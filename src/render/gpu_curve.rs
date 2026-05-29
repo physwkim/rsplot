@@ -10,8 +10,8 @@
 //! a uniform thickness regardless of the data aspect ratio. The points are read
 //! from a read-only storage buffer; the draw is `6 × segment count` vertices,
 //! no vertex buffer. In-place re-upload ([`GpuCurve::update`]) reuses the buffer
-//! for live updates. Round joins/caps, anti-aliasing, per-vertex color, and
-//! markers are later steps (`doc/design.md` §7·§13 B1).
+//! for live updates. Optional markers and per-vertex color are supported; round
+//! joins/caps and anti-aliasing are later steps (`doc/design.md` §7·§13 B1).
 
 use std::num::NonZeroU64;
 
@@ -30,7 +30,8 @@ const IDENTITY: [[f32; 4]; 4] = [
 ];
 
 /// Uniform block for the curve shader. Layout matches `Params` in `curve.wgsl`
-/// (std140: mat4 @0, vec4 @64, vec2 @80, vec2 @88, f32 @96; padded to 112).
+/// (std140: mat4 @0, vec4 @64, vec2 @80, vec2 @88, f32 @96, f32 @100; padded
+/// to 112).
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct CurveParams {
@@ -42,7 +43,10 @@ struct CurveParams {
     viewport_px: [f32; 2],
     /// Half the line width, in physical pixels.
     half_width_px: f32,
-    _pad: [f32; 3],
+    /// 1.0 to take each vertex's color from the per-vertex color buffer, else
+    /// 0.0 to use the uniform `color`.
+    use_vertex_color: f32,
+    _pad: [f32; 2],
 }
 
 /// Marker symbol drawn at each curve vertex (silx `symbol`).
@@ -95,6 +99,12 @@ pub struct CurveData {
     pub x: Vec<f64>,
     pub y: Vec<f64>,
     pub color: Color32,
+    /// Per-vertex line color (silx per-point color), one entry per `x`/`y`
+    /// vertex. `None` draws the whole line in the single [`Self::color`]; when
+    /// set, the segment between two vertices is a gradient between their colors.
+    /// Mutually exclusive with decimation (the envelope would unalign colors),
+    /// so a per-vertex-colored curve always draws at full resolution.
+    pub colors: Option<Vec<Color32>>,
     /// Line width in physical pixels (`doc/design.md` §12·§13 B1).
     pub width: f32,
     /// Marker symbol drawn at each vertex, or `None` for a line only.
@@ -114,11 +124,26 @@ impl CurveData {
             x,
             y,
             color,
+            colors: None,
             width: 1.0,
             symbol: None,
             marker_size: 7.0,
             y_axis: YAxis::Left,
         }
+    }
+
+    /// Color each vertex individually; each segment is a gradient between its
+    /// two endpoint colors (silx per-point color). `colors` must have one entry
+    /// per vertex (same length as `x`/`y`). Setting this disables decimation
+    /// for the curve so colors stay aligned with their vertices.
+    pub fn with_colors(mut self, colors: Vec<Color32>) -> Self {
+        assert_eq!(
+            colors.len(),
+            self.x.len(),
+            "colors must have one entry per vertex"
+        );
+        self.colors = Some(colors);
+        self
     }
 
     /// Set the line width in physical pixels (clamped to ≥ 0).
@@ -148,7 +173,8 @@ impl CurveData {
 
 /// The render pipelines shared by all curves: the thick-line pipeline and the
 /// marker pipeline. Both take the same bind-group layout (a 112-byte uniform at
-/// binding 0 plus the shared points storage buffer at binding 1).
+/// binding 0, the shared points storage buffer at binding 1, and a per-vertex
+/// color storage buffer at binding 2 — used by the line, ignored by markers).
 pub struct CurvePipeline {
     pub(crate) pipeline: wgpu::RenderPipeline,
     pub(crate) marker_pipeline: wgpu::RenderPipeline,
@@ -191,6 +217,20 @@ impl CurvePipeline {
                             has_dynamic_offset: false,
                             min_binding_size: NonZeroU64::new(
                                 std::mem::size_of::<[f32; 2]>() as u64
+                            ),
+                        },
+                        count: None,
+                    },
+                    // Per-vertex line colors (linear premultiplied RGBA), read in
+                    // the vertex shader; a 1-element placeholder when unused.
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::VERTEX,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: NonZeroU64::new(
+                                std::mem::size_of::<[f32; 4]>() as u64
                             ),
                         },
                         count: None,
@@ -281,6 +321,14 @@ pub struct GpuCurve {
     capacity: u32,
     params: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
+    /// Per-vertex color storage buffer (binding 2). Holds `count` colors when
+    /// [`Self::vertex_color`] is set; otherwise a 1-element placeholder.
+    vcolors: wgpu::Buffer,
+    /// Colors the `vcolors` buffer can hold; `0` when the curve was created with
+    /// no per-vertex colors (the placeholder), forcing a realloc on first use.
+    colors_capacity: u32,
+    /// Whether to draw with per-vertex color (the `use_vertex_color` flag).
+    vertex_color: bool,
     /// Marker uniform + bind group (shares the points buffer at binding 1).
     marker_params: wgpu::Buffer,
     marker_bind_group: wgpu::BindGroup,
@@ -322,6 +370,15 @@ fn pack(x: &[f64], y: &[f64]) -> Vec<[f32; 2]> {
         .collect()
 }
 
+/// Pack sRGB colors into the linear premultiplied RGBA the shader blends with
+/// (matches the single-color conversion `egui::Rgba::from`).
+fn pack_colors(colors: &[Color32]) -> Vec<[f32; 4]> {
+    colors
+        .iter()
+        .map(|&c| egui::Rgba::from(c).to_array())
+        .collect()
+}
+
 impl GpuCurve {
     /// Upload `curve`'s vertices and build its uniform + bind group.
     pub fn new(
@@ -346,6 +403,24 @@ impl GpuCurve {
             queue.write_buffer(&points, 0, bytemuck::cast_slice(&positions));
         }
 
+        // Per-vertex color buffer. Sized to `capacity` (so in-place updates fit)
+        // when the curve carries colors, else a 1-element placeholder that the
+        // shader never samples (`use_vertex_color` stays 0).
+        let vertex_color = curve.colors.is_some();
+        let colors_capacity = if vertex_color { capacity } else { 0 };
+        let vcolors = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("egui-silx curve colors"),
+            size: (colors_capacity.max(1) as usize * std::mem::size_of::<[f32; 4]>()) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        if let Some(colors) = &curve.colors {
+            let packed = pack_colors(colors);
+            if !packed.is_empty() {
+                queue.write_buffer(&vcolors, 0, bytemuck::cast_slice(&packed));
+            }
+        }
+
         let params = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("egui-silx curve params"),
             size: std::mem::size_of::<CurveParams>() as u64,
@@ -364,6 +439,10 @@ impl GpuCurve {
                 wgpu::BindGroupEntry {
                     binding: 1,
                     resource: points.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: vcolors.as_entire_binding(),
                 },
             ],
         });
@@ -387,6 +466,10 @@ impl GpuCurve {
                     binding: 1,
                     resource: points.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: vcolors.as_entire_binding(),
+                },
             ],
         });
 
@@ -399,6 +482,9 @@ impl GpuCurve {
             capacity,
             params,
             bind_group,
+            vcolors,
+            colors_capacity,
+            vertex_color,
             marker_params,
             marker_bind_group,
             color,
@@ -430,11 +516,30 @@ impl GpuCurve {
         if curve.x.len() as u32 > self.capacity {
             return false;
         }
+        // Per-vertex colors must fit the existing color buffer; if the curve
+        // gained colors (or grew past the buffer), force a fresh allocation.
+        if let Some(colors) = &curve.colors {
+            assert_eq!(
+                colors.len(),
+                curve.x.len(),
+                "colors must have one entry per vertex"
+            );
+            if colors.len() as u32 > self.colors_capacity {
+                return false;
+            }
+        }
         let positions = pack(&curve.x, &curve.y);
         if !positions.is_empty() {
             queue.write_buffer(&self.points, 0, bytemuck::cast_slice(&positions));
         }
         self.count = positions.len() as u32;
+        self.vertex_color = curve.colors.is_some();
+        if let Some(colors) = &curve.colors {
+            let packed = pack_colors(colors);
+            if !packed.is_empty() {
+                queue.write_buffer(&self.vcolors, 0, bytemuck::cast_slice(&packed));
+            }
+        }
         self.color = egui::Rgba::from(curve.color).to_array();
         self.width = curve.width;
         self.symbol = curve.symbol;
@@ -470,7 +575,10 @@ impl GpuCurve {
         // Decimate only when it strictly reduces the count and the envelope is
         // valid; `2 * columns + 2` is the most points a decimation can emit, so
         // requiring more sources than that guarantees a reduction that fits.
+        // Per-vertex color is excluded: the min/max envelope drops and reorders
+        // vertices, which would unalign the colors from their points.
         let beneficial = self.symbol.is_none()
+            && !self.vertex_color
             && self.monotonic_x
             && columns > 0
             && self.full_count as u64 > 2 * columns as u64 + 2;
@@ -519,7 +627,8 @@ impl GpuCurve {
             axis_log,
             viewport_px,
             half_width_px: 0.5 * self.width,
-            _pad: [0.0; 3],
+            use_vertex_color: if self.vertex_color { 1.0 } else { 0.0 },
+            _pad: [0.0; 2],
         };
         queue.write_buffer(&self.params, 0, bytemuck::bytes_of(&params));
 
@@ -589,6 +698,7 @@ mod tests {
         assert_eq!(c.symbol, None);
         assert_eq!(c.marker_size, 7.0);
         assert_eq!(c.y_axis, YAxis::Left);
+        assert_eq!(c.colors, None);
 
         let c = c
             .with_width(-3.0) // clamped to 0
@@ -599,5 +709,30 @@ mod tests {
         assert_eq!(c.symbol, Some(Symbol::Plus));
         assert_eq!(c.marker_size, 0.0);
         assert_eq!(c.y_axis, YAxis::Right);
+    }
+
+    #[test]
+    fn with_colors_sets_per_vertex_colors() {
+        let c = CurveData::new(vec![0.0, 1.0, 2.0], vec![0.0, 1.0, 0.0], Color32::WHITE)
+            .with_colors(vec![Color32::RED, Color32::GREEN, Color32::BLUE]);
+        assert_eq!(
+            c.colors,
+            Some(vec![Color32::RED, Color32::GREEN, Color32::BLUE])
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "colors must have one entry per vertex")]
+    fn with_colors_rejects_length_mismatch() {
+        CurveData::new(vec![0.0, 1.0, 2.0], vec![0.0, 1.0, 0.0], Color32::WHITE)
+            .with_colors(vec![Color32::RED, Color32::GREEN]);
+    }
+
+    #[test]
+    fn pack_colors_matches_single_color_conversion() {
+        // Per-vertex packing must match the single-color path so a uniform
+        // per-vertex list renders identically to a single `color`.
+        let c = Color32::from_rgba_unmultiplied(200, 100, 50, 180);
+        assert_eq!(pack_colors(&[c])[0], egui::Rgba::from(c).to_array());
     }
 }

@@ -82,3 +82,7 @@ path = "examples/save_graph.rs"
 [[example]]
 name = "labels"
 path = "examples/labels.rs"
+
+[[example]]
+name = "per_vertex_color"
+path = "examples/per_vertex_color.rs"
