@@ -26,7 +26,9 @@ pub struct WgpuResources {
     image_pipeline: ImagePipeline,
     image: Option<GpuImage>,
     curve_pipeline: CurvePipeline,
-    curve: Option<GpuCurve>,
+    /// All curves on the plot, drawn in order. Each carries its own Y-axis
+    /// binding (left or y2), selected per frame in [`CurveCallback`].
+    curves: Vec<GpuCurve>,
 }
 
 impl WgpuResources {
@@ -106,7 +108,7 @@ impl WgpuResources {
             image_pipeline,
             image: None,
             curve_pipeline,
-            curve: None,
+            curves: Vec::new(),
         }
     }
 }
@@ -140,22 +142,33 @@ pub fn set_image(render_state: &RenderState, image: &ImageData) {
     res.image = Some(gpu);
 }
 
-/// Upload `curve` to the GPU and make it the plot's current curve. Requires
-/// [`install`] to have run first. The vertices are uploaded once here; the
-/// per-frame transform is applied by [`CurveCallback`].
+/// Upload `curve` to the GPU as the plot's sole curve (replacing any existing
+/// curves). Requires [`install`] to have run first. The vertices are uploaded
+/// once here; the per-frame transform is applied by [`CurveCallback`].
 pub fn set_curve(render_state: &RenderState, curve: &CurveData) {
+    set_curves(render_state, std::slice::from_ref(curve));
+}
+
+/// Upload `curves` to the GPU as the plot's full curve set (replacing any
+/// existing curves), preserving order. Each curve keeps its own Y-axis binding
+/// ([`CurveData::y_axis`]). Requires [`install`] to have run first.
+pub fn set_curves(render_state: &RenderState, curves: &[CurveData]) {
     let mut renderer = render_state.renderer.write();
     let res: &mut WgpuResources = renderer
         .callback_resources
         .get_mut()
         .expect("WgpuResources not installed — call egui_silx::install() first");
-    let gpu = GpuCurve::new(
-        &render_state.device,
-        &render_state.queue,
-        &res.curve_pipeline,
-        curve,
-    );
-    res.curve = Some(gpu);
+    res.curves = curves
+        .iter()
+        .map(|curve| {
+            GpuCurve::new(
+                &render_state.device,
+                &render_state.queue,
+                &res.curve_pipeline,
+                curve,
+            )
+        })
+        .collect();
 }
 
 /// Re-upload a `w × h` sub-region of the current image at `(x0, y0)` in place
@@ -180,17 +193,24 @@ pub fn update_image_region(
     }
 }
 
-/// Re-upload `curve`'s vertices in place (dirty update), reusing the existing
-/// GPU buffer when the vertex count fits; reallocates only if it grew beyond
-/// the allocated capacity. Creates the curve if none has been set yet
-/// (`doc/design.md` §11.7).
+/// Re-upload the first curve's vertices in place (dirty update). Convenience
+/// for single-curve plots; see [`update_curve_at`] for a specific index.
 pub fn update_curve(render_state: &RenderState, curve: &CurveData) {
+    update_curve_at(render_state, 0, curve);
+}
+
+/// Re-upload curve `index`'s vertices in place (dirty update), reusing the
+/// existing GPU buffer when the vertex count fits; reallocates only if it grew
+/// beyond the allocated capacity. If `index` is past the end (or no such curve
+/// exists yet), the curve set is extended so `index` becomes the last curve
+/// (`doc/design.md` §11.7).
+pub fn update_curve_at(render_state: &RenderState, index: usize, curve: &CurveData) {
     let mut renderer = render_state.renderer.write();
     let res: &mut WgpuResources = renderer
         .callback_resources
         .get_mut()
         .expect("WgpuResources not installed — call egui_silx::install() first");
-    let fits = match &mut res.curve {
+    let fits = match res.curves.get_mut(index) {
         Some(existing) => existing.update(&render_state.queue, curve),
         None => false,
     };
@@ -201,7 +221,10 @@ pub fn update_curve(render_state: &RenderState, curve: &CurveData) {
             &res.curve_pipeline,
             curve,
         );
-        res.curve = Some(gpu);
+        match res.curves.get_mut(index) {
+            Some(slot) => *slot = gpu,
+            None => res.curves.push(gpu),
+        }
     }
 }
 
@@ -286,13 +309,28 @@ impl egui_wgpu::CallbackTrait for ImageCallback {
     }
 }
 
-/// Paint callback that draws the plot's curve (if any) with the given per-frame
-/// data→NDC transform. A no-op when no curve has been set.
+/// Paint callback that draws the plot's curves with the per-frame data→NDC
+/// transform of each curve's bound Y axis. A no-op when no curve has been set.
 pub(crate) struct CurveCallback {
-    /// data→NDC orthographic matrix from the plot's `Transform`.
-    pub ortho: [[f32; 4]; 4],
-    /// Per-axis log flag `[x, y]` (1.0 = log10), matching the transform.
-    pub axis_log: [f32; 2],
+    /// Left (main) axis data→NDC matrix; used by `YAxis::Left` curves.
+    pub ortho_left: [[f32; 4]; 4],
+    /// Per-axis log flag `[x, y]` for the left axis.
+    pub axis_log_left: [f32; 2],
+    /// Right (y2) axis data→NDC matrix; used by `YAxis::Right` curves. Equals
+    /// `ortho_left` when the plot has no y2 axis.
+    pub ortho_right: [[f32; 4]; 4],
+    /// Per-axis log flag `[x, y]` for the right axis.
+    pub axis_log_right: [f32; 2],
+}
+
+impl CurveCallback {
+    /// Pick the (ortho, axis_log) pair matching a curve's bound axis.
+    fn matrices_for(&self, y_axis: crate::core::transform::YAxis) -> ([[f32; 4]; 4], [f32; 2]) {
+        match y_axis {
+            crate::core::transform::YAxis::Left => (self.ortho_left, self.axis_log_left),
+            crate::core::transform::YAxis::Right => (self.ortho_right, self.axis_log_right),
+        }
+    }
 }
 
 impl egui_wgpu::CallbackTrait for CurveCallback {
@@ -307,8 +345,9 @@ impl egui_wgpu::CallbackTrait for CurveCallback {
         let res: &WgpuResources = resources
             .get()
             .expect("WgpuResources not installed — call egui_silx::install() at startup");
-        if let Some(curve) = &res.curve {
-            curve.write_uniforms(queue, self.ortho, self.axis_log);
+        for curve in &res.curves {
+            let (ortho, axis_log) = self.matrices_for(curve.y_axis);
+            curve.write_uniforms(queue, ortho, axis_log);
         }
         Vec::new()
     }
@@ -322,7 +361,7 @@ impl egui_wgpu::CallbackTrait for CurveCallback {
         let res: &WgpuResources = resources
             .get()
             .expect("WgpuResources not installed — call egui_silx::install() at startup");
-        if let Some(curve) = &res.curve {
+        for curve in &res.curves {
             curve.draw(render_pass, &res.curve_pipeline);
         }
     }

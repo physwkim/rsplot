@@ -43,3 +43,7 @@ path = "examples/log_axis.rs"
 [[example]]
 name = "aspect_ratio"
 path = "examples/aspect_ratio.rs"
+
+[[example]]
+name = "y2_axis"
+path = "examples/y2_axis.rs"

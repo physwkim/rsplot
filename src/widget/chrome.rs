@@ -50,14 +50,19 @@ const GUTTER_LEFT: f32 = 52.0;
 const GUTTER_BOTTOM: f32 = 30.0;
 const GUTTER_TOP: f32 = 12.0;
 const GUTTER_RIGHT: f32 = 12.0;
+const GUTTER_Y2: f32 = 52.0;
 const CBAR_WIDTH: f32 = 16.0;
 const CBAR_LABELS: f32 = 46.0;
 
-/// Reserve gutters for axis labels (and a colorbar, if requested) and return
-/// the resulting data area and colorbar rects.
-pub fn layout(full: Rect, with_colorbar: bool) -> ChromeLayout {
+/// Reserve gutters for axis labels (a colorbar and/or a right y2 axis, if
+/// requested) and return the resulting data area and colorbar rects. A colorbar
+/// and a y2 axis both claim the right gutter; the colorbar takes precedence when
+/// both are requested.
+pub fn layout(full: Rect, with_colorbar: bool, with_y2: bool) -> ChromeLayout {
     let right = if with_colorbar {
         GUTTER_RIGHT + CBAR_WIDTH + CBAR_LABELS
+    } else if with_y2 {
+        GUTTER_Y2
     } else {
         GUTTER_RIGHT
     };
@@ -236,6 +241,32 @@ pub fn draw_axes(painter: &Painter, t: &Transform, style: &Style) {
     }
 }
 
+/// Draw the secondary right (y2) axis: tick marks and value labels just outside
+/// the right edge of the data area. `t` is the y2 transform (shared X, y2 as Y);
+/// no grid lines are drawn, to keep the right axis from cluttering the data area
+/// (`doc/design.md` §13 A5).
+pub fn draw_y2_ticks(painter: &Painter, t: &Transform, style: &Style) {
+    let area = t.area;
+    let axis = Stroke::new(1.0, style.axis);
+    let font = FontId::proportional(11.0);
+    let tick_len = 4.0;
+
+    for (yv, label) in axis_ticks(&t.y, 6) {
+        let py = t.data_to_pixel(t.x.min, yv).y;
+        painter.line_segment(
+            [pos2(area.right(), py), pos2(area.right() + tick_len, py)],
+            axis,
+        );
+        painter.text(
+            pos2(area.right() + tick_len + 3.0, py),
+            Align2::LEFT_CENTER,
+            label,
+            font.clone(),
+            style.text,
+        );
+    }
+}
+
 /// Draw a vertical colorbar matching `cmap` (top = vmax, bottom = vmin), with a
 /// border and value labels on its right edge.
 pub fn draw_colorbar(painter: &Painter, rect: Rect, cmap: &Colormap, style: &Style) {
@@ -340,12 +371,23 @@ mod tests {
     #[test]
     fn layout_reserves_right_gutter_only_with_colorbar() {
         let full = Rect::from_min_max(pos2(0.0, 0.0), pos2(400.0, 300.0));
-        let no_bar = layout(full, false);
+        let no_bar = layout(full, false, false);
         assert!(no_bar.colorbar.is_none());
-        let with_bar = layout(full, true);
+        let with_bar = layout(full, true, false);
         let bar = with_bar.colorbar.expect("colorbar rect");
         // The colorbar sits to the right of the (narrower) data area.
         assert!(bar.left() >= with_bar.data_area.right());
         assert!(with_bar.data_area.right() < no_bar.data_area.right());
+    }
+
+    #[test]
+    fn layout_reserves_right_gutter_for_y2_without_colorbar() {
+        let full = Rect::from_min_max(pos2(0.0, 0.0), pos2(400.0, 300.0));
+        let plain = layout(full, false, false);
+        let with_y2 = layout(full, false, true);
+        // A y2 axis narrows the data area (right gutter holds y2 labels) but
+        // adds no colorbar rect.
+        assert!(with_y2.colorbar.is_none());
+        assert!(with_y2.data_area.right() < plain.data_area.right());
     }
 }

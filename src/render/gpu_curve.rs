@@ -15,6 +15,8 @@ use std::num::NonZeroU64;
 use egui::Color32;
 use egui_wgpu::wgpu;
 
+use crate::core::transform::YAxis;
+
 /// Identity ortho matrix; replaced every frame by the widget's transform.
 const IDENTITY: [[f32; 4]; 4] = [
     [1.0, 0.0, 0.0, 0.0],
@@ -49,13 +51,27 @@ pub struct CurveData {
     pub x: Vec<f64>,
     pub y: Vec<f64>,
     pub color: Color32,
+    /// Which Y axis this curve is plotted against (left by default).
+    pub y_axis: YAxis,
 }
 
 impl CurveData {
-    /// Build a curve from equal-length x/y arrays with the given line color.
+    /// Build a curve from equal-length x/y arrays with the given line color,
+    /// plotted against the main left Y axis.
     pub fn new(x: Vec<f64>, y: Vec<f64>, color: Color32) -> Self {
         assert_eq!(x.len(), y.len(), "x and y must have equal length");
-        Self { x, y, color }
+        Self {
+            x,
+            y,
+            color,
+            y_axis: YAxis::Left,
+        }
+    }
+
+    /// Bind this curve to the given Y axis (left or right/y2).
+    pub fn with_y_axis(mut self, y_axis: YAxis) -> Self {
+        self.y_axis = y_axis;
+        self
     }
 }
 
@@ -142,6 +158,8 @@ pub struct GpuCurve {
     params: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
     color: [f32; 4],
+    /// Which Y axis this curve is bound to; selects the per-frame ortho matrix.
+    pub(crate) y_axis: YAxis,
 }
 
 impl GpuCurve {
@@ -198,6 +216,7 @@ impl GpuCurve {
             params,
             bind_group,
             color,
+            y_axis: curve.y_axis,
         };
         // Seed the uniform; the per-frame transform overwrites `ortho`.
         gpu.write_uniforms(queue, IDENTITY, [0.0, 0.0]);
@@ -228,6 +247,7 @@ impl GpuCurve {
         }
         self.count = positions.len() as u32;
         self.color = egui::Rgba::from(curve.color).to_array();
+        self.y_axis = curve.y_axis;
         true
     }
 

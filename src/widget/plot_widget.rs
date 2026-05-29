@@ -35,9 +35,10 @@ impl PlotWidget {
         let current = plot.limits;
         plot.home_limits.get_or_insert(current);
 
-        // Chrome gutters depend only on whether a colorbar shows, not on limits.
+        // Chrome gutters depend only on which axes/colorbar show, not on limits.
         let with_colorbar = plot.colormap.is_some();
-        let chrome_layout = chrome::layout(rect, with_colorbar);
+        let with_y2 = plot.y2.is_some();
+        let chrome_layout = chrome::layout(rect, with_colorbar, with_y2);
         let area = plot.margins.data_area(chrome_layout.data_area);
 
         // Map input through the transform the user currently sees, then update
@@ -45,14 +46,20 @@ impl PlotWidget {
         let view = plot.transform(area);
         let selection = apply_interaction(ui, &response, plot, area, &view);
 
-        // Final transform for this frame (after any interaction).
+        // Final transforms for this frame (after any interaction). The left
+        // (main) transform drives the image, the left axes, and left-bound
+        // curves; the optional right (y2) transform drives right-bound curves
+        // and the right ticks.
         let transform = plot.transform(area);
-        let ortho = transform.ortho_matrix();
-        // Per-axis log flags for the shaders (must match the transform's scale).
-        let axis_log = [
-            f32::from(transform.x.scale == Scale::Log10),
-            f32::from(transform.y.scale == Scale::Log10),
-        ];
+        let transform_right = plot.transform_y2(area);
+        let ortho_left = transform.ortho_matrix();
+        let axis_log_left = axis_log_flags(&transform);
+        // Right-axis matrices fall back to the left axis when there is no y2,
+        // so a stray right-bound curve still draws against the main axis.
+        let (ortho_right, axis_log_right) = match &transform_right {
+            Some(t) => (t.ortho_matrix(), axis_log_flags(t)),
+            None => (ortho_left, axis_log_left),
+        };
 
         // Convert sRGB Color32 to linear, premultiplied RGBA expected by the shader.
         let bg = egui::Rgba::from(plot.data_background).to_array();
@@ -66,15 +73,26 @@ impl PlotWidget {
         ));
         painter.add(egui_wgpu::Callback::new_paint_callback(
             area,
-            ImageCallback { ortho, axis_log },
+            ImageCallback {
+                ortho: ortho_left,
+                axis_log: axis_log_left,
+            },
         ));
         painter.add(egui_wgpu::Callback::new_paint_callback(
             area,
-            CurveCallback { ortho, axis_log },
+            CurveCallback {
+                ortho_left,
+                axis_log_left,
+                ortho_right,
+                axis_log_right,
+            },
         ));
 
         // Chrome (egui), drawn on top of / in the gutters around the data layer.
         chrome::draw_axes(painter, &transform, &style);
+        if let Some(t_right) = &transform_right {
+            chrome::draw_y2_ticks(painter, t_right, &style);
+        }
         if let (Some(cbar), Some(cmap)) = (chrome_layout.colorbar, plot.colormap.as_ref()) {
             chrome::draw_colorbar(painter, cbar, cmap, &style);
         }
@@ -96,6 +114,15 @@ impl PlotWidget {
 
         response
     }
+}
+
+/// Per-axis log flags `[x, y]` (1.0 = log10) for the shaders, matching a
+/// transform's scales.
+fn axis_log_flags(t: &crate::core::transform::Transform) -> [f32; 2] {
+    [
+        f32::from(t.x.scale == Scale::Log10),
+        f32::from(t.y.scale == Scale::Log10),
+    ]
 }
 
 /// Apply the active pointer interaction to `plot.limits`, returning the

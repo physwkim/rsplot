@@ -46,6 +46,10 @@ pub struct Plot {
     /// (silx `setKeepDataAspectRatio`). Only honored when both axes are linear
     /// (`doc/design.md` §13 A4).
     pub keep_aspect: bool,
+    /// Secondary right Y axis limits `(y2_min, y2_max)`, or `None` for no y2
+    /// axis. Curves bound to [`crate::YAxis::Right`] are plotted against it and
+    /// its ticks are drawn in the right gutter (linear, `doc/design.md` §13 A5).
+    pub y2: Option<(f64, f64)>,
 }
 
 impl Plot {
@@ -64,6 +68,7 @@ impl Plot {
             x_inverted: false,
             y_inverted: false,
             keep_aspect: false,
+            y2: None,
         }
     }
 
@@ -93,5 +98,65 @@ impl Plot {
             inverted: self.y_inverted,
         };
         Transform::with_axes(x, y, area)
+    }
+
+    /// Build the transform for the secondary right (y2) axis, sharing the left
+    /// transform's X axis exactly (including any aspect expansion) so curves on
+    /// both axes stay aligned in X. `None` when the plot has no y2 axis. The y2
+    /// axis is linear, non-inverted (`doc/design.md` §13 A5).
+    pub fn transform_y2(&self, area: Rect) -> Option<Transform> {
+        let (y2_min, y2_max) = self.y2?;
+        let left = self.transform(area);
+        let y2 = Axis::linear(y2_min, y2_max);
+        Some(Transform::with_axes(left.x, y2, area))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egui::pos2;
+
+    fn area() -> Rect {
+        Rect::from_min_max(pos2(0.0, 0.0), pos2(200.0, 100.0))
+    }
+
+    #[test]
+    fn transform_y2_is_none_without_y2_axis() {
+        let plot = Plot::new(0);
+        assert!(plot.transform_y2(area()).is_none());
+    }
+
+    #[test]
+    fn transform_y2_shares_left_x_and_maps_its_own_y() {
+        let mut plot = Plot::new(0);
+        plot.limits = (0.0, 10.0, 0.0, 100.0);
+        plot.y2 = Some((-1.0, 1.0));
+        let left = plot.transform(area());
+        let right = plot.transform_y2(area()).expect("y2 transform");
+
+        // X axis is shared exactly, so curves on both axes align in X.
+        assert_eq!(left.x, right.x);
+        // The right axis maps its own y2 range: y2_min at the bottom edge, y2_max
+        // at the top edge of the same area.
+        let bottom = right.data_to_pixel(0.0, -1.0).y;
+        let top = right.data_to_pixel(0.0, 1.0).y;
+        assert!((bottom - area().bottom()).abs() <= 1e-3, "{bottom}");
+        assert!((top - area().top()).abs() <= 1e-3, "{top}");
+    }
+
+    #[test]
+    fn transform_y2_shares_aspect_expanded_x() {
+        // With the aspect lock on, the left transform's X is expanded; the y2
+        // transform must inherit that same expanded X (not the raw limits).
+        let mut plot = Plot::new(0);
+        plot.limits = (0.0, 10.0, 0.0, 10.0);
+        plot.keep_aspect = true;
+        plot.y2 = Some((0.0, 5.0));
+        let left = plot.transform(area());
+        let right = plot.transform_y2(area()).expect("y2 transform");
+        assert_eq!(left.x, right.x);
+        // Sanity: the lock actually widened X beyond the raw [0, 10].
+        assert!(left.x.min < 0.0 && left.x.max > 10.0, "{:?}", left.x);
     }
 }

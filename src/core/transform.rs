@@ -28,6 +28,17 @@ pub enum Scale {
     Log10,
 }
 
+/// Which Y axis a curve is plotted against (silx `YAxis`): the main left axis
+/// or the secondary right axis (`doc/design.md` §13 A5).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum YAxis {
+    /// The main left Y axis (`Plot::limits`).
+    #[default]
+    Left,
+    /// The secondary right Y axis (`Plot::y2`).
+    Right,
+}
+
 /// One axis: a data range, a scale, and a direction flag.
 ///
 /// Preconditions: `max > min`; for [`Scale::Log10`], also `min > 0`.
