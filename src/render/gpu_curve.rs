@@ -160,6 +160,38 @@ impl LineStyle {
     }
 }
 
+/// Where a filled curve's area extends to (silx `baseline`). The fill is the
+/// band between the curve and this baseline.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Baseline {
+    /// Fill down to a constant y value (silx scalar baseline; `0.0` by default).
+    Scalar(f64),
+    /// Fill to a per-vertex y value (silx array baseline), one entry per vertex.
+    PerPoint(Vec<f64>),
+}
+
+impl Baseline {
+    /// The baseline y values for an `n`-vertex curve, broadcasting a scalar.
+    fn values(&self, n: usize) -> Vec<f32> {
+        match self {
+            Baseline::Scalar(v) => vec![*v as f32; n],
+            Baseline::PerPoint(vs) => vs.iter().map(|&v| v as f32).collect(),
+        }
+    }
+}
+
+/// Uniform block for the fill shader. Field order keeps `repr(C)` offsets
+/// std140-aligned: mat4 @0, vec4 @64, vec2 @80, vec2 @88; total 96. Matches
+/// `Params` in `fill.wgsl`.
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct FillParams {
+    ortho: [[f32; 4]; 4],
+    color: [f32; 4],
+    axis_log: [f32; 2],
+    _pad: [f32; 2],
+}
+
 /// Uniform block for the marker shader. Layout matches `Params` in
 /// `markers.wgsl` (std140: mat4 @0, vec4 @64, vec2 @80, vec2 @88, f32 @96,
 /// u32 @100; padded to 112).
@@ -197,6 +229,14 @@ pub struct CurveData {
     /// Fill color for dashed-line gaps (silx `gapcolor`). `None` leaves the
     /// gaps transparent; only meaningful with a dashed [`Self::line_style`].
     pub gap_color: Option<Color32>,
+    /// Fill the area between the curve and its [`Self::baseline`] with the curve
+    /// color (silx `fill`). `false` by default. Disables decimation so the fill
+    /// band stays aligned with the baseline.
+    pub fill: bool,
+    /// The y target a filled curve extends to (silx `baseline`).
+    /// [`Baseline::Scalar(0.0)`](Baseline::Scalar) by default; only used when
+    /// [`Self::fill`] is set.
+    pub baseline: Baseline,
     /// Line width in physical pixels (`doc/design.md` §12·§13 B1).
     pub width: f32,
     /// Marker symbol drawn at each vertex, or `None` for a line only.
@@ -219,6 +259,8 @@ impl CurveData {
             colors: None,
             line_style: LineStyle::Solid,
             gap_color: None,
+            fill: false,
+            baseline: Baseline::Scalar(0.0),
             width: 1.0,
             symbol: None,
             marker_size: 7.0,
@@ -253,6 +295,22 @@ impl CurveData {
         self
     }
 
+    /// Fill the area between the curve and `baseline` with the curve color
+    /// (silx `fill` + `baseline`). A [`Baseline::PerPoint`] must have one entry
+    /// per vertex. Setting this disables decimation so the fill stays aligned.
+    pub fn with_fill(mut self, baseline: Baseline) -> Self {
+        if let Baseline::PerPoint(vs) = &baseline {
+            assert_eq!(
+                vs.len(),
+                self.x.len(),
+                "per-point baseline must have one entry per vertex"
+            );
+        }
+        self.fill = true;
+        self.baseline = baseline;
+        self
+    }
+
     /// Set the line width in physical pixels (clamped to ≥ 0).
     pub fn with_width(mut self, width: f32) -> Self {
         self.width = width.max(0.0);
@@ -278,17 +336,20 @@ impl CurveData {
     }
 }
 
-/// The render pipelines shared by all curves: the thick-line pipeline and the
-/// marker pipeline. The line layout has the curve uniform at binding 0, the
-/// points storage buffer at binding 1, and a per-vertex color storage buffer at
-/// binding 2. The marker pipeline has its own minimal layout (marker uniform at
-/// binding 0, the shared points at binding 1), so the line uniform/layout can
-/// grow without affecting markers.
+/// The render pipelines shared by all curves: the thick-line, marker, and fill
+/// pipelines. The line layout has the curve uniform at binding 0, the points
+/// storage buffer at binding 1, a per-vertex color buffer at binding 2, and the
+/// dash arc length at binding 3. The marker and fill pipelines each have their
+/// own minimal layout (so the line layout can grow without affecting them): the
+/// marker layout is uniform + points; the fill layout is uniform + points +
+/// baseline.
 pub struct CurvePipeline {
     pub(crate) pipeline: wgpu::RenderPipeline,
     pub(crate) marker_pipeline: wgpu::RenderPipeline,
+    pub(crate) fill_pipeline: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
     marker_bind_group_layout: wgpu::BindGroupLayout,
+    fill_bind_group_layout: wgpu::BindGroupLayout,
 }
 
 impl CurvePipeline {
@@ -300,6 +361,10 @@ impl CurvePipeline {
         let marker_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("egui-silx markers"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shaders/markers.wgsl").into()),
+        });
+        let fill_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("egui-silx fill"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/fill.wgsl").into()),
         });
 
         let bind_group_layout =
@@ -463,11 +528,87 @@ impl CurvePipeline {
             cache: None,
         });
 
+        // Fill pipeline: its own layout (fill uniform at 0, the shared points at
+        // 1, the baseline at 2). Two data-space triangles per segment.
+        let fill_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("egui-silx fill bgl"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: NonZeroU64::new(
+                                std::mem::size_of::<FillParams>() as u64
+                            ),
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::VERTEX,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: NonZeroU64::new(
+                                std::mem::size_of::<[f32; 2]>() as u64
+                            ),
+                        },
+                        count: None,
+                    },
+                    // Per-vertex baseline y; a 1-element placeholder when unfilled.
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::VERTEX,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: NonZeroU64::new(std::mem::size_of::<f32>() as u64),
+                        },
+                        count: None,
+                    },
+                ],
+            });
+        let fill_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("egui-silx fill layout"),
+            bind_group_layouts: &[Some(&fill_bind_group_layout)],
+            immediate_size: 0,
+        });
+        let fill_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("egui-silx fill pipeline"),
+            layout: Some(&fill_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &fill_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &fill_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: target_format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+
         Self {
             pipeline,
             marker_pipeline,
+            fill_pipeline,
             bind_group_layout,
             marker_bind_group_layout,
+            fill_bind_group_layout,
         }
     }
 }
@@ -507,6 +648,17 @@ pub struct GpuCurve {
     /// Marker uniform + bind group (shares the points buffer at binding 1).
     marker_params: wgpu::Buffer,
     marker_bind_group: wgpu::BindGroup,
+    /// Whether to draw the fill band between the curve and its baseline.
+    fill: bool,
+    /// Per-vertex baseline y (binding 2 of the fill layout); holds `count`
+    /// entries when [`Self::fill`] is set, else a 1-element placeholder.
+    baseline_buf: wgpu::Buffer,
+    /// Baseline entries the `baseline_buf` can hold; `0` for the placeholder
+    /// (unfilled at creation), forcing a realloc when the curve becomes filled.
+    baseline_capacity: u32,
+    /// Fill uniform + bind group (shares the points buffer at binding 1).
+    fill_params: wgpu::Buffer,
+    fill_bind_group: wgpu::BindGroup,
     color: [f32; 4],
     /// Line stroke style (selects the dash pattern; [`LineStyle::None`] skips
     /// the line entirely).
@@ -726,6 +878,47 @@ impl GpuCurve {
             ],
         });
 
+        // Baseline buffer for fill. Sized to `capacity` (filled curves never
+        // decimate, so `count == capacity`) when the curve is filled at
+        // creation, else a 1-element placeholder.
+        let baseline_capacity = if curve.fill { capacity } else { 0 };
+        let baseline_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("egui-silx curve baseline"),
+            size: (baseline_capacity.max(1) as usize * std::mem::size_of::<f32>()) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        if curve.fill {
+            let base = curve.baseline.values(curve.x.len());
+            if !base.is_empty() {
+                queue.write_buffer(&baseline_buf, 0, bytemuck::cast_slice(&base));
+            }
+        }
+        let fill_params = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("egui-silx fill params"),
+            size: std::mem::size_of::<FillParams>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let fill_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("egui-silx fill bg"),
+            layout: &pipeline.fill_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: fill_params.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: points.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: baseline_buf.as_entire_binding(),
+                },
+            ],
+        });
+
         // sRGB Color32 -> linear, premultiplied RGBA (matches the alpha-blend target).
         let color = egui::Rgba::from(curve.color).to_array();
 
@@ -743,6 +936,11 @@ impl GpuCurve {
             arclen_key: None,
             marker_params,
             marker_bind_group,
+            fill: curve.fill,
+            baseline_buf,
+            baseline_capacity,
+            fill_params,
+            fill_bind_group,
             color,
             line_style: curve.line_style.clone(),
             gap_color: curve.gap_color.map(|c| egui::Rgba::from(c).to_array()),
@@ -793,6 +991,20 @@ impl GpuCurve {
         {
             return false;
         }
+        // A filled curve needs a baseline entry per vertex; if it became filled
+        // (or grew past the buffer), force a fresh allocation.
+        if curve.fill {
+            if let Baseline::PerPoint(vs) = &curve.baseline {
+                assert_eq!(
+                    vs.len(),
+                    curve.x.len(),
+                    "per-point baseline must have one entry per vertex"
+                );
+            }
+            if curve.x.len() as u32 > self.baseline_capacity {
+                return false;
+            }
+        }
         let positions = pack(&curve.x, &curve.y);
         if !positions.is_empty() {
             queue.write_buffer(&self.points, 0, bytemuck::cast_slice(&positions));
@@ -803,6 +1015,13 @@ impl GpuCurve {
             let packed = pack_colors(colors);
             if !packed.is_empty() {
                 queue.write_buffer(&self.vcolors, 0, bytemuck::cast_slice(&packed));
+            }
+        }
+        self.fill = curve.fill;
+        if curve.fill {
+            let base = curve.baseline.values(curve.x.len());
+            if !base.is_empty() {
+                queue.write_buffer(&self.baseline_buf, 0, bytemuck::cast_slice(&base));
             }
         }
         self.color = egui::Rgba::from(curve.color).to_array();
@@ -843,11 +1062,12 @@ impl GpuCurve {
         // Decimate only when it strictly reduces the count and the envelope is
         // valid; `2 * columns + 2` is the most points a decimation can emit, so
         // requiring more sources than that guarantees a reduction that fits.
-        // Per-vertex color and dashing are excluded: the min/max envelope drops
-        // and reorders vertices, which would unalign per-vertex colors and break
-        // the cross-segment dash phase.
+        // Per-vertex color, dashing, and fill are excluded: the min/max envelope
+        // drops and reorders vertices, which would unalign per-vertex colors,
+        // break the cross-segment dash phase, and unalign the fill baseline.
         let beneficial = self.symbol.is_none()
             && !self.vertex_color
+            && !self.fill
             && self.line_style.dash_spec(self.width).is_none()
             && self.monotonic_x
             && columns > 0
@@ -949,6 +1169,33 @@ impl GpuCurve {
             _pad: [0.0; 2],
         };
         queue.write_buffer(&self.marker_params, 0, bytemuck::bytes_of(&marker));
+
+        // Fill uniform shares the transform; the fill takes the curve color.
+        let fill = FillParams {
+            ortho,
+            color: self.color,
+            axis_log,
+            _pad: [0.0; 2],
+        };
+        queue.write_buffer(&self.fill_params, 0, bytemuck::bytes_of(&fill));
+    }
+
+    /// Draw the fill band between the curve and its baseline, if filled. A no-op
+    /// when fill is off or there is fewer than one segment. Drawn before the
+    /// line so the stroke sits on top of its own fill.
+    pub(crate) fn draw_fill(
+        &self,
+        render_pass: &mut wgpu::RenderPass<'_>,
+        pipeline: &CurvePipeline,
+    ) {
+        if !self.fill || self.count < 2 {
+            return;
+        }
+        // 6 vertices (two triangles) per segment; segment count = points - 1.
+        let vertices = 6 * (self.count - 1);
+        render_pass.set_pipeline(&pipeline.fill_pipeline);
+        render_pass.set_bind_group(0, &self.fill_bind_group, &[]);
+        render_pass.draw(0..vertices, 0..1);
     }
 
     /// Draw the polyline (thick-line quads). A no-op below two points or when
@@ -1137,5 +1384,32 @@ mod tests {
             (total - expected).abs() <= 1e-2,
             "arc length {total} vs pixel distance {expected}"
         );
+    }
+
+    #[test]
+    fn fill_default_and_builders() {
+        let c = CurveData::new(vec![0.0, 1.0], vec![0.0, 1.0], Color32::WHITE);
+        assert!(!c.fill);
+        assert_eq!(c.baseline, Baseline::Scalar(0.0));
+
+        let c = c.with_fill(Baseline::Scalar(-2.0));
+        assert!(c.fill);
+        assert_eq!(c.baseline, Baseline::Scalar(-2.0));
+    }
+
+    #[test]
+    fn baseline_values_broadcasts_scalar_and_passes_through_per_point() {
+        assert_eq!(Baseline::Scalar(3.0).values(3), vec![3.0, 3.0, 3.0]);
+        assert_eq!(
+            Baseline::PerPoint(vec![1.0, 2.0, 3.0]).values(3),
+            vec![1.0, 2.0, 3.0]
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "per-point baseline must have one entry per vertex")]
+    fn with_fill_per_point_rejects_length_mismatch() {
+        CurveData::new(vec![0.0, 1.0, 2.0], vec![0.0, 1.0, 0.0], Color32::WHITE)
+            .with_fill(Baseline::PerPoint(vec![0.0, 0.0]));
     }
 }

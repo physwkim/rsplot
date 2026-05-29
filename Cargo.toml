@@ -90,3 +90,7 @@ path = "examples/per_vertex_color.rs"
 [[example]]
 name = "line_styles"
 path = "examples/line_styles.rs"
+
+[[example]]
+name = "fill"
+path = "examples/fill.rs"

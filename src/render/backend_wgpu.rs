@@ -194,10 +194,13 @@ impl WgpuResources {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            // The render pass viewport defaults to the full target. Lines first,
-            // then markers, mirroring the on-screen draw order.
+            // The render pass viewport defaults to the full target. Fills, then
+            // lines, then markers, mirroring the on-screen draw order.
             if let Some(image) = &self.image {
                 image.draw(&mut rp, &self.image_pipeline);
+            }
+            for curve in &self.curves {
+                curve.draw_fill(&mut rp, &self.curve_pipeline);
             }
             for curve in &self.curves {
                 curve.draw(&mut rp, &self.curve_pipeline);
@@ -518,7 +521,11 @@ impl egui_wgpu::CallbackTrait for CurveCallback {
         let res: &WgpuResources = resources
             .get()
             .expect("WgpuResources not installed — call egui_silx::install() at startup");
-        // Lines first, then markers, so markers sit on top of every line.
+        // Fills first (behind), then lines, then markers, so each stroke sits on
+        // top of its own fill and markers sit on top of every line.
+        for curve in &res.curves {
+            curve.draw_fill(render_pass, &res.curve_pipeline);
+        }
         for curve in &res.curves {
             curve.draw(render_pass, &res.curve_pipeline);
         }
