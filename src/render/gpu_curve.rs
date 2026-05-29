@@ -192,6 +192,70 @@ struct FillParams {
     _pad: [f32; 2],
 }
 
+/// Per-point uncertainty drawn as error bars (silx `xerror` / `yerror`).
+#[derive(Clone, Debug, PartialEq)]
+pub enum ErrorBars {
+    /// The same `+/-` error for every point (silx scalar error).
+    Symmetric(f64),
+    /// A per-point symmetric `+/-` error (silx 1D error array).
+    PerPoint(Vec<f64>),
+    /// Per-point asymmetric error: `lower` extends below/left, `upper`
+    /// above/right (silx `(2, N)` error array).
+    Asymmetric { lower: Vec<f64>, upper: Vec<f64> },
+}
+
+impl ErrorBars {
+    /// The `(lower, upper)` error magnitudes at point `i`.
+    fn bounds(&self, i: usize) -> (f32, f32) {
+        match self {
+            ErrorBars::Symmetric(e) => (*e as f32, *e as f32),
+            ErrorBars::PerPoint(es) => (es[i] as f32, es[i] as f32),
+            ErrorBars::Asymmetric { lower, upper } => (lower[i] as f32, upper[i] as f32),
+        }
+    }
+
+    /// Panic if a per-point/asymmetric array does not match the vertex count.
+    fn check_len(&self, n: usize) {
+        match self {
+            ErrorBars::Symmetric(_) => {}
+            ErrorBars::PerPoint(es) => {
+                assert_eq!(
+                    es.len(),
+                    n,
+                    "per-point error must have one entry per vertex"
+                );
+            }
+            ErrorBars::Asymmetric { lower, upper } => {
+                assert_eq!(
+                    lower.len(),
+                    n,
+                    "asymmetric error `lower` must have one entry per vertex"
+                );
+                assert_eq!(
+                    upper.len(),
+                    n,
+                    "asymmetric error `upper` must have one entry per vertex"
+                );
+            }
+        }
+    }
+}
+
+/// Uniform block for the error-bar shader. Same layout as the marker uniform up
+/// to the line width: mat4 @0, vec4 @64, vec2 @80, vec2 @88, f32 @96; total 112.
+/// Matches `Params` in `errorbars.wgsl`.
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct ErrorBarParams {
+    ortho: [[f32; 4]; 4],
+    color: [f32; 4],
+    axis_log: [f32; 2],
+    viewport_px: [f32; 2],
+    /// Half the error-bar line width, in physical pixels.
+    half_width_px: f32,
+    _pad: [f32; 3],
+}
+
 /// Uniform block for the marker shader. Layout matches `Params` in
 /// `markers.wgsl` (std140: mat4 @0, vec4 @64, vec2 @80, vec2 @88, f32 @96,
 /// u32 @100; padded to 112).
@@ -237,6 +301,10 @@ pub struct CurveData {
     /// [`Baseline::Scalar(0.0)`](Baseline::Scalar) by default; only used when
     /// [`Self::fill`] is set.
     pub baseline: Baseline,
+    /// X-direction error bars drawn at each vertex (silx `xerror`), or `None`.
+    pub x_error: Option<ErrorBars>,
+    /// Y-direction error bars drawn at each vertex (silx `yerror`), or `None`.
+    pub y_error: Option<ErrorBars>,
     /// Line width in physical pixels (`doc/design.md` §12·§13 B1).
     pub width: f32,
     /// Marker symbol drawn at each vertex, or `None` for a line only.
@@ -261,6 +329,8 @@ impl CurveData {
             gap_color: None,
             fill: false,
             baseline: Baseline::Scalar(0.0),
+            x_error: None,
+            y_error: None,
             width: 1.0,
             symbol: None,
             marker_size: 7.0,
@@ -311,6 +381,22 @@ impl CurveData {
         self
     }
 
+    /// Draw x-direction error bars at each vertex (silx `xerror`). A per-point
+    /// or asymmetric error must have one entry per vertex.
+    pub fn with_x_error(mut self, error: ErrorBars) -> Self {
+        error.check_len(self.x.len());
+        self.x_error = Some(error);
+        self
+    }
+
+    /// Draw y-direction error bars at each vertex (silx `yerror`). A per-point
+    /// or asymmetric error must have one entry per vertex.
+    pub fn with_y_error(mut self, error: ErrorBars) -> Self {
+        error.check_len(self.y.len());
+        self.y_error = Some(error);
+        self
+    }
+
     /// Set the line width in physical pixels (clamped to ≥ 0).
     pub fn with_width(mut self, width: f32) -> Self {
         self.width = width.max(0.0);
@@ -336,20 +422,23 @@ impl CurveData {
     }
 }
 
-/// The render pipelines shared by all curves: the thick-line, marker, and fill
-/// pipelines. The line layout has the curve uniform at binding 0, the points
-/// storage buffer at binding 1, a per-vertex color buffer at binding 2, and the
-/// dash arc length at binding 3. The marker and fill pipelines each have their
-/// own minimal layout (so the line layout can grow without affecting them): the
-/// marker layout is uniform + points; the fill layout is uniform + points +
-/// baseline.
+/// The render pipelines shared by all curves: the thick-line, marker, fill, and
+/// error-bar pipelines. The line layout has the curve uniform at binding 0, the
+/// points storage buffer at binding 1, a per-vertex color buffer at binding 2,
+/// and the dash arc length at binding 3. The marker, fill, and error-bar
+/// pipelines each have their own minimal layout (so the line layout can grow
+/// without affecting them): the marker layout is uniform + points; the fill
+/// layout is uniform + points + baseline; the error-bar layout is uniform +
+/// segments.
 pub struct CurvePipeline {
     pub(crate) pipeline: wgpu::RenderPipeline,
     pub(crate) marker_pipeline: wgpu::RenderPipeline,
     pub(crate) fill_pipeline: wgpu::RenderPipeline,
+    pub(crate) errorbar_pipeline: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
     marker_bind_group_layout: wgpu::BindGroupLayout,
     fill_bind_group_layout: wgpu::BindGroupLayout,
+    errorbar_bind_group_layout: wgpu::BindGroupLayout,
 }
 
 impl CurvePipeline {
@@ -365,6 +454,10 @@ impl CurvePipeline {
         let fill_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("egui-silx fill"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shaders/fill.wgsl").into()),
+        });
+        let errorbar_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("egui-silx errorbars"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/errorbars.wgsl").into()),
         });
 
         let bind_group_layout =
@@ -602,13 +695,82 @@ impl CurvePipeline {
             cache: None,
         });
 
+        // Error-bar pipeline: its own layout (error-bar uniform at 0, the segment
+        // endpoints at 1). Two triangles (6 vertices) per segment, like the line.
+        let errorbar_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("egui-silx errorbar bgl"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: NonZeroU64::new(
+                                std::mem::size_of::<ErrorBarParams>() as u64,
+                            ),
+                        },
+                        count: None,
+                    },
+                    // Segment endpoints `[anchor_x, anchor_y, offset_px_x,
+                    // offset_px_y]`, two per segment; a 1-element placeholder when
+                    // the curve has no error bars.
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::VERTEX,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: NonZeroU64::new(
+                                std::mem::size_of::<[f32; 4]>() as u64
+                            ),
+                        },
+                        count: None,
+                    },
+                ],
+            });
+        let errorbar_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("egui-silx errorbar layout"),
+                bind_group_layouts: &[Some(&errorbar_bind_group_layout)],
+                immediate_size: 0,
+            });
+        let errorbar_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("egui-silx errorbar pipeline"),
+            layout: Some(&errorbar_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &errorbar_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &errorbar_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: target_format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+
         Self {
             pipeline,
             marker_pipeline,
             fill_pipeline,
+            errorbar_pipeline,
             bind_group_layout,
             marker_bind_group_layout,
             fill_bind_group_layout,
+            errorbar_bind_group_layout,
         }
     }
 }
@@ -659,6 +821,21 @@ pub struct GpuCurve {
     /// Fill uniform + bind group (shares the points buffer at binding 1).
     fill_params: wgpu::Buffer,
     fill_bind_group: wgpu::BindGroup,
+    /// Error-bar segment endpoints (binding 1 of the error-bar layout), two per
+    /// segment; holds the built segments when the curve has error bars, else a
+    /// 1-element placeholder.
+    errorbar_segs: wgpu::Buffer,
+    /// Number of error-bar *segments* currently in `errorbar_segs` (each is two
+    /// endpoint entries → `6` draw vertices); `0` when the curve has no error
+    /// bars, which skips the draw.
+    errorbar_count: u32,
+    /// Endpoint *entries* the `errorbar_segs` buffer can hold (`2 ×` the segment
+    /// capacity); `0` for the placeholder, forcing a realloc when the curve
+    /// gains error bars.
+    errorbar_capacity: u32,
+    /// Error-bar uniform + bind group.
+    errorbar_params: wgpu::Buffer,
+    errorbar_bind_group: wgpu::BindGroup,
     color: [f32; 4],
     /// Line stroke style (selects the dash pattern; [`LineStyle::None`] skips
     /// the line entirely).
@@ -769,6 +946,51 @@ fn cumulative_arclen(
         prev = Some(p);
     }
     out
+}
+
+/// Half the error-bar cap length, in physical pixels (a cap is `2 ×` this wide).
+const ERRORBAR_CAP_HALF_PX: f32 = 3.0;
+/// Error-bar line width, in physical pixels.
+const ERRORBAR_WIDTH_PX: f32 = 1.0;
+
+/// Build the error-bar line segments as pairs of vertices, each vertex
+/// `[anchor_x, anchor_y, offset_px_x, offset_px_y]`: the shader maps the data
+/// anchor through the transform and then adds the pixel-space offset, so caps
+/// keep a fixed pixel size at any zoom. Each point contributes a bar plus two
+/// end caps per active error axis. The result is transform-independent, so it is
+/// built once at upload, not per frame.
+fn build_errorbar_segments(
+    x: &[f64],
+    y: &[f64],
+    x_error: Option<&ErrorBars>,
+    y_error: Option<&ErrorBars>,
+) -> Vec<[f32; 4]> {
+    let cap = ERRORBAR_CAP_HALF_PX;
+    let mut segs = Vec::new();
+    let mut push = |a: [f32; 4], b: [f32; 4]| {
+        segs.push(a);
+        segs.push(b);
+    };
+    for i in 0..x.len() {
+        let (xi, yi) = (x[i] as f32, y[i] as f32);
+        if let Some(e) = y_error {
+            let (lo, hi) = e.bounds(i);
+            let (bot, top) = (yi - lo, yi + hi);
+            // Vertical bar, then horizontal caps at each end.
+            push([xi, bot, 0.0, 0.0], [xi, top, 0.0, 0.0]);
+            push([xi, bot, -cap, 0.0], [xi, bot, cap, 0.0]);
+            push([xi, top, -cap, 0.0], [xi, top, cap, 0.0]);
+        }
+        if let Some(e) = x_error {
+            let (lo, hi) = e.bounds(i);
+            let (left, right) = (xi - lo, xi + hi);
+            // Horizontal bar, then vertical caps at each end.
+            push([left, yi, 0.0, 0.0], [right, yi, 0.0, 0.0]);
+            push([left, yi, 0.0, -cap], [left, yi, 0.0, cap]);
+            push([right, yi, 0.0, -cap], [right, yi, 0.0, cap]);
+        }
+    }
+    segs
 }
 
 impl GpuCurve {
@@ -919,6 +1141,47 @@ impl GpuCurve {
             ],
         });
 
+        // Error-bar segment buffer. Built from the active x/y errors; sized to
+        // the built entry count (error-barred curves are not decimated by their
+        // segment buffer) or a 1-element placeholder when there are no errors.
+        let segs = build_errorbar_segments(
+            &curve.x,
+            &curve.y,
+            curve.x_error.as_ref(),
+            curve.y_error.as_ref(),
+        );
+        let errorbar_capacity = segs.len() as u32;
+        let errorbar_count = (segs.len() / 2) as u32;
+        let errorbar_segs = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("egui-silx curve errorbar segs"),
+            size: (errorbar_capacity.max(1) as usize * std::mem::size_of::<[f32; 4]>()) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        if !segs.is_empty() {
+            queue.write_buffer(&errorbar_segs, 0, bytemuck::cast_slice(&segs));
+        }
+        let errorbar_params = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("egui-silx errorbar params"),
+            size: std::mem::size_of::<ErrorBarParams>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let errorbar_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("egui-silx errorbar bg"),
+            layout: &pipeline.errorbar_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: errorbar_params.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: errorbar_segs.as_entire_binding(),
+                },
+            ],
+        });
+
         // sRGB Color32 -> linear, premultiplied RGBA (matches the alpha-blend target).
         let color = egui::Rgba::from(curve.color).to_array();
 
@@ -941,6 +1204,11 @@ impl GpuCurve {
             baseline_capacity,
             fill_params,
             fill_bind_group,
+            errorbar_segs,
+            errorbar_count,
+            errorbar_capacity,
+            errorbar_params,
+            errorbar_bind_group,
             color,
             line_style: curve.line_style.clone(),
             gap_color: curve.gap_color.map(|c| egui::Rgba::from(c).to_array()),
@@ -1005,6 +1273,24 @@ impl GpuCurve {
                 return false;
             }
         }
+        // Error bars need two endpoint entries per segment; if the curve gained
+        // error bars (or grew/added an axis past the buffer), force a fresh
+        // allocation. `check_len` validates per-point/asymmetric array lengths.
+        if let Some(e) = &curve.x_error {
+            e.check_len(curve.x.len());
+        }
+        if let Some(e) = &curve.y_error {
+            e.check_len(curve.y.len());
+        }
+        let segs = build_errorbar_segments(
+            &curve.x,
+            &curve.y,
+            curve.x_error.as_ref(),
+            curve.y_error.as_ref(),
+        );
+        if segs.len() as u32 > self.errorbar_capacity {
+            return false;
+        }
         let positions = pack(&curve.x, &curve.y);
         if !positions.is_empty() {
             queue.write_buffer(&self.points, 0, bytemuck::cast_slice(&positions));
@@ -1023,6 +1309,10 @@ impl GpuCurve {
             if !base.is_empty() {
                 queue.write_buffer(&self.baseline_buf, 0, bytemuck::cast_slice(&base));
             }
+        }
+        self.errorbar_count = (segs.len() / 2) as u32;
+        if !segs.is_empty() {
+            queue.write_buffer(&self.errorbar_segs, 0, bytemuck::cast_slice(&segs));
         }
         self.color = egui::Rgba::from(curve.color).to_array();
         self.line_style = curve.line_style.clone();
@@ -1178,6 +1468,18 @@ impl GpuCurve {
             _pad: [0.0; 2],
         };
         queue.write_buffer(&self.fill_params, 0, bytemuck::bytes_of(&fill));
+
+        // Error-bar uniform shares the transform; bars take the curve color and
+        // a fixed pixel width.
+        let errorbar = ErrorBarParams {
+            ortho,
+            color: self.color,
+            axis_log,
+            viewport_px,
+            half_width_px: 0.5 * ERRORBAR_WIDTH_PX,
+            _pad: [0.0; 3],
+        };
+        queue.write_buffer(&self.errorbar_params, 0, bytemuck::bytes_of(&errorbar));
     }
 
     /// Draw the fill band between the curve and its baseline, if filled. A no-op
@@ -1195,6 +1497,24 @@ impl GpuCurve {
         let vertices = 6 * (self.count - 1);
         render_pass.set_pipeline(&pipeline.fill_pipeline);
         render_pass.set_bind_group(0, &self.fill_bind_group, &[]);
+        render_pass.draw(0..vertices, 0..1);
+    }
+
+    /// Draw the error bars (bar + end caps per point), if any. A no-op when the
+    /// curve has no error bars. Drawn after the fill and before the line so the
+    /// stroke and markers sit on top of the bars.
+    pub(crate) fn draw_errorbars(
+        &self,
+        render_pass: &mut wgpu::RenderPass<'_>,
+        pipeline: &CurvePipeline,
+    ) {
+        if self.errorbar_count == 0 {
+            return;
+        }
+        // 6 vertices (two triangles) per segment.
+        let vertices = 6 * self.errorbar_count;
+        render_pass.set_pipeline(&pipeline.errorbar_pipeline);
+        render_pass.set_bind_group(0, &self.errorbar_bind_group, &[]);
         render_pass.draw(0..vertices, 0..1);
     }
 
@@ -1411,5 +1731,116 @@ mod tests {
     fn with_fill_per_point_rejects_length_mismatch() {
         CurveData::new(vec![0.0, 1.0, 2.0], vec![0.0, 1.0, 0.0], Color32::WHITE)
             .with_fill(Baseline::PerPoint(vec![0.0, 0.0]));
+    }
+
+    #[test]
+    fn error_bars_default_and_builders() {
+        let c = CurveData::new(vec![0.0, 1.0], vec![0.0, 1.0], Color32::WHITE);
+        assert_eq!(c.x_error, None);
+        assert_eq!(c.y_error, None);
+
+        let c = c
+            .with_x_error(ErrorBars::Symmetric(0.5))
+            .with_y_error(ErrorBars::PerPoint(vec![0.1, 0.2]));
+        assert_eq!(c.x_error, Some(ErrorBars::Symmetric(0.5)));
+        assert_eq!(c.y_error, Some(ErrorBars::PerPoint(vec![0.1, 0.2])));
+    }
+
+    #[test]
+    fn error_bars_bounds_per_variant() {
+        assert_eq!(ErrorBars::Symmetric(0.5).bounds(0), (0.5, 0.5));
+        assert_eq!(ErrorBars::PerPoint(vec![0.1, 0.3]).bounds(1), (0.3, 0.3));
+        assert_eq!(
+            ErrorBars::Asymmetric {
+                lower: vec![0.2, 0.4],
+                upper: vec![1.0, 2.0],
+            }
+            .bounds(1),
+            (0.4, 2.0)
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "per-point error must have one entry per vertex")]
+    fn with_y_error_per_point_rejects_length_mismatch() {
+        CurveData::new(vec![0.0, 1.0, 2.0], vec![0.0, 1.0, 0.0], Color32::WHITE)
+            .with_y_error(ErrorBars::PerPoint(vec![0.1, 0.2]));
+    }
+
+    #[test]
+    #[should_panic(expected = "asymmetric error `upper` must have one entry per vertex")]
+    fn with_x_error_asymmetric_rejects_length_mismatch() {
+        CurveData::new(vec![0.0, 1.0], vec![0.0, 1.0], Color32::WHITE).with_x_error(
+            ErrorBars::Asymmetric {
+                lower: vec![0.1, 0.2],
+                upper: vec![0.3],
+            },
+        );
+    }
+
+    #[test]
+    fn build_errorbar_segments_y_error_geometry() {
+        // One point at (2, 5) with a symmetric y error of 1.0 yields a vertical
+        // bar (4 -> 6) plus a horizontal cap at each end (offset +/- cap px in x).
+        let cap = ERRORBAR_CAP_HALF_PX;
+        let segs = build_errorbar_segments(&[2.0], &[5.0], None, Some(&ErrorBars::Symmetric(1.0)));
+        assert_eq!(
+            segs,
+            vec![
+                [2.0, 4.0, 0.0, 0.0],
+                [2.0, 6.0, 0.0, 0.0],
+                [2.0, 4.0, -cap, 0.0],
+                [2.0, 4.0, cap, 0.0],
+                [2.0, 6.0, -cap, 0.0],
+                [2.0, 6.0, cap, 0.0],
+            ]
+        );
+    }
+
+    #[test]
+    fn build_errorbar_segments_x_error_geometry() {
+        // One point at (2, 5) with an asymmetric x error (lower 1, upper 2)
+        // yields a horizontal bar (1 -> 4) plus a vertical cap at each end
+        // (offset +/- cap px in y).
+        let cap = ERRORBAR_CAP_HALF_PX;
+        let segs = build_errorbar_segments(
+            &[2.0],
+            &[5.0],
+            Some(&ErrorBars::Asymmetric {
+                lower: vec![1.0],
+                upper: vec![2.0],
+            }),
+            None,
+        );
+        assert_eq!(
+            segs,
+            vec![
+                [1.0, 5.0, 0.0, 0.0],
+                [4.0, 5.0, 0.0, 0.0],
+                [1.0, 5.0, 0.0, -cap],
+                [1.0, 5.0, 0.0, cap],
+                [4.0, 5.0, 0.0, -cap],
+                [4.0, 5.0, 0.0, cap],
+            ]
+        );
+    }
+
+    #[test]
+    fn build_errorbar_segments_counts_scale_with_active_axes() {
+        let x = vec![0.0, 1.0, 2.0];
+        let y = vec![0.0, 1.0, 2.0];
+        // No errors -> no segments.
+        assert!(build_errorbar_segments(&x, &y, None, None).is_empty());
+        // One axis -> 3 segments (6 entries) per point.
+        let one = build_errorbar_segments(&x, &y, None, Some(&ErrorBars::Symmetric(1.0)));
+        assert_eq!(one.len(), 3 * 2 * x.len());
+        // Both axes -> 6 segments (12 entries) per point.
+        let both = build_errorbar_segments(
+            &x,
+            &y,
+            Some(&ErrorBars::Symmetric(0.5)),
+            Some(&ErrorBars::Symmetric(1.0)),
+        );
+        assert_eq!(both.len(), 6 * 2 * x.len());
     }
 }

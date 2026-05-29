@@ -94,3 +94,7 @@ path = "examples/line_styles.rs"
 [[example]]
 name = "fill"
 path = "examples/fill.rs"
+
+[[example]]
+name = "error_bars"
+path = "examples/error_bars.rs"
