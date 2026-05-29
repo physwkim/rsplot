@@ -87,7 +87,7 @@ impl LiveApp {
 
         let mut plot = Plot::new(0);
         plot.limits = (0.0, WIDTH as f64, 0.0, HEIGHT as f64);
-        plot.colormap = Some(image.colormap.clone());
+        plot.colormap = image.colormap().cloned();
 
         Self {
             plot,

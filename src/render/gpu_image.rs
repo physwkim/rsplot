@@ -1,9 +1,12 @@
 //! GPU-side image: the shared image pipeline and a single uploaded image.
 //!
-//! [`ImageData`] is the CPU spec (mirrors silx `addImage`: data, origin/scale,
-//! colormap, alpha). [`ImagePipeline`] holds the pipeline and samplers shared
-//! across images. [`GpuImage`] owns one image's textures/uniform/bind group and
-//! persists across frames in `WgpuResources`.
+//! [`ImageData`] is the CPU spec (mirrors silx `addImage`: pixels, origin/scale,
+//! alpha). Its [`ImagePixels`] is either a scalar field with a colormap or a
+//! direct RGBA image (the colormap is meaningless for RGBA, so the sum type
+//! makes "RGBA + colormap" unrepresentable). [`ImagePipeline`] holds the scalar
+//! (colormapped) and RGBA (direct) pipelines plus the shared samplers.
+//! [`GpuImage`] owns one image's textures/uniform/bind group and persists across
+//! frames in `WgpuResources`.
 //!
 //! An image is split into a grid of tiles no larger than the device's
 //! `max_texture_dimension_2d`, so images exceeding the single-texture limit
@@ -51,24 +54,55 @@ struct ImageParams {
     _pad: f32,
 }
 
-/// A 2D scalar (or single-channel) image to display, in data coordinates.
+/// Uniform block for the RGBA (direct) image shader: just the transform, rect,
+/// axis-scale flags, and global alpha — no colormap fields. `repr(C)` offsets
+/// stay std140-aligned: mat4 @0, vec4 @64, vec2 @80, f32 @88; padded to 96.
+/// Matches `Params` in `image_rgba.wgsl`.
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct ImageRgbaParams {
+    ortho: [[f32; 4]; 4],
+    rect: [f32; 4],
+    /// 1.0 if that axis is log10, else 0.0 (x, y).
+    axis_log: [f32; 2],
+    alpha: f32,
+    _pad: f32,
+}
+
+/// The pixel payload of an [`ImageData`]: either a scalar field that the shader
+/// colormaps, or a direct RGBA image displayed without a colormap (silx accepts
+/// both in `addImage`). Making this a sum type keeps "RGBA + colormap" — an
+/// illegal combination — unrepresentable.
+#[derive(Clone, Debug)]
+pub enum ImagePixels {
+    /// Row-major scalar values (length `width * height`) mapped through
+    /// `colormap` under its [`Normalization`](crate::core::colormap::Normalization).
+    /// The colormap is boxed because its 256-entry LUT dwarfs the RGBA variant.
+    Scalar {
+        data: Vec<f32>,
+        colormap: Box<Colormap>,
+    },
+    /// Row-major sRGB RGBA pixels (length `width * height`), displayed directly.
+    Rgba { data: Vec<[u8; 4]> },
+}
+
+/// A 2D image to display, in data coordinates.
 ///
 /// `origin` is the data coordinate of the lower-left corner of pixel `(0, 0)`;
-/// `scale` is data units per pixel. Row 0 of `data` is drawn at the bottom.
+/// `scale` is data units per pixel. Row 0 of the pixels is drawn at the bottom.
 #[derive(Clone, Debug)]
 pub struct ImageData {
-    /// Row-major scalar values, length `width * height`.
-    pub data: Vec<f32>,
+    pub pixels: ImagePixels,
     pub width: u32,
     pub height: u32,
     pub origin: (f64, f64),
     pub scale: (f64, f64),
-    pub colormap: Colormap,
     pub alpha: f32,
 }
 
 impl ImageData {
-    /// Build an image at origin `(0, 0)` with unit scale and full opacity.
+    /// Build a colormapped scalar image at origin `(0, 0)` with unit scale and
+    /// full opacity. `data` is row-major, length `width * height`.
     pub fn new(width: u32, height: u32, data: Vec<f32>, colormap: Colormap) -> Self {
         assert_eq!(
             data.len(),
@@ -76,21 +110,56 @@ impl ImageData {
             "data length must equal width * height"
         );
         Self {
-            data,
+            pixels: ImagePixels::Scalar {
+                data,
+                colormap: Box::new(colormap),
+            },
             width,
             height,
             origin: (0.0, 0.0),
             scale: (1.0, 1.0),
-            colormap,
             alpha: 1.0,
+        }
+    }
+
+    /// Build a direct RGBA image (no colormap) at origin `(0, 0)` with unit
+    /// scale and full opacity. `data` is row-major sRGB RGBA, length
+    /// `width * height` (silx `addImage` with an RGBA array).
+    pub fn rgba(width: u32, height: u32, data: Vec<[u8; 4]>) -> Self {
+        assert_eq!(
+            data.len(),
+            (width as usize) * (height as usize),
+            "data length must equal width * height"
+        );
+        Self {
+            pixels: ImagePixels::Rgba { data },
+            width,
+            height,
+            origin: (0.0, 0.0),
+            scale: (1.0, 1.0),
+            alpha: 1.0,
+        }
+    }
+
+    /// The colormap for a scalar image, or `None` for an RGBA image — used to
+    /// mirror the image's colormap onto the plot's colorbar.
+    pub fn colormap(&self) -> Option<&Colormap> {
+        match &self.pixels {
+            ImagePixels::Scalar { colormap, .. } => Some(colormap.as_ref()),
+            ImagePixels::Rgba { .. } => None,
         }
     }
 }
 
-/// The render pipeline and samplers shared by all images.
+/// The render pipelines and samplers shared by all images: the scalar
+/// (colormapped) pipeline and the RGBA (direct) pipeline. The scalar layout is
+/// uniform + data texture + data sampler + LUT texture + LUT sampler; the RGBA
+/// layout is its own minimal uniform + RGBA texture + sampler (no LUT).
 pub struct ImagePipeline {
     pub(crate) pipeline: wgpu::RenderPipeline,
+    pub(crate) rgba_pipeline: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
+    rgba_bind_group_layout: wgpu::BindGroupLayout,
     data_sampler: wgpu::Sampler,
     lut_sampler: wgpu::Sampler,
 }
@@ -100,6 +169,10 @@ impl ImagePipeline {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("egui-silx image"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shaders/image.wgsl").into()),
+        });
+        let rgba_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("egui-silx image rgba"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/image_rgba.wgsl").into()),
         });
 
         let bind_group_layout =
@@ -190,6 +263,76 @@ impl ImagePipeline {
             cache: None,
         });
 
+        // RGBA pipeline: its own minimal layout (uniform + RGBA texture +
+        // nearest sampler, no LUT). The texture is sampled non-filtering so it
+        // shares the nearest data sampler.
+        let rgba_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("egui-silx image rgba bgl"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: NonZeroU64::new(
+                                std::mem::size_of::<ImageRgbaParams>() as u64,
+                            ),
+                        },
+                        count: None,
+                    },
+                    // 1: RGBA texture (sampled non-filtering / nearest)
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    // 2: sampler (non-filtering / nearest)
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
+                        count: None,
+                    },
+                ],
+            });
+        let rgba_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("egui-silx image rgba layout"),
+            bind_group_layouts: &[Some(&rgba_bind_group_layout)],
+            immediate_size: 0,
+        });
+        let rgba_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("egui-silx image rgba pipeline"),
+            layout: Some(&rgba_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &rgba_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &rgba_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: target_format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+
         let data_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("egui-silx image data sampler"),
             mag_filter: wgpu::FilterMode::Nearest,
@@ -205,7 +348,9 @@ impl ImagePipeline {
 
         Self {
             pipeline,
+            rgba_pipeline,
             bind_group_layout,
+            rgba_bind_group_layout,
             data_sampler,
             lut_sampler,
         }
@@ -233,8 +378,16 @@ fn tile_bounds(width: u32, height: u32, max_dim: u32) -> Vec<(u32, u32, u32, u32
 }
 
 /// Copy the `w × h` sub-block at `(x0, y0)` out of a row-major image of stride
-/// `full_width`, producing a tightly packed row-major `w × h` buffer.
-fn extract_subgrid(data: &[f32], full_width: u32, x0: u32, y0: u32, w: u32, h: u32) -> Vec<f32> {
+/// `full_width`, producing a tightly packed row-major `w × h` buffer. Generic
+/// over the texel type so it serves both scalar (`f32`) and RGBA (`[u8; 4]`).
+fn extract_subgrid<T: Copy>(
+    data: &[T],
+    full_width: u32,
+    x0: u32,
+    y0: u32,
+    w: u32,
+    h: u32,
+) -> Vec<T> {
     let mut out = Vec::with_capacity((w as usize) * (h as usize));
     for row in 0..h {
         let src = ((y0 + row) as usize) * (full_width as usize) + x0 as usize;
@@ -243,9 +396,10 @@ fn extract_subgrid(data: &[f32], full_width: u32, x0: u32, y0: u32, w: u32, h: u
     out
 }
 
-/// One tile of a (possibly split) image: its own scalar texture, params, bind
-/// group, data-space rect, and pixel bounds within the full image (the bounds
-/// route [`GpuImage::update_region`] writes to the tiles they overlap).
+/// One tile of a (possibly split) image: its own texture (`R32Float` for a
+/// scalar image, `Rgba8UnormSrgb` for an RGBA one), params, bind group,
+/// data-space rect, and pixel bounds within the full image (the bounds route
+/// [`GpuImage::update_region`] writes to the tiles they overlap).
 struct ImageTile {
     bind_group: wgpu::BindGroup,
     params: wgpu::Buffer,
@@ -257,6 +411,23 @@ struct ImageTile {
     h: u32,
 }
 
+/// What a [`GpuImage`] renders: a colormapped scalar field (carrying the
+/// resolved normalization for the per-frame uniform) or a direct RGBA image
+/// (no colormap fields — they would have no meaning).
+#[derive(Clone, Copy)]
+enum GpuImageKind {
+    Scalar {
+        /// Bounds transformed by the normalization (`norm(vmin)`).
+        cmap_min: f32,
+        /// `1 / (norm(vmax) - norm(vmin))`, or 0 for a degenerate range.
+        cmap_one_over_range: f32,
+        gamma: f32,
+        /// Normalization code; see `Normalization::code`.
+        norm: u32,
+    },
+    Rgba,
+}
+
 /// One uploaded image's GPU resources, persisting across frames. The image is
 /// stored as one or more [`ImageTile`]s so it can exceed the single-texture
 /// dimension limit.
@@ -264,162 +435,254 @@ pub struct GpuImage {
     tiles: Vec<ImageTile>,
     width: u32,
     height: u32,
-    /// Resolved colormap normalization for the per-frame uniform: the bounds
-    /// transformed by the normalization, plus the gamma exponent and code.
-    cmap_min: f32,
-    cmap_one_over_range: f32,
-    gamma: f32,
-    norm: u32,
+    kind: GpuImageKind,
     alpha: f32,
 }
 
 impl GpuImage {
-    /// Upload `image` (data + LUT textures) and build per-tile bind groups. The
-    /// scalar textures are `R32Float`; the LUT is a 256x1 sRGB texture shared by
-    /// every tile. The image is split into tiles no larger than the device's
-    /// `max_texture_dimension_2d`, so it can exceed the single-texture limit.
+    /// Upload `image` and build per-tile bind groups. A scalar image uploads
+    /// `R32Float` tiles plus a shared 256x1 sRGB LUT and uses the colormap
+    /// pipeline; an RGBA image uploads `Rgba8UnormSrgb` tiles and uses the
+    /// direct pipeline (no LUT). Either way the image is split into tiles no
+    /// larger than the device's `max_texture_dimension_2d`, so it can exceed the
+    /// single-texture limit.
     pub fn new(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         pipeline: &ImagePipeline,
         image: &ImageData,
     ) -> Self {
-        // LUT texture is shared across tiles (built once).
-        let lut_size = wgpu::Extent3d {
-            width: 256,
-            height: 1,
-            depth_or_array_layers: 1,
-        };
-        let lut_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("egui-silx image lut"),
-            size: lut_size,
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8UnormSrgb,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
-        queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &lut_texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            bytemuck::cast_slice(&image.colormap.lut),
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(4 * 256),
-                rows_per_image: Some(1),
-            },
-            lut_size,
-        );
-        let lut_view = lut_texture.create_view(&wgpu::TextureViewDescriptor::default());
-
         let (ox, oy) = image.origin;
         let (sx, sy) = image.scale;
         let max_dim = device.limits().max_texture_dimension_2d;
+        // A tile's data-space rect: its pixel sub-grid mapped through origin +
+        // scale, so adjacent tiles abut exactly.
+        let rect_of = |x0: u32, y0: u32, w: u32, h: u32| {
+            [
+                (ox + sx * x0 as f64) as f32,
+                (oy + sy * y0 as f64) as f32,
+                (ox + sx * (x0 + w) as f64) as f32,
+                (oy + sy * (y0 + h) as f64) as f32,
+            ]
+        };
 
-        let tiles = tile_bounds(image.width, image.height, max_dim)
-            .into_iter()
-            .map(|(x0, y0, w, h)| {
-                let tile_size = wgpu::Extent3d {
-                    width: w,
-                    height: h,
+        let (tiles, kind) = match &image.pixels {
+            ImagePixels::Scalar { data, colormap } => {
+                // LUT texture is shared across tiles (built once).
+                let lut_size = wgpu::Extent3d {
+                    width: 256,
+                    height: 1,
                     depth_or_array_layers: 1,
                 };
-                let data_texture = device.create_texture(&wgpu::TextureDescriptor {
-                    label: Some("egui-silx image tile"),
-                    size: tile_size,
+                let lut_texture = device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("egui-silx image lut"),
+                    size: lut_size,
                     mip_level_count: 1,
                     sample_count: 1,
                     dimension: wgpu::TextureDimension::D2,
-                    format: wgpu::TextureFormat::R32Float,
+                    format: wgpu::TextureFormat::Rgba8UnormSrgb,
                     usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
                     view_formats: &[],
                 });
-                let sub = extract_subgrid(&image.data, image.width, x0, y0, w, h);
                 queue.write_texture(
                     wgpu::TexelCopyTextureInfo {
-                        texture: &data_texture,
+                        texture: &lut_texture,
                         mip_level: 0,
                         origin: wgpu::Origin3d::ZERO,
                         aspect: wgpu::TextureAspect::All,
                     },
-                    bytemuck::cast_slice(&sub),
+                    bytemuck::cast_slice(&colormap.lut),
                     wgpu::TexelCopyBufferLayout {
                         offset: 0,
-                        bytes_per_row: Some(4 * w),
-                        rows_per_image: Some(h),
+                        bytes_per_row: Some(4 * 256),
+                        rows_per_image: Some(1),
                     },
-                    tile_size,
+                    lut_size,
                 );
-                let data_view = data_texture.create_view(&wgpu::TextureViewDescriptor::default());
+                let lut_view = lut_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-                let params = device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("egui-silx image tile params"),
-                    size: std::mem::size_of::<ImageParams>() as u64,
-                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                    mapped_at_creation: false,
-                });
-                let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("egui-silx image tile bg"),
-                    layout: &pipeline.bind_group_layout,
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: params.as_entire_binding(),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: wgpu::BindingResource::TextureView(&data_view),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 2,
-                            resource: wgpu::BindingResource::Sampler(&pipeline.data_sampler),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 3,
-                            resource: wgpu::BindingResource::TextureView(&lut_view),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 4,
-                            resource: wgpu::BindingResource::Sampler(&pipeline.lut_sampler),
-                        },
-                    ],
-                });
+                let tiles = tile_bounds(image.width, image.height, max_dim)
+                    .into_iter()
+                    .map(|(x0, y0, w, h)| {
+                        let tile_size = wgpu::Extent3d {
+                            width: w,
+                            height: h,
+                            depth_or_array_layers: 1,
+                        };
+                        let data_texture = device.create_texture(&wgpu::TextureDescriptor {
+                            label: Some("egui-silx image tile"),
+                            size: tile_size,
+                            mip_level_count: 1,
+                            sample_count: 1,
+                            dimension: wgpu::TextureDimension::D2,
+                            format: wgpu::TextureFormat::R32Float,
+                            usage: wgpu::TextureUsages::TEXTURE_BINDING
+                                | wgpu::TextureUsages::COPY_DST,
+                            view_formats: &[],
+                        });
+                        let sub = extract_subgrid(data, image.width, x0, y0, w, h);
+                        queue.write_texture(
+                            wgpu::TexelCopyTextureInfo {
+                                texture: &data_texture,
+                                mip_level: 0,
+                                origin: wgpu::Origin3d::ZERO,
+                                aspect: wgpu::TextureAspect::All,
+                            },
+                            bytemuck::cast_slice(&sub),
+                            wgpu::TexelCopyBufferLayout {
+                                offset: 0,
+                                bytes_per_row: Some(4 * w),
+                                rows_per_image: Some(h),
+                            },
+                            tile_size,
+                        );
+                        let data_view =
+                            data_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-                // The tile's data-space rect: its pixel sub-grid mapped through
-                // origin + scale, so adjacent tiles abut exactly.
-                let rect = [
-                    (ox + sx * x0 as f64) as f32,
-                    (oy + sy * y0 as f64) as f32,
-                    (ox + sx * (x0 + w) as f64) as f32,
-                    (oy + sy * (y0 + h) as f64) as f32,
-                ];
-                ImageTile {
-                    bind_group,
-                    params,
-                    data_texture,
-                    rect,
-                    x0,
-                    y0,
-                    w,
-                    h,
-                }
-            })
-            .collect();
+                        let params = device.create_buffer(&wgpu::BufferDescriptor {
+                            label: Some("egui-silx image tile params"),
+                            size: std::mem::size_of::<ImageParams>() as u64,
+                            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                            mapped_at_creation: false,
+                        });
+                        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                            label: Some("egui-silx image tile bg"),
+                            layout: &pipeline.bind_group_layout,
+                            entries: &[
+                                wgpu::BindGroupEntry {
+                                    binding: 0,
+                                    resource: params.as_entire_binding(),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 1,
+                                    resource: wgpu::BindingResource::TextureView(&data_view),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 2,
+                                    resource: wgpu::BindingResource::Sampler(
+                                        &pipeline.data_sampler,
+                                    ),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 3,
+                                    resource: wgpu::BindingResource::TextureView(&lut_view),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 4,
+                                    resource: wgpu::BindingResource::Sampler(&pipeline.lut_sampler),
+                                },
+                            ],
+                        });
+                        ImageTile {
+                            bind_group,
+                            params,
+                            data_texture,
+                            rect: rect_of(x0, y0, w, h),
+                            x0,
+                            y0,
+                            w,
+                            h,
+                        }
+                    })
+                    .collect();
 
-        let (cmap_min, cmap_one_over_range) = image.colormap.norm_bounds();
+                let (cmap_min, cmap_one_over_range) = colormap.norm_bounds();
+                (
+                    tiles,
+                    GpuImageKind::Scalar {
+                        cmap_min,
+                        cmap_one_over_range,
+                        gamma: colormap.gamma,
+                        norm: colormap.normalization.code(),
+                    },
+                )
+            }
+            ImagePixels::Rgba { data } => {
+                let tiles = tile_bounds(image.width, image.height, max_dim)
+                    .into_iter()
+                    .map(|(x0, y0, w, h)| {
+                        let tile_size = wgpu::Extent3d {
+                            width: w,
+                            height: h,
+                            depth_or_array_layers: 1,
+                        };
+                        let data_texture = device.create_texture(&wgpu::TextureDescriptor {
+                            label: Some("egui-silx image rgba tile"),
+                            size: tile_size,
+                            mip_level_count: 1,
+                            sample_count: 1,
+                            dimension: wgpu::TextureDimension::D2,
+                            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                            usage: wgpu::TextureUsages::TEXTURE_BINDING
+                                | wgpu::TextureUsages::COPY_DST,
+                            view_formats: &[],
+                        });
+                        let sub = extract_subgrid(data, image.width, x0, y0, w, h);
+                        queue.write_texture(
+                            wgpu::TexelCopyTextureInfo {
+                                texture: &data_texture,
+                                mip_level: 0,
+                                origin: wgpu::Origin3d::ZERO,
+                                aspect: wgpu::TextureAspect::All,
+                            },
+                            bytemuck::cast_slice(&sub),
+                            wgpu::TexelCopyBufferLayout {
+                                offset: 0,
+                                bytes_per_row: Some(4 * w),
+                                rows_per_image: Some(h),
+                            },
+                            tile_size,
+                        );
+                        let data_view =
+                            data_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+                        let params = device.create_buffer(&wgpu::BufferDescriptor {
+                            label: Some("egui-silx image rgba tile params"),
+                            size: std::mem::size_of::<ImageRgbaParams>() as u64,
+                            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                            mapped_at_creation: false,
+                        });
+                        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                            label: Some("egui-silx image rgba tile bg"),
+                            layout: &pipeline.rgba_bind_group_layout,
+                            entries: &[
+                                wgpu::BindGroupEntry {
+                                    binding: 0,
+                                    resource: params.as_entire_binding(),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 1,
+                                    resource: wgpu::BindingResource::TextureView(&data_view),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 2,
+                                    resource: wgpu::BindingResource::Sampler(
+                                        &pipeline.data_sampler,
+                                    ),
+                                },
+                            ],
+                        });
+                        ImageTile {
+                            bind_group,
+                            params,
+                            data_texture,
+                            rect: rect_of(x0, y0, w, h),
+                            x0,
+                            y0,
+                            w,
+                            h,
+                        }
+                    })
+                    .collect();
+                (tiles, GpuImageKind::Rgba)
+            }
+        };
+
         let gpu = Self {
             tiles,
             width: image.width,
             height: image.height,
-            cmap_min,
-            cmap_one_over_range,
-            gamma: image.colormap.gamma,
-            norm: image.colormap.normalization.code(),
+            kind,
             alpha: image.alpha,
         };
         // Seed each tile's uniform; the per-frame transform overwrites `ortho`.
@@ -429,10 +692,11 @@ impl GpuImage {
 
     /// Re-upload a `w × h` sub-region at `(x0, y0)` of the image in place (dirty
     /// update), routing it to the tiles it overlaps without recreating any GPU
-    /// resources. `data` is row-major, length `w * h`. Row `y0` is the same row
-    /// the shader samples, so increasing `y0` moves the region upward in the
-    /// displayed image (origin lower-left). Panics if the region exceeds the
-    /// image bounds.
+    /// resources. `data` is row-major scalar values, length `w * h`. Row `y0` is
+    /// the same row the shader samples, so increasing `y0` moves the region
+    /// upward in the displayed image (origin lower-left). Panics if the region
+    /// exceeds the image bounds, or if the image is RGBA (this is the scalar
+    /// live-update path; the `f32` bytes would corrupt an `Rgba8` texture).
     pub(crate) fn update_region(
         &self,
         queue: &wgpu::Queue,
@@ -442,6 +706,10 @@ impl GpuImage {
         h: u32,
         data: &[f32],
     ) {
+        assert!(
+            matches!(self.kind, GpuImageKind::Scalar { .. }),
+            "update_region is only valid for scalar images"
+        );
         assert_eq!(
             data.len(),
             (w as usize) * (h as usize),
@@ -501,23 +769,46 @@ impl GpuImage {
         axis_log: [f32; 2],
     ) {
         for tile in &self.tiles {
-            let params = ImageParams {
-                ortho,
-                rect: tile.rect,
-                axis_log,
-                alpha: self.alpha,
-                cmap_min: self.cmap_min,
-                cmap_one_over_range: self.cmap_one_over_range,
-                gamma: self.gamma,
-                norm: self.norm,
-                _pad: 0.0,
-            };
-            queue.write_buffer(&tile.params, 0, bytemuck::bytes_of(&params));
+            match self.kind {
+                GpuImageKind::Scalar {
+                    cmap_min,
+                    cmap_one_over_range,
+                    gamma,
+                    norm,
+                } => {
+                    let params = ImageParams {
+                        ortho,
+                        rect: tile.rect,
+                        axis_log,
+                        alpha: self.alpha,
+                        cmap_min,
+                        cmap_one_over_range,
+                        gamma,
+                        norm,
+                        _pad: 0.0,
+                    };
+                    queue.write_buffer(&tile.params, 0, bytemuck::bytes_of(&params));
+                }
+                GpuImageKind::Rgba => {
+                    let params = ImageRgbaParams {
+                        ortho,
+                        rect: tile.rect,
+                        axis_log,
+                        alpha: self.alpha,
+                        _pad: 0.0,
+                    };
+                    queue.write_buffer(&tile.params, 0, bytemuck::bytes_of(&params));
+                }
+            }
         }
     }
 
     pub(crate) fn draw(&self, render_pass: &mut wgpu::RenderPass<'_>, pipeline: &ImagePipeline) {
-        render_pass.set_pipeline(&pipeline.pipeline);
+        let pipe = match self.kind {
+            GpuImageKind::Scalar { .. } => &pipeline.pipeline,
+            GpuImageKind::Rgba => &pipeline.rgba_pipeline,
+        };
+        render_pass.set_pipeline(pipe);
         for tile in &self.tiles {
             render_pass.set_bind_group(0, &tile.bind_group, &[]);
             render_pass.draw(0..6, 0..1);
@@ -564,5 +855,48 @@ mod tests {
         ];
         let sub = extract_subgrid(&data, 4, 1, 1, 2, 2);
         assert_eq!(sub, vec![5.0, 6.0, 9.0, 10.0]);
+    }
+
+    #[test]
+    fn extract_subgrid_works_on_rgba_texels() {
+        // Same block, but the texels are [u8; 4] (the generic over Copy texel).
+        #[rustfmt::skip]
+        let data = vec![
+            [0, 0, 0, 0], [1, 1, 1, 1], [2, 2, 2, 2], [3, 3, 3, 3],
+            [4, 4, 4, 4], [5, 5, 5, 5], [6, 6, 6, 6], [7, 7, 7, 7],
+        ];
+        let sub = extract_subgrid(&data, 4, 1, 0, 2, 2);
+        assert_eq!(
+            sub,
+            vec![[1, 1, 1, 1], [2, 2, 2, 2], [5, 5, 5, 5], [6, 6, 6, 6]]
+        );
+    }
+
+    #[test]
+    fn scalar_constructor_carries_a_colormap() {
+        let img = ImageData::new(2, 2, vec![0.0, 1.0, 2.0, 3.0], Colormap::viridis(0.0, 3.0));
+        assert!(matches!(img.pixels, ImagePixels::Scalar { .. }));
+        assert!(img.colormap().is_some());
+        assert_eq!((img.width, img.height), (2, 2));
+    }
+
+    #[test]
+    fn rgba_constructor_has_no_colormap() {
+        let px = vec![
+            [255, 0, 0, 255],
+            [0, 255, 0, 255],
+            [0, 0, 255, 255],
+            [0, 0, 0, 0],
+        ];
+        let img = ImageData::rgba(2, 2, px);
+        assert!(matches!(img.pixels, ImagePixels::Rgba { .. }));
+        assert!(img.colormap().is_none());
+        assert_eq!((img.width, img.height), (2, 2));
+    }
+
+    #[test]
+    #[should_panic(expected = "data length must equal width * height")]
+    fn rgba_constructor_rejects_length_mismatch() {
+        ImageData::rgba(2, 2, vec![[0, 0, 0, 0]; 3]);
     }
 }

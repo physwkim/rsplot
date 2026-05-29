@@ -55,7 +55,7 @@ impl LargeImageApp {
 
         let mut plot = Plot::new(0);
         plot.limits = (0.0, image.width as f64, 0.0, image.height as f64);
-        plot.colormap = Some(image.colormap.clone());
+        plot.colormap = image.colormap().cloned();
 
         Self {
             plot,

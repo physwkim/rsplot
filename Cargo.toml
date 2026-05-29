@@ -102,3 +102,7 @@ path = "examples/error_bars.rs"
 [[example]]
 name = "colormap_norm"
 path = "examples/colormap_norm.rs"
+
+[[example]]
+name = "rgba_image"
+path = "examples/rgba_image.rs"

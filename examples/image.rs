@@ -47,7 +47,7 @@ impl ImageApp {
         // Limits == image extent so the image fills the data area.
         plot.limits = (0.0, image.width as f64, 0.0, image.height as f64);
         // Mirror the image colormap so the colorbar shows the same LUT/clim.
-        plot.colormap = Some(image.colormap.clone());
+        plot.colormap = image.colormap().cloned();
 
         Self { plot }
     }
