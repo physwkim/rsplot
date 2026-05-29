@@ -66,6 +66,8 @@ impl ImageCurveApp {
         // is expressed in the same coordinates.
         plot.limits = (0.0, image.width as f64, 0.0, image.height as f64);
         plot.colormap = Some(image.colormap.clone());
+        // Show a crosshair + coordinate readout following the pointer.
+        plot.crosshair = true;
 
         Self { plot }
     }

@@ -50,6 +50,9 @@ pub struct Plot {
     /// axis. Curves bound to [`crate::YAxis::Right`] are plotted against it and
     /// its ticks are drawn in the right gutter (linear, `doc/design.md` §13 A5).
     pub y2: Option<(f64, f64)>,
+    /// Draw a crosshair + coordinate readout following the pointer when it is
+    /// over the data area (silx `setGraphCursor`, `doc/design.md` §13 C1).
+    pub crosshair: bool,
 }
 
 impl Plot {
@@ -69,6 +72,7 @@ impl Plot {
             y_inverted: false,
             keep_aspect: false,
             y2: None,
+            crosshair: false,
         }
     }
 

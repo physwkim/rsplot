@@ -6,7 +6,7 @@
 //! Layout reserves fixed-pixel gutters for the labels and (optionally) the
 //! colorbar; this is the chrome counterpart of silx's `_PlotWidget` margins.
 
-use egui::{Align2, Color32, FontId, Painter, Rect, Stroke, Visuals, pos2};
+use egui::{Align2, Color32, FontId, Painter, Pos2, Rect, Stroke, Visuals, pos2};
 
 use crate::core::colormap::Colormap;
 use crate::core::transform::{Axis, Scale, Transform};
@@ -20,17 +20,21 @@ pub struct Style {
     pub grid: Color32,
     /// Tick label text.
     pub text: Color32,
+    /// Background fill behind the crosshair coordinate readout.
+    pub readout_bg: Color32,
 }
 
 impl Style {
     /// Build a chrome style from egui visuals (axis/text = text color, grid = a
-    /// faint tint of it).
+    /// faint tint of it, readout = the themed window fill).
     pub fn from_visuals(v: &Visuals) -> Self {
         let text = v.text_color();
+        let fill = v.window_fill();
         Self {
             axis: text,
             grid: Color32::from_rgba_unmultiplied(text.r(), text.g(), text.b(), 28),
             text,
+            readout_bg: Color32::from_rgba_unmultiplied(fill.r(), fill.g(), fill.b(), 210),
         }
     }
 }
@@ -267,6 +271,52 @@ pub fn draw_y2_ticks(painter: &Painter, t: &Transform, style: &Style) {
     }
 }
 
+/// Format a coordinate with decimals scaled to the visible span.
+fn format_coord(v: f64, lo: f64, hi: f64) -> String {
+    let span = (hi - lo).abs();
+    let decimals = if span > 0.0 {
+        (2.0 - span.log10().floor()).clamp(0.0, 6.0) as usize
+    } else {
+        3
+    };
+    format!("{v:.decimals$}")
+}
+
+/// Draw a crosshair through `pos` (clipped to the data area) and a readout box
+/// with the data coordinates under the pointer (`doc/design.md` §13 C1). `pos`
+/// is expected to lie within `t.area`.
+pub fn draw_crosshair(painter: &Painter, t: &Transform, pos: Pos2, style: &Style) {
+    let area = t.area;
+    let line = Stroke::new(1.0, style.axis);
+    painter.vline(pos.x, area.y_range(), line);
+    painter.hline(area.x_range(), pos.y, line);
+
+    let (x, y) = t.pixel_to_data(pos);
+    let label = format!(
+        "{}, {}",
+        format_coord(x, t.x.min, t.x.max),
+        format_coord(y, t.y.min, t.y.max),
+    );
+    let font = FontId::proportional(11.0);
+    let galley = painter.layout_no_wrap(label, font, style.text);
+    let pad = egui::vec2(4.0, 2.0);
+    let size = galley.size() + pad * 2.0;
+    // Prefer the lower-right of the cursor; flip to stay inside the data area.
+    let mut min = pos + egui::vec2(10.0, 10.0);
+    if min.x + size.x > area.right() {
+        min.x = pos.x - 10.0 - size.x;
+    }
+    if min.y + size.y > area.bottom() {
+        min.y = pos.y - 10.0 - size.y;
+    }
+    painter.rect_filled(
+        Rect::from_min_size(min, size),
+        egui::CornerRadius::same(2),
+        style.readout_bg,
+    );
+    painter.galley(min + pad, galley, style.text);
+}
+
 /// Draw a vertical colorbar matching `cmap` (top = vmax, bottom = vmin), with a
 /// border and value labels on its right edge.
 pub fn draw_colorbar(painter: &Painter, rect: Rect, cmap: &Colormap, style: &Style) {
@@ -359,6 +409,16 @@ mod tests {
         assert!(log_decade_ticks(0.0, 100.0).is_empty());
         assert!(log_decade_ticks(-1.0, 100.0).is_empty());
         assert!(log_decade_ticks(100.0, 1.0).is_empty());
+    }
+
+    #[test]
+    fn format_coord_scales_decimals_to_span() {
+        // Wide span → few decimals; narrow span → more.
+        assert_eq!(format_coord(123.456, 0.0, 1000.0), "123");
+        assert_eq!(format_coord(1.2345, 0.0, 10.0), "1.2");
+        assert_eq!(format_coord(0.012345, 0.0, 0.1), "0.012");
+        // Degenerate span falls back to 3 decimals.
+        assert_eq!(format_coord(1.5, 5.0, 5.0), "1.500");
     }
 
     #[test]

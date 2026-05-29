@@ -103,6 +103,14 @@ impl PlotWidget {
             chrome::draw_colorbar(painter, cbar, cmap, &style);
         }
 
+        // Hover crosshair + coordinate readout over the data area.
+        if plot.crosshair
+            && let Some(p) = response.hover_pos()
+            && area.contains(p)
+        {
+            chrome::draw_crosshair(painter, &transform, p, &style);
+        }
+
         // Box-zoom selection rectangle (drawn last, on top of everything).
         if let Some(sel) = selection {
             painter.rect_filled(
