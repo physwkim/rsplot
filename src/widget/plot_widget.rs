@@ -109,6 +109,10 @@ fn apply_interaction(
     area: Rect,
     view: &crate::core::transform::Transform,
 ) -> Option<Rect> {
+    // Interaction operates on the displayed view's limits (which fold in any
+    // aspect-ratio expansion), so pan/zoom act on exactly what is on screen.
+    let base = (view.x.min, view.x.max, view.y.min, view.y.max);
+
     // Reset: double-click restores the home view.
     if response.double_clicked()
         && let Some(home) = plot.home_limits
@@ -120,7 +124,7 @@ fn apply_interaction(
     if response.dragged_by(PointerButton::Secondary) {
         let delta = response.drag_delta();
         if delta != egui::Vec2::ZERO {
-            let next = interaction::pan(plot.limits, area, delta);
+            let next = interaction::pan(base, area, delta);
             commit(plot, next);
         }
     }
@@ -134,7 +138,7 @@ fn apply_interaction(
     {
         let (cx, cy) = view.pixel_to_data(p);
         let factor = interaction::wheel_zoom_factor(scroll);
-        let next = interaction::zoom_about(plot.limits, factor, cx, cy);
+        let next = interaction::zoom_about(base, factor, cx, cy);
         commit(plot, next);
     }
 

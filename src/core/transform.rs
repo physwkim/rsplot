@@ -87,6 +87,40 @@ impl Axis {
     }
 }
 
+/// Expand limits so both axes share the same data-units-per-pixel, keeping
+/// data square on screen (silx `setKeepDataAspectRatio`). The axis that is too
+/// tight is widened symmetrically about its center; nothing is ever shrunk, so
+/// all originally-visible data stays visible. Linear-only — the caller must not
+/// apply this when either axis is log10. A no-op for a degenerate `area` or
+/// span.
+///
+/// This is a pure function of `(limits, area)`: the widget derives the display
+/// view from the stable requested limits every frame, so resizing never
+/// compounds the expansion (`doc/design.md` §13 A4).
+pub fn keep_aspect_limits(
+    (x_min, x_max, y_min, y_max): (f64, f64, f64, f64),
+    area: Rect,
+) -> (f64, f64, f64, f64) {
+    let (w, h) = (area.width() as f64, area.height() as f64);
+    let (x_span, y_span) = (x_max - x_min, y_max - y_min);
+    if w <= 0.0 || h <= 0.0 || x_span <= 0.0 || y_span <= 0.0 {
+        return (x_min, x_max, y_min, y_max);
+    }
+    // Data units per pixel on each axis; equalize to the larger (zoom out the
+    // tighter axis) so the common scale shows all data.
+    let scale_x = x_span / w;
+    let scale_y = y_span / h;
+    if scale_x > scale_y {
+        let new_span = scale_x * h;
+        let cy = 0.5 * (y_min + y_max);
+        (x_min, x_max, cy - new_span / 2.0, cy + new_span / 2.0)
+    } else {
+        let new_span = scale_y * w;
+        let cx = 0.5 * (x_min + x_max);
+        (cx - new_span / 2.0, cx + new_span / 2.0, y_min, y_max)
+    }
+}
+
 /// Plot margins as fractions of the full widget rect, matching silx
 /// `setAxesMargins`. Insetting the full widget rect by these yields the data
 /// area that a [`Transform`] maps into.
@@ -383,6 +417,50 @@ mod tests {
         assert!(close(a.norm(10.0), 1.0 / 3.0, 1e-12));
         assert!(close(a.norm(100.0), 2.0 / 3.0, 1e-12));
         assert!(close(a.norm(1000.0), 1.0, 1e-12));
+    }
+
+    #[test]
+    fn keep_aspect_equalizes_units_per_pixel() {
+        // Wide area (2:1), square data limits: x must widen so both axes share
+        // the same data-units-per-pixel; the y range is untouched.
+        let area = Rect::from_min_max(pos2(0.0, 0.0), pos2(200.0, 100.0));
+        let (x0, x1, y0, y1) = keep_aspect_limits((0.0, 10.0, 0.0, 10.0), area);
+        // y unchanged.
+        assert!(close(y0, 0.0, 1e-12) && close(y1, 10.0, 1e-12));
+        // x widened to 20 units (0.1 units/px * 200 px), centered on 5.
+        assert!(close(x0, -5.0, 1e-9) && close(x1, 15.0, 1e-9), "{x0},{x1}");
+        // Units-per-pixel now equal on both axes.
+        let sx = (x1 - x0) / area.width() as f64;
+        let sy = (y1 - y0) / area.height() as f64;
+        assert!(close(sx, sy, 1e-9), "{sx} vs {sy}");
+    }
+
+    #[test]
+    fn keep_aspect_is_idempotent_for_fixed_area() {
+        let area = Rect::from_min_max(pos2(0.0, 0.0), pos2(150.0, 300.0));
+        let once = keep_aspect_limits((0.0, 4.0, -2.0, 2.0), area);
+        let twice = keep_aspect_limits(once, area);
+        assert!(
+            close(once.0, twice.0, 1e-9)
+                && close(once.1, twice.1, 1e-9)
+                && close(once.2, twice.2, 1e-9)
+                && close(once.3, twice.3, 1e-9),
+            "{once:?} vs {twice:?}"
+        );
+    }
+
+    #[test]
+    fn keep_aspect_noop_on_degenerate_inputs() {
+        let zero = Rect::from_min_max(pos2(0.0, 0.0), pos2(0.0, 0.0));
+        assert_eq!(
+            keep_aspect_limits((0.0, 1.0, 0.0, 1.0), zero),
+            (0.0, 1.0, 0.0, 1.0)
+        );
+        let area = Rect::from_min_max(pos2(0.0, 0.0), pos2(100.0, 100.0));
+        assert_eq!(
+            keep_aspect_limits((5.0, 5.0, 0.0, 1.0), area),
+            (5.0, 5.0, 0.0, 1.0)
+        );
     }
 
     #[test]

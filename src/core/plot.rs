@@ -8,7 +8,7 @@
 use egui::{Color32, Rect};
 
 use crate::core::colormap::Colormap;
-use crate::core::transform::{Axis, Margins, Scale, Transform};
+use crate::core::transform::{Axis, Margins, Scale, Transform, keep_aspect_limits};
 
 /// Identifier for a single `Plot` instance.
 ///
@@ -42,6 +42,10 @@ pub struct Plot {
     pub x_inverted: bool,
     /// Reverse the Y-axis on-screen direction.
     pub y_inverted: bool,
+    /// Keep data square on screen by expanding the tighter axis' display range
+    /// (silx `setKeepDataAspectRatio`). Only honored when both axes are linear
+    /// (`doc/design.md` §13 A4).
+    pub keep_aspect: bool,
 }
 
 impl Plot {
@@ -59,13 +63,23 @@ impl Plot {
             y_scale: Scale::Linear,
             x_inverted: false,
             y_inverted: false,
+            keep_aspect: false,
         }
     }
 
     /// Build the data↔screen transform for the given data-area rect, honoring
-    /// the per-axis scale and inversion.
+    /// the per-axis scale, inversion, and (linear-only) aspect-ratio lock.
+    ///
+    /// Aspect correction is derived here from the stable requested `limits`, so
+    /// it is the same view used for rendering, chrome, and pointer mapping —
+    /// and resizing never compounds the expansion (`doc/design.md` §13 A4).
     pub fn transform(&self, area: Rect) -> Transform {
-        let (x_min, x_max, y_min, y_max) = self.limits;
+        let linear = self.x_scale == Scale::Linear && self.y_scale == Scale::Linear;
+        let (x_min, x_max, y_min, y_max) = if self.keep_aspect && linear {
+            keep_aspect_limits(self.limits, area)
+        } else {
+            self.limits
+        };
         let x = Axis {
             min: x_min,
             max: x_max,

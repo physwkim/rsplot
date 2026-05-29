@@ -39,3 +39,7 @@ path = "examples/live_update.rs"
 [[example]]
 name = "log_axis"
 path = "examples/log_axis.rs"
+
+[[example]]
+name = "aspect_ratio"
+path = "examples/aspect_ratio.rs"
