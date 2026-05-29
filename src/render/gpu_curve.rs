@@ -172,13 +172,16 @@ impl CurveData {
 }
 
 /// The render pipelines shared by all curves: the thick-line pipeline and the
-/// marker pipeline. Both take the same bind-group layout (a 112-byte uniform at
-/// binding 0, the shared points storage buffer at binding 1, and a per-vertex
-/// color storage buffer at binding 2 — used by the line, ignored by markers).
+/// marker pipeline. The line layout has the curve uniform at binding 0, the
+/// points storage buffer at binding 1, and a per-vertex color storage buffer at
+/// binding 2. The marker pipeline has its own minimal layout (marker uniform at
+/// binding 0, the shared points at binding 1), so the line uniform/layout can
+/// grow without affecting markers.
 pub struct CurvePipeline {
     pub(crate) pipeline: wgpu::RenderPipeline,
     pub(crate) marker_pipeline: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
+    marker_bind_group_layout: wgpu::BindGroupLayout,
 }
 
 impl CurvePipeline {
@@ -244,6 +247,47 @@ impl CurvePipeline {
             immediate_size: 0,
         });
 
+        // Markers have their own minimal layout (uniform at 0 + points at 1) so
+        // the curve uniform/layout can grow per-vertex color, dashes, etc.
+        // without forcing the marker uniform to match the curve uniform's size
+        // or carry dead curve-only bindings.
+        let marker_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("egui-silx marker bgl"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: NonZeroU64::new(
+                                std::mem::size_of::<MarkerParams>() as u64
+                            ),
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::VERTEX,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: NonZeroU64::new(
+                                std::mem::size_of::<[f32; 2]>() as u64
+                            ),
+                        },
+                        count: None,
+                    },
+                ],
+            });
+        let marker_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("egui-silx marker layout"),
+                bind_group_layouts: &[Some(&marker_bind_group_layout)],
+                immediate_size: 0,
+            });
+
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("egui-silx curve pipeline"),
             layout: Some(&pipeline_layout),
@@ -273,10 +317,10 @@ impl CurvePipeline {
             cache: None,
         });
 
-        // Marker pipeline: same layout, one quad (6 vertices) per point.
+        // Marker pipeline: its own minimal layout, one quad (6 vertices) per point.
         let marker_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("egui-silx marker pipeline"),
-            layout: Some(&pipeline_layout),
+            layout: Some(&marker_pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &marker_shader,
                 entry_point: Some("vs_main"),
@@ -304,6 +348,7 @@ impl CurvePipeline {
             pipeline,
             marker_pipeline,
             bind_group_layout,
+            marker_bind_group_layout,
         }
     }
 }
@@ -456,7 +501,7 @@ impl GpuCurve {
         });
         let marker_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("egui-silx marker bg"),
-            layout: &pipeline.bind_group_layout,
+            layout: &pipeline.marker_bind_group_layout,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
@@ -465,10 +510,6 @@ impl GpuCurve {
                 wgpu::BindGroupEntry {
                     binding: 1,
                     resource: points.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: vcolors.as_entire_binding(),
                 },
             ],
         });
