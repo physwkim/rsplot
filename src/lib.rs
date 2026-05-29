@@ -17,13 +17,14 @@ pub mod widget;
 
 pub use crate::core::colormap::{Colormap, ColormapName, Normalization};
 pub use crate::core::decimate::min_max_decimate;
+pub use crate::core::items::LineStyle;
 pub use crate::core::plot::{Plot, PlotId};
 pub use crate::core::roi::{Roi, RoiEdge};
 pub use crate::core::transform::{Axis, Margins, Scale, Transform, YAxis};
 pub use crate::render::backend_wgpu::{
     install, set_curve, set_curves, set_image, update_curve, update_curve_at, update_image_region,
 };
-pub use crate::render::gpu_curve::{Baseline, CurveData, ErrorBars, LineStyle, Symbol};
+pub use crate::render::gpu_curve::{Baseline, CurveData, ErrorBars, Symbol};
 pub use crate::render::gpu_image::{ImageData, ImagePixels};
 pub use crate::render::save::{SaveError, encode_png, save_graph};
 pub use crate::widget::interaction::{PointPick, image_index, nearest_point};

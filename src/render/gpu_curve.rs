@@ -18,6 +18,8 @@ use std::num::NonZeroU64;
 use egui::Color32;
 use egui_wgpu::wgpu;
 
+use crate::core::items::LineStyle;
+
 use crate::core::decimate::min_max_decimate;
 use crate::core::transform::YAxis;
 
@@ -93,34 +95,7 @@ impl Symbol {
     }
 }
 
-/// Line stroke style (silx `linestyle`). Dash lengths for the predefined styles
-/// are in physical pixels and scale with the line width (`max(width, 1)`), so
-/// they stay proportionate at any thickness; a [`LineStyle::Custom`] pattern is
-/// taken verbatim in physical pixels.
-#[derive(Clone, Debug, PartialEq)]
-pub enum LineStyle {
-    /// No line drawn (markers only, if any). silx `' '` / `''`.
-    None,
-    /// Continuous line. silx `'-'`.
-    Solid,
-    /// Dashed line. silx `'--'`.
-    Dashed,
-    /// Dash-dot line. silx `'-.'`.
-    DashDot,
-    /// Dotted line. silx `':'`.
-    Dotted,
-    /// Custom dash pattern in physical pixels: alternating on/off lengths
-    /// (`on, off, on, off`), with `offset` the starting phase. silx
-    /// `(offset, (dash pattern))`. Up to four entries are honored.
-    Custom { offset: f32, pattern: Vec<f32> },
-}
-
 impl LineStyle {
-    /// Whether this style draws a line at all (false only for [`LineStyle::None`]).
-    fn draws_line(&self) -> bool {
-        !matches!(self, LineStyle::None)
-    }
-
     /// The dash pattern for the given line width as `(cumulative boundaries,
     /// phase offset)`, or `None` for a solid (un-dashed) line. The boundaries
     /// encode up to two on/off pairs: a fragment at phase `p` is "on" when
@@ -1626,15 +1601,6 @@ mod tests {
     fn dash_spec_solid_and_none_are_undashed() {
         assert_eq!(LineStyle::Solid.dash_spec(1.0), None);
         assert_eq!(LineStyle::None.dash_spec(1.0), None);
-    }
-
-    #[test]
-    fn draws_line_false_only_for_none() {
-        assert!(!LineStyle::None.draws_line());
-        assert!(LineStyle::Solid.draws_line());
-        assert!(LineStyle::Dashed.draws_line());
-        assert!(LineStyle::DashDot.draws_line());
-        assert!(LineStyle::Dotted.draws_line());
     }
 
     #[test]
