@@ -323,6 +323,13 @@ pub(crate) struct CurveCallback {
     pub axis_log_right: [f32; 2],
     /// Data-area size in physical pixels, for the pixel-space line expansion.
     pub viewport_px: [f32; 2],
+    /// Visible data-x window `(x_min, x_max)`, shared by both axes, used to
+    /// re-decimate large curves for the current view (`doc/design.md` §13 D1).
+    pub x_window: (f64, f64),
+    /// Number of pixel columns to decimate into (the data-area pixel width), or
+    /// `0` to disable decimation (e.g. a log x-axis, where equal data-x bins are
+    /// not equal pixel columns).
+    pub decimate_columns: u32,
 }
 
 impl CurveCallback {
@@ -344,10 +351,14 @@ impl egui_wgpu::CallbackTrait for CurveCallback {
         _egui_encoder: &mut wgpu::CommandEncoder,
         resources: &mut egui_wgpu::CallbackResources,
     ) -> Vec<wgpu::CommandBuffer> {
-        let res: &WgpuResources = resources
-            .get()
+        let res: &mut WgpuResources = resources
+            .get_mut()
             .expect("WgpuResources not installed — call egui_silx::install() at startup");
-        for curve in &res.curves {
+        let (x_min, x_max) = self.x_window;
+        for curve in &mut res.curves {
+            // Re-decimate to the current view first (a no-op once the view is
+            // steady), then stamp the per-frame uniforms.
+            curve.ensure_decimated(queue, x_min, x_max, self.decimate_columns);
             let (ortho, axis_log) = self.matrices_for(curve.y_axis);
             curve.write_uniforms(queue, ortho, axis_log, self.viewport_px);
         }

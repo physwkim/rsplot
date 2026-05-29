@@ -4,6 +4,7 @@
 //! modules here (`doc/design.md` §2).
 
 pub mod colormap;
+pub mod decimate;
 pub mod plot;
 pub mod roi;
 pub mod transform;

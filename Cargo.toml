@@ -63,3 +63,7 @@ path = "examples/picking.rs"
 [[example]]
 name = "roi"
 path = "examples/roi.rs"
+
+[[example]]
+name = "decimation"
+path = "examples/decimation.rs"

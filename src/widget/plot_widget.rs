@@ -120,6 +120,14 @@ impl PlotWidget {
                 axis_log: axis_log_left,
             },
         ));
+        // Decimate to per-pixel-column min/max only when the x-axis is linear
+        // (equal data-x bins map to equal pixel columns); on a log x-axis they
+        // do not, so 0 disables it and the full curve is drawn.
+        let decimate_columns = if transform.x.scale == Scale::Linear {
+            viewport_px[0].ceil() as u32
+        } else {
+            0
+        };
         painter.add(egui_wgpu::Callback::new_paint_callback(
             area,
             CurveCallback {
@@ -128,6 +136,8 @@ impl PlotWidget {
                 ortho_right,
                 axis_log_right,
                 viewport_px,
+                x_window: (transform.x.min, transform.x.max),
+                decimate_columns,
             },
         ));
 

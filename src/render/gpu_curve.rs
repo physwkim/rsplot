@@ -18,6 +18,7 @@ use std::num::NonZeroU64;
 use egui::Color32;
 use egui_wgpu::wgpu;
 
+use crate::core::decimate::min_max_decimate;
 use crate::core::transform::YAxis;
 
 /// Identity ortho matrix; replaced every frame by the widget's transform.
@@ -270,9 +271,13 @@ impl CurvePipeline {
 /// One uploaded curve's GPU resources, persisting across frames.
 pub struct GpuCurve {
     points: wgpu::Buffer,
+    /// Points currently in the buffer prefix `[0, count)` and drawn this frame
+    /// (the full set, or a decimated envelope when [`Self::ensure_decimated`]
+    /// has reduced it).
     count: u32,
     /// Points the buffer can hold; an in-place [`Self::update`] up to this many
-    /// points reuses the buffer instead of reallocating.
+    /// points reuses the buffer instead of reallocating. Sized to the full
+    /// source, so any decimated envelope (≤ source length) always fits.
     capacity: u32,
     params: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
@@ -288,6 +293,33 @@ pub struct GpuCurve {
     marker_size: f32,
     /// Which Y axis this curve is bound to; selects the per-frame ortho matrix.
     pub(crate) y_axis: YAxis,
+    /// Full-resolution source kept on the CPU so the curve can be re-decimated
+    /// for the current view without a fresh upload from the caller.
+    src_x: Vec<f64>,
+    src_y: Vec<f64>,
+    /// Source vertex count (the un-decimated length).
+    full_count: u32,
+    /// Whether `src_x` is monotonically non-decreasing. Decimation reorders by
+    /// x within each column, so it is only valid (lossless-looking) for sorted
+    /// x; otherwise the curve is always drawn at full resolution.
+    monotonic_x: bool,
+    /// The `(x_min bits, x_max bits, columns)` the buffer was last decimated
+    /// for, or `None` when the buffer currently holds the full source. Lets
+    /// [`Self::ensure_decimated`] skip work when the view is unchanged.
+    decimate_key: Option<(u64, u64, u32)>,
+}
+
+/// Whether `xs` is monotonically non-decreasing.
+fn is_monotonic(xs: &[f64]) -> bool {
+    xs.windows(2).all(|w| w[0] <= w[1])
+}
+
+/// Pack equal-length f64 x/y into the `[f32; 2]` positions the shader reads.
+fn pack(x: &[f64], y: &[f64]) -> Vec<[f32; 2]> {
+    x.iter()
+        .zip(y)
+        .map(|(&x, &y)| [x as f32, y as f32])
+        .collect()
 }
 
 impl GpuCurve {
@@ -298,12 +330,7 @@ impl GpuCurve {
         pipeline: &CurvePipeline,
         curve: &CurveData,
     ) -> Self {
-        let positions: Vec<[f32; 2]> = curve
-            .x
-            .iter()
-            .zip(&curve.y)
-            .map(|(&x, &y)| [x as f32, y as f32])
-            .collect();
+        let positions = pack(&curve.x, &curve.y);
 
         // max(1) keeps a zero-point curve from creating a zero-size buffer (also
         // satisfies the storage binding's nonzero min size); the draw is still
@@ -379,6 +406,11 @@ impl GpuCurve {
             symbol: curve.symbol,
             marker_size: curve.marker_size,
             y_axis: curve.y_axis,
+            monotonic_x: is_monotonic(&curve.x),
+            full_count: positions.len() as u32,
+            src_x: curve.x.clone(),
+            src_y: curve.y.clone(),
+            decimate_key: None,
         };
         // Seed the uniforms; the per-frame transform/viewport overwrite them.
         gpu.write_uniforms(queue, IDENTITY, [0.0, 0.0], [1.0, 1.0]);
@@ -398,12 +430,7 @@ impl GpuCurve {
         if curve.x.len() as u32 > self.capacity {
             return false;
         }
-        let positions: Vec<[f32; 2]> = curve
-            .x
-            .iter()
-            .zip(&curve.y)
-            .map(|(&x, &y)| [x as f32, y as f32])
-            .collect();
+        let positions = pack(&curve.x, &curve.y);
         if !positions.is_empty() {
             queue.write_buffer(&self.points, 0, bytemuck::cast_slice(&positions));
         }
@@ -413,7 +440,66 @@ impl GpuCurve {
         self.symbol = curve.symbol;
         self.marker_size = curve.marker_size;
         self.y_axis = curve.y_axis;
+        // The buffer now holds the new full source; force a re-decimation for
+        // the current view on the next frame.
+        self.src_x = curve.x.clone();
+        self.src_y = curve.y.clone();
+        self.full_count = positions.len() as u32;
+        self.monotonic_x = is_monotonic(&curve.x);
+        self.decimate_key = None;
         true
+    }
+
+    /// Ensure the buffer holds the right vertices for the current view: a
+    /// per-pixel-column min/max envelope when the curve has many more points
+    /// than `columns`, or the full source otherwise.
+    ///
+    /// `x_min`/`x_max` is the visible data-x window and `columns` is the data
+    /// area width in pixels (or `0` to disable, e.g. on a log x-axis where
+    /// equal data-x bins are not equal pixel columns). Decimation is skipped
+    /// for markered curves (every vertex must keep its marker) and for
+    /// non-monotonic x. The result is cached by `(x_min, x_max, columns)`, so a
+    /// steady view does no work after the first frame (`doc/design.md` §13 D1).
+    pub(crate) fn ensure_decimated(
+        &mut self,
+        queue: &wgpu::Queue,
+        x_min: f64,
+        x_max: f64,
+        columns: u32,
+    ) {
+        // Decimate only when it strictly reduces the count and the envelope is
+        // valid; `2 * columns + 2` is the most points a decimation can emit, so
+        // requiring more sources than that guarantees a reduction that fits.
+        let beneficial = self.symbol.is_none()
+            && self.monotonic_x
+            && columns > 0
+            && self.full_count as u64 > 2 * columns as u64 + 2;
+
+        if !beneficial {
+            // Restore the full source if a previous view had decimated it.
+            if self.decimate_key.is_some() {
+                let positions = pack(&self.src_x, &self.src_y);
+                if !positions.is_empty() {
+                    queue.write_buffer(&self.points, 0, bytemuck::cast_slice(&positions));
+                }
+                self.count = self.full_count;
+                self.decimate_key = None;
+            }
+            return;
+        }
+
+        let key = (x_min.to_bits(), x_max.to_bits(), columns);
+        if self.decimate_key == Some(key) {
+            return; // view unchanged since the last decimation
+        }
+
+        let (dx, dy) = min_max_decimate(&self.src_x, &self.src_y, x_min, x_max, columns);
+        let positions = pack(&dx, &dy);
+        if !positions.is_empty() {
+            queue.write_buffer(&self.points, 0, bytemuck::cast_slice(&positions));
+        }
+        self.count = positions.len() as u32;
+        self.decimate_key = Some(key);
     }
 
     /// Update the per-frame data->NDC transform, axis-scale flags, and data-area
