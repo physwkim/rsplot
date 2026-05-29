@@ -31,3 +31,7 @@ path = "examples/image.rs"
 [[example]]
 name = "image_and_curve"
 path = "examples/image_and_curve.rs"
+
+[[example]]
+name = "live_update"
+path = "examples/live_update.rs"

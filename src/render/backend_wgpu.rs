@@ -158,6 +158,53 @@ pub fn set_curve(render_state: &RenderState, curve: &CurveData) {
     res.curve = Some(gpu);
 }
 
+/// Re-upload a `w × h` sub-region of the current image at `(x0, y0)` in place
+/// (dirty update), reusing the existing texture. `data` is row-major, length
+/// `w * h`. A no-op if no image has been set. This is the partial-write path
+/// for live updates (`doc/design.md` §11.7).
+pub fn update_image_region(
+    render_state: &RenderState,
+    x0: u32,
+    y0: u32,
+    w: u32,
+    h: u32,
+    data: &[f32],
+) {
+    let renderer = render_state.renderer.read();
+    let res: &WgpuResources = renderer
+        .callback_resources
+        .get()
+        .expect("WgpuResources not installed — call egui_silx::install() first");
+    if let Some(image) = &res.image {
+        image.update_region(&render_state.queue, x0, y0, w, h, data);
+    }
+}
+
+/// Re-upload `curve`'s vertices in place (dirty update), reusing the existing
+/// GPU buffer when the vertex count fits; reallocates only if it grew beyond
+/// the allocated capacity. Creates the curve if none has been set yet
+/// (`doc/design.md` §11.7).
+pub fn update_curve(render_state: &RenderState, curve: &CurveData) {
+    let mut renderer = render_state.renderer.write();
+    let res: &mut WgpuResources = renderer
+        .callback_resources
+        .get_mut()
+        .expect("WgpuResources not installed — call egui_silx::install() first");
+    let fits = match &mut res.curve {
+        Some(existing) => existing.update(&render_state.queue, curve),
+        None => false,
+    };
+    if !fits {
+        let gpu = GpuCurve::new(
+            &render_state.device,
+            &render_state.queue,
+            &res.curve_pipeline,
+            curve,
+        );
+        res.curve = Some(gpu);
+    }
+}
+
 /// Paint callback that fills the data rect with a solid color. This is a
 /// lightweight value re-registered by the egui side every frame; the actual GPU
 /// resources are looked up from [`WgpuResources`].

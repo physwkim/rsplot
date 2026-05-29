@@ -6,8 +6,9 @@
 //! persists across frames in `WgpuResources`.
 //!
 //! Scope: a single curve, uniform color, line-strip topology with wgpu's fixed
-//! 1px line width. Thick lines (quad expansion), per-vertex color, markers, and
-//! partial re-upload are later steps (`doc/design.md` §7·§11).
+//! 1px line width. In-place vertex re-upload ([`GpuCurve::update`]) reuses the
+//! buffer for live updates. Thick lines (quad expansion), per-vertex color, and
+//! markers are later steps (`doc/design.md` §7·§11).
 
 use std::num::NonZeroU64;
 
@@ -132,6 +133,9 @@ impl CurvePipeline {
 pub struct GpuCurve {
     vertices: wgpu::Buffer,
     count: u32,
+    /// Vertices the buffer can hold; an in-place [`Self::update`] up to this
+    /// many vertices reuses the buffer instead of reallocating.
+    capacity: u32,
     params: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
     color: [f32; 4],
@@ -154,9 +158,10 @@ impl GpuCurve {
 
         // max(1) keeps a zero-vertex curve from creating a zero-size buffer; the
         // draw is still skipped (count < 2) so nothing is rendered.
+        let capacity = positions.len().max(1) as u32;
         let vertices = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("egui-silx curve vertices"),
-            size: (positions.len().max(1) * std::mem::size_of::<[f32; 2]>()) as u64,
+            size: (capacity as usize * std::mem::size_of::<[f32; 2]>()) as u64,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -186,6 +191,7 @@ impl GpuCurve {
         let gpu = Self {
             vertices,
             count: positions.len() as u32,
+            capacity,
             params,
             bind_group,
             color,
@@ -193,6 +199,33 @@ impl GpuCurve {
         // Seed the uniform; the per-frame transform overwrites `ortho`.
         gpu.write_uniforms(queue, IDENTITY);
         gpu
+    }
+
+    /// Re-upload `curve`'s vertices into the existing buffer in place (dirty
+    /// update), reusing all GPU resources. Returns `false` if the new vertex
+    /// count exceeds the allocated [`Self::capacity`], in which case the caller
+    /// must reallocate (build a fresh [`GpuCurve`]).
+    pub(crate) fn update(&mut self, queue: &wgpu::Queue, curve: &CurveData) -> bool {
+        assert_eq!(
+            curve.x.len(),
+            curve.y.len(),
+            "x and y must have equal length"
+        );
+        if curve.x.len() as u32 > self.capacity {
+            return false;
+        }
+        let positions: Vec<[f32; 2]> = curve
+            .x
+            .iter()
+            .zip(&curve.y)
+            .map(|(&x, &y)| [x as f32, y as f32])
+            .collect();
+        if !positions.is_empty() {
+            queue.write_buffer(&self.vertices, 0, bytemuck::cast_slice(&positions));
+        }
+        self.count = positions.len() as u32;
+        self.color = egui::Rgba::from(curve.color).to_array();
+        true
     }
 
     /// Update the per-frame data->NDC transform (and re-stamp the color).

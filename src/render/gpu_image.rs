@@ -5,9 +5,10 @@
 //! across images. [`GpuImage`] owns one image's textures/uniform/bind group and
 //! persists across frames in `WgpuResources`.
 //!
-//! Scope: a single non-tiled image, linear colormap, fixed (non-dirty) upload at
-//! creation. Tiling for textures beyond `max_texture_dimension_2d`, partial
-//! (dirty-range) re-upload, and autoscale are later steps (`doc/design.md`
+//! Scope: a single non-tiled image, linear colormap. The initial upload happens
+//! at creation; a sub-region can be re-uploaded in place via
+//! [`GpuImage::update_region`] (dirty update). Tiling for textures beyond
+//! `max_texture_dimension_2d` and autoscale are later steps (`doc/design.md`
 //! §6·§7).
 
 use std::num::NonZeroU64;
@@ -201,6 +202,10 @@ impl ImagePipeline {
 pub struct GpuImage {
     bind_group: wgpu::BindGroup,
     params: wgpu::Buffer,
+    /// Retained so a sub-region can be re-uploaded in place (dirty update).
+    data_texture: wgpu::Texture,
+    width: u32,
+    height: u32,
     rect: [f32; 4],
     clim: [f32; 2],
     alpha: f32,
@@ -327,6 +332,9 @@ impl GpuImage {
         let gpu = Self {
             bind_group,
             params,
+            data_texture,
+            width: image.width,
+            height: image.height,
             rect,
             clim,
             alpha: image.alpha,
@@ -334,6 +342,50 @@ impl GpuImage {
         // Seed the uniform; the per-frame transform overwrites `ortho`.
         gpu.write_uniforms(queue, IDENTITY);
         gpu
+    }
+
+    /// Re-upload a `w × h` sub-region at `(x0, y0)` of the scalar texture in
+    /// place (dirty update), without recreating any GPU resources. `data` is
+    /// row-major, length `w * h`. Row `y0` is the same row the shader samples,
+    /// so increasing `y0` moves the region upward in the displayed image
+    /// (origin lower-left). Panics if the region exceeds the texture bounds.
+    pub(crate) fn update_region(
+        &self,
+        queue: &wgpu::Queue,
+        x0: u32,
+        y0: u32,
+        w: u32,
+        h: u32,
+        data: &[f32],
+    ) {
+        assert_eq!(
+            data.len(),
+            (w as usize) * (h as usize),
+            "data length must equal w * h"
+        );
+        assert!(
+            x0 + w <= self.width && y0 + h <= self.height,
+            "region out of bounds"
+        );
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.data_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d { x: x0, y: y0, z: 0 },
+                aspect: wgpu::TextureAspect::All,
+            },
+            bytemuck::cast_slice(data),
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(4 * w),
+                rows_per_image: Some(h),
+            },
+            wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+        );
     }
 
     /// Update the per-frame data->NDC transform (and re-stamp the static fields).
