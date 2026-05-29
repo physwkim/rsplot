@@ -78,3 +78,7 @@ path = "examples/large_image.rs"
 [[example]]
 name = "save_graph"
 path = "examples/save_graph.rs"
+
+[[example]]
+name = "labels"
+path = "examples/labels.rs"

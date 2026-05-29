@@ -69,10 +69,19 @@ impl PlotWidget {
         let current = plot.limits;
         plot.home_limits.get_or_insert(current);
 
-        // Chrome gutters depend only on which axes/colorbar show, not on limits.
+        // Chrome gutters depend only on which axes/colorbar/labels show, not on
+        // limits.
         let with_colorbar = plot.colormap.is_some();
         let with_y2 = plot.y2.is_some();
-        let chrome_layout = chrome::layout(rect, with_colorbar, with_y2);
+        let chrome_request = chrome::ChromeRequest {
+            colorbar: with_colorbar,
+            y2: with_y2,
+            title: plot.title.is_some(),
+            x_label: plot.x_label.is_some(),
+            y_label: plot.y_label.is_some(),
+            y2_label: plot.y2_label.is_some(),
+        };
+        let chrome_layout = chrome::layout(rect, &chrome_request);
         let area = plot.margins.data_area(chrome_layout.data_area);
 
         // Map input through the transform the user currently sees, then update
@@ -105,7 +114,8 @@ impl PlotWidget {
 
         // Convert sRGB Color32 to linear, premultiplied RGBA expected by the shader.
         let bg = egui::Rgba::from(plot.data_background).to_array();
-        let style = chrome::Style::from_visuals(ui.visuals());
+        let style = chrome::Style::from_visuals(ui.visuals())
+            .with_overrides(plot.foreground, plot.grid_color);
 
         let painter = ui.painter();
         // Data layer (wgpu), clipped to the data area: clear, image, then curve.
@@ -149,6 +159,21 @@ impl PlotWidget {
         if let (Some(cbar), Some(cmap)) = (chrome_layout.colorbar, plot.colormap.as_ref()) {
             chrome::draw_colorbar(painter, cbar, cmap, &style);
         }
+
+        // Title + axis labels in the reserved gutters.
+        chrome::draw_labels(
+            painter,
+            rect,
+            area,
+            &chrome::Labels {
+                title: plot.title.as_deref(),
+                x: plot.x_label.as_deref(),
+                y: plot.y_label.as_deref(),
+                y2: plot.y2_label.as_deref(),
+            },
+            with_y2,
+            &style,
+        );
 
         // Regions of interest (fill, border, edge handles) over the data layer.
         if !plot.rois.is_empty() {

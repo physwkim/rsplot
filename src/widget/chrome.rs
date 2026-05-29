@@ -6,6 +6,7 @@
 //! Layout reserves fixed-pixel gutters for the labels and (optionally) the
 //! colorbar; this is the chrome counterpart of silx's `_PlotWidget` margins.
 
+use egui::epaint::TextShape;
 use egui::{Align2, Color32, FontId, Painter, Pos2, Rect, Stroke, Visuals, pos2};
 
 use crate::core::colormap::Colormap;
@@ -38,6 +39,23 @@ impl Style {
             readout_bg: Color32::from_rgba_unmultiplied(fill.r(), fill.g(), fill.b(), 210),
         }
     }
+
+    /// Apply the plot's color overrides: `fg` (when set) recolors the axes,
+    /// frame, ticks, and label text; `grid` (when set) recolors the grid lines
+    /// (silx `setForegroundColor` / `setGridColor`).
+    pub fn with_overrides(mut self, fg: Option<Color32>, grid: Option<Color32>) -> Self {
+        if let Some(c) = fg {
+            self.axis = c;
+            self.text = c;
+            // Default the grid to a faint tint of the new foreground unless the
+            // caller also overrides it below.
+            self.grid = Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), 28);
+        }
+        if let Some(g) = grid {
+            self.grid = g;
+        }
+        self
+    }
 }
 
 /// Where the data area and (optional) colorbar sit inside the widget rect.
@@ -58,24 +76,51 @@ const GUTTER_RIGHT: f32 = 12.0;
 const GUTTER_Y2: f32 = 52.0;
 const CBAR_WIDTH: f32 = 16.0;
 const CBAR_LABELS: f32 = 46.0;
+// Extra gutter claimed by an axis title / label when present.
+const TITLE_H: f32 = 18.0;
+const LABEL_H: f32 = 16.0;
+
+/// What chrome the plot needs space reserved for. Drives [`layout`]'s gutter
+/// sizes so titles/labels, a colorbar, and a y2 axis all get room.
+#[derive(Clone, Copy, Default)]
+pub struct ChromeRequest {
+    /// A vertical colorbar in the right gutter.
+    pub colorbar: bool,
+    /// A secondary right (y2) axis with ticks in the right gutter.
+    pub y2: bool,
+    /// A graph title above the data area.
+    pub title: bool,
+    /// An X-axis label below the X tick labels.
+    pub x_label: bool,
+    /// A (left) Y-axis label at the far left.
+    pub y_label: bool,
+    /// A right (y2) Y-axis label at the far right (only honored with `y2`).
+    pub y2_label: bool,
+}
 
 /// Reserve gutters for axis labels (a colorbar and/or a right y2 axis, if
 /// requested) and return the resulting data area and colorbar rects. A colorbar
 /// and a y2 axis both claim the right gutter; the colorbar takes precedence when
-/// both are requested.
-pub fn layout(full: Rect, with_colorbar: bool, with_y2: bool) -> ChromeLayout {
-    let right = if with_colorbar {
+/// both are requested. Titles and axis labels each grow their own gutter.
+pub fn layout(full: Rect, req: &ChromeRequest) -> ChromeLayout {
+    let right_axis = if req.colorbar {
         GUTTER_RIGHT + CBAR_WIDTH + CBAR_LABELS
-    } else if with_y2 {
+    } else if req.y2 {
         GUTTER_Y2
     } else {
         GUTTER_RIGHT
     };
+    // A y2 label adds rotated text outside the y2 ticks.
+    let right = right_axis + if req.y2 && req.y2_label { LABEL_H } else { 0.0 };
+    let left = GUTTER_LEFT + if req.y_label { LABEL_H } else { 0.0 };
+    let top = GUTTER_TOP + if req.title { TITLE_H } else { 0.0 };
+    let bottom = GUTTER_BOTTOM + if req.x_label { LABEL_H } else { 0.0 };
+
     let data_area = Rect::from_min_max(
-        pos2(full.left() + GUTTER_LEFT, full.top() + GUTTER_TOP),
-        pos2(full.right() - right, full.bottom() - GUTTER_BOTTOM),
+        pos2(full.left() + left, full.top() + top),
+        pos2(full.right() - right, full.bottom() - bottom),
     );
-    let colorbar = with_colorbar.then(|| {
+    let colorbar = req.colorbar.then(|| {
         let x0 = data_area.right() + GUTTER_RIGHT;
         Rect::from_min_max(
             pos2(x0, data_area.top()),
@@ -272,6 +317,72 @@ pub fn draw_y2_ticks(painter: &Painter, t: &Transform, style: &Style) {
     }
 }
 
+/// The title and axis-label strings to draw in the reserved gutters; any field
+/// may be `None`.
+#[derive(Clone, Copy, Default)]
+pub struct Labels<'a> {
+    /// Graph title, centered above the data area.
+    pub title: Option<&'a str>,
+    /// X-axis label, centered below the X tick labels.
+    pub x: Option<&'a str>,
+    /// Left Y-axis label, rotated at the far left.
+    pub y: Option<&'a str>,
+    /// Right (y2) Y-axis label, rotated at the far right (gated by `with_y2`).
+    pub y2: Option<&'a str>,
+}
+
+/// Draw the graph title and axis labels in the gutters reserved by [`layout`].
+/// `full` is the whole widget rect, `area` the data area; `with_y2` gates the
+/// y2 label. Y labels are rotated a quarter turn (silx `setGraphYLabel`).
+pub fn draw_labels(
+    painter: &Painter,
+    full: Rect,
+    area: Rect,
+    labels: &Labels,
+    with_y2: bool,
+    style: &Style,
+) {
+    let title_font = FontId::proportional(14.0);
+    let label_font = FontId::proportional(12.0);
+
+    if let Some(t) = labels.title {
+        painter.text(
+            pos2(area.center().x, full.top() + 2.0),
+            Align2::CENTER_TOP,
+            t,
+            title_font,
+            style.text,
+        );
+    }
+    if let Some(t) = labels.x {
+        painter.text(
+            pos2(area.center().x, full.bottom() - 2.0),
+            Align2::CENTER_BOTTOM,
+            t,
+            label_font.clone(),
+            style.text,
+        );
+    }
+    // Left Y label: rotate a quarter turn counter-clockwise (reads bottom→top).
+    if let Some(t) = labels.y {
+        let galley = painter.layout_no_wrap(t.to_owned(), label_font.clone(), style.text);
+        let pos = pos2(full.left() + LABEL_H * 0.5, area.center().y);
+        painter.add(egui::Shape::Text(
+            TextShape::new(pos, galley, style.text)
+                .with_angle_and_anchor(-std::f32::consts::FRAC_PI_2, Align2::CENTER_CENTER),
+        ));
+    }
+    // Right y2 label: rotate a quarter turn clockwise (reads top→bottom).
+    if with_y2 && let Some(t) = labels.y2 {
+        let galley = painter.layout_no_wrap(t.to_owned(), label_font, style.text);
+        let pos = pos2(full.right() - LABEL_H * 0.5, area.center().y);
+        painter.add(egui::Shape::Text(
+            TextShape::new(pos, galley, style.text)
+                .with_angle_and_anchor(std::f32::consts::FRAC_PI_2, Align2::CENTER_CENTER),
+        ));
+    }
+}
+
 /// Format a coordinate with decimals scaled to the visible span.
 fn format_coord(v: f64, lo: f64, hi: f64) -> String {
     let span = (hi - lo).abs();
@@ -453,9 +564,15 @@ mod tests {
     #[test]
     fn layout_reserves_right_gutter_only_with_colorbar() {
         let full = Rect::from_min_max(pos2(0.0, 0.0), pos2(400.0, 300.0));
-        let no_bar = layout(full, false, false);
+        let no_bar = layout(full, &ChromeRequest::default());
         assert!(no_bar.colorbar.is_none());
-        let with_bar = layout(full, true, false);
+        let with_bar = layout(
+            full,
+            &ChromeRequest {
+                colorbar: true,
+                ..Default::default()
+            },
+        );
         let bar = with_bar.colorbar.expect("colorbar rect");
         // The colorbar sits to the right of the (narrower) data area.
         assert!(bar.left() >= with_bar.data_area.right());
@@ -465,11 +582,84 @@ mod tests {
     #[test]
     fn layout_reserves_right_gutter_for_y2_without_colorbar() {
         let full = Rect::from_min_max(pos2(0.0, 0.0), pos2(400.0, 300.0));
-        let plain = layout(full, false, false);
-        let with_y2 = layout(full, false, true);
+        let plain = layout(
+            full,
+            &ChromeRequest {
+                ..Default::default()
+            },
+        );
+        let with_y2 = layout(
+            full,
+            &ChromeRequest {
+                y2: true,
+                ..Default::default()
+            },
+        );
         // A y2 axis narrows the data area (right gutter holds y2 labels) but
         // adds no colorbar rect.
         assert!(with_y2.colorbar.is_none());
         assert!(with_y2.data_area.right() < plain.data_area.right());
+    }
+
+    #[test]
+    fn layout_grows_each_gutter_for_its_label() {
+        let full = Rect::from_min_max(pos2(0.0, 0.0), pos2(400.0, 300.0));
+        let base = layout(full, &ChromeRequest::default()).data_area;
+
+        let titled = layout(
+            full,
+            &ChromeRequest {
+                title: true,
+                ..Default::default()
+            },
+        )
+        .data_area;
+        assert!(titled.top() > base.top(), "title grows the top gutter");
+
+        let xlab = layout(
+            full,
+            &ChromeRequest {
+                x_label: true,
+                ..Default::default()
+            },
+        )
+        .data_area;
+        assert!(
+            xlab.bottom() < base.bottom(),
+            "x label grows the bottom gutter"
+        );
+
+        let ylab = layout(
+            full,
+            &ChromeRequest {
+                y_label: true,
+                ..Default::default()
+            },
+        )
+        .data_area;
+        assert!(ylab.left() > base.left(), "y label grows the left gutter");
+
+        // A y2 label only claims space when the y2 axis is present.
+        let y2lab = layout(
+            full,
+            &ChromeRequest {
+                y2: true,
+                y2_label: true,
+                ..Default::default()
+            },
+        )
+        .data_area;
+        let y2_only = layout(
+            full,
+            &ChromeRequest {
+                y2: true,
+                ..Default::default()
+            },
+        )
+        .data_area;
+        assert!(
+            y2lab.right() < y2_only.right(),
+            "y2 label grows the right gutter"
+        );
     }
 }

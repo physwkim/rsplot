@@ -58,6 +58,24 @@ pub struct Plot {
     /// handles. Dragging an edge updates that ROI's bounds in place and the
     /// widget reports the changed index (`doc/design.md` §13 C3).
     pub rois: Vec<Roi>,
+    /// Graph title, drawn centered above the data area (silx `setGraphTitle`,
+    /// `BackendBase.setGraphTitle`). `None` reserves no top space for it.
+    pub title: Option<String>,
+    /// X-axis label, drawn centered below the X tick labels (silx
+    /// `setGraphXLabel`). `None` reserves no extra bottom space.
+    pub x_label: Option<String>,
+    /// Left Y-axis label, drawn rotated at the far left (silx `setGraphYLabel`).
+    /// `None` reserves no extra left space.
+    pub y_label: Option<String>,
+    /// Right (y2) Y-axis label, drawn rotated at the far right; only shown when
+    /// a [`Self::y2`] axis exists. `None` reserves no extra right space.
+    pub y2_label: Option<String>,
+    /// Foreground color override for axes/frame/ticks/labels (silx
+    /// `setForegroundColor`). `None` follows the egui theme's text color.
+    pub foreground: Option<Color32>,
+    /// Grid-line color override (silx `setGridColor`). `None` uses a faint tint
+    /// of the foreground color.
+    pub grid_color: Option<Color32>,
 }
 
 impl Plot {
@@ -79,6 +97,12 @@ impl Plot {
             y2: None,
             crosshair: false,
             rois: Vec::new(),
+            title: None,
+            x_label: None,
+            y_label: None,
+            y2_label: None,
+            foreground: None,
+            grid_color: None,
         }
     }
 
