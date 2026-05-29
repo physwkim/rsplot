@@ -10,7 +10,9 @@
 //! wheel = cursor-anchored zoom, double-click = reset. The mapping lives in the
 //! widget; this module is just the geometry, kept pure so it is unit-testable.
 
-use egui::{Rect, Vec2};
+use egui::{Pos2, Rect, Vec2};
+
+use crate::core::transform::Transform;
 
 /// Data limits `(x_min, x_max, y_min, y_max)`.
 pub type Limits = (f64, f64, f64, f64);
@@ -59,6 +61,68 @@ pub fn wheel_zoom_factor(scroll_y: f32) -> f64 {
 pub fn is_valid(limits: Limits) -> bool {
     let (x_min, x_max, y_min, y_max) = limits;
     x_max > x_min && y_max > y_min
+}
+
+/// A picked polyline vertex: its index and data coordinates, plus the pixel
+/// distance from the cursor (`doc/design.md` §13 C2).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PointPick {
+    pub index: usize,
+    pub x: f64,
+    pub y: f64,
+    pub dist_px: f32,
+}
+
+/// Nearest polyline vertex to `cursor` (screen pixels) within `threshold_px`.
+/// `points` are data coordinates, projected through `transform` to pixels for
+/// the distance test. `None` if no vertex is within the threshold.
+pub fn nearest_point(
+    points: &[(f64, f64)],
+    transform: &Transform,
+    cursor: Pos2,
+    threshold_px: f32,
+) -> Option<PointPick> {
+    let mut best: Option<PointPick> = None;
+    for (index, &(x, y)) in points.iter().enumerate() {
+        let dist_px = transform.data_to_pixel(x, y).distance(cursor);
+        if dist_px <= threshold_px && best.is_none_or(|b| dist_px < b.dist_px) {
+            best = Some(PointPick {
+                index,
+                x,
+                y,
+                dist_px,
+            });
+        }
+    }
+    best
+}
+
+/// Image pixel `(col, row)` under `cursor` (screen pixels), or `None` if the
+/// cursor maps outside the image. `origin` is the data coordinate of pixel
+/// `(0, 0)`'s lower-left corner and `scale` is data units per pixel (matching
+/// [`crate::ImageData`]); row 0 is at the bottom.
+pub fn image_index(
+    transform: &Transform,
+    origin: (f64, f64),
+    scale: (f64, f64),
+    dims: (u32, u32),
+    cursor: Pos2,
+) -> Option<(u32, u32)> {
+    if scale.0 <= 0.0 || scale.1 <= 0.0 {
+        return None;
+    }
+    let (x, y) = transform.pixel_to_data(cursor);
+    if !x.is_finite() || !y.is_finite() {
+        return None;
+    }
+    let col = ((x - origin.0) / scale.0).floor();
+    let row = ((y - origin.1) / scale.1).floor();
+    if col < 0.0 || row < 0.0 {
+        return None;
+    }
+    // Saturating f64->u32 cast handles huge values; the bounds check rejects them.
+    let (col, row) = (col as u32, row as u32);
+    (col < dims.0 && row < dims.1).then_some((col, row))
 }
 
 #[cfg(test)]
@@ -128,5 +192,44 @@ mod tests {
         assert!(is_valid((0.0, 1.0, 0.0, 1.0)));
         assert!(!is_valid((1.0, 1.0, 0.0, 1.0)));
         assert!(!is_valid((0.0, 1.0, 2.0, 1.0)));
+    }
+
+    use crate::core::transform::Transform;
+
+    // 100×100 px area mapping data [0,10]×[0,10]; 1 data unit = 10 px.
+    fn pick_transform() -> Transform {
+        Transform::new(0.0, 10.0, 0.0, 10.0, area_100())
+    }
+
+    #[test]
+    fn nearest_point_picks_closest_within_threshold() {
+        let t = pick_transform();
+        let pts = [(0.0, 0.0), (5.0, 5.0), (10.0, 10.0)];
+        // (5,5) -> pixel (50, 50). Cursor a few px away picks index 1.
+        let pick = nearest_point(&pts, &t, pos2(52.0, 47.0), 6.0).expect("a pick");
+        assert_eq!(pick.index, 1);
+        assert_eq!((pick.x, pick.y), (5.0, 5.0));
+        // Nothing within threshold -> None.
+        assert!(nearest_point(&pts, &t, pos2(52.0, 47.0), 2.0).is_none());
+        assert!(nearest_point(&[], &t, pos2(0.0, 0.0), 100.0).is_none());
+    }
+
+    #[test]
+    fn image_index_maps_cursor_to_pixel() {
+        // 10×10 image, origin (0,0), unit scale, over data [0,10] in a 100px area.
+        let t = pick_transform();
+        // Data (0,0) is bottom-left -> pixel (0, 100). Pixel (5,95) -> data ~(0.5, 0.5)
+        // -> col 0, row 0.
+        assert_eq!(
+            image_index(&t, (0.0, 0.0), (1.0, 1.0), (10, 10), pos2(5.0, 95.0)),
+            Some((0, 0))
+        );
+        // Center pixel (55, 45) -> data (5.5, 5.5) -> col 5, row 5.
+        assert_eq!(
+            image_index(&t, (0.0, 0.0), (1.0, 1.0), (10, 10), pos2(55.0, 45.0)),
+            Some((5, 5))
+        );
+        // Outside the data area maps outside the image.
+        assert!(image_index(&t, (0.0, 0.0), (1.0, 1.0), (10, 10), pos2(-5.0, 50.0)).is_none());
     }
 }

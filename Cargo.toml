@@ -55,3 +55,7 @@ path = "examples/thick_lines.rs"
 [[example]]
 name = "markers"
 path = "examples/markers.rs"
+
+[[example]]
+name = "picking"
+path = "examples/picking.rs"

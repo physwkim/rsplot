@@ -23,7 +23,8 @@ pub use crate::render::backend_wgpu::{
 };
 pub use crate::render::gpu_curve::{CurveData, Symbol};
 pub use crate::render::gpu_image::ImageData;
-pub use crate::widget::plot_widget::PlotWidget;
+pub use crate::widget::interaction::{PointPick, image_index, nearest_point};
+pub use crate::widget::plot_widget::{PlotResponse, PlotWidget};
 
 // Plotting-library convention: re-export so downstreams use the same
 // egui/egui-wgpu without version skew.

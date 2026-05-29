@@ -13,9 +13,20 @@
 use egui::{Color32, PointerButton, Pos2, Rect, Sense, Stroke, Ui};
 
 use crate::core::plot::Plot;
-use crate::core::transform::Scale;
+use crate::core::transform::{Scale, Transform};
 use crate::render::backend_wgpu::{ClearCallback, CurveCallback, ImageCallback};
 use crate::widget::{chrome, interaction};
+
+/// What [`PlotWidget::show`] returns: the egui [`Response`](egui::Response) plus
+/// the display [`Transform`] used this frame. The transform lets callers map
+/// pointer pixels to data coordinates and run picking
+/// ([`interaction::nearest_point`](crate::nearest_point) /
+/// [`image_index`](crate::image_index)) against their own data
+/// (`doc/design.md` §13 C2).
+pub struct PlotResponse {
+    pub response: egui::Response,
+    pub transform: Transform,
+}
 
 /// Widget that renders a [`Plot`] into an egui `Ui`.
 #[derive(Default)]
@@ -28,7 +39,8 @@ impl PlotWidget {
     }
 
     /// Render the plot, filling the available space, and handle interaction.
-    pub fn show(self, ui: &mut Ui, plot: &mut Plot) -> egui::Response {
+    /// Returns the egui response and the display transform used this frame.
+    pub fn show(self, ui: &mut Ui, plot: &mut Plot) -> PlotResponse {
         let (rect, response) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
 
         // Capture the initial view once, for double-click reset.
@@ -126,7 +138,10 @@ impl PlotWidget {
             );
         }
 
-        response
+        PlotResponse {
+            response,
+            transform,
+        }
     }
 }
 
