@@ -15,7 +15,7 @@ pub mod core;
 pub mod render;
 pub mod widget;
 
-pub use crate::core::colormap::{Colormap, ColormapName};
+pub use crate::core::colormap::{Colormap, ColormapName, Normalization};
 pub use crate::core::decimate::min_max_decimate;
 pub use crate::core::plot::{Plot, PlotId};
 pub use crate::core::roi::{Roi, RoiEdge};

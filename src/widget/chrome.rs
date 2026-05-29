@@ -9,7 +9,7 @@
 use egui::epaint::TextShape;
 use egui::{Align2, Color32, FontId, Painter, Pos2, Rect, Stroke, Visuals, pos2};
 
-use crate::core::colormap::Colormap;
+use crate::core::colormap::{Colormap, Normalization};
 use crate::core::roi::Roi;
 use crate::core::transform::{Axis, Scale, Transform};
 
@@ -479,21 +479,36 @@ pub fn draw_colorbar(painter: &Painter, rect: Rect, cmap: &Colormap, style: &Sty
         egui::StrokeKind::Inside,
     );
 
-    let (ticks, step) = nice_ticks(cmap.vmin, cmap.vmax, 6);
     let font = FontId::proportional(11.0);
     let axis = Stroke::new(1.0, style.axis);
-    let span = cmap.vmax - cmap.vmin;
-    if span <= 0.0 {
+    if cmap.vmax <= cmap.vmin {
         return;
     }
-    for v in ticks {
-        let frac = ((v - cmap.vmin) / span) as f32; // 0 at vmin, 1 at vmax
+    // Ticks and their labels follow the normalization, like the data axes:
+    // decade ticks under log, nice ticks otherwise. Each tick is placed at the
+    // bar fraction the image colors that value at (`Colormap::normalize`), so
+    // the colorbar matches the image under any normalization (`doc/design.md` §5).
+    let labeled: Vec<(f64, String)> = match cmap.normalization {
+        Normalization::Log => log_decade_ticks(cmap.vmin, cmap.vmax)
+            .into_iter()
+            .map(|v| (v, format_log_tick(v)))
+            .collect(),
+        _ => {
+            let (ticks, step) = nice_ticks(cmap.vmin, cmap.vmax, 6);
+            ticks
+                .into_iter()
+                .map(|v| (v, format_tick(v, step)))
+                .collect()
+        }
+    };
+    for (v, label) in labeled {
+        let frac = cmap.normalize(v); // 0 at vmin, 1 at vmax, under the normalization
         let py = rect.bottom() - frac * rect.height(); // vmin at bottom
         painter.line_segment([pos2(rect.right(), py), pos2(rect.right() + 3.0, py)], axis);
         painter.text(
             pos2(rect.right() + 5.0, py),
             Align2::LEFT_CENTER,
-            format_tick(v, step),
+            label,
             font.clone(),
             style.text,
         );

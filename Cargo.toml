@@ -98,3 +98,7 @@ path = "examples/fill.rs"
 [[example]]
 name = "error_bars"
 path = "examples/error_bars.rs"
+
+[[example]]
+name = "colormap_norm"
+path = "examples/colormap_norm.rs"

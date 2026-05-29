@@ -29,19 +29,26 @@ const IDENTITY: [[f32; 4]; 4] = [
     [0.0, 0.0, 0.0, 1.0],
 ];
 
-/// Uniform block for the image shader. Layout matches `Params` in `image.wgsl`
-/// (std140: mat4 @0, vec4 @64, vec2 @80, f32 @88, vec2 @96, total 112).
+/// Uniform block for the image shader. Field order keeps `repr(C)` offsets
+/// std140-aligned: mat4 @0, vec4 @64, vec2 @80, then scalars f32 @88/92/96/100,
+/// u32 @104; padded to 112. Matches `Params` in `image.wgsl`.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct ImageParams {
     ortho: [[f32; 4]; 4],
     rect: [f32; 4],
-    clim: [f32; 2],
-    alpha: f32,
-    _pad0: f32,
     /// 1.0 if that axis is log10, else 0.0 (x, y).
     axis_log: [f32; 2],
-    _pad1: [f32; 2],
+    alpha: f32,
+    /// Normalization transform applied to `vmin` (the LUT-coordinate origin).
+    cmap_min: f32,
+    /// `1 / (norm(vmax) - norm(vmin))`, or 0 for a degenerate range.
+    cmap_one_over_range: f32,
+    /// Gamma exponent (used only when `norm == 3`).
+    gamma: f32,
+    /// Normalization code; see [`Normalization::code`](crate::core::colormap::Normalization).
+    norm: u32,
+    _pad: f32,
 }
 
 /// A 2D scalar (or single-channel) image to display, in data coordinates.
@@ -257,7 +264,12 @@ pub struct GpuImage {
     tiles: Vec<ImageTile>,
     width: u32,
     height: u32,
-    clim: [f32; 2],
+    /// Resolved colormap normalization for the per-frame uniform: the bounds
+    /// transformed by the normalization, plus the gamma exponent and code.
+    cmap_min: f32,
+    cmap_one_over_range: f32,
+    gamma: f32,
+    norm: u32,
     alpha: f32,
 }
 
@@ -399,12 +411,15 @@ impl GpuImage {
             })
             .collect();
 
-        let clim = [image.colormap.vmin as f32, image.colormap.vmax as f32];
+        let (cmap_min, cmap_one_over_range) = image.colormap.norm_bounds();
         let gpu = Self {
             tiles,
             width: image.width,
             height: image.height,
-            clim,
+            cmap_min,
+            cmap_one_over_range,
+            gamma: image.colormap.gamma,
+            norm: image.colormap.normalization.code(),
             alpha: image.alpha,
         };
         // Seed each tile's uniform; the per-frame transform overwrites `ortho`.
@@ -489,11 +504,13 @@ impl GpuImage {
             let params = ImageParams {
                 ortho,
                 rect: tile.rect,
-                clim: self.clim,
-                alpha: self.alpha,
-                _pad0: 0.0,
                 axis_log,
-                _pad1: [0.0, 0.0],
+                alpha: self.alpha,
+                cmap_min: self.cmap_min,
+                cmap_one_over_range: self.cmap_one_over_range,
+                gamma: self.gamma,
+                norm: self.norm,
+                _pad: 0.0,
             };
             queue.write_buffer(&tile.params, 0, bytemuck::bytes_of(&params));
         }

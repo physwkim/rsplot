@@ -3,15 +3,19 @@
 // A quad covering the image's data-space rect is generated from the vertex
 // index, transformed to NDC by the ortho matrix (data -> NDC, the single
 // source of truth in core::transform). The fragment samples the scalar data
-// texture (nearest), normalizes against clim, and looks up the color in a
-// 256x1 sRGB LUT texture (linear). Linear normalization only for now.
+// texture (nearest), maps it to a [0, 1] LUT coordinate under the colormap
+// normalization (linear / log10 / sqrt / gamma — mirrors silx GLPlotImage),
+// and looks up the color in a 256x1 sRGB LUT texture (linear).
 
 struct Params {
     ortho: mat4x4<f32>,
-    rect: vec4<f32>,    // data-space extent: (x0, y0, x1, y1)
-    clim: vec2<f32>,    // (vmin, vmax)
+    rect: vec4<f32>,           // data-space extent: (x0, y0, x1, y1)
+    axis_log: vec2<f32>,       // 1.0 if that axis is log10, else 0.0
     alpha: f32,
-    axis_log: vec2<f32>, // 1.0 if that axis is log10, else 0.0
+    cmap_min: f32,             // normalization transform of vmin
+    cmap_one_over_range: f32,  // 1 / (norm(vmax) - norm(vmin)), or 0 if degenerate
+    gamma: f32,                // exponent for norm == 3 (gamma)
+    norm: u32,                 // normalization code: 0 linear, 1 log, 2 sqrt, 3 gamma
 };
 
 // 1 / ln(10), to turn the natural log into log10.
@@ -68,10 +72,33 @@ fn vs_main(@builtin(vertex_index) vid: u32) -> VsOut {
     return out;
 }
 
+// Map a raw scalar to its [0, 1] LUT coordinate under the colormap
+// normalization. Mirrors silx GLPlotImage (and Colormap::normalize on the CPU,
+// used for colorbar tick positions): the bounds are pre-transformed on the CPU
+// into cmap_min / cmap_one_over_range, so per fragment only the value itself is
+// transformed. log/sqrt guard their invalid domain by mapping to the low color.
+fn normalize_value(raw: f32) -> f32 {
+    if (params.norm == 1u) { // log10
+        if (raw > 0.0) {
+            return clamp(params.cmap_one_over_range * (log(raw) * INV_LN10 - params.cmap_min), 0.0, 1.0);
+        }
+        return 0.0;
+    } else if (params.norm == 2u) { // sqrt
+        if (raw >= 0.0) {
+            return clamp(params.cmap_one_over_range * (sqrt(raw) - params.cmap_min), 0.0, 1.0);
+        }
+        return 0.0;
+    } else if (params.norm == 3u) { // gamma
+        return pow(clamp(params.cmap_one_over_range * (raw - params.cmap_min), 0.0, 1.0), params.gamma);
+    }
+    // linear + fallback
+    return clamp(params.cmap_one_over_range * (raw - params.cmap_min), 0.0, 1.0);
+}
+
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let v = textureSample(data_tex, data_samp, in.uv).r;
-    let tnorm = clamp((v - params.clim.x) / (params.clim.y - params.clim.x), 0.0, 1.0);
-    let rgb = textureSample(lut_tex, lut_samp, vec2<f32>(tnorm, 0.5)).rgb;
+    let value = normalize_value(v);
+    let rgb = textureSample(lut_tex, lut_samp, vec2<f32>(value, 0.5)).rgb;
     return vec4<f32>(rgb, params.alpha);
 }
