@@ -9,6 +9,7 @@
 use egui::{Align2, Color32, FontId, Painter, Pos2, Rect, Stroke, Visuals, pos2};
 
 use crate::core::colormap::Colormap;
+use crate::core::roi::Roi;
 use crate::core::transform::{Axis, Scale, Transform};
 
 /// Colors used to draw the chrome, derived from the active egui visuals so the
@@ -280,6 +281,27 @@ fn format_coord(v: f64, lo: f64, hi: f64) -> String {
         3
     };
     format!("{v:.decimals$}")
+}
+
+/// Draw each region of interest: a translucent fill, a border, and a small
+/// square handle at every draggable edge midpoint (`doc/design.md` §13 C3).
+pub fn draw_rois(painter: &Painter, t: &Transform, rois: &[Roi], style: &Style) {
+    let fill = Color32::from_rgba_unmultiplied(style.axis.r(), style.axis.g(), style.axis.b(), 24);
+    let border = Stroke::new(1.0, style.axis);
+    for roi in rois {
+        let r = roi.screen_rect(t);
+        painter.rect_filled(r, egui::CornerRadius::ZERO, fill);
+        painter.rect_stroke(
+            r,
+            egui::CornerRadius::ZERO,
+            border,
+            egui::StrokeKind::Inside,
+        );
+        for c in roi.handle_centers(t) {
+            let h = Rect::from_center_size(c, egui::vec2(6.0, 6.0));
+            painter.rect_filled(h, egui::CornerRadius::ZERO, style.axis);
+        }
+    }
 }
 
 /// Draw a crosshair through `pos` (clipped to the data area) and a readout box

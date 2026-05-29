@@ -13,7 +13,26 @@
 use egui::{Color32, PointerButton, Pos2, Rect, Sense, Stroke, Ui};
 
 use crate::core::plot::Plot;
+use crate::core::roi::RoiEdge;
 use crate::core::transform::{Scale, Transform};
+
+/// Pixel radius for grabbing an ROI edge handle.
+const ROI_GRAB_PX: f32 = 6.0;
+
+/// An in-progress ROI edge drag, stashed in egui temp memory across frames.
+#[derive(Clone, Copy)]
+struct RoiDrag {
+    roi: usize,
+    edge: RoiEdge,
+}
+
+/// What `apply_interaction` produced this frame.
+struct Interaction {
+    /// In-progress box-zoom selection rectangle (screen space).
+    selection: Option<egui::Rect>,
+    /// Index of the ROI whose bounds an edge drag changed this frame.
+    roi_changed: Option<usize>,
+}
 use crate::render::backend_wgpu::{ClearCallback, CurveCallback, ImageCallback};
 use crate::widget::{chrome, interaction};
 
@@ -26,6 +45,9 @@ use crate::widget::{chrome, interaction};
 pub struct PlotResponse {
     pub response: egui::Response,
     pub transform: Transform,
+    /// Index into `Plot::rois` of the region whose bounds changed this frame
+    /// from an edge drag, or `None` (`doc/design.md` §13 C3).
+    pub roi_changed: Option<usize>,
 }
 
 /// Widget that renders a [`Plot`] into an egui `Ui`.
@@ -56,7 +78,10 @@ impl PlotWidget {
         // Map input through the transform the user currently sees, then update
         // limits; this frame re-renders with the new limits below.
         let view = plot.transform(area);
-        let selection = apply_interaction(ui, &response, plot, area, &view);
+        let Interaction {
+            selection,
+            roi_changed,
+        } = apply_interaction(ui, &response, plot, area, &view);
 
         // Final transforms for this frame (after any interaction). The left
         // (main) transform drives the image, the left axes, and left-bound
@@ -115,6 +140,11 @@ impl PlotWidget {
             chrome::draw_colorbar(painter, cbar, cmap, &style);
         }
 
+        // Regions of interest (fill, border, edge handles) over the data layer.
+        if !plot.rois.is_empty() {
+            chrome::draw_rois(painter, &transform, &plot.rois, &style);
+        }
+
         // Hover crosshair + coordinate readout over the data area.
         if plot.crosshair
             && let Some(p) = response.hover_pos()
@@ -141,6 +171,7 @@ impl PlotWidget {
         PlotResponse {
             response,
             transform,
+            roi_changed,
         }
     }
 }
@@ -154,17 +185,17 @@ fn axis_log_flags(t: &crate::core::transform::Transform) -> [f32; 2] {
     ]
 }
 
-/// Apply the active pointer interaction to `plot.limits`, returning the
-/// in-progress box-zoom selection rect (screen space) if a left-drag is under
-/// way. `view` is the transform matching what is currently on screen, used to
-/// convert pointer pixels to data coordinates.
+/// Apply the active pointer interaction to `plot.limits` (and, for an ROI edge
+/// drag, to `plot.rois`). `view` is the transform matching what is currently on
+/// screen, used to convert pointer pixels to data coordinates. Returns the
+/// in-progress box-zoom selection rect and the ROI index changed this frame.
 fn apply_interaction(
     ui: &Ui,
     response: &egui::Response,
     plot: &mut Plot,
     area: Rect,
     view: &crate::core::transform::Transform,
-) -> Option<Rect> {
+) -> Interaction {
     // Interaction operates on the displayed view's limits (which fold in any
     // aspect-ratio expansion), so pan/zoom act on exactly what is on screen.
     let base = (view.x.min, view.x.max, view.y.min, view.y.max);
@@ -198,40 +229,74 @@ fn apply_interaction(
         commit(plot, next);
     }
 
-    // Box zoom: left-drag selects a rectangle; release zooms to it. The drag
-    // start (screen pixels) is stashed in egui's temp memory under the
-    // response id across frames.
+    // Left-drag start: prefer grabbing an ROI edge under the cursor; only if no
+    // edge is grabbed does the same press begin a box-zoom selection. Both drag
+    // states live in egui temp memory across frames (the ROI drag under a
+    // distinct id from the box-zoom start pos).
     let id = response.id;
+    let roi_id = id.with("roi-drag");
+    let mut roi_changed = None;
     if response.drag_started_by(PointerButton::Primary)
         && let Some(p) = response.interact_pointer_pos()
     {
-        ui.data_mut(|d| d.insert_temp(id, p));
-    }
-    let mut selection = None;
-    if response.dragged_by(PointerButton::Primary) {
-        let start = ui.data_mut(|d| d.get_temp::<Pos2>(id));
-        if let (Some(start), Some(cur)) = (start, response.interact_pointer_pos()) {
-            selection = Some(Rect::from_two_pos(start, cur));
+        // Topmost ROI wins (last in the list is drawn last, so hit-tested first).
+        let grabbed = plot.rois.iter().enumerate().rev().find_map(|(i, roi)| {
+            roi.edge_at(view, p, ROI_GRAB_PX)
+                .map(|edge| RoiDrag { roi: i, edge })
+        });
+        match grabbed {
+            Some(rd) => ui.data_mut(|d| {
+                d.insert_temp(roi_id, rd);
+            }),
+            None => ui.data_mut(|d| {
+                d.insert_temp(id, p);
+            }),
         }
     }
-    if response.drag_stopped_by(PointerButton::Primary) {
-        let start = ui.data_mut(|d| {
-            let s = d.get_temp::<Pos2>(id);
-            d.remove::<Pos2>(id);
-            s
-        });
-        if let (Some(start), Some(end)) = (start, response.interact_pointer_pos()) {
-            // Ignore accidental click-sized drags.
-            if (start - end).length() > 4.0 {
-                let (ax, ay) = view.pixel_to_data(start);
-                let (bx, by) = view.pixel_to_data(end);
-                let next = interaction::box_zoom(ax, ay, bx, by);
-                commit(plot, next);
+
+    // An active ROI edge drag takes precedence over box zoom.
+    let mut selection = None;
+    if let Some(rd) = ui.data_mut(|d| d.get_temp::<RoiDrag>(roi_id)) {
+        if response.dragged_by(PointerButton::Primary)
+            && let Some(cur) = response.interact_pointer_pos()
+            && let Some(roi) = plot.rois.get_mut(rd.roi)
+        {
+            roi.move_edge(rd.edge, view.pixel_to_data(cur));
+            roi_changed = Some(rd.roi);
+        }
+        if response.drag_stopped_by(PointerButton::Primary) {
+            ui.data_mut(|d| d.remove::<RoiDrag>(roi_id));
+        }
+    } else {
+        // Box zoom: left-drag selects a rectangle; release zooms to it.
+        if response.dragged_by(PointerButton::Primary) {
+            let start = ui.data_mut(|d| d.get_temp::<Pos2>(id));
+            if let (Some(start), Some(cur)) = (start, response.interact_pointer_pos()) {
+                selection = Some(Rect::from_two_pos(start, cur));
+            }
+        }
+        if response.drag_stopped_by(PointerButton::Primary) {
+            let start = ui.data_mut(|d| {
+                let s = d.get_temp::<Pos2>(id);
+                d.remove::<Pos2>(id);
+                s
+            });
+            if let (Some(start), Some(end)) = (start, response.interact_pointer_pos()) {
+                // Ignore accidental click-sized drags.
+                if (start - end).length() > 4.0 {
+                    let (ax, ay) = view.pixel_to_data(start);
+                    let (bx, by) = view.pixel_to_data(end);
+                    let next = interaction::box_zoom(ax, ay, bx, by);
+                    commit(plot, next);
+                }
             }
         }
     }
 
-    selection
+    Interaction {
+        selection,
+        roi_changed,
+    }
 }
 
 /// Adopt `next` limits only if they are non-degenerate, otherwise keep the

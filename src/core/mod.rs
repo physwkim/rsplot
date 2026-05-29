@@ -5,4 +5,5 @@
 
 pub mod colormap;
 pub mod plot;
+pub mod roi;
 pub mod transform;

@@ -17,6 +17,7 @@ pub mod widget;
 
 pub use crate::core::colormap::{Colormap, ColormapName};
 pub use crate::core::plot::{Plot, PlotId};
+pub use crate::core::roi::{Roi, RoiEdge};
 pub use crate::core::transform::{Axis, Margins, Scale, Transform, YAxis};
 pub use crate::render::backend_wgpu::{
     install, set_curve, set_curves, set_image, update_curve, update_curve_at, update_image_region,

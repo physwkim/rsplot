@@ -8,6 +8,7 @@
 use egui::{Color32, Rect};
 
 use crate::core::colormap::Colormap;
+use crate::core::roi::Roi;
 use crate::core::transform::{Axis, Margins, Scale, Transform, keep_aspect_limits};
 
 /// Identifier for a single `Plot` instance.
@@ -53,6 +54,10 @@ pub struct Plot {
     /// Draw a crosshair + coordinate readout following the pointer when it is
     /// over the data area (silx `setGraphCursor`, `doc/design.md` §13 C1).
     pub crosshair: bool,
+    /// Regions of interest drawn over the data area with draggable edge
+    /// handles. Dragging an edge updates that ROI's bounds in place and the
+    /// widget reports the changed index (`doc/design.md` §13 C3).
+    pub rois: Vec<Roi>,
 }
 
 impl Plot {
@@ -73,6 +78,7 @@ impl Plot {
             keep_aspect: false,
             y2: None,
             crosshair: false,
+            rois: Vec::new(),
         }
     }
 
