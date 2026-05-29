@@ -120,7 +120,9 @@ impl WgpuResources {
     /// `bg` is the linear, premultiplied clear color; the orthos/axis_log pairs
     /// are the same matrices the on-screen [`CurveCallback`] uses for each Y
     /// axis. Curves are drawn at whatever resolution they were last decimated
-    /// to (the current view); no re-decimation is performed here.
+    /// to, and dashed lines reuse the dash arc length last computed for the
+    /// on-screen view; neither is recomputed here, so a save target whose size
+    /// differs from the on-screen data area keeps the on-screen dash metric.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn render_to_rgba(
         &self,
@@ -497,9 +499,11 @@ impl egui_wgpu::CallbackTrait for CurveCallback {
         let (x_min, x_max) = self.x_window;
         for curve in &mut res.curves {
             // Re-decimate to the current view first (a no-op once the view is
-            // steady), then stamp the per-frame uniforms.
+            // steady), recompute the dash arc length for the view (a no-op for
+            // solid lines / a steady view), then stamp the per-frame uniforms.
             curve.ensure_decimated(queue, x_min, x_max, self.decimate_columns);
             let (ortho, axis_log) = self.matrices_for(curve.y_axis);
+            curve.ensure_arclen(queue, ortho, axis_log, self.viewport_px);
             curve.write_uniforms(queue, ortho, axis_log, self.viewport_px);
         }
         Vec::new()

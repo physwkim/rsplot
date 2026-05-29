@@ -13,15 +13,25 @@
 // When `use_vertex_color` is set, each quad vertex takes the color of its own
 // endpoint (point `seg` or `seg+1`), so the rasterizer interpolates a gradient
 // along the segment (silx per-point line color, doc/design.md §13 B1).
+//
+// Dashing: each vertex carries its cumulative pixel arc length (CPU-computed in
+// the current view), interpolated to the fragment. A `dash_cum` boundary set
+// decides, by the phase within one period, whether a fragment is in an "on"
+// (drawn) or "off" (gap) span; gaps are either discarded or filled with
+// `gap_color` (silx linestyle / gapcolor, doc/design.md §13 B1).
 
 struct Params {
     ortho: mat4x4<f32>,
     // Linear, premultiplied RGBA (already alpha-multiplied on the CPU side).
     color: vec4<f32>,
+    gap_color: vec4<f32>,       // dashed-gap fill (premultiplied); used if use_gap_color
+    dash_cum: vec4<f32>,        // cumulative dash boundaries; .w = period (0 = solid)
     axis_log: vec2<f32>,        // 1.0 if that axis is log10, else 0.0
     viewport_px: vec2<f32>,     // data-area size in physical pixels
     half_width_px: f32,         // half the line width, in physical pixels
     use_vertex_color: f32,      // >0.5 to take color from `vcolors` per vertex
+    dash_offset: f32,           // phase offset added to arc length before the dash test
+    use_gap_color: f32,         // >0.5 to fill gaps with gap_color, else discard
 };
 
 @group(0) @binding(0) var<uniform> params: Params;
@@ -29,6 +39,9 @@ struct Params {
 // Per-vertex linear premultiplied RGBA, one per point. A 1-element placeholder
 // when `use_vertex_color` is 0 (never sampled, but the binding must be present).
 @group(0) @binding(2) var<storage, read> vcolors: array<vec4<f32>>;
+// Per-vertex cumulative pixel arc length. A 1-element placeholder when the line
+// is solid (never sampled for the dash test, but the binding must be present).
+@group(0) @binding(3) var<storage, read> arclen: array<f32>;
 
 // 1 / ln(10), to turn the natural log into log10.
 const INV_LN10: f32 = 0.4342944819032518;
@@ -52,6 +65,8 @@ struct VsOut {
     @builtin(position) pos: vec4<f32>,
     // Interpolated along the segment between the two endpoint colors.
     @location(0) color: vec4<f32>,
+    // Cumulative pixel arc length, interpolated along the segment for dashing.
+    @location(1) arc: f32,
 };
 
 @vertex
@@ -85,20 +100,37 @@ fn vs_main(@builtin(vertex_index) vid: u32) -> VsOut {
     let base = select(px0, px1, ep == 1u);
     let pos_px = base + normal * (params.half_width_px * side[corner]);
 
-    // This vertex's endpoint color. `select` evaluates both arms, so clamp the
-    // index to the bound array length to stay in-bounds for the placeholder
-    // buffer when per-vertex color is off.
+    // This vertex's endpoint color and arc length. `select` evaluates both arms,
+    // so clamp the index to the bound array length to stay in-bounds for the
+    // placeholder buffers when per-vertex color / dashing is off.
     let idx = seg + ep;
     let ci = min(idx, arrayLength(&vcolors) - 1u);
     let color = select(params.color, vcolors[ci], params.use_vertex_color > 0.5);
+    let ai = min(idx, arrayLength(&arclen) - 1u);
 
     var out: VsOut;
     out.pos = vec4<f32>(pos_px / half_vp, 0.0, 1.0);
     out.color = color;
+    out.arc = arclen[ai];
     return out;
 }
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    return in.color;
+    let period = params.dash_cum.w;
+    if (period <= 0.0) {
+        return in.color; // solid line
+    }
+    // Phase within one dash period (in physical pixels).
+    let s = in.arc + params.dash_offset;
+    let p = s - floor(s / period) * period;
+    // "On" spans: [0, cum.x) and [cum.y, cum.z). Everything else is a gap.
+    let on = (p < params.dash_cum.x) || (p >= params.dash_cum.y && p < params.dash_cum.z);
+    if (on) {
+        return in.color;
+    }
+    if (params.use_gap_color > 0.5) {
+        return params.gap_color;
+    }
+    discard;
 }
