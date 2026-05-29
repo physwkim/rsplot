@@ -111,6 +111,146 @@ impl WgpuResources {
             curves: Vec::new(),
         }
     }
+
+    /// Render the data layer (background clear, image, curves) for the given
+    /// per-axis transforms into an offscreen `size = (w, h)` texture, read it
+    /// back, and return tightly packed RGBA8 pixels (top row first). Used by
+    /// [`crate::render::save::save_graph`] (`doc/design.md` §13 E1).
+    ///
+    /// `bg` is the linear, premultiplied clear color; the orthos/axis_log pairs
+    /// are the same matrices the on-screen [`CurveCallback`] uses for each Y
+    /// axis. Curves are drawn at whatever resolution they were last decimated
+    /// to (the current view); no re-decimation is performed here.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn render_to_rgba(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        target_format: wgpu::TextureFormat,
+        size: (u32, u32),
+        bg: [f32; 4],
+        ortho_left: [[f32; 4]; 4],
+        axis_log_left: [f32; 2],
+        ortho_right: [[f32; 4]; 4],
+        axis_log_right: [f32; 2],
+    ) -> Result<Vec<u8>, crate::render::save::SaveError> {
+        use crate::core::transform::YAxis;
+        use crate::render::save::{padded_bytes_per_row, rows_to_rgba8};
+
+        let (w, h) = size;
+        let extent = wgpu::Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: 1,
+        };
+        let target = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("egui-silx offscreen target"),
+            size: extent,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: target_format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = target.create_view(&wgpu::TextureViewDescriptor::default());
+
+        // Stamp the offscreen uniforms (line width uses the target pixel size).
+        let viewport_px = [w as f32, h as f32];
+        if let Some(image) = &self.image {
+            image.write_uniforms(queue, ortho_left, axis_log_left);
+        }
+        for curve in &self.curves {
+            let (ortho, axis_log) = match curve.y_axis {
+                YAxis::Left => (ortho_left, axis_log_left),
+                YAxis::Right => (ortho_right, axis_log_right),
+            };
+            curve.write_uniforms(queue, ortho, axis_log, viewport_px);
+        }
+
+        let mut encoder =
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        {
+            let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("egui-silx offscreen pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: bg[0] as f64,
+                            g: bg[1] as f64,
+                            b: bg[2] as f64,
+                            a: bg[3] as f64,
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            // The render pass viewport defaults to the full target. Lines first,
+            // then markers, mirroring the on-screen draw order.
+            if let Some(image) = &self.image {
+                image.draw(&mut rp, &self.image_pipeline);
+            }
+            for curve in &self.curves {
+                curve.draw(&mut rp, &self.curve_pipeline);
+            }
+            for curve in &self.curves {
+                curve.draw_markers(&mut rp, &self.curve_pipeline);
+            }
+        }
+
+        // Copy the target into a readback buffer with a padded row stride.
+        let bpr = padded_bytes_per_row(w);
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("egui-silx readback"),
+            size: (bpr as u64) * (h as u64),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &target,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(bpr),
+                    rows_per_image: Some(h),
+                },
+            },
+            extent,
+        );
+        queue.submit([encoder.finish()]);
+
+        // Map the buffer and block until the GPU is done.
+        let (tx, rx) = std::sync::mpsc::channel();
+        buffer.slice(..).map_async(wgpu::MapMode::Read, move |r| {
+            let _ = tx.send(r);
+        });
+        device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .map_err(|e| crate::render::save::SaveError::Readback(format!("poll: {e}")))?;
+        rx.recv()
+            .map_err(|e| crate::render::save::SaveError::Readback(format!("map channel: {e}")))?
+            .map_err(|e| crate::render::save::SaveError::Readback(format!("buffer map: {e}")))?;
+
+        let rgba = {
+            let mapped = buffer.slice(..).get_mapped_range();
+            rows_to_rgba8(&mapped, w, h, bpr, target_format)
+        };
+        buffer.unmap();
+        Ok(rgba)
+    }
 }
 
 /// Install [`WgpuResources`] into eframe's `RenderState` once. Call this at app

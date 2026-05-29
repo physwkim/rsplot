@@ -25,6 +25,7 @@ pub use crate::render::backend_wgpu::{
 };
 pub use crate::render::gpu_curve::{CurveData, Symbol};
 pub use crate::render::gpu_image::ImageData;
+pub use crate::render::save::{SaveError, encode_png, save_graph};
 pub use crate::widget::interaction::{PointPick, image_index, nearest_point};
 pub use crate::widget::plot_widget::{PlotResponse, PlotWidget};
 

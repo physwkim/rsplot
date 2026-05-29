@@ -8,3 +8,4 @@
 pub mod backend_wgpu;
 pub mod gpu_curve;
 pub mod gpu_image;
+pub mod save;

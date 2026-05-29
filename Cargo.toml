@@ -15,6 +15,9 @@ egui = "0.34"
 egui-wgpu = "0.34"
 bytemuck = { version = "1", features = ["derive"] }
 colorous = "1"
+# PNG encoding for save_graph (offscreen readback → file). Already in the tree
+# transitively via egui's image loading, so this pins no new major version.
+png = "0.18"
 
 # Only the example (an eframe app) needs a window + RenderState.
 [dev-dependencies]
@@ -71,3 +74,7 @@ path = "examples/decimation.rs"
 [[example]]
 name = "large_image"
 path = "examples/large_image.rs"
+
+[[example]]
+name = "save_graph"
+path = "examples/save_graph.rs"
