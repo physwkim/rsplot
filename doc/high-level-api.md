@@ -24,6 +24,10 @@ The high-level examples mirror common silx examples from `silx/examples/`:
 | `shiftPlotAction.py` | `cargo run --example high_level_shift_action` | custom action mutating the active curve in place |
 | `plotUpdateImageFromThread.py` and `plotUpdateImageFromGevent.py` | `cargo run --example high_level_live_image` | retained image handle updates without resetting zoom |
 | `plotLimits.py` | `cargo run --example high_level_plot_limits` | per-axis min/max span and position constraints, visibility toggle, z-order |
+| `plotProfile.py` (live) | `cargo run --example high_level_live_profile` | `ProfileMode` toolbar, `profile_at_cursor` extracts row/column slice from hover |
+| `compareImages.py` | `cargo run --example high_level_compare_images` | `CompareImages` widget: OnlyA / OnlyB / HalfHalf split slider / A−B subtract |
+| `imageview.py` | `cargo run --example high_level_image_view` | `ImageView` widget: central image + column-sum and row-sum side histograms |
+| `scatterview.py` | `cargo run --example high_level_scatter_view` | `ScatterView` widget: value-coloured scatter via per-point colormap |
 
 `syncPlotLocation.py` and `syncaxis.py` are partially ported. The low-level
 `sync_axes` example shows `SyncAxes` linking two `PlotView`-based plots; a
@@ -136,7 +140,7 @@ plot.add_image_with_geometry(
 )?;
 ```
 
-## Profiles and Masks
+## Profiles, Masks, and Live Profile Toolbar
 
 `Plot2D` profile helpers return row/column values from scalar image data. They
 validate the row-major image shape and index:
@@ -144,6 +148,21 @@ validate the row-major image shape and index:
 ```rust
 let row = plot.horizontal_profile(width, height, &pixels, row_index)?;
 let col = plot.vertical_profile(width, height, &pixels, column_index)?;
+```
+
+`PlotWidget::show_profile_toolbar` (accessible from any `Plot2D` via `DerefMut`)
+shows compact None / Horizontal / Vertical toggle buttons. `Plot2D::profile_at_cursor`
+extracts the row or column under the cursor each frame:
+
+```rust
+let (_, mode) = plot.show_toolbar_with(ui, |ui, plot| {
+    ui.separator();
+    plot.show_profile_toolbar(ui)
+});
+let response = plot.show(ui);
+if let Some((x, y)) = plot.profile_at_cursor(&response, &pixels, width, height, mode) {
+    profile_plot.update_curve_data(handle, &CurveData::new(x, y, Color32::YELLOW));
+}
 ```
 
 Masks are rendered as transparent RGBA image overlays:
@@ -190,3 +209,49 @@ call when the extra controls do not need to change the data before the plot is
 drawn. The toolbar is intentionally egui-native rather than a Qt action system:
 icons are drawn by the widget, and tooltips provide the full action names. Its
 return value reports which controls changed during the frame.
+
+## Composite Widgets
+
+### CompareImages
+
+`CompareImages` displays two co-registered scalar images side by side with a
+split slider, mirroring silx `CompareImages.py`:
+
+```rust
+let mut cmp = CompareImages::new(render_state, 0);
+cmp.set_images(width, height, &data_a, &data_b, Colormap::viridis(0.0, 1.0))?;
+// frame loop
+cmp.show_toolbar(ui);  // A / B / ½ / A-B buttons + split slider
+cmp.show(ui);
+```
+
+`CompareMode` variants: `OnlyA`, `OnlyB`, `HalfHalf` (CPU split composite),
+`Subtract` (red = A>B, blue = B>A, grey = equal).
+
+### ImageView
+
+`ImageView` adds column-sum and row-sum histogram side panels to a central
+`Plot2D`, mirroring silx `ImageView.py`:
+
+```rust
+let mut view = ImageView::new(render_state, 0);  // uses plot ids 0, 1, 2
+view.set_image(width, height, &pixels, colormap)?;
+// frame loop
+view.show(ui, None, None);  // None → default 80 pt histogram panels
+```
+
+Axes are synchronised with `SyncAxes` so panning/zooming the image shifts the
+histogram views accordingly.
+
+### ScatterView
+
+`ScatterView` colours scatter markers by a per-point value array through a
+colormap, mirroring silx `ScatterView`:
+
+```rust
+let mut sv = ScatterView::new(render_state, 0);
+sv.set_data(&x, &y, &values, Colormap::viridis(vmin, vmax))?;
+// frame loop
+sv.show_toolbar(ui);
+sv.show(ui);
+```
