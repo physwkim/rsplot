@@ -1631,6 +1631,17 @@ impl PlotWidget {
         self.add_curve_spec(curve_spec_from_data(curve))
     }
 
+    /// Add a curve from [`CurveData`] and assign a legend label in one call.
+    pub fn add_curve_data_with_legend(
+        &mut self,
+        curve: &CurveData,
+        legend: impl Into<String>,
+    ) -> ItemHandle {
+        let handle = self.add_curve_data(curve);
+        self.set_item_legend(handle, legend);
+        handle
+    }
+
     /// Add a curve from the full backend spec.
     pub fn add_curve_spec(&mut self, spec: CurveSpec<'_>) -> ItemHandle {
         self.add_curve_spec_as_kind(spec, PlotItemKind::Curve)
@@ -1801,6 +1812,19 @@ impl PlotWidget {
     /// Add a direct RGBA image with unit scale and origin `(0, 0)`.
     pub fn add_rgba_image(&mut self, width: u32, height: u32, data: &[[u8; 4]]) -> ItemHandle {
         self.add_image_spec(ImageSpec::rgba(width, height, data))
+    }
+
+    /// Add a direct RGBA image and assign a legend label.
+    pub fn add_rgba_image_with_legend(
+        &mut self,
+        width: u32,
+        height: u32,
+        data: &[[u8; 4]],
+        legend: impl Into<String>,
+    ) -> ItemHandle {
+        let handle = self.add_rgba_image(width, height, data);
+        self.set_item_legend(handle, legend);
+        handle
     }
 
     /// Add a direct RGBA image, returning an error instead of panicking on length mismatch.
@@ -1983,6 +2007,17 @@ impl PlotWidget {
         self.add_triangles(triangle_spec_from_data(triangles))
     }
 
+    /// Add a triangle mesh from [`Triangles`] and assign a legend label.
+    pub fn add_triangles_data_with_legend(
+        &mut self,
+        triangles: &Triangles,
+        legend: impl Into<String>,
+    ) -> ItemHandle {
+        let handle = self.add_triangles_data(triangles);
+        self.set_item_legend(handle, legend);
+        handle
+    }
+
     /// Add a shape overlay.
     pub fn add_shape(&mut self, spec: ShapeSpec<'_>) -> ItemHandle {
         let bounds = xy_bounds(spec.x, spec.y, YAxis::Left);
@@ -1995,6 +2030,17 @@ impl PlotWidget {
     /// Add a shape overlay from an existing [`Shape`] value.
     pub fn add_shape_data(&mut self, shape: &Shape) -> ItemHandle {
         self.add_shape(shape_spec_from_data(shape))
+    }
+
+    /// Add a shape overlay from [`Shape`] and assign a legend label.
+    pub fn add_shape_data_with_legend(
+        &mut self,
+        shape: &Shape,
+        legend: impl Into<String>,
+    ) -> ItemHandle {
+        let handle = self.add_shape_data(shape);
+        self.set_item_legend(handle, legend);
+        handle
     }
 
     /// Add a rectangle shape.
@@ -2039,6 +2085,17 @@ impl PlotWidget {
     /// Add a marker from an existing [`Marker`] value.
     pub fn add_marker_data(&mut self, marker: &Marker) -> ItemHandle {
         self.add_marker(marker_spec_from_data(marker))
+    }
+
+    /// Add a marker from [`Marker`] and assign a legend label.
+    pub fn add_marker_data_with_legend(
+        &mut self,
+        marker: &Marker,
+        legend: impl Into<String>,
+    ) -> ItemHandle {
+        let handle = self.add_marker_data(marker);
+        self.set_item_legend(handle, legend);
+        handle
     }
 
     /// Add a point marker.
@@ -2764,27 +2821,34 @@ impl PlotWidget {
         self.reset_zoom_to_data();
     }
 
+    /// Return the current X axis limits `(min, max)`.
     pub fn x_limits(&self) -> (f64, f64) {
         self.backend.x_limits()
     }
 
+    /// Return the current X axis limits `(min, max)` (alias for [`x_limits`](Self::x_limits)).
     pub fn get_graph_x_limits(&self) -> (f64, f64) {
         self.x_limits()
     }
 
+    /// Set the X axis display limits.
     pub fn set_graph_x_limits(&mut self, xmin: f64, xmax: f64) {
         let (_, _, ymin, ymax) = self.backend.plot().limits;
         self.set_limits_internal(xmin, xmax, ymin, ymax, self.backend.plot().y2);
     }
 
+    /// Return the current Y axis limits `(min, max)` for `axis`, or `None` if
+    /// the axis has not been given explicit limits.
     pub fn y_limits(&self, axis: YAxis) -> Option<(f64, f64)> {
         self.backend.y_limits(axis)
     }
 
+    /// Return Y axis limits (alias for [`y_limits`](Self::y_limits)).
     pub fn get_graph_y_limits(&self, axis: YAxis) -> Option<(f64, f64)> {
         self.y_limits(axis)
     }
 
+    /// Set the Y axis display limits.  Pass [`YAxis::Right`] for the secondary axis.
     pub fn set_graph_y_limits(&mut self, ymin: f64, ymax: f64, axis: YAxis) {
         match axis {
             YAxis::Left => {
@@ -2799,26 +2863,52 @@ impl PlotWidget {
         }
     }
 
+    /// Enable or disable a log10 X axis.  Limits must be strictly positive when on.
     pub fn set_x_log(&mut self, on: bool) {
         self.backend.set_x_log(on);
     }
 
+    /// Enable or disable a log10 X axis (alias for [`set_x_log`](Self::set_x_log)).
+    pub fn set_graph_x_log(&mut self, on: bool) {
+        self.set_x_log(on);
+    }
+
+    /// Return `true` if the X axis is logarithmic.
     pub fn is_x_logarithmic(&self) -> bool {
         self.backend.plot().x_scale == Scale::Log10
     }
 
+    /// Return `true` if the X axis is logarithmic (alias for [`is_x_logarithmic`](Self::is_x_logarithmic)).
+    pub fn is_graph_x_log(&self) -> bool {
+        self.is_x_logarithmic()
+    }
+
+    /// Enable or disable a log10 Y axis.  Limits must be strictly positive when on.
     pub fn set_y_log(&mut self, on: bool) {
         self.backend.set_y_log(on);
     }
 
+    /// Enable or disable a log10 Y axis (alias for [`set_y_log`](Self::set_y_log)).
+    pub fn set_graph_y_log(&mut self, on: bool) {
+        self.set_y_log(on);
+    }
+
+    /// Return `true` if the Y axis is logarithmic.
     pub fn is_y_logarithmic(&self) -> bool {
         self.backend.plot().y_scale == Scale::Log10
     }
 
+    /// Return `true` if the Y axis is logarithmic (alias for [`is_y_logarithmic`](Self::is_y_logarithmic)).
+    pub fn is_graph_y_log(&self) -> bool {
+        self.is_y_logarithmic()
+    }
+
+    /// Invert the X axis direction (right-to-left).
     pub fn set_x_inverted(&mut self, on: bool) {
         self.backend.set_x_inverted(on);
     }
 
+    /// Return `true` if the X axis is inverted.
     pub fn is_x_inverted(&self) -> bool {
         self.backend.plot().x_inverted
     }
