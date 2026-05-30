@@ -71,49 +71,11 @@ impl Plot1dApp {
 
 impl eframe::App for Plot1dApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        egui::Panel::left("plot1d_controls")
-            .resizable(false)
-            .default_size(190.0)
-            .show_inside(ui, |ui| {
-                if ui
-                    .add(
-                        egui::Slider::new(&mut self.phase, 0.0..=std::f64::consts::TAU)
-                            .text("phase"),
-                    )
-                    .changed()
-                {
-                    self.update_curve();
-                }
-
-                if ui.button("Activate scatter").clicked()
-                    && let Some(handle) = self.plot.scatter_by_legend("sample points")
-                {
-                    self.plot.set_active_item(Some(handle));
-                }
-
-                let scatter_present = self.plot.scatter_by_legend("sample points").is_some();
-                if scatter_present {
-                    if ui.button("Remove scatter").clicked()
-                        && let Some(handle) = self.plot.scatter_by_legend("sample points")
-                    {
-                        self.plot.remove_scatter(handle);
-                    }
-                } else if ui.button("Re-add scatter").clicked() {
-                    let (sx, sy) = scatter_values();
-                    self.plot.add_scatter_with_legend(
-                        &sx,
-                        &sy,
-                        egui::Color32::LIGHT_BLUE,
-                        "sample points",
-                    );
-                }
-            });
-
         egui::Panel::right("plot1d_inspector")
             .resizable(true)
             .default_size(230.0)
             .show_inside(ui, |ui| {
-                ui.heading("Legend");
+                ui.heading("Legends");
                 self.plot.show_legend(ui);
                 ui.separator();
                 ui.heading("Active stats");
@@ -127,7 +89,52 @@ impl eframe::App for Plot1dApp {
             });
 
         egui::CentralPanel::default().show_inside(ui, |ui| {
-            self.plot.show_toolbar(ui);
+            let scatter_present = self.plot.scatter_by_legend("sample points").is_some();
+            let mut phase = self.phase;
+            let mut phase_changed = false;
+            let (_, (activate_scatter, toggle_scatter)) =
+                self.plot.show_toolbar_with(ui, |ui, _plot| {
+                    phase_changed = ui
+                        .add(
+                            egui::Slider::new(&mut phase, 0.0..=std::f64::consts::TAU)
+                                .text("phase")
+                                .max_decimals(2),
+                        )
+                        .changed();
+                    let activate_scatter = ui.button("Activate scatter").clicked();
+                    let label = if scatter_present {
+                        "Remove scatter"
+                    } else {
+                        "Re-add scatter"
+                    };
+                    let toggle_scatter = ui.button(label).clicked();
+                    (activate_scatter, toggle_scatter)
+                });
+
+            if phase_changed {
+                self.phase = phase;
+                self.update_curve();
+            }
+
+            if activate_scatter && let Some(handle) = self.plot.scatter_by_legend("sample points") {
+                self.plot.set_active_item(Some(handle));
+            }
+
+            if toggle_scatter {
+                if scatter_present {
+                    if let Some(handle) = self.plot.scatter_by_legend("sample points") {
+                        self.plot.remove_scatter(handle);
+                    }
+                } else {
+                    let (sx, sy) = scatter_values();
+                    self.plot.add_scatter_with_legend(
+                        &sx,
+                        &sy,
+                        egui::Color32::LIGHT_BLUE,
+                        "sample points",
+                    );
+                }
+            }
             self.plot.show(ui);
         });
     }

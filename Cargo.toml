@@ -48,6 +48,38 @@ name = "high_level_plot2d"
 path = "examples/high_level_plot2d.rs"
 
 [[example]]
+name = "high_level_clear_action"
+path = "examples/high_level_clear_action.rs"
+
+[[example]]
+name = "high_level_live_update"
+path = "examples/high_level_live_update.rs"
+
+[[example]]
+name = "high_level_roi_stats"
+path = "examples/high_level_roi_stats.rs"
+
+[[example]]
+name = "high_level_items_selector"
+path = "examples/high_level_items_selector.rs"
+
+[[example]]
+name = "high_level_context_menu"
+path = "examples/high_level_context_menu.rs"
+
+[[example]]
+name = "high_level_shift_action"
+path = "examples/high_level_shift_action.rs"
+
+[[example]]
+name = "high_level_live_image"
+path = "examples/high_level_live_image.rs"
+
+[[example]]
+name = "high_level_legend"
+path = "examples/high_level_legend.rs"
+
+[[example]]
 name = "live_update"
 path = "examples/live_update.rs"
 

@@ -7,8 +7,10 @@
 //! from the (possibly just-updated) limits, so they stay aligned while panning
 //! and zooming (`doc/design.md` §4·§8·§11.6).
 //!
-//! Mouse mapping (silx default): left-drag = box zoom, right-drag = pan,
-//! wheel = cursor-anchored zoom, double-click = reset.
+//! Mouse mapping follows the active interaction mode: select mode uses primary
+//! drag for ROI handles, zoom mode uses primary drag for box zoom, pan mode uses
+//! primary drag for panning. Secondary drag pans in every mode; wheel zoom and
+//! double-click reset remain available.
 
 use egui::{Color32, PointerButton, Pos2, Rect, Sense, Stroke, Ui};
 
@@ -36,6 +38,20 @@ struct Interaction {
 use crate::render::backend_wgpu::{ClearCallback, CurveCallback, ImageCallback};
 use crate::widget::{chrome, interaction};
 
+/// Primary pointer behavior used by [`PlotView`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PlotInteractionMode {
+    /// Primary clicks select items in high-level widgets; primary drags adjust
+    /// ROI handles without starting a box zoom.
+    Select,
+    /// Primary drag pans the plot.
+    Pan,
+    /// Primary drag draws a box zoom. This preserves the original low-level
+    /// [`PlotView::show`] behavior.
+    #[default]
+    Zoom,
+}
+
 /// What [`PlotView::show`] returns: the egui [`Response`](egui::Response) plus
 /// the display [`Transform`] used this frame. The transform lets callers map
 /// pointer pixels to data coordinates and run picking
@@ -60,9 +76,20 @@ impl PlotView {
         Self
     }
 
-    /// Render the plot, filling the available space, and handle interaction.
-    /// Returns the egui response and the display transform used this frame.
+    /// Render the plot with the default zoom interaction mode, filling the
+    /// available space. Returns the egui response and the display transform used
+    /// this frame.
     pub fn show(self, ui: &mut Ui, plot: &mut Plot) -> PlotResponse {
+        self.show_with_interaction(ui, plot, PlotInteractionMode::Zoom)
+    }
+
+    /// Render the plot with an explicit primary-pointer interaction mode.
+    pub fn show_with_interaction(
+        self,
+        ui: &mut Ui,
+        plot: &mut Plot,
+        interaction_mode: PlotInteractionMode,
+    ) -> PlotResponse {
         let (rect, response) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
 
         // Capture the initial view once, for double-click reset.
@@ -90,7 +117,7 @@ impl PlotView {
         let Interaction {
             selection,
             roi_changed,
-        } = apply_interaction(ui, &response, plot, area, &view);
+        } = apply_interaction(ui, &response, plot, area, &view, interaction_mode);
 
         // Final transforms for this frame (after any interaction). The left
         // (main) transform drives the image, the left axes, and left-bound
@@ -247,6 +274,7 @@ fn apply_interaction(
     plot: &mut Plot,
     area: Rect,
     view: &crate::core::transform::Transform,
+    mode: PlotInteractionMode,
 ) -> Interaction {
     // Interaction operates on the displayed view's limits (which fold in any
     // aspect-ratio expansion), so pan/zoom act on exactly what is on screen.
@@ -259,9 +287,11 @@ fn apply_interaction(
         plot.limits = home;
     }
 
-    // Pan: right-drag translates the limits by the per-frame drag delta.
-    if response.dragged_by(PointerButton::Secondary) {
-        let delta = response.drag_delta();
+    // Pan: secondary-drag always pans; pan mode also binds primary-drag to pan.
+    let primary_pan =
+        mode == PlotInteractionMode::Pan && response.dragged_by(PointerButton::Primary);
+    if response.dragged_by(PointerButton::Secondary) || primary_pan {
+        let delta = ui.input(|i| i.pointer.delta());
         if delta != egui::Vec2::ZERO {
             let next = interaction::pan(base, area, delta);
             commit(plot, next);
@@ -281,14 +311,14 @@ fn apply_interaction(
         commit(plot, next);
     }
 
-    // Left-drag start: prefer grabbing an ROI edge under the cursor; only if no
-    // edge is grabbed does the same press begin a box-zoom selection. Both drag
-    // states live in egui temp memory across frames (the ROI drag under a
-    // distinct id from the box-zoom start pos).
+    // Left-drag start: select/zoom modes prefer grabbing an ROI edge under the
+    // cursor. Zoom mode falls back to a box-zoom selection; select mode does
+    // not, so item/handle interactions are not preempted by zoom.
     let id = response.id;
     let roi_id = id.with("roi-drag");
     let mut roi_changed = None;
-    if response.drag_started_by(PointerButton::Primary)
+    if mode != PlotInteractionMode::Pan
+        && response.drag_started_by(PointerButton::Primary)
         && let Some(p) = response.interact_pointer_pos()
     {
         // Topmost ROI wins (last in the list is drawn last, so hit-tested first).
@@ -300,9 +330,10 @@ fn apply_interaction(
             Some(rd) => ui.data_mut(|d| {
                 d.insert_temp(roi_id, rd);
             }),
-            None => ui.data_mut(|d| {
+            None if mode == PlotInteractionMode::Zoom => ui.data_mut(|d| {
                 d.insert_temp(id, p);
             }),
+            None => {}
         }
     }
 
@@ -321,13 +352,13 @@ fn apply_interaction(
         }
     } else {
         // Box zoom: left-drag selects a rectangle; release zooms to it.
-        if response.dragged_by(PointerButton::Primary) {
+        if mode == PlotInteractionMode::Zoom && response.dragged_by(PointerButton::Primary) {
             let start = ui.data_mut(|d| d.get_temp::<Pos2>(id));
             if let (Some(start), Some(cur)) = (start, response.interact_pointer_pos()) {
                 selection = Some(Rect::from_two_pos(start, cur));
             }
         }
-        if response.drag_stopped_by(PointerButton::Primary) {
+        if mode == PlotInteractionMode::Zoom && response.drag_stopped_by(PointerButton::Primary) {
             let start = ui.data_mut(|d| {
                 let s = d.get_temp::<Pos2>(id);
                 d.remove::<Pos2>(id);

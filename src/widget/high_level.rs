@@ -29,7 +29,7 @@ use crate::render::backend_wgpu::WgpuBackend;
 use crate::render::gpu_curve::CurveData;
 use crate::render::gpu_image::{ImageData, ImagePixels};
 use crate::render::save::SaveError;
-use crate::widget::plot_widget::{PlotResponse, PlotView};
+use crate::widget::plot_widget::{PlotInteractionMode, PlotResponse, PlotView};
 
 /// Data validation failures returned by helper APIs that build derived items.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -247,6 +247,7 @@ pub struct LegendResponse {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ToolbarResponse {
     pub reset_zoom: bool,
+    pub interaction_mode_changed: bool,
     pub cursor_changed: bool,
     pub grid_changed: bool,
     pub minor_grid_changed: bool,
@@ -263,6 +264,38 @@ pub struct PlotWithToolbarResponse {
     pub plot: PlotResponse,
 }
 
+/// Silx-style name for a standalone high-level plot surface.
+///
+/// In egui the native application owns the actual OS window, so `PlotWindow`
+/// is an API alias for [`PlotWidget`] with the same retained item and toolbar
+/// behavior.
+pub type PlotWindow = PlotWidget;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ToolbarIcon {
+    Home,
+    Select,
+    Pan,
+    Zoom,
+    Cursor,
+    Grid,
+    MinorGrid,
+    Aspect,
+    LogX,
+    LogY,
+    InvertX,
+    InvertY,
+}
+
+impl ToolbarIcon {
+    fn size(self) -> egui::Vec2 {
+        match self {
+            Self::LogX | Self::LogY => egui::vec2(34.0, 24.0),
+            _ => egui::vec2(28.0, 24.0),
+        }
+    }
+}
+
 fn expected_image_len(width: u32, height: u32) -> usize {
     (width as usize).saturating_mul(height as usize)
 }
@@ -274,6 +307,321 @@ fn validate_image_len(width: u32, height: u32, actual: usize) -> Result<usize, P
     } else {
         Err(PlotDataError::ImageDataLength { expected, actual })
     }
+}
+
+fn toolbar_icon_button(
+    ui: &mut egui::Ui,
+    icon: ToolbarIcon,
+    selected: bool,
+    tooltip: &str,
+) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(icon.size(), egui::Sense::click());
+    let response = response.on_hover_text(tooltip);
+    if ui.is_rect_visible(rect) {
+        draw_toolbar_button(ui, rect, &response, selected, icon);
+    }
+    response
+}
+
+fn draw_toolbar_button(
+    ui: &egui::Ui,
+    rect: egui::Rect,
+    response: &egui::Response,
+    selected: bool,
+    icon: ToolbarIcon,
+) {
+    let visuals = ui.style().interact_selectable(response, selected);
+    let painter = ui.painter();
+    let button_rect = rect.shrink(1.0);
+    if selected || response.hovered() || response.has_focus() {
+        painter.rect_filled(button_rect, 2.0, visuals.weak_bg_fill);
+        painter.rect_stroke(
+            button_rect,
+            2.0,
+            visuals.bg_stroke,
+            egui::StrokeKind::Inside,
+        );
+    }
+
+    let color = if !ui.is_enabled() {
+        ui.visuals().weak_text_color()
+    } else if selected {
+        ui.visuals().selection.stroke.color
+    } else {
+        visuals.fg_stroke.color
+    };
+    draw_toolbar_icon(painter, rect.shrink(5.0), icon, color);
+}
+
+fn draw_toolbar_icon(painter: &egui::Painter, rect: egui::Rect, icon: ToolbarIcon, color: Color32) {
+    let stroke = egui::Stroke::new(1.6, color);
+    match icon {
+        ToolbarIcon::Home => draw_home_icon(painter, rect, stroke),
+        ToolbarIcon::Select => draw_select_icon(painter, rect, stroke),
+        ToolbarIcon::Pan => draw_pan_icon(painter, rect, stroke),
+        ToolbarIcon::Zoom => draw_zoom_icon(painter, rect, stroke),
+        ToolbarIcon::Cursor => draw_cursor_icon(painter, rect, stroke),
+        ToolbarIcon::Grid => draw_grid_icon(painter, rect, stroke, 3),
+        ToolbarIcon::MinorGrid => draw_grid_icon(painter, rect, stroke, 4),
+        ToolbarIcon::Aspect => draw_center_text(painter, rect, "1:1", 11.0, color),
+        ToolbarIcon::LogX => draw_log_icon(painter, rect, "X", color),
+        ToolbarIcon::LogY => draw_log_icon(painter, rect, "Y", color),
+        ToolbarIcon::InvertX => draw_axis_icon(painter, rect, "X", false, stroke),
+        ToolbarIcon::InvertY => draw_axis_icon(painter, rect, "Y", true, stroke),
+    }
+}
+
+fn draw_home_icon(painter: &egui::Painter, rect: egui::Rect, stroke: egui::Stroke) {
+    let top = egui::pos2(rect.center().x, rect.top());
+    let left_roof = egui::pos2(rect.left(), rect.center().y - 1.0);
+    let right_roof = egui::pos2(rect.right(), rect.center().y - 1.0);
+    painter.line_segment([left_roof, top], stroke);
+    painter.line_segment([top, right_roof], stroke);
+    let house = egui::Rect::from_min_max(
+        egui::pos2(rect.left() + 3.0, rect.center().y - 1.0),
+        egui::pos2(rect.right() - 3.0, rect.bottom()),
+    );
+    painter.rect_stroke(house, 1.0, stroke, egui::StrokeKind::Inside);
+}
+
+fn draw_select_icon(painter: &egui::Painter, rect: egui::Rect, stroke: egui::Stroke) {
+    let points = vec![
+        egui::pos2(rect.left() + 2.0, rect.top() + 1.0),
+        egui::pos2(rect.left() + 2.0, rect.bottom() - 2.0),
+        egui::pos2(rect.left() + 7.0, rect.bottom() - 6.0),
+        egui::pos2(rect.left() + 10.0, rect.bottom() - 1.0),
+        egui::pos2(rect.left() + 13.0, rect.bottom() - 2.5),
+        egui::pos2(rect.left() + 10.0, rect.bottom() - 7.0),
+        egui::pos2(rect.right() - 2.0, rect.bottom() - 7.0),
+    ];
+    painter.add(egui::Shape::convex_polygon(
+        points,
+        Color32::TRANSPARENT,
+        stroke,
+    ));
+}
+
+fn draw_pan_icon(painter: &egui::Painter, rect: egui::Rect, stroke: egui::Stroke) {
+    let c = rect.center();
+    let arrow = 3.0;
+    painter.line_segment(
+        [egui::pos2(rect.left(), c.y), egui::pos2(rect.right(), c.y)],
+        stroke,
+    );
+    painter.line_segment(
+        [egui::pos2(c.x, rect.top()), egui::pos2(c.x, rect.bottom())],
+        stroke,
+    );
+    for (tip, a, b) in [
+        (
+            egui::pos2(rect.left(), c.y),
+            egui::pos2(rect.left() + arrow, c.y - arrow),
+            egui::pos2(rect.left() + arrow, c.y + arrow),
+        ),
+        (
+            egui::pos2(rect.right(), c.y),
+            egui::pos2(rect.right() - arrow, c.y - arrow),
+            egui::pos2(rect.right() - arrow, c.y + arrow),
+        ),
+        (
+            egui::pos2(c.x, rect.top()),
+            egui::pos2(c.x - arrow, rect.top() + arrow),
+            egui::pos2(c.x + arrow, rect.top() + arrow),
+        ),
+        (
+            egui::pos2(c.x, rect.bottom()),
+            egui::pos2(c.x - arrow, rect.bottom() - arrow),
+            egui::pos2(c.x + arrow, rect.bottom() - arrow),
+        ),
+    ] {
+        painter.line_segment([tip, a], stroke);
+        painter.line_segment([tip, b], stroke);
+    }
+}
+
+fn draw_zoom_icon(painter: &egui::Painter, rect: egui::Rect, stroke: egui::Stroke) {
+    let radius = rect.width().min(rect.height()) * 0.28;
+    let center = egui::pos2(rect.left() + radius + 2.0, rect.top() + radius + 2.0);
+    painter.circle_stroke(center, radius, stroke);
+    painter.line_segment(
+        [
+            center + egui::vec2(radius * 0.7, radius * 0.7),
+            egui::pos2(rect.right() - 2.0, rect.bottom() - 2.0),
+        ],
+        stroke,
+    );
+}
+
+fn draw_cursor_icon(painter: &egui::Painter, rect: egui::Rect, stroke: egui::Stroke) {
+    let center = rect.center();
+    painter.line_segment(
+        [
+            egui::pos2(rect.left(), center.y),
+            egui::pos2(rect.right(), center.y),
+        ],
+        stroke,
+    );
+    painter.line_segment(
+        [
+            egui::pos2(center.x, rect.top()),
+            egui::pos2(center.x, rect.bottom()),
+        ],
+        stroke,
+    );
+    painter.circle_stroke(center, rect.width().min(rect.height()) * 0.28, stroke);
+}
+
+fn draw_grid_icon(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    stroke: egui::Stroke,
+    divisions: usize,
+) {
+    painter.rect_stroke(rect, 0.0, stroke, egui::StrokeKind::Inside);
+    for index in 1..divisions {
+        let t = index as f32 / divisions as f32;
+        let x = egui::lerp(rect.left()..=rect.right(), t);
+        let y = egui::lerp(rect.top()..=rect.bottom(), t);
+        painter.line_segment(
+            [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
+            stroke,
+        );
+        painter.line_segment(
+            [egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)],
+            stroke,
+        );
+    }
+}
+
+fn draw_log_icon(painter: &egui::Painter, rect: egui::Rect, axis: &str, color: Color32) {
+    painter.text(
+        egui::pos2(rect.center().x, rect.top() + 3.0),
+        egui::Align2::CENTER_CENTER,
+        "Log",
+        egui::FontId::proportional(8.5),
+        color,
+    );
+    painter.text(
+        egui::pos2(rect.center().x, rect.bottom() - 4.0),
+        egui::Align2::CENTER_CENTER,
+        axis,
+        egui::FontId::proportional(11.0),
+        color,
+    );
+}
+
+fn draw_axis_icon(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    axis: &str,
+    vertical: bool,
+    stroke: egui::Stroke,
+) {
+    let center = rect.center();
+    let arrow = 3.0;
+    if vertical {
+        painter.line_segment(
+            [
+                egui::pos2(center.x, rect.top()),
+                egui::pos2(center.x, rect.bottom()),
+            ],
+            stroke,
+        );
+        painter.line_segment(
+            [
+                egui::pos2(center.x, rect.top()),
+                egui::pos2(center.x - arrow, rect.top() + arrow),
+            ],
+            stroke,
+        );
+        painter.line_segment(
+            [
+                egui::pos2(center.x, rect.top()),
+                egui::pos2(center.x + arrow, rect.top() + arrow),
+            ],
+            stroke,
+        );
+        painter.line_segment(
+            [
+                egui::pos2(center.x, rect.bottom()),
+                egui::pos2(center.x - arrow, rect.bottom() - arrow),
+            ],
+            stroke,
+        );
+        painter.line_segment(
+            [
+                egui::pos2(center.x, rect.bottom()),
+                egui::pos2(center.x + arrow, rect.bottom() - arrow),
+            ],
+            stroke,
+        );
+        painter.text(
+            egui::pos2(rect.right() - 2.0, center.y),
+            egui::Align2::RIGHT_CENTER,
+            axis,
+            egui::FontId::proportional(11.0),
+            stroke.color,
+        );
+    } else {
+        painter.line_segment(
+            [
+                egui::pos2(rect.left(), center.y),
+                egui::pos2(rect.right(), center.y),
+            ],
+            stroke,
+        );
+        painter.line_segment(
+            [
+                egui::pos2(rect.left(), center.y),
+                egui::pos2(rect.left() + arrow, center.y - arrow),
+            ],
+            stroke,
+        );
+        painter.line_segment(
+            [
+                egui::pos2(rect.left(), center.y),
+                egui::pos2(rect.left() + arrow, center.y + arrow),
+            ],
+            stroke,
+        );
+        painter.line_segment(
+            [
+                egui::pos2(rect.right(), center.y),
+                egui::pos2(rect.right() - arrow, center.y - arrow),
+            ],
+            stroke,
+        );
+        painter.line_segment(
+            [
+                egui::pos2(rect.right(), center.y),
+                egui::pos2(rect.right() - arrow, center.y + arrow),
+            ],
+            stroke,
+        );
+        painter.text(
+            egui::pos2(center.x, rect.top() + 1.0),
+            egui::Align2::CENTER_TOP,
+            axis,
+            egui::FontId::proportional(11.0),
+            stroke.color,
+        );
+    }
+}
+
+fn draw_center_text(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    text: &str,
+    size: f32,
+    color: Color32,
+) {
+    painter.text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        text,
+        egui::FontId::proportional(size),
+        color,
+    );
 }
 
 fn mask_rgba_pixels(mask: &[bool], color: Color32) -> Vec<[u8; 4]> {
@@ -504,6 +852,69 @@ fn image_spec_stats(spec: &ImageSpec<'_>) -> ItemStats {
     })
 }
 
+fn rgba_to_color32(rgba: [u8; 4]) -> Color32 {
+    Color32::from_rgba_unmultiplied(rgba[0], rgba[1], rgba[2], rgba[3])
+}
+
+fn fallback_legend_color(kind: PlotItemKind) -> Color32 {
+    match kind {
+        PlotItemKind::Curve => Color32::LIGHT_BLUE,
+        PlotItemKind::Histogram => Color32::LIGHT_GREEN,
+        PlotItemKind::Scatter => Color32::LIGHT_BLUE,
+        PlotItemKind::Image => Color32::GRAY,
+        PlotItemKind::Mask => Color32::from_rgba_unmultiplied(255, 80, 80, 160),
+        PlotItemKind::Triangles => Color32::LIGHT_BLUE,
+        PlotItemKind::Shape => Color32::WHITE,
+        PlotItemKind::Marker => Color32::YELLOW,
+    }
+}
+
+fn curve_spec_legend_visual(spec: &CurveSpec<'_>, kind: PlotItemKind) -> LegendVisual {
+    let color = match spec.color {
+        CurveColor::Uniform(color) => color,
+        CurveColor::PerVertex(colors) => colors
+            .first()
+            .copied()
+            .unwrap_or_else(|| fallback_legend_color(kind)),
+    };
+    LegendVisual::new(color)
+}
+
+fn image_spec_legend_visual(spec: &ImageSpec<'_>, kind: PlotItemKind) -> LegendVisual {
+    match &spec.pixels {
+        ImagePixelsSpec::Scalar { colormap, .. } => LegendVisual::with_secondary(
+            rgba_to_color32(colormap.lut[48]),
+            rgba_to_color32(colormap.lut[208]),
+        ),
+        ImagePixelsSpec::Rgba { data, .. } => {
+            let color = data
+                .iter()
+                .copied()
+                .find(|rgba| rgba[3] != 0)
+                .map(rgba_to_color32)
+                .unwrap_or_else(|| fallback_legend_color(kind));
+            LegendVisual::new(color)
+        }
+    }
+}
+
+fn triangle_spec_legend_visual(spec: &TriangleSpec<'_>) -> LegendVisual {
+    LegendVisual::new(
+        spec.colors
+            .first()
+            .copied()
+            .unwrap_or_else(|| fallback_legend_color(PlotItemKind::Triangles)),
+    )
+}
+
+fn shape_spec_legend_visual(spec: &ShapeSpec<'_>) -> LegendVisual {
+    LegendVisual::new(spec.color)
+}
+
+fn marker_spec_legend_visual(spec: &MarkerSpec<'_>) -> LegendVisual {
+    LegendVisual::new(spec.color)
+}
+
 fn xy_bounds(x: &[f64], y: &[f64], axis: YAxis) -> DataBounds {
     let mut bounds = DataBounds::default();
     if let (Some(x), Some(y)) = (finite_bounds(x), finite_bounds(y)) {
@@ -611,6 +1022,260 @@ struct ItemRecord {
     bounds: DataBounds,
     legend: Option<String>,
     stats: Option<ItemStats>,
+    visual: LegendVisual,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct LegendVisual {
+    color: Color32,
+    secondary: Option<Color32>,
+}
+
+const LEGEND_ROW_HEIGHT: f32 = 24.0;
+const LEGEND_SWATCH_WIDTH: f32 = 54.0;
+const LEGEND_CHECK_WIDTH: f32 = 22.0;
+const LEGEND_ROW_MIN_WIDTH: f32 = 1.0;
+
+impl LegendVisual {
+    fn new(color: Color32) -> Self {
+        Self {
+            color,
+            secondary: None,
+        }
+    }
+
+    fn with_secondary(color: Color32, secondary: Color32) -> Self {
+        Self {
+            color,
+            secondary: Some(secondary),
+        }
+    }
+}
+
+fn legend_row_width(available_width: f32) -> f32 {
+    available_width.max(LEGEND_ROW_MIN_WIDTH)
+}
+
+fn legend_row_response(
+    ui: &mut egui::Ui,
+    width: f32,
+    kind: PlotItemKind,
+    label: &str,
+    active: bool,
+    visual: LegendVisual,
+) -> egui::Response {
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(width, LEGEND_ROW_HEIGHT), egui::Sense::click());
+    if ui.is_rect_visible(rect) {
+        draw_legend_row(ui, rect, &response, kind, label, active, visual);
+    }
+    response
+}
+
+fn draw_legend_row(
+    ui: &egui::Ui,
+    rect: egui::Rect,
+    response: &egui::Response,
+    kind: PlotItemKind,
+    label: &str,
+    active: bool,
+    visual: LegendVisual,
+) {
+    let visuals = ui.visuals();
+    let row_rect = rect.shrink2(egui::vec2(1.0, 0.0));
+    let row_clip = row_rect.intersect(ui.clip_rect());
+    let painter = ui.painter().with_clip_rect(row_clip);
+
+    let fill = if active {
+        visuals.selection.bg_fill
+    } else if response.hovered() {
+        visuals.widgets.hovered.weak_bg_fill
+    } else {
+        Color32::TRANSPARENT
+    };
+    painter.rect_filled(row_rect, 0.0, fill);
+
+    let check_rect = egui::Rect::from_min_max(
+        egui::pos2(row_rect.right() - LEGEND_CHECK_WIDTH, row_rect.top()),
+        row_rect.right_bottom(),
+    );
+    let swatch_right = (row_rect.left() + 4.0 + LEGEND_SWATCH_WIDTH)
+        .min(check_rect.left() - 4.0)
+        .max(row_rect.left() + 4.0);
+    let swatch_rect = egui::Rect::from_min_max(
+        egui::pos2(row_rect.left() + 4.0, row_rect.top() + 4.0),
+        egui::pos2(swatch_right, row_rect.bottom() - 4.0),
+    );
+    if swatch_rect.width() >= 8.0 {
+        draw_legend_swatch(&painter, swatch_rect, kind, visual);
+    }
+
+    let text_color = if active {
+        visuals.selection.stroke.color
+    } else {
+        visuals.text_color()
+    };
+    let text_left = swatch_rect.right() + 6.0;
+    let text_right = check_rect.left() - 2.0;
+    if text_right > text_left {
+        let text_clip = egui::Rect::from_min_max(
+            egui::pos2(text_left, row_rect.top()),
+            egui::pos2(text_right, row_rect.bottom()),
+        )
+        .intersect(row_clip);
+        painter.with_clip_rect(text_clip).text(
+            egui::pos2(text_left, row_rect.center().y),
+            egui::Align2::LEFT_CENTER,
+            label,
+            egui::FontId::proportional(12.0),
+            text_color,
+        );
+    }
+
+    draw_legend_check(
+        &painter,
+        check_rect,
+        active,
+        visuals.widgets.inactive.fg_stroke.color,
+    );
+    painter.line_segment(
+        [
+            egui::pos2(row_rect.left(), row_rect.bottom()),
+            egui::pos2(row_rect.right(), row_rect.bottom()),
+        ],
+        egui::Stroke::new(1.0, visuals.widgets.noninteractive.bg_stroke.color),
+    );
+}
+
+fn draw_legend_swatch(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    kind: PlotItemKind,
+    visual: LegendVisual,
+) {
+    painter.rect_stroke(
+        rect,
+        0.0,
+        egui::Stroke::new(1.0, Color32::from_gray(110)),
+        egui::StrokeKind::Inside,
+    );
+    match kind {
+        PlotItemKind::Curve => {
+            painter.line_segment(
+                [
+                    egui::pos2(rect.left() + 4.0, rect.center().y),
+                    egui::pos2(rect.right() - 4.0, rect.center().y),
+                ],
+                egui::Stroke::new(2.0, visual.color),
+            );
+        }
+        PlotItemKind::Histogram => {
+            let fill = visual.color.linear_multiply(0.45);
+            let bar_width = rect.width() / 5.0;
+            for (index, height) in [0.35, 0.65, 0.9, 0.55].iter().copied().enumerate() {
+                let left = rect.left() + 4.0 + index as f32 * bar_width;
+                let right = left + bar_width * 0.7;
+                let top = rect.bottom() - 3.0 - rect.height() * height;
+                let bar = egui::Rect::from_min_max(
+                    egui::pos2(left, top),
+                    egui::pos2(right, rect.bottom() - 3.0),
+                );
+                painter.rect_filled(bar, 0.0, fill);
+                painter.rect_stroke(
+                    bar,
+                    0.0,
+                    egui::Stroke::new(1.0, visual.color),
+                    egui::StrokeKind::Inside,
+                );
+            }
+        }
+        PlotItemKind::Scatter => {
+            for t in [0.25, 0.5, 0.75] {
+                let center = egui::pos2(
+                    egui::lerp(rect.left() + 6.0..=rect.right() - 6.0, t),
+                    egui::lerp(rect.bottom() - 4.0..=rect.top() + 4.0, t),
+                );
+                painter.circle_filled(center, 3.0, visual.color);
+            }
+        }
+        PlotItemKind::Image | PlotItemKind::Mask => {
+            if let Some(secondary) = visual.secondary {
+                let split = rect.center().x;
+                painter.rect_filled(
+                    egui::Rect::from_min_max(rect.left_top(), egui::pos2(split, rect.bottom())),
+                    0.0,
+                    visual.color,
+                );
+                painter.rect_filled(
+                    egui::Rect::from_min_max(egui::pos2(split, rect.top()), rect.right_bottom()),
+                    0.0,
+                    secondary,
+                );
+            } else {
+                painter.rect_filled(rect.shrink(2.0), 0.0, visual.color);
+            }
+        }
+        PlotItemKind::Triangles => {
+            let points = vec![
+                egui::pos2(rect.left() + 7.0, rect.bottom() - 4.0),
+                egui::pos2(rect.center().x, rect.top() + 4.0),
+                egui::pos2(rect.right() - 7.0, rect.bottom() - 4.0),
+            ];
+            painter.add(egui::Shape::convex_polygon(
+                points,
+                visual.color.linear_multiply(0.45),
+                egui::Stroke::new(1.0, visual.color),
+            ));
+        }
+        PlotItemKind::Shape => {
+            let shape = rect.shrink2(egui::vec2(12.0, 3.0));
+            painter.rect_stroke(
+                shape,
+                0.0,
+                egui::Stroke::new(1.5, visual.color),
+                egui::StrokeKind::Inside,
+            );
+        }
+        PlotItemKind::Marker => {
+            let center = rect.center();
+            let stroke = egui::Stroke::new(1.8, visual.color);
+            painter.line_segment(
+                [
+                    egui::pos2(center.x - 7.0, center.y),
+                    egui::pos2(center.x + 7.0, center.y),
+                ],
+                stroke,
+            );
+            painter.line_segment(
+                [
+                    egui::pos2(center.x, center.y - 7.0),
+                    egui::pos2(center.x, center.y + 7.0),
+                ],
+                stroke,
+            );
+        }
+    }
+}
+
+fn draw_legend_check(painter: &egui::Painter, rect: egui::Rect, active: bool, color: Color32) {
+    if !active {
+        return;
+    }
+    let stroke = egui::Stroke::new(2.0, color);
+    painter.line_segment(
+        [
+            egui::pos2(rect.left() + 5.0, rect.center().y + 1.0),
+            egui::pos2(rect.center().x - 1.0, rect.bottom() - 6.0),
+        ],
+        stroke,
+    );
+    painter.line_segment(
+        [
+            egui::pos2(rect.center().x - 1.0, rect.bottom() - 6.0),
+            egui::pos2(rect.right() - 4.0, rect.top() + 5.0),
+        ],
+        stroke,
+    );
 }
 
 type LimitsSnapshot = ((f64, f64, f64, f64), Option<(f64, f64)>);
@@ -625,6 +1290,7 @@ pub struct PlotWidget {
     data_bounds: DataBounds,
     default_colormap: Colormap,
     auto_reset_zoom: bool,
+    interaction_mode: PlotInteractionMode,
     active_item: Option<ItemHandle>,
     events: Vec<PlotEvent>,
 }
@@ -643,17 +1309,23 @@ impl PlotWidget {
             data_bounds: DataBounds::default(),
             default_colormap: Colormap::viridis(0.0, 1.0),
             auto_reset_zoom: true,
+            interaction_mode: PlotInteractionMode::Zoom,
             active_item: None,
             events: Vec::new(),
         }
     }
 
-    /// Render the widget in `ui`, handling pan/zoom/ROI interaction.
+    /// Render the widget in `ui`, handling interaction and plot item selection.
     pub fn show(&mut self, ui: &mut egui::Ui) -> PlotResponse {
         let before = self.limits_snapshot();
-        let response = PlotView::new().show(ui, self.backend.plot_mut());
+        let response = PlotView::new().show_with_interaction(
+            ui,
+            self.backend.plot_mut(),
+            self.interaction_mode,
+        );
         self.backend
             .set_plot_bounds_in_pixels(response.transform.area);
+        self.select_item_from_plot_response(&response);
         self.push_limits_changed_if(before);
         if let Some(index) = response.roi_changed {
             self.events.push(PlotEvent::RoiChanged { index });
@@ -690,6 +1362,16 @@ impl PlotWidget {
         self.auto_reset_zoom
     }
 
+    /// Set the primary pointer interaction mode used by [`Self::show`].
+    pub fn set_interaction_mode(&mut self, mode: PlotInteractionMode) {
+        self.interaction_mode = mode;
+    }
+
+    /// Primary pointer interaction mode used by [`Self::show`].
+    pub fn interaction_mode(&self) -> PlotInteractionMode {
+        self.interaction_mode
+    }
+
     /// Queued plot events since the last drain.
     pub fn events(&self) -> &[PlotEvent] {
         &self.events
@@ -708,6 +1390,29 @@ impl PlotWidget {
         if before != self.limits_snapshot() {
             self.events.push(PlotEvent::LimitsChanged);
         }
+    }
+
+    fn select_item_from_plot_response(&mut self, response: &PlotResponse) {
+        if !response.response.clicked_by(egui::PointerButton::Primary) {
+            return;
+        }
+        let Some(pos) = response.response.interact_pointer_pos() else {
+            return;
+        };
+        if !response.transform.area.contains(pos) {
+            return;
+        }
+        if let Some(handle) = self.pick_topmost_item(pos) {
+            self.set_active_item(Some(handle));
+        }
+    }
+
+    fn pick_topmost_item(&self, pos: egui::Pos2) -> Option<ItemHandle> {
+        self.backend
+            .items_back_to_front()
+            .into_iter()
+            .rev()
+            .find(|&handle| self.backend.pick_item(pos, handle).is_some())
     }
 
     fn set_limits_internal(
@@ -729,6 +1434,7 @@ impl PlotWidget {
         kind: PlotItemKind,
         bounds: DataBounds,
         stats: Option<ItemStats>,
+        visual: LegendVisual,
     ) {
         self.item_records.push(ItemRecord {
             handle,
@@ -736,6 +1442,7 @@ impl PlotWidget {
             bounds,
             legend: None,
             stats,
+            visual,
         });
         self.events.push(PlotEvent::ItemAdded { handle, kind });
         if self.active_item.is_none() {
@@ -751,6 +1458,7 @@ impl PlotWidget {
         kind: PlotItemKind,
         bounds: DataBounds,
         stats: Option<ItemStats>,
+        visual: LegendVisual,
     ) {
         if let Some(record) = self
             .item_records
@@ -760,6 +1468,7 @@ impl PlotWidget {
             record.kind = kind;
             record.bounds = bounds;
             record.stats = stats;
+            record.visual = visual;
             self.events.push(PlotEvent::ItemUpdated { handle, kind });
         } else {
             self.item_records.push(ItemRecord {
@@ -768,6 +1477,7 @@ impl PlotWidget {
                 bounds,
                 legend: None,
                 stats,
+                visual,
             });
             self.events.push(PlotEvent::ItemAdded { handle, kind });
         }
@@ -863,8 +1573,9 @@ impl PlotWidget {
     fn add_curve_spec_as_kind(&mut self, spec: CurveSpec<'_>, kind: PlotItemKind) -> ItemHandle {
         let bounds = curve_spec_bounds(&spec);
         let stats = Some(curve_spec_stats(&spec));
+        let visual = curve_spec_legend_visual(&spec, kind);
         let handle = self.backend.add_curve(spec);
-        self.record_item(handle, kind, bounds, stats);
+        self.record_item(handle, kind, bounds, stats, visual);
         handle
     }
 
@@ -876,8 +1587,9 @@ impl PlotWidget {
             .item_kind(handle)
             .filter(|kind| kind.is_curve_like())
             .unwrap_or(PlotItemKind::Curve);
+        let visual = curve_spec_legend_visual(&spec, kind);
         if self.backend.update_curve(handle, spec) {
-            self.update_item_record(handle, kind, bounds, stats);
+            self.update_item_record(handle, kind, bounds, stats, visual);
             true
         } else {
             false
@@ -1065,8 +1777,9 @@ impl PlotWidget {
     fn add_image_spec_as_kind(&mut self, spec: ImageSpec<'_>, kind: PlotItemKind) -> ItemHandle {
         let bounds = image_spec_bounds(&spec);
         let stats = Some(image_spec_stats(&spec));
+        let visual = image_spec_legend_visual(&spec, kind);
         let handle = self.backend.add_image(spec);
-        self.record_item(handle, kind, bounds, stats);
+        self.record_item(handle, kind, bounds, stats, visual);
         handle
     }
 
@@ -1078,8 +1791,9 @@ impl PlotWidget {
             .item_kind(handle)
             .filter(|kind| kind.is_image_like())
             .unwrap_or(PlotItemKind::Image);
+        let visual = image_spec_legend_visual(&spec, kind);
         if self.backend.update_image(handle, spec) {
-            self.update_item_record(handle, kind, bounds, stats);
+            self.update_item_record(handle, kind, bounds, stats, visual);
             true
         } else {
             false
@@ -1192,8 +1906,9 @@ impl PlotWidget {
     /// Add a triangle mesh.
     pub fn add_triangles(&mut self, spec: TriangleSpec<'_>) -> ItemHandle {
         let bounds = xy_bounds(spec.x, spec.y, YAxis::Left);
+        let visual = triangle_spec_legend_visual(&spec);
         let handle = self.backend.add_triangles(spec);
-        self.record_item(handle, PlotItemKind::Triangles, bounds, None);
+        self.record_item(handle, PlotItemKind::Triangles, bounds, None, visual);
         handle
     }
 
@@ -1205,8 +1920,9 @@ impl PlotWidget {
     /// Add a shape overlay.
     pub fn add_shape(&mut self, spec: ShapeSpec<'_>) -> ItemHandle {
         let bounds = xy_bounds(spec.x, spec.y, YAxis::Left);
+        let visual = shape_spec_legend_visual(&spec);
         let handle = self.backend.add_shape(spec);
-        self.record_item(handle, PlotItemKind::Shape, bounds, None);
+        self.record_item(handle, PlotItemKind::Shape, bounds, None, visual);
         handle
     }
 
@@ -1242,8 +1958,15 @@ impl PlotWidget {
 
     /// Add a point or line marker.
     pub fn add_marker(&mut self, spec: MarkerSpec<'_>) -> ItemHandle {
+        let visual = marker_spec_legend_visual(&spec);
         let handle = self.backend.add_marker(spec);
-        self.record_item(handle, PlotItemKind::Marker, DataBounds::default(), None);
+        self.record_item(
+            handle,
+            PlotItemKind::Marker,
+            DataBounds::default(),
+            None,
+            visual,
+        );
         handle
     }
 
@@ -1637,7 +2360,7 @@ impl PlotWidget {
 
     /// Draw a selectable legend list. Clicking an entry makes it active.
     pub fn show_legend(&mut self, ui: &mut egui::Ui) -> LegendResponse {
-        let rows: Vec<(ItemHandle, PlotItemKind, String, bool)> = self
+        let rows: Vec<(ItemHandle, PlotItemKind, String, bool, LegendVisual)> = self
             .item_records
             .iter()
             .map(|record| {
@@ -1646,26 +2369,33 @@ impl PlotWidget {
                     record.kind,
                     self.legend_label(record),
                     self.active_item == Some(record.handle),
+                    record.visual,
                 )
             })
             .collect();
 
         let mut out = LegendResponse::default();
-        egui::Grid::new(ui.id().with(("egui_silx_legend", self.backend.plot().id))).show(
-            ui,
-            |ui| {
-                for (handle, kind, label, active) in rows {
-                    if ui.selectable_label(active, label).clicked() {
+        if rows.is_empty() {
+            ui.label("no items");
+            return out;
+        }
+
+        egui::Frame::new()
+            .inner_margin(1)
+            .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
+            .show(ui, |ui| {
+                ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
+                let width = legend_row_width(ui.available_width());
+                for (handle, kind, label, active, visual) in rows {
+                    let response = legend_row_response(ui, width, kind, &label, active, visual);
+                    if response.clicked() {
                         out.selected = Some(handle);
                         if self.set_active_item(Some(handle)) {
                             out.activated = Some(handle);
                         }
                     }
-                    ui.label(kind.as_str());
-                    ui.end_row();
                 }
-            },
-        );
+            });
         out
     }
 
@@ -1704,64 +2434,40 @@ impl PlotWidget {
     /// Draw an egui-native plot toolbar.
     pub fn show_toolbar(&mut self, ui: &mut egui::Ui) -> ToolbarResponse {
         let mut out = ToolbarResponse::default();
-        ui.horizontal(|ui| {
-            if ui.button("Home").clicked() {
-                self.reset_zoom();
-                out.reset_zoom = true;
-            }
-
-            let mut cursor = self.graph_cursor();
-            if ui.checkbox(&mut cursor, "Cursor").changed() {
-                self.set_graph_cursor(cursor);
-                out.cursor_changed = true;
-            }
-
-            let mut grid = self.graph_grid();
-            if ui.checkbox(&mut grid, "Grid").changed() {
-                self.set_graph_grid(grid);
-                out.grid_changed = true;
-            }
-
-            let mut minor = self.graph_minor_grid();
-            if ui
-                .add_enabled(grid, egui::Checkbox::new(&mut minor, "Minor"))
-                .changed()
-            {
-                self.set_graph_minor_grid(minor);
-                out.minor_grid_changed = true;
-            }
-
-            let mut aspect = self.is_keep_data_aspect_ratio();
-            if ui.checkbox(&mut aspect, "Aspect").changed() {
-                self.set_keep_data_aspect_ratio(aspect);
-                out.aspect_changed = true;
-            }
-
-            let mut x_log = self.is_x_logarithmic();
-            if ui.checkbox(&mut x_log, "X log").changed() {
-                self.set_x_log(x_log);
-                out.x_log_changed = true;
-            }
-
-            let mut y_log = self.is_y_logarithmic();
-            if ui.checkbox(&mut y_log, "Y log").changed() {
-                self.set_y_log(y_log);
-                out.y_log_changed = true;
-            }
-
-            let mut x_inv = self.is_x_inverted();
-            if ui.checkbox(&mut x_inv, "X inv").changed() {
-                self.set_x_inverted(x_inv);
-                out.x_inverted_changed = true;
-            }
-
-            let mut y_inv = self.is_y_inverted();
-            if ui.checkbox(&mut y_inv, "Y inv").changed() {
-                self.set_y_inverted(y_inv);
-                out.y_inverted_changed = true;
-            }
+        ui.scope(|ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            ui.horizontal(|ui| {
+                self.show_toolbar_controls(ui, &mut out);
+            });
         });
         out
+    }
+
+    /// Draw the standard toolbar and append caller-provided controls in the
+    /// same toolbar row.
+    ///
+    /// The closure receives this plot after the built-in controls have been
+    /// drawn, so custom actions can mutate plot state while still sharing the
+    /// standard toolbar layout.
+    pub fn show_toolbar_with<R>(
+        &mut self,
+        ui: &mut egui::Ui,
+        add_contents: impl FnOnce(&mut egui::Ui, &mut Self) -> R,
+    ) -> (ToolbarResponse, R) {
+        let mut out = ToolbarResponse::default();
+        let mut extra = None;
+        ui.scope(|ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            ui.horizontal(|ui| {
+                self.show_toolbar_controls(ui, &mut out);
+                ui.separator();
+                extra = Some(add_contents(ui, self));
+            });
+        });
+        (
+            out,
+            extra.expect("egui horizontal layout closure should run exactly once"),
+        )
     }
 
     /// Draw toolbar then plot in the remaining UI.
@@ -1769,6 +2475,132 @@ impl PlotWidget {
         let toolbar = self.show_toolbar(ui);
         let plot = self.show(ui);
         PlotWithToolbarResponse { toolbar, plot }
+    }
+
+    /// Draw the standard toolbar plus caller controls, then draw the plot.
+    pub fn show_with_toolbar_with<R>(
+        &mut self,
+        ui: &mut egui::Ui,
+        add_toolbar_contents: impl FnOnce(&mut egui::Ui, &mut Self) -> R,
+    ) -> (PlotWithToolbarResponse, R) {
+        let (toolbar, extra) = self.show_toolbar_with(ui, add_toolbar_contents);
+        let plot = self.show(ui);
+        (PlotWithToolbarResponse { toolbar, plot }, extra)
+    }
+
+    fn show_toolbar_controls(&mut self, ui: &mut egui::Ui, out: &mut ToolbarResponse) {
+        if toolbar_icon_button(ui, ToolbarIcon::Home, false, "Reset zoom").clicked() {
+            self.reset_zoom();
+            out.reset_zoom = true;
+        }
+
+        ui.separator();
+
+        let mode = self.interaction_mode();
+        if toolbar_icon_button(
+            ui,
+            ToolbarIcon::Select,
+            mode == PlotInteractionMode::Select,
+            "Select items and edit handles",
+        )
+        .clicked()
+        {
+            self.set_interaction_mode(PlotInteractionMode::Select);
+            out.interaction_mode_changed = true;
+        }
+        if toolbar_icon_button(
+            ui,
+            ToolbarIcon::Zoom,
+            mode == PlotInteractionMode::Zoom,
+            "Box zoom",
+        )
+        .clicked()
+        {
+            self.set_interaction_mode(PlotInteractionMode::Zoom);
+            out.interaction_mode_changed = true;
+        }
+        if toolbar_icon_button(
+            ui,
+            ToolbarIcon::Pan,
+            mode == PlotInteractionMode::Pan,
+            "Pan",
+        )
+        .clicked()
+        {
+            self.set_interaction_mode(PlotInteractionMode::Pan);
+            out.interaction_mode_changed = true;
+        }
+
+        ui.separator();
+
+        let mut x_inv = self.is_x_inverted();
+        if toolbar_icon_button(ui, ToolbarIcon::InvertX, x_inv, "Invert X axis").clicked() {
+            x_inv = !x_inv;
+            self.set_x_inverted(x_inv);
+            out.x_inverted_changed = true;
+        }
+
+        let mut y_inv = self.is_y_inverted();
+        if toolbar_icon_button(ui, ToolbarIcon::InvertY, y_inv, "Invert Y axis").clicked() {
+            y_inv = !y_inv;
+            self.set_y_inverted(y_inv);
+            out.y_inverted_changed = true;
+        }
+
+        ui.separator();
+
+        let mut x_log = self.is_x_logarithmic();
+        if toolbar_icon_button(ui, ToolbarIcon::LogX, x_log, "Toggle X log scale").clicked() {
+            x_log = !x_log;
+            self.set_x_log(x_log);
+            out.x_log_changed = true;
+        }
+
+        let mut y_log = self.is_y_logarithmic();
+        if toolbar_icon_button(ui, ToolbarIcon::LogY, y_log, "Toggle Y log scale").clicked() {
+            y_log = !y_log;
+            self.set_y_log(y_log);
+            out.y_log_changed = true;
+        }
+
+        ui.separator();
+
+        let mut grid = self.graph_grid();
+        if toolbar_icon_button(ui, ToolbarIcon::Grid, grid, "Toggle grid").clicked() {
+            grid = !grid;
+            self.set_graph_grid(grid);
+            out.grid_changed = true;
+        }
+
+        let mut minor = self.graph_minor_grid();
+        let minor_response = ui
+            .add_enabled_ui(grid, |ui| {
+                toolbar_icon_button(ui, ToolbarIcon::MinorGrid, minor, "Toggle minor grid")
+            })
+            .inner;
+        if minor_response.clicked() {
+            minor = !minor;
+            self.set_graph_minor_grid(minor);
+            out.minor_grid_changed = true;
+        }
+
+        ui.separator();
+
+        let mut aspect = self.is_keep_data_aspect_ratio();
+        if toolbar_icon_button(ui, ToolbarIcon::Aspect, aspect, "Keep data aspect ratio").clicked()
+        {
+            aspect = !aspect;
+            self.set_keep_data_aspect_ratio(aspect);
+            out.aspect_changed = true;
+        }
+
+        let mut cursor = self.graph_cursor();
+        if toolbar_icon_button(ui, ToolbarIcon::Cursor, cursor, "Show cursor coordinates").clicked()
+        {
+            cursor = !cursor;
+            self.set_graph_cursor(cursor);
+            out.cursor_changed = true;
+        }
     }
 
     /// Set graph limits.
@@ -2344,5 +3176,12 @@ mod tests {
         let pixels = mask_rgba_pixels(&[true, false, true], color);
         let rgba = color.to_srgba_unmultiplied();
         assert_eq!(pixels, vec![rgba, [0, 0, 0, 0], rgba]);
+    }
+
+    #[test]
+    fn legend_row_width_stays_within_parent_width() {
+        assert_eq!(legend_row_width(180.0), 180.0);
+        assert_eq!(legend_row_width(80.0), 80.0);
+        assert_eq!(legend_row_width(0.0), LEGEND_ROW_MIN_WIDTH);
     }
 }

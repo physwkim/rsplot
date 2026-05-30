@@ -128,28 +128,11 @@ impl HighLevelWidgetApp {
 
 impl eframe::App for HighLevelWidgetApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        egui::Panel::left("high_level_plot_widget_controls")
-            .resizable(false)
-            .default_size(170.0)
-            .show_inside(ui, |ui| {
-                if ui.button("Image").clicked() {
-                    self.show_image();
-                }
-                if ui.button("Scatter").clicked() {
-                    self.show_scatter();
-                }
-                if ui.button("Histogram").clicked() {
-                    self.show_histogram();
-                }
-                ui.separator();
-                ui.label(format!("Mode: {:?}", self.demo));
-            });
-
         egui::Panel::right("high_level_plot_widget_inspector")
             .resizable(true)
             .default_size(230.0)
             .show_inside(ui, |ui| {
-                ui.heading("Legend");
+                ui.heading("Legends");
                 self.plot.show_legend(ui);
                 ui.separator();
                 ui.heading("Active stats");
@@ -163,7 +146,35 @@ impl eframe::App for HighLevelWidgetApp {
             });
 
         egui::CentralPanel::default().show_inside(ui, |ui| {
-            self.plot.show_toolbar(ui);
+            let current_demo = self.demo;
+            let (_, requested_demo) = self.plot.show_toolbar_with(ui, |ui, _plot| {
+                let mut requested = None;
+                if ui
+                    .selectable_label(current_demo == DemoData::Image, "Image")
+                    .clicked()
+                {
+                    requested = Some(DemoData::Image);
+                }
+                if ui
+                    .selectable_label(current_demo == DemoData::Scatter, "Scatter")
+                    .clicked()
+                {
+                    requested = Some(DemoData::Scatter);
+                }
+                if ui
+                    .selectable_label(current_demo == DemoData::Histogram, "Histogram")
+                    .clicked()
+                {
+                    requested = Some(DemoData::Histogram);
+                }
+                requested
+            });
+            match requested_demo {
+                Some(DemoData::Image) => self.show_image(),
+                Some(DemoData::Scatter) => self.show_scatter(),
+                Some(DemoData::Histogram) => self.show_histogram(),
+                None => {}
+            }
             self.plot.show(ui);
         });
     }

@@ -6,9 +6,8 @@
 //! and the egui chrome) derives from those limits, the image, curve, and axes
 //! move together with no extra bookkeeping (`doc/design.md` §4·§8·§11.6).
 //!
-//! Mouse mapping (silx default): left-drag = box zoom, right-drag = pan,
-//! wheel = cursor-anchored zoom, double-click = reset. The mapping lives in the
-//! widget; this module is just the geometry, kept pure so it is unit-testable.
+//! Pointer-mode mapping lives in the widget; this module is just the geometry
+//! for pan/zoom/pick math, kept pure so it is unit-testable.
 
 use egui::{Pos2, Rect, Vec2};
 

@@ -15,13 +15,15 @@ use crate::core::backend::{
     Backend, CurveColor, CurveSpec, ImagePixelsSpec, ImageSpec, ItemHandle, MarkerSpec, PickResult,
     ShapeSpec, TriangleSpec,
 };
-use crate::core::marker::Marker;
+use crate::core::marker::{Marker, MarkerKind};
 use crate::core::plot::{Plot, PlotId};
 use crate::core::shape::{Shape, ShapeKind};
 use crate::core::transform::{Margins, Scale, Transform, YAxis};
 use crate::core::triangles::Triangles;
 use crate::render::gpu_curve::{CurveData, CurvePipeline, GpuCurve};
-use crate::render::gpu_image::{GpuImage, ImageData, ImagePipeline};
+use crate::render::gpu_image::{GpuImage, ImageData, ImagePipeline, ImagePixels};
+
+const OVERLAY_PICK_TOLERANCE_PX: f32 = 5.0;
 
 /// GPU resources that persist across frames. Stored as a single type in
 /// `egui_wgpu`'s `callback_resources` (a type map).
@@ -609,12 +611,23 @@ impl Backend for WgpuBackend {
             }
             BackendItem::Image { data, .. } => {
                 let transform = self.transform_for(YAxis::Left)?;
-                image_index(data, &transform, p)
+                pick_image_pixel(data, &transform, p)
                     .map(|(col, row)| PickResult::ImagePixel { col, row })
             }
-            BackendItem::Triangles { .. }
-            | BackendItem::Shape { .. }
-            | BackendItem::Marker { .. } => None,
+            BackendItem::Triangles { handle, data } => {
+                let transform = self.transform_for(YAxis::Left)?;
+                pick_triangles(data, &transform, p).then_some(PickResult::Item { handle: *handle })
+            }
+            BackendItem::Shape { handle, data } => {
+                let transform = self.transform_for(YAxis::Left)?;
+                pick_shape(data, &transform, p).then_some(PickResult::Item { handle: *handle })
+            }
+            BackendItem::Marker { handle, data } => {
+                let transform = self
+                    .transform_for(data.y_axis)
+                    .or_else(|| self.transform_for(YAxis::Left))?;
+                pick_marker(data, &transform, p).then_some(PickResult::Item { handle: *handle })
+            }
         }
     }
 
@@ -780,6 +793,149 @@ fn nearest_curve_point(
         y,
         distance_px,
     })
+}
+
+fn pick_image_pixel(data: &ImageData, transform: &Transform, cursor: Pos2) -> Option<(u32, u32)> {
+    let (col, row) = image_index(data, transform, cursor)?;
+    image_pixel_pickable(data, col, row).then_some((col, row))
+}
+
+fn image_pixel_pickable(data: &ImageData, col: u32, row: u32) -> bool {
+    if data.alpha <= 0.0 {
+        return false;
+    }
+    match &data.pixels {
+        ImagePixels::Scalar { .. } => true,
+        ImagePixels::Rgba { data: pixels } => {
+            let index = (row as usize)
+                .saturating_mul(data.width as usize)
+                .saturating_add(col as usize);
+            pixels.get(index).is_some_and(|pixel| pixel[3] > 0)
+        }
+    }
+}
+
+fn pick_triangles(data: &Triangles, transform: &Transform, cursor: Pos2) -> bool {
+    data.indices.iter().any(|tri| {
+        let [a, b, c] = *tri;
+        let a = a as usize;
+        let b = b as usize;
+        let c = c as usize;
+        let Some((&ax, &ay)) = data.x.get(a).zip(data.y.get(a)) else {
+            return false;
+        };
+        let Some((&bx, &by)) = data.x.get(b).zip(data.y.get(b)) else {
+            return false;
+        };
+        let Some((&cx, &cy)) = data.x.get(c).zip(data.y.get(c)) else {
+            return false;
+        };
+        point_in_triangle(
+            cursor,
+            transform.data_to_pixel(ax, ay),
+            transform.data_to_pixel(bx, by),
+            transform.data_to_pixel(cx, cy),
+        )
+    })
+}
+
+fn pick_shape(shape: &Shape, transform: &Transform, cursor: Pos2) -> bool {
+    let tolerance = OVERLAY_PICK_TOLERANCE_PX + shape.line_width.max(1.0) * 0.5;
+    match shape.kind {
+        ShapeKind::HLine => shape.y.iter().any(|&y| {
+            let py = transform.data_to_pixel(transform.x.min, y).y;
+            (cursor.y - py).abs() <= tolerance
+                && cursor.x >= transform.area.left() - tolerance
+                && cursor.x <= transform.area.right() + tolerance
+        }),
+        ShapeKind::VLine => shape.x.iter().any(|&x| {
+            let px = transform.data_to_pixel(x, transform.y.min).x;
+            (cursor.x - px).abs() <= tolerance
+                && cursor.y >= transform.area.top() - tolerance
+                && cursor.y <= transform.area.bottom() + tolerance
+        }),
+        ShapeKind::Rectangle | ShapeKind::Polygon | ShapeKind::Polyline => {
+            let points = shape.screen_points(transform);
+            if points.len() < 2 {
+                return false;
+            }
+            if shape.fill && shape.kind != ShapeKind::Polyline && point_in_polygon(cursor, &points)
+            {
+                return true;
+            }
+
+            let close_path = matches!(shape.kind, ShapeKind::Rectangle | ShapeKind::Polygon);
+            let open_hit = points
+                .windows(2)
+                .any(|segment| distance_to_segment(cursor, segment[0], segment[1]) <= tolerance);
+            let close_hit = close_path
+                && distance_to_segment(cursor, points[points.len() - 1], points[0]) <= tolerance;
+            open_hit || close_hit
+        }
+    }
+}
+
+fn pick_marker(marker: &Marker, transform: &Transform, cursor: Pos2) -> bool {
+    let tolerance = OVERLAY_PICK_TOLERANCE_PX + marker.line_width.max(1.0) * 0.5;
+    match marker.kind {
+        MarkerKind::Point { x, y, size, .. } => {
+            let radius = size.max(1.0) * 0.5 + OVERLAY_PICK_TOLERANCE_PX;
+            transform.data_to_pixel(x, y).distance(cursor) <= radius
+        }
+        MarkerKind::VLine { x } => {
+            let px = transform.data_to_pixel(x, transform.y.min).x;
+            (cursor.x - px).abs() <= tolerance
+                && cursor.y >= transform.area.top() - tolerance
+                && cursor.y <= transform.area.bottom() + tolerance
+        }
+        MarkerKind::HLine { y } => {
+            let py = transform.data_to_pixel(transform.x.min, y).y;
+            (cursor.y - py).abs() <= tolerance
+                && cursor.x >= transform.area.left() - tolerance
+                && cursor.x <= transform.area.right() + tolerance
+        }
+    }
+}
+
+fn point_in_triangle(p: Pos2, a: Pos2, b: Pos2, c: Pos2) -> bool {
+    let d1 = signed_area(p, a, b);
+    let d2 = signed_area(p, b, c);
+    let d3 = signed_area(p, c, a);
+    let has_neg = d1 < 0.0 || d2 < 0.0 || d3 < 0.0;
+    let has_pos = d1 > 0.0 || d2 > 0.0 || d3 > 0.0;
+    !(has_neg && has_pos)
+}
+
+fn point_in_polygon(point: Pos2, points: &[Pos2]) -> bool {
+    let mut inside = false;
+    let mut previous = points[points.len() - 1];
+    for &current in points {
+        let crosses = (current.y > point.y) != (previous.y > point.y);
+        if crosses {
+            let x = (previous.x - current.x) * (point.y - current.y) / (previous.y - current.y)
+                + current.x;
+            if point.x < x {
+                inside = !inside;
+            }
+        }
+        previous = current;
+    }
+    inside
+}
+
+fn signed_area(a: Pos2, b: Pos2, c: Pos2) -> f32 {
+    (a.x - c.x) * (b.y - c.y) - (b.x - c.x) * (a.y - c.y)
+}
+
+fn distance_to_segment(p: Pos2, a: Pos2, b: Pos2) -> f32 {
+    let ab = b - a;
+    let ab_len_sq = ab.length_sq();
+    if ab_len_sq <= f32::EPSILON {
+        return p.distance(a);
+    }
+    let ap = p - a;
+    let t = (ap.dot(ab) / ab_len_sq).clamp(0.0, 1.0);
+    p.distance(a + t * ab)
 }
 
 fn image_index(data: &ImageData, transform: &Transform, cursor: Pos2) -> Option<(u32, u32)> {
@@ -1233,5 +1389,64 @@ mod tests {
             Some((1, 1))
         );
         assert_eq!(image_index(&image, &transform, pos2(450.0, 150.0)), None);
+        assert_eq!(
+            pick_image_pixel(&image, &transform, pos2(150.0, 150.0)),
+            Some((1, 1))
+        );
+
+        let rgba = ImageData::rgba(
+            2,
+            1,
+            vec![
+                Color32::from_rgba_unmultiplied(255, 0, 0, 0).to_srgba_unmultiplied(),
+                Color32::from_rgba_unmultiplied(255, 0, 0, 128).to_srgba_unmultiplied(),
+            ],
+        );
+        let rgba_transform = Transform::new(
+            0.0,
+            2.0,
+            0.0,
+            1.0,
+            Rect::from_min_max(pos2(0.0, 0.0), pos2(200.0, 100.0)),
+        );
+        assert_eq!(
+            pick_image_pixel(&rgba, &rgba_transform, pos2(50.0, 50.0)),
+            None
+        );
+        assert_eq!(
+            pick_image_pixel(&rgba, &rgba_transform, pos2(150.0, 50.0)),
+            Some((1, 0))
+        );
+    }
+
+    #[test]
+    fn overlay_pick_helpers_cover_shapes_markers_and_triangles() {
+        let transform = Transform::new(
+            0.0,
+            10.0,
+            0.0,
+            10.0,
+            Rect::from_min_max(pos2(0.0, 0.0), pos2(100.0, 100.0)),
+        );
+
+        let shape = Shape::rectangle(2.0, 2.0, 4.0, 4.0).with_line_width(2.0);
+        assert!(pick_shape(&shape, &transform, pos2(20.0, 70.0)));
+        assert!(!pick_shape(&shape, &transform, pos2(80.0, 20.0)));
+
+        let filled_shape = Shape::rectangle(2.0, 2.0, 4.0, 4.0).with_fill(true);
+        assert!(pick_shape(&filled_shape, &transform, pos2(30.0, 70.0)));
+
+        let marker = Marker::point(5.0, 5.0).with_symbol_size(10.0);
+        assert!(pick_marker(&marker, &transform, pos2(51.0, 49.0)));
+        assert!(!pick_marker(&marker, &transform, pos2(80.0, 20.0)));
+
+        let tris = Triangles::new(
+            vec![1.0, 6.0, 1.0],
+            vec![1.0, 1.0, 6.0],
+            vec![[0, 1, 2]],
+            vec![Color32::RED, Color32::GREEN, Color32::BLUE],
+        );
+        assert!(pick_triangles(&tris, &transform, pos2(25.0, 75.0)));
+        assert!(!pick_triangles(&tris, &transform, pos2(90.0, 10.0)));
     }
 }

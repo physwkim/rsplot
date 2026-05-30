@@ -103,38 +103,36 @@ impl Plot2dApp {
 
 impl eframe::App for Plot2dApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        egui::Panel::left("plot2d_controls")
-            .resizable(false)
-            .default_size(210.0)
-            .show_inside(ui, |ui| {
-                ui.checkbox(&mut self.mask_visible, "Mask");
-                self.ensure_mask_state();
-                ui.add(egui::Slider::new(&mut self.row, 0..=HEIGHT - 1).text("row"));
-                ui.add(egui::Slider::new(&mut self.column, 0..=WIDTH - 1).text("column"));
-
-                let row = self.row_stats();
-                let col = self.column_stats();
-                ui.separator();
-                ui.label("Horizontal profile");
-                show_value_stats(ui, row);
-                ui.separator();
-                ui.label("Vertical profile");
-                show_value_stats(ui, col);
-            });
-
         egui::Panel::right("plot2d_inspector")
             .resizable(true)
             .default_size(230.0)
             .show_inside(ui, |ui| {
-                ui.heading("Legend");
+                ui.heading("Legends");
                 self.plot.show_legend(ui);
                 ui.separator();
                 ui.heading("Active stats");
                 self.plot.show_active_stats(ui);
+                ui.separator();
+                ui.heading("Horizontal profile");
+                show_value_stats(ui, self.row_stats());
+                ui.separator();
+                ui.heading("Vertical profile");
+                show_value_stats(ui, self.column_stats());
             });
 
         egui::CentralPanel::default().show_inside(ui, |ui| {
-            self.plot.show_toolbar(ui);
+            let mut mask_visible = self.mask_visible;
+            let mut row = self.row;
+            let mut column = self.column;
+            self.plot.show_toolbar_with(ui, |ui, _plot| {
+                ui.checkbox(&mut mask_visible, "Mask");
+                ui.add(egui::Slider::new(&mut row, 0..=HEIGHT - 1).text("row"));
+                ui.add(egui::Slider::new(&mut column, 0..=WIDTH - 1).text("column"));
+            });
+            self.mask_visible = mask_visible;
+            self.row = row;
+            self.column = column;
+            self.ensure_mask_state();
             self.plot.show(ui);
         });
     }
