@@ -3643,6 +3643,196 @@ fn colormap_to_rgba(_width: u32, data: &[f32], colormap: &Colormap) -> Vec<[u8; 
         .collect()
 }
 
+// ─── ImageView ────────────────────────────────────────────────────────────────
+
+/// A 2D image viewer with side aggregate-profile panels, mirroring silx
+/// `ImageView`.
+///
+/// Layout:
+/// ```text
+/// ┌──────────────────┬───────┐
+/// │  histo_h (top)   │       │
+/// ├──────────────────┤       │
+/// │   image_plot     │ histo_v│
+/// │   (centre)       │(right) │
+/// └──────────────────┴───────┘
+/// ```
+///
+/// The horizontal histogram (top) shows column sums; the vertical histogram
+/// (right) shows row sums.  Both use `SyncAxes` to track the image-plot limits.
+pub struct ImageView {
+    image_plot: Plot2D,
+    histo_h: Plot1D,
+    histo_v: Plot1D,
+    sync_x: crate::widget::sync::SyncAxes,
+    sync_y: crate::widget::sync::SyncAxes,
+    image_handle: Option<ItemHandle>,
+    histo_h_curve: Option<ItemHandle>,
+    histo_v_curve: Option<ItemHandle>,
+    width: u32,
+    height: u32,
+    pixels: Vec<f32>,
+}
+
+impl ImageView {
+    /// Create a new `ImageView`.
+    ///
+    /// Plots use ids `image_id`, `image_id + 1` (histo_h), and `image_id + 2`
+    /// (histo_v) — choose a base id that does not collide with other plots in
+    /// the same egui frame.
+    pub fn new(render_state: &RenderState, image_id: PlotId) -> Self {
+        let mut image_plot = Plot2D::new(render_state, image_id);
+        image_plot.set_graph_cursor(true);
+        image_plot.set_keep_data_aspect_ratio(true);
+
+        let mut histo_h = Plot1D::new(render_state, image_id + 1);
+        histo_h.set_graph_title("Column profile");
+        histo_h.set_graph_x_label("column");
+        histo_h.set_graph_y_label("sum", YAxis::Left);
+
+        let mut histo_v = Plot1D::new(render_state, image_id + 2);
+        histo_v.set_graph_title("Row profile");
+        histo_v.set_graph_x_label("sum");
+        histo_v.set_graph_y_label("row", YAxis::Left);
+
+        Self {
+            image_plot,
+            histo_h,
+            histo_v,
+            sync_x: crate::widget::sync::SyncAxes::new().with_sync_y(false),
+            sync_y: crate::widget::sync::SyncAxes::new().with_sync_x(false),
+            image_handle: None,
+            histo_h_curve: None,
+            histo_v_curve: None,
+            width: 0,
+            height: 0,
+            pixels: Vec::new(),
+        }
+    }
+
+    /// Upload and display a new image.
+    pub fn set_image(
+        &mut self,
+        width: u32,
+        height: u32,
+        pixels: &[f32],
+        colormap: Colormap,
+    ) -> Result<(), PlotDataError> {
+        let expected = (width as usize).saturating_mul(height as usize);
+        if pixels.len() != expected {
+            return Err(PlotDataError::ImageDataLength {
+                expected,
+                actual: pixels.len(),
+            });
+        }
+        self.width = width;
+        self.height = height;
+        self.pixels = pixels.to_vec();
+
+        if let Some(handle) = self.image_handle {
+            self.image_plot
+                .try_update_image(handle, width, height, pixels, colormap)
+                .ok();
+        } else {
+            let h = self
+                .image_plot
+                .try_add_default_image(width, height, pixels)?;
+            self.image_handle = Some(h);
+        }
+        self.rebuild_histograms();
+        Ok(())
+    }
+
+    /// Render the image + side histogram panels.
+    ///
+    /// Call this once per frame.  The top histogram occupies `histo_height`
+    /// points of vertical space; the right histogram occupies `histo_width`
+    /// points of horizontal space.  Pass `None` to use the defaults (80 pt).
+    pub fn show(&mut self, ui: &mut egui::Ui, histo_height: Option<f32>, histo_width: Option<f32>) {
+        let histo_h_h = histo_height.unwrap_or(80.0);
+        let histo_v_w = histo_width.unwrap_or(80.0);
+
+        // Synchronise axes before rendering.
+        self.sync_x
+            .sync(&mut [self.image_plot.plot_mut(), self.histo_h.plot_mut()]);
+        self.sync_y
+            .sync(&mut [self.image_plot.plot_mut(), self.histo_v.plot_mut()]);
+
+        let avail = ui.available_size();
+
+        // Top row: horizontal histogram.
+        ui.allocate_ui(egui::vec2(avail.x - histo_v_w, histo_h_h), |ui| {
+            self.histo_h.show(ui);
+        });
+
+        // Bottom row: image + vertical histogram side by side.
+        ui.horizontal(|ui| {
+            let img_w = avail.x - histo_v_w;
+            let img_h = avail.y - histo_h_h;
+            ui.allocate_ui(egui::vec2(img_w, img_h), |ui| {
+                self.image_plot.show(ui);
+            });
+            ui.allocate_ui(egui::vec2(histo_v_w, img_h), |ui| {
+                self.histo_v.show(ui);
+            });
+        });
+    }
+
+    /// Access the main image plot for toolbar/ROI/limit configuration.
+    pub fn image_plot(&self) -> &Plot2D {
+        &self.image_plot
+    }
+
+    /// Mutable access to the main image plot.
+    pub fn image_plot_mut(&mut self) -> &mut Plot2D {
+        &mut self.image_plot
+    }
+
+    fn rebuild_histograms(&mut self) {
+        if self.width == 0 || self.pixels.is_empty() {
+            return;
+        }
+        let w = self.width as usize;
+        let h = self.height as usize;
+        let pixels = &self.pixels;
+
+        // Column sums: histo_h — x = column index, y = sum of that column.
+        let col_sums: Vec<f64> = (0..w)
+            .map(|col| (0..h).map(|row| pixels[row * w + col] as f64).sum())
+            .collect();
+        let col_x: Vec<f64> = (0..w).map(|i| i as f64).collect();
+
+        // Row sums: histo_v — x = sum of that row, y = row index.
+        let row_sums: Vec<f64> = (0..h)
+            .map(|row| (0..w).map(|col| pixels[row * w + col] as f64).sum())
+            .collect();
+        let row_y: Vec<f64> = (0..h).map(|i| i as f64).collect();
+
+        if let Some(h) = self.histo_h_curve {
+            self.histo_h
+                .update_curve_data(h, &CurveData::new(col_x, col_sums, Color32::YELLOW));
+        } else {
+            let h =
+                self.histo_h
+                    .add_curve_with_legend(&col_x, &col_sums, Color32::YELLOW, "col sums");
+            self.histo_h_curve = Some(h);
+        }
+
+        if let Some(h) = self.histo_v_curve {
+            self.histo_v
+                .update_curve_data(h, &CurveData::new(row_sums, row_y, Color32::LIGHT_BLUE));
+        } else {
+            let h = self.histo_v.add_curve_with_legend(
+                &row_sums,
+                &row_y,
+                Color32::LIGHT_BLUE,
+                "row sums",
+            );
+            self.histo_v_curve = Some(h);
+        }
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Short human-readable description of a single ROI for the ROI manager table.

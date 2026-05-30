@@ -36,8 +36,8 @@ pub use crate::render::gpu_curve::CurveData;
 pub use crate::render::gpu_image::{ImageData, ImagePixels};
 pub use crate::render::save::{SaveError, encode_png, save_graph};
 pub use crate::widget::high_level::{
-    CompareImages, CompareMode, CurveStats, ImageGeometry, ImageStats, ItemStats, LegendResponse,
-    Plot1D, Plot2D, PlotDataError, PlotEvent, PlotItemKind, PlotWidget, PlotWindow,
+    CompareImages, CompareMode, CurveStats, ImageGeometry, ImageStats, ImageView, ItemStats,
+    LegendResponse, Plot1D, Plot2D, PlotDataError, PlotEvent, PlotItemKind, PlotWidget, PlotWindow,
     PlotWithToolbarResponse, ProfileMode, ToolbarResponse, ValueStats, histogram_step_values,
     horizontal_profile_values, vertical_profile_values,
 };
