@@ -43,6 +43,7 @@ pub use crate::widget::high_level::{
 };
 pub use crate::widget::interaction::{PointPick, image_index, nearest_point};
 pub use crate::widget::plot_widget::{PlotInteractionMode, PlotResponse, PlotView};
+pub use crate::widget::sync::SyncAxes;
 
 // Plotting-library convention: re-export so downstreams use the same
 // egui/egui-wgpu without version skew.

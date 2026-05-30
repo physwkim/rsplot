@@ -25,10 +25,9 @@ The high-level examples mirror common silx examples from `silx/examples/`:
 | `plotUpdateImageFromThread.py` and `plotUpdateImageFromGevent.py` | `cargo run --example high_level_live_image` | retained image handle updates without resetting zoom |
 | `plotLimits.py` | `cargo run --example high_level_plot_limits` | per-axis min/max span and position constraints, visibility toggle, z-order |
 
-`syncPlotLocation.py` is not ported yet. It needs multiple independent
-high-level plots visible in one window, while the current wgpu resource path is
-still documented as a single-item-set implementation; the backend notes call out
-future `HashMap<PlotId, _>` storage for multi-plot state.
+`syncPlotLocation.py` and `syncaxis.py` are partially ported. The low-level
+`sync_axes` example shows `SyncAxes` linking two `PlotView`-based plots; a
+high-level `PlotWidget` variant is not yet added.
 
 ## Choosing a Type
 
