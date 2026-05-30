@@ -3833,6 +3833,106 @@ impl ImageView {
     }
 }
 
+// ─── ScatterView ──────────────────────────────────────────────────────────────
+
+/// A scatter plot where marker colours are driven by a per-point value array
+/// mapped through a [`Colormap`], mirroring silx `ScatterView`.
+///
+/// ```ignore
+/// let mut sv = ScatterView::new(render_state, 0);
+/// sv.set_data(&x, &y, &values, Colormap::viridis(0.0, 10.0))?;
+/// // frame loop
+/// sv.show_toolbar(ui);
+/// sv.show(ui);
+/// ```
+pub struct ScatterView {
+    inner: PlotWidget,
+    scatter_handle: Option<ItemHandle>,
+}
+
+impl ScatterView {
+    /// Create a new scatter-view widget.
+    pub fn new(render_state: &RenderState, id: PlotId) -> Self {
+        let mut inner = PlotWidget::new(render_state, id);
+        inner.set_graph_cursor(true);
+        Self {
+            inner,
+            scatter_handle: None,
+        }
+    }
+
+    /// Upload data.  `values` drives point colours through `colormap`.
+    ///
+    /// All three slices must have equal length; returns [`PlotDataError`] otherwise.
+    pub fn set_data(
+        &mut self,
+        x: &[f64],
+        y: &[f64],
+        values: &[f64],
+        colormap: Colormap,
+    ) -> Result<(), PlotDataError> {
+        if x.len() != y.len() || x.len() != values.len() {
+            return Err(PlotDataError::ImageDataLength {
+                expected: x.len(),
+                actual: if y.len() != x.len() {
+                    y.len()
+                } else {
+                    values.len()
+                },
+            });
+        }
+
+        let colors: Vec<Color32> = values
+            .iter()
+            .map(|&v| {
+                let t = colormap.normalize(v);
+                let idx = (t * 255.0).clamp(0.0, 255.0) as usize;
+                let [r, g, b, a] = colormap.lut[idx];
+                Color32::from_rgba_unmultiplied(r, g, b, a)
+            })
+            .collect();
+
+        let mut spec = CurveSpec::new(x, y, Color32::WHITE);
+        spec.color = crate::core::backend::CurveColor::PerVertex(&colors);
+        spec.line_style = LineStyle::None;
+        spec.symbol = Some(crate::core::items::Symbol::Circle);
+        spec.symbol_size = 6.0;
+
+        if let Some(h) = self.scatter_handle {
+            self.inner.update_curve_spec(h, spec);
+        } else {
+            let h = self.inner.add_curve_spec(spec);
+            self.scatter_handle = Some(h);
+            self.inner.set_item_legend(h, "scatter");
+        }
+        Ok(())
+    }
+
+    /// Show the standard toolbar.
+    pub fn show_toolbar(&mut self, ui: &mut egui::Ui) -> ToolbarResponse {
+        self.inner.show_toolbar(ui)
+    }
+
+    /// Render the scatter plot.
+    pub fn show(&mut self, ui: &mut egui::Ui) -> PlotResponse {
+        self.inner.show(ui)
+    }
+}
+
+impl Deref for ScatterView {
+    type Target = PlotWidget;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl DerefMut for ScatterView {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.inner
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Short human-readable description of a single ROI for the ROI manager table.
