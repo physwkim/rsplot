@@ -3933,6 +3933,173 @@ impl DerefMut for ScatterView {
     }
 }
 
+// ─── StackView ────────────────────────────────────────────────────────────────
+
+/// A 3D image stack viewer with a frame-selection slider, mirroring silx
+/// `StackView`.
+///
+/// Stores all frames as flat `Vec<f32>` slices.  Only the selected frame is
+/// uploaded to the GPU each time it changes.
+///
+/// ```ignore
+/// let mut sv = StackView::new(render_state, 0);
+/// sv.set_stack(width, height, frames)?;  // frames: Vec<Vec<f32>>
+/// // frame loop
+/// sv.show_toolbar(ui);
+/// sv.show_frame_controls(ui);
+/// sv.show(ui);
+/// ```
+pub struct StackView {
+    inner: Plot2D,
+    width: u32,
+    height: u32,
+    frames: Vec<Vec<f32>>,
+    colormap: Colormap,
+    image_handle: Option<ItemHandle>,
+    current_frame: usize,
+    dirty: bool,
+}
+
+impl StackView {
+    /// Create a new `StackView`.
+    pub fn new(render_state: &RenderState, id: PlotId) -> Self {
+        let mut inner = Plot2D::new(render_state, id);
+        inner.set_keep_data_aspect_ratio(true);
+        inner.set_graph_cursor(true);
+        Self {
+            inner,
+            width: 0,
+            height: 0,
+            frames: Vec::new(),
+            colormap: Colormap::viridis(0.0, 1.0),
+            image_handle: None,
+            current_frame: 0,
+            dirty: false,
+        }
+    }
+
+    /// Load a stack of frames.  Each frame must have `width * height` elements.
+    pub fn set_stack(
+        &mut self,
+        width: u32,
+        height: u32,
+        frames: Vec<Vec<f32>>,
+        colormap: Colormap,
+    ) -> Result<(), PlotDataError> {
+        let expected = (width as usize).saturating_mul(height as usize);
+        for frame in &frames {
+            if frame.len() != expected {
+                return Err(PlotDataError::ImageDataLength {
+                    expected,
+                    actual: frame.len(),
+                });
+            }
+        }
+        self.width = width;
+        self.height = height;
+        self.frames = frames;
+        self.colormap = colormap;
+        self.current_frame = 0;
+        self.dirty = true;
+        Ok(())
+    }
+
+    /// Number of frames in the stack.
+    pub fn frame_count(&self) -> usize {
+        self.frames.len()
+    }
+
+    /// Index of the currently visible frame.
+    pub fn frame(&self) -> usize {
+        self.current_frame
+    }
+
+    /// Jump to frame `index` (clamped to valid range).
+    pub fn set_frame(&mut self, index: usize) {
+        let clamped = index.min(self.frames.len().saturating_sub(1));
+        if clamped != self.current_frame {
+            self.current_frame = clamped;
+            self.dirty = true;
+        }
+    }
+
+    /// Set the colormap applied to all frames.
+    pub fn set_colormap(&mut self, colormap: Colormap) {
+        self.colormap = colormap;
+        self.dirty = true;
+    }
+
+    /// Show a compact frame-navigation row: ← slider → with frame counter.
+    ///
+    /// Typically called before [`Self::show`].
+    pub fn show_frame_controls(&mut self, ui: &mut egui::Ui) {
+        if self.frames.is_empty() {
+            return;
+        }
+        let n = self.frames.len();
+        ui.horizontal(|ui| {
+            if ui.button("◀").on_hover_text("Previous frame").clicked() && self.current_frame > 0
+            {
+                self.current_frame -= 1;
+                self.dirty = true;
+            }
+            let mut idx = self.current_frame;
+            if ui
+                .add(egui::Slider::new(&mut idx, 0..=n.saturating_sub(1)).text("frame"))
+                .changed()
+            {
+                self.current_frame = idx;
+                self.dirty = true;
+            }
+            if ui.button("▶").on_hover_text("Next frame").clicked() && self.current_frame + 1 < n
+            {
+                self.current_frame += 1;
+                self.dirty = true;
+            }
+            ui.label(format!("{}/{}", self.current_frame + 1, n));
+        });
+    }
+
+    /// Render the currently selected frame.
+    pub fn show(&mut self, ui: &mut egui::Ui) -> PlotResponse {
+        if self.dirty && !self.frames.is_empty() {
+            let frame = &self.frames[self.current_frame];
+            if let Some(handle) = self.image_handle {
+                self.inner
+                    .try_update_image(
+                        handle,
+                        self.width,
+                        self.height,
+                        frame,
+                        self.colormap.clone(),
+                    )
+                    .ok();
+            } else if let Ok(h) =
+                self.inner
+                    .try_add_image(self.width, self.height, frame, self.colormap.clone())
+            {
+                self.image_handle = Some(h);
+            }
+            self.dirty = false;
+        }
+        self.inner.show(ui)
+    }
+}
+
+impl Deref for StackView {
+    type Target = Plot2D;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl DerefMut for StackView {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.inner
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Short human-readable description of a single ROI for the ROI manager table.
