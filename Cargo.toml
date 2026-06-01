@@ -166,3 +166,7 @@ path = "examples/triangles.rs"
 [[example]]
 name = "high_level_roi_profile"
 path = "examples/high_level_roi_profile.rs"
+
+[[example]]
+name = "high_level_fit_widget"
+path = "examples/high_level_fit_widget.rs"

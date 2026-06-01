@@ -6,6 +6,7 @@
 //! (`doc/design.md` §8).
 
 pub mod chrome;
+pub mod fit_widget;
 pub mod high_level;
 pub mod interaction;
 pub mod plot_widget;

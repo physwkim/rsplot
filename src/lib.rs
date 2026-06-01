@@ -35,6 +35,7 @@ pub use crate::render::backend_wgpu::{
 pub use crate::render::gpu_curve::CurveData;
 pub use crate::render::gpu_image::{ImageData, ImagePixels};
 pub use crate::render::save::{SaveError, encode_png, save_graph};
+pub use crate::widget::fit_widget::FitWidget;
 pub use crate::widget::high_level::{
     CompareImages, CompareMode, CurveStats, ImageGeometry, ImageStats, ImageView, ItemStats,
     LegendResponse, Plot1D, Plot2D, PlotDataError, PlotEvent, PlotItemKind, PlotWidget, PlotWindow,

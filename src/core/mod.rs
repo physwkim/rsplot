@@ -3,6 +3,7 @@
 pub mod backend;
 pub mod colormap;
 pub mod decimate;
+pub mod fitting;
 pub mod items;
 pub mod marker;
 pub mod plot;
