@@ -186,6 +186,141 @@ impl Shape {
     }
 }
 
+/// An infinite line `y = slope * x + intercept`, or a vertical line
+/// `x = intercept` when `slope` is non-finite (silx `Line`, `shape.py:289-393`).
+///
+/// silx warns: "If slope is not finite, then the line is x = intercept." The
+/// line is drawn as the segment of itself that crosses the visible data bounds;
+/// [`Line::clipped_segment`] computes that segment (its rendering wiring — the
+/// data-to-screen transform and the chrome draw — is deferred to the
+/// interaction/chrome layer).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Line {
+    /// Line slope (silx `slope`). Non-finite (`inf` / `NaN`) means a vertical
+    /// line `x = intercept`.
+    pub slope: f64,
+    /// Line intercept (silx `intercept`). For a sloped line it is the y-intercept;
+    /// for a vertical line it is the x position. silx asserts this is finite.
+    pub intercept: f64,
+    /// Line color (silx `color`).
+    pub color: Color32,
+    /// Outline stroke style (silx `linestyle`).
+    pub line_style: LineStyle,
+    /// Outline width in logical points (silx `linewidth`).
+    pub line_width: f32,
+    /// Second color filling dash gaps (silx `gapcolor`); `None` leaves them empty.
+    pub gap_color: Option<Color32>,
+    /// Whether the line draws in the overlay pass (silx `Line` is an
+    /// `_OverlayItem`; matches [`Shape::is_overlay`], defaulting to `true`).
+    pub is_overlay: bool,
+}
+
+impl Line {
+    /// An infinite line `y = slope * x + intercept`. A non-finite `slope` makes a
+    /// vertical line `x = intercept`. Panics if `intercept` is not finite, matching
+    /// silx's `assert numpy.isfinite(intercept)`.
+    pub fn new(slope: f64, intercept: f64) -> Self {
+        assert!(intercept.is_finite(), "Line intercept must be finite");
+        Self {
+            slope,
+            intercept,
+            color: Color32::WHITE,
+            line_style: LineStyle::Solid,
+            line_width: 1.0,
+            gap_color: None,
+            is_overlay: true,
+        }
+    }
+
+    /// A line through two `(x, y)` points (silx `setSlopeInterceptFromPoints`,
+    /// `shape.py:370-383`). Equal x values make a vertical line `x = x0`.
+    pub fn from_points(point0: (f64, f64), point1: (f64, f64)) -> Self {
+        let (x0, y0) = point0;
+        let (x1, y1) = point1;
+        if x0 == x1 {
+            // Vertical line: slope inf, intercept = x0 (silx special case).
+            return Self::new(f64::INFINITY, x0);
+        }
+        let slope = (y1 - y0) / (x1 - x0);
+        Self::new(slope, y0 - x0 * slope)
+    }
+
+    /// Set the line color.
+    pub fn with_color(mut self, color: Color32) -> Self {
+        self.color = color;
+        self
+    }
+
+    /// Set the outline stroke style.
+    pub fn with_line_style(mut self, style: LineStyle) -> Self {
+        self.line_style = style;
+        self
+    }
+
+    /// Set the outline width.
+    pub fn with_line_width(mut self, width: f32) -> Self {
+        self.line_width = width;
+        self
+    }
+
+    /// Set the dash-gap fill color (silx `gapcolor`).
+    pub fn with_gap_color(mut self, color: Color32) -> Self {
+        self.gap_color = Some(color);
+        self
+    }
+
+    /// Set whether the line draws in the overlay pass (silx `setOverlay`).
+    pub fn with_overlay(mut self, overlay: bool) -> Self {
+        self.is_overlay = overlay;
+        self
+    }
+
+    /// The visible segment of the line within the data `bounds`, or `None` when
+    /// the line does not cross the bounds (silx `Line.__updatePoints`,
+    /// `shape.py:305-340`).
+    ///
+    /// `bounds` is the data-space window expressed as a [`Rect`]: `bounds.min` is
+    /// `(xmin, ymin)`, `bounds.max` is `(xmax, ymax)`. The returned endpoints are
+    /// in **data coordinates** (`Pos2` = `(x, y)`); the data-to-screen transform
+    /// and drawing are the renderer's job (deferred).
+    ///
+    /// The clipping reproduces silx exactly:
+    ///
+    /// - Vertical line (non-finite slope): visible iff `xmin <= intercept <= xmax`;
+    ///   the segment is `((intercept, ymin), (intercept, ymax))`.
+    /// - Sloped line: the y at `xmin` and `xmax` are ` y0 = slope*xmin + intercept`
+    ///   and `y1 = slope*xmax + intercept`; the line is visible iff
+    ///   `min(y0, y1) < ymax AND max(y0, y1) > ymin`, and the segment is
+    ///   `((xmin, y0), (xmax, y1))`.
+    pub fn clipped_segment(&self, bounds: egui::Rect) -> Option<(Pos2, Pos2)> {
+        let xmin = bounds.min.x as f64;
+        let ymin = bounds.min.y as f64;
+        let xmax = bounds.max.x as f64;
+        let ymax = bounds.max.y as f64;
+
+        if !self.slope.is_finite() {
+            // Vertical line x = intercept.
+            if self.intercept < xmin || self.intercept > xmax {
+                return None;
+            }
+            let x = self.intercept as f32;
+            return Some((Pos2::new(x, ymin as f32), Pos2::new(x, ymax as f32)));
+        }
+
+        let y0 = self.slope * xmin + self.intercept;
+        let y1 = self.slope * xmax + self.intercept;
+        let (lo, hi) = if y0 <= y1 { (y0, y1) } else { (y1, y0) };
+        if lo < ymax && hi > ymin {
+            Some((
+                Pos2::new(xmin as f32, y0 as f32),
+                Pos2::new(xmax as f32, y1 as f32),
+            ))
+        } else {
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -286,5 +421,105 @@ mod tests {
         // Line kinds carry no fixed-extent vertices.
         assert!(Shape::hlines(vec![1.0]).screen_points(&t()).is_empty());
         assert!(Shape::vlines(vec![1.0]).screen_points(&t()).is_empty());
+    }
+
+    // Data bounds [0,10] x [0,10] expressed as a Rect (min=(xmin,ymin),
+    // max=(xmax,ymax)) for the Line clipping tests.
+    fn bounds() -> Rect {
+        Rect::from_min_max(pos2(0.0, 0.0), pos2(10.0, 10.0))
+    }
+
+    #[test]
+    fn line_defaults_and_overlay_builder() {
+        let l = Line::new(2.0, 1.0);
+        assert_eq!(l.slope, 2.0);
+        assert_eq!(l.intercept, 1.0);
+        assert_eq!(l.color, Color32::WHITE);
+        assert_eq!(l.line_style, LineStyle::Solid);
+        assert!(l.is_overlay);
+        assert!(!Line::new(0.0, 0.0).with_overlay(false).is_overlay);
+    }
+
+    #[test]
+    #[should_panic(expected = "Line intercept must be finite")]
+    fn line_rejects_non_finite_intercept() {
+        Line::new(1.0, f64::NAN);
+    }
+
+    #[test]
+    fn sloped_line_clips_to_box_entry_and_exit() {
+        // y = x: crosses the box [0,10]^2 from (0,0) to (10,10).
+        let seg = Line::new(1.0, 0.0).clipped_segment(bounds());
+        assert_eq!(seg, Some((pos2(0.0, 0.0), pos2(10.0, 10.0))));
+
+        // y = 0.5*x + 2: y0 = 2 at x=0, y1 = 7 at x=10; both inside.
+        let seg = Line::new(0.5, 2.0).clipped_segment(bounds()).unwrap();
+        assert_eq!(seg.0, pos2(0.0, 2.0));
+        assert_eq!(seg.1, pos2(10.0, 7.0));
+    }
+
+    #[test]
+    fn horizontal_line_inside_box_is_visible() {
+        // slope 0, intercept 5: a horizontal line y=5 that crosses the box.
+        // y0 = y1 = 5; min(5,5)=5 < ymax 10 and max=5 > ymin 0 -> visible.
+        let seg = Line::new(0.0, 5.0).clipped_segment(bounds());
+        assert_eq!(seg, Some((pos2(0.0, 5.0), pos2(10.0, 5.0))));
+    }
+
+    #[test]
+    fn sloped_line_entirely_above_box_is_none() {
+        // y = x + 20: y0 = 20, y1 = 30, both above ymax 10. min(20,30)=20 is
+        // not < ymax 10 -> None.
+        assert_eq!(Line::new(1.0, 20.0).clipped_segment(bounds()), None);
+    }
+
+    #[test]
+    fn sloped_line_entirely_below_box_is_none() {
+        // y = x - 20: y0 = -20, y1 = -10, both below ymin 0. max(-20,-10)=-10
+        // is not > ymin 0 -> None.
+        assert_eq!(Line::new(1.0, -20.0).clipped_segment(bounds()), None);
+    }
+
+    #[test]
+    fn vertical_line_inside_outside_and_on_edge() {
+        // x = 5: inside [0,10] -> segment spans the full y range.
+        let seg = Line::new(f64::INFINITY, 5.0).clipped_segment(bounds());
+        assert_eq!(seg, Some((pos2(5.0, 0.0), pos2(5.0, 10.0))));
+
+        // On the min edge x = 0 (xmin <= 0 <= xmax) -> visible (inclusive).
+        let seg = Line::new(f64::INFINITY, 0.0).clipped_segment(bounds());
+        assert_eq!(seg, Some((pos2(0.0, 0.0), pos2(0.0, 10.0))));
+        // On the max edge x = 10 -> visible (inclusive).
+        let seg = Line::new(f64::INFINITY, 10.0).clipped_segment(bounds());
+        assert_eq!(seg, Some((pos2(10.0, 0.0), pos2(10.0, 10.0))));
+
+        // x = 15: outside -> None.
+        assert_eq!(
+            Line::new(f64::INFINITY, 15.0).clipped_segment(bounds()),
+            None
+        );
+        // x = -1: outside on the low side -> None.
+        assert_eq!(
+            Line::new(f64::INFINITY, -1.0).clipped_segment(bounds()),
+            None
+        );
+    }
+
+    #[test]
+    fn from_points_sloped_and_vertical() {
+        // Two points on y = x.
+        let l = Line::from_points((0.0, 0.0), (2.0, 2.0));
+        assert_eq!(l.slope, 1.0);
+        assert_eq!(l.intercept, 0.0);
+
+        // y = 2x + 1 through (1, 3) and (2, 5).
+        let l = Line::from_points((1.0, 3.0), (2.0, 5.0));
+        assert_eq!(l.slope, 2.0);
+        assert_eq!(l.intercept, 1.0);
+
+        // Equal x -> vertical line x = x0 (silx special case).
+        let l = Line::from_points((4.0, 1.0), (4.0, 9.0));
+        assert!(!l.slope.is_finite());
+        assert_eq!(l.intercept, 4.0);
     }
 }

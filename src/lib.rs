@@ -36,7 +36,7 @@ pub use crate::core::plot::{
     resolved_axis_label,
 };
 pub use crate::core::roi::{Roi, RoiEdge};
-pub use crate::core::shape::{Shape, ShapeKind};
+pub use crate::core::shape::{Line, Shape, ShapeKind};
 pub use crate::core::stats::{ComCoord, StatScope, Stats};
 pub use crate::core::transform::{Axis, Margins, Scale, Transform, YAxis};
 pub use crate::core::triangles::Triangles;
