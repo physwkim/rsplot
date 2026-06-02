@@ -12,6 +12,7 @@ pub mod colormap_dialog;
 pub mod complex_image_view;
 pub mod fit_widget;
 pub mod high_level;
+pub mod image_stack;
 pub mod interaction;
 pub mod limits_widget;
 pub mod mask_tools;
