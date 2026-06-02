@@ -84,6 +84,7 @@ pub use crate::widget::interaction::{
     PanDirection, PlotPointerEvent, PointPick, SelectionStyle, cursor_for_edge, cursor_for_grab,
     ellipse_semi_axes, hatch_lines, image_index, nearest_point,
 };
+pub use crate::widget::items_selection_dialog::{ItemsSelectionDialog, SelectableItem};
 pub use crate::widget::limits_widget::LimitsWidget;
 pub use crate::widget::mask_tools::{MaskTool, MaskToolsWidget, ThresholdMode};
 pub use crate::widget::plot_widget::{DrawResponse, PlotInteractionMode, PlotResponse, PlotView};

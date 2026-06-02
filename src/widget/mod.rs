@@ -14,6 +14,7 @@ pub mod fit_widget;
 pub mod high_level;
 pub mod image_stack;
 pub mod interaction;
+pub mod items_selection_dialog;
 pub mod limits_widget;
 pub mod mask_tools;
 pub mod plot_widget;
