@@ -394,6 +394,39 @@ Single worktree-isolated cluster owning `plot_widget.rs` + `actions/mode.rs` (NE
   ops). **Wave 6 complete.** **Deferred to Wave 7:** Print action, median-filter + pixel-histogram actions,
   SVG/PPM/TIFF figure save (needs a public RenderState/format save path), per-axis X/Y-only autoscale.
 
+### Wave 7A — Figure output: SVG/PPM/TIFF save + Print action
+Single worktree-isolated cluster owning `src/core/backend.rs` + `src/render/backend_wgpu.rs` + `high_level.rs`
++ `Cargo.toml` (3 commits); per-item adversarial verify. BASE `2de55f6`. Recon found the figure-save
+primitives already complete — this wave is wiring + one new dep.
+- SVG/PPM/TIFF figure save (NO new dep): the four `encode_{png,ppm,svg,tiff}` encoders and
+  `render::save::save_graph_with_format` (one GPU readback → centralized format match) already existed &
+  were tested; only the UI entry point dropped non-PNG. Added `Backend::save_graph_with_format` (trait +
+  the sole `WgpuBackend` impl — `rg` confirmed one impl, no headless backend) + a `PlotWidget` passthrough;
+  `save_to_path` now routes every `SaveTarget::Figure(fmt)` through it at `DEFAULT_SAVE_DPI=96` (PNG stays
+  byte-identical, same `encode_png`); `save_dialog` gained PPM/SVG/TIFF rfd filters. Faithful to silx
+  `SaveAction._saveSnapshot → plot.saveGraph(filename, fileFormat)` (actions/io.py:225-242). SVG remains the
+  intentionally raster-wrapped encoder (true vector export still deferred). Pure test: the extension→
+  `SaveFormat` dispatch table (png/ppm/svg/tif/tiff→Figure, csv→CurveCsv, pdf/noext→None) asserted without
+  a GPU; the readback + write are shims.
+- Print action (user-approved `printers` crate, v2.3.0 — verified to build on macOS: wraps CUPS/winspool).
+  `print_graph` mirrors silx `PrintAction.printPlot` (actions/io.py:809-846): silx renders the plot to a PNG
+  (`_plotAsPNG`) and draws that bitmap onto the printer via `QPainter`/`QPrinter` (RASTER, not vector). Here
+  the figure is rasterized to a process-unique temp PNG via the existing `save_graph`, then submitted to the
+  default printer (`get_default_printer` → `print_file`); returns `Ok(false)` with no default printer.
+  `ToolbarIcon::Print` + `ToolbarResponse.print` + toolbar button (Save-button pattern, result ignored).
+  Pure test: the temp-path naming (`print_temp_png_path`); the GPU readback + printer submit are untested
+  platform shims. `printers::PrintersError` has no `Display`, so its `.message` field is used in the error
+  string; printer-submit errors reuse `SaveError::Readback` (internal, toolbar ignores it) to avoid a
+  `SaveError` enum-variant fanout. Print preview / `QPrintDialog` printer-settings UI intentionally omitted.
+- Both adversarial reviewers returned `accept`; the integration diff was ALSO reviewed by hand before the
+  fast-forward (the verify reviewers had been handed absolute worktree paths as the `git diff` pathspec,
+  which can silently empty the diff — fixed for 7B by reporting repo-relative paths). No findings.
+- Gate: clippy `-p egui-silx --all-targets` clean (printers compiled), **674 tests pass** (+2), doctests ok.
+- **Deferred:** true VECTOR SVG (re-emit geometry); PDF/PS/EPS/JPEG (matplotlib-only, `from_extension`
+  rejects); print preview / printer-settings dialog (no egui `QPrintDialog`). **Wave 7B next:** per-axis
+  X/Y autoscale toggles + the widget-reset flag-respect fix; median filter (crate) + pixel-intensity
+  histogram.
+
 
 ## PlotWidget core, axes, frame, ticks  — 25✅ 2◐ 7☐
 
