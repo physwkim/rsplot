@@ -488,8 +488,9 @@ fn format_coord(v: f64, lo: f64, hi: f64) -> String {
 }
 
 /// Per-ROI drawing overrides supplied by the ROI manager. Keeps the geometry
-/// [`Roi`] pure: color, name, and selection live alongside it, not inside it.
-#[derive(Clone, Copy, Default)]
+/// [`Roi`] pure: color, name, selection, and outline styling live alongside it,
+/// not inside it.
+#[derive(Clone, Default)]
 pub struct RoiAppearance<'a> {
     /// Outline/handle color; falls back to the chrome axis color when `None`
     /// (silx `RegionOfInterest.getColor`, default red applied by the manager).
@@ -500,6 +501,16 @@ pub struct RoiAppearance<'a> {
     /// Whether this ROI is the highlighted/current one: drawn with a thicker
     /// outline (silx highlight style `linewidth=2` vs the default `1`).
     pub selected: bool,
+    /// Outline width in logical points; `None` uses the default (silx
+    /// `RegionOfInterest.getLineWidth`). A `selected` ROI uses `max(width, 2)`
+    /// (silx highlight `linewidth=2`).
+    pub line_width: Option<f32>,
+    /// Outline stroke style (silx `getLineStyle`). `None` is solid; a dashed or
+    /// dotted style is emitted as manual dash segments.
+    pub line_style: Option<LineStyle>,
+    /// Whether the ROI interior is filled with a translucent tint. `None` keeps
+    /// the legacy faint fill; `Some(false)` draws no fill (silx `setFill(False)`).
+    pub fill: Option<bool>,
 }
 
 /// Draw each region of interest with default (axis-color, unnamed, unselected)
@@ -600,30 +611,66 @@ pub fn draw_roi(
     style: &Style,
 ) {
     let color = appearance.color.unwrap_or(style.axis);
-    let fill = Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 24);
-    let width = if appearance.selected { 2.0 } else { 1.0 };
-    let border = Stroke::new(width, color);
+    // Base width from the appearance (silx default 1.0); a selected/current ROI
+    // gets at least the silx highlight width 2.0.
+    let base_width = appearance.line_width.unwrap_or(1.0);
+    let width = if appearance.selected {
+        base_width.max(2.0)
+    } else {
+        base_width
+    };
+    // Fill: `Some(false)` means no fill (silx `setFill(False)`); `Some(true)` and
+    // the default both draw the translucent tint.
+    let fill_enabled = appearance.fill.unwrap_or(true);
+    let fill =
+        fill_enabled.then(|| Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 24));
+    let line_style = appearance.line_style.clone().unwrap_or(LineStyle::Solid);
+
+    // Draw a closed outline through `path` honoring width and dash style; the
+    // path is closed back to its first point before stroking.
+    let outline = |mut path: Vec<Pos2>| {
+        if let Some(&first) = path.first() {
+            path.push(first);
+            draw_styled_line(painter, path, color, width, &line_style, None);
+        }
+    };
 
     // A representative anchor (in screen pixels) used to place the name label.
     let label_anchor: Option<Pos2> = match roi {
         Roi::Point { x, y } => {
             let p = t.data_to_pixel(*x, *y);
-            painter.circle_filled(p, 5.0, fill);
-            painter.circle_stroke(p, 5.0, border);
+            if let Some(fc) = fill {
+                painter.circle_filled(p, 5.0, fc);
+            }
+            painter.circle_stroke(p, 5.0, Stroke::new(width, color));
             Some(p)
         }
         Roi::Cross { center } => {
             // Full-span cross-hairs through the center (silx CrossROI markers).
             let p = t.data_to_pixel(center.0, center.1);
             let area = t.area;
-            painter.vline(p.x, area.y_range(), border);
-            painter.hline(area.x_range(), p.y, border);
+            draw_styled_line(
+                painter,
+                vec![pos2(p.x, area.top()), pos2(p.x, area.bottom())],
+                color,
+                width,
+                &line_style,
+                None,
+            );
+            draw_styled_line(
+                painter,
+                vec![pos2(area.left(), p.y), pos2(area.right(), p.y)],
+                color,
+                width,
+                &line_style,
+                None,
+            );
             Some(p)
         }
         Roi::Line { start, end } => {
             let a = t.data_to_pixel(start.0, start.1);
             let b = t.data_to_pixel(end.0, end.1);
-            painter.line_segment([a, b], border);
+            draw_styled_line(painter, vec![a, b], color, width, &line_style, None);
             Some(a)
         }
         Roi::Polygon { vertices } if !vertices.is_empty() => {
@@ -631,8 +678,12 @@ pub fn draw_roi(
                 .iter()
                 .map(|&(x, y)| t.data_to_pixel(x, y))
                 .collect();
-            painter.add(egui::Shape::convex_polygon(pts.clone(), fill, border));
-            pts.first().copied()
+            if let Some(fc) = fill {
+                painter.add(egui::Shape::convex_polygon(pts.clone(), fc, Stroke::NONE));
+            }
+            let anchor = pts.first().copied();
+            outline(pts);
+            anchor
         }
         Roi::Polygon { .. } => None, // empty polygon, skip
         Roi::Circle { center, radius } => {
@@ -641,8 +692,19 @@ pub fn draw_roi(
             let c = t.data_to_pixel(center.0, center.1);
             let edge = t.data_to_pixel(center.0 + radius, center.1);
             let rpx = (edge.x - c.x).abs();
-            painter.circle_filled(c, rpx, fill);
-            painter.circle_stroke(c, rpx, border);
+            if let Some(fc) = fill {
+                painter.circle_filled(c, rpx, fc);
+            }
+            // Outline as a 64-gon so dash/dot styling applies (egui has no dashed
+            // circle stroke); solid styles still look round at this segment count.
+            let n = 64usize;
+            let pts: Vec<Pos2> = (0..n)
+                .map(|i| {
+                    let a = i as f32 * std::f32::consts::TAU / n as f32;
+                    egui::pos2(c.x + rpx * a.cos(), c.y + rpx * a.sin())
+                })
+                .collect();
+            outline(pts);
             Some(egui::pos2(c.x, c.y - rpx))
         }
         Roi::Ellipse { center, radii } => {
@@ -660,7 +722,10 @@ pub fn draw_roi(
                     egui::pos2(c.x + rx * a.cos(), c.y + ry * a.sin())
                 })
                 .collect();
-            painter.add(egui::Shape::convex_polygon(pts, fill, border));
+            if let Some(fc) = fill {
+                painter.add(egui::Shape::convex_polygon(pts.clone(), fc, Stroke::NONE));
+            }
+            outline(pts);
             Some(egui::pos2(c.x, c.y - ry))
         }
         Roi::Arc {
@@ -672,8 +737,10 @@ pub fn draw_roi(
         } => {
             // Annular-sector outline in data space, then mapped to pixels (the
             // transform may scale axes differently, so sample in data space —
-            // silx samples the arc with up to ~100 angular steps).
-            let mut pts: Vec<Pos2> = arc_outline(
+            // silx samples the arc with up to ~100 angular steps). The sector is
+            // non-convex, so it is drawn as the closed outline only (silx draws
+            // the arc shape with `setFill(False)`).
+            let pts: Vec<Pos2> = arc_outline(
                 *center,
                 *inner_radius,
                 *outer_radius,
@@ -683,37 +750,40 @@ pub fn draw_roi(
             .into_iter()
             .map(|(x, y)| t.data_to_pixel(x, y))
             .collect();
-            // The annular sector is non-convex, so draw the closed outline only
-            // (silx draws the arc shape with `setFill(False)`).
-            if let Some(&first) = pts.first() {
-                pts.push(first);
-                painter.add(egui::Shape::line(pts, border));
-            }
+            outline(pts);
             // Label anchor at the top of the outer circle.
-            let cp = t.data_to_pixel(center.0, center.1 + outer_radius);
-            Some(cp)
+            Some(t.data_to_pixel(center.0, center.1 + outer_radius))
         }
-        Roi::Band { begin, end, width } => {
+        Roi::Band {
+            begin,
+            end,
+            width: bw,
+        } => {
             // The four band corners form a convex quadrilateral (rotated rect).
-            let corners = band_corners_data(*begin, *end, *width);
+            let corners = band_corners_data(*begin, *end, *bw);
             let pts: Vec<Pos2> = corners
                 .iter()
                 .map(|&(x, y)| t.data_to_pixel(x, y))
                 .collect();
-            painter.add(egui::Shape::convex_polygon(pts.clone(), fill, border));
-            // Label anchor at the begin corner.
-            pts.first().copied()
+            if let Some(fc) = fill {
+                painter.add(egui::Shape::convex_polygon(pts.clone(), fc, Stroke::NONE));
+            }
+            let anchor = pts.first().copied();
+            outline(pts);
+            anchor
         }
         _ => {
             // Rect, HRange, VRange
             let r = roi.screen_rect(t);
-            painter.rect_filled(r, egui::CornerRadius::ZERO, fill);
-            painter.rect_stroke(
-                r,
-                egui::CornerRadius::ZERO,
-                border,
-                egui::StrokeKind::Inside,
-            );
+            if let Some(fc) = fill {
+                painter.rect_filled(r, egui::CornerRadius::ZERO, fc);
+            }
+            outline(vec![
+                r.left_top(),
+                r.right_top(),
+                r.right_bottom(),
+                r.left_bottom(),
+            ]);
             Some(egui::pos2(r.center().x, r.top()))
         }
     };
