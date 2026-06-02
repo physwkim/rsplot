@@ -18,6 +18,11 @@ colorous = "1"
 # PNG encoding for save_graph (offscreen readback → file). Already in the tree
 # transitively via egui's image loading, so this pins no new major version.
 png = "0.18"
+# Native Save/load file dialog for the toolbar Save action (mirrors silx's QFileDialog).
+rfd = "0.17"
+# System clipboard for the toolbar Copy action (set_image with the wgpu readback RGBA).
+# Default features; the `image` crate it pulls is already in the tree via egui-winit.
+arboard = "3.6"
 
 # Only the example (an eframe app) needs a window + RenderState.
 [dev-dependencies]
