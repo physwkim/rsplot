@@ -11,36 +11,190 @@
 
 use egui::{Pos2, Rect, Vec2};
 
-use crate::core::transform::Transform;
+use crate::core::transform::{Scale, Transform};
 
 /// Data limits `(x_min, x_max, y_min, y_max)`.
 pub type Limits = (f64, f64, f64, f64);
 
+// Float32 safe range, mirroring silx `_utils/panzoom.py`. Limits are kept inside
+// these so that span subtractions do not overflow float32 downstream.
+const FLOAT32_SAFE_MIN: f64 = -1e37;
+const FLOAT32_SAFE_MAX: f64 = 1e37;
+// `numpy.finfo(numpy.float32).tiny`: smallest positive normal float32.
+const FLOAT32_MINPOS: f64 = 1.1754943508222875e-38;
+
+/// Translate a single axis range by a screen-space drag of `delta_px` pixels
+/// across an axis of `extent_px` pixels, mirroring silx `Pan.drag`
+/// (`PlotInteraction.py`). For a [`Scale::Log10`] axis the shift is applied in
+/// log10 space; for [`Scale::Linear`] it is a plain offset.
+///
+/// `delta_px` is the pixel delta that should be *subtracted* from the range (the
+/// data point under the pointer follows the cursor). Returns the new
+/// `(min, max)`; on a log axis with a non-positive `min` or an out-of-range
+/// result the original range is kept (silx reverts in those cases).
+fn pan_axis(min: f64, max: f64, delta_px: f64, extent_px: f64, scale: Scale) -> (f64, f64) {
+    match scale {
+        Scale::Log10 if min > 0.0 && max > 0.0 => {
+            let log_min = min.log10();
+            let log_max = max.log10();
+            // Per-pixel log10 delta across the axis (the data-to-pixel mapping is
+            // linear in log space), matching silx `dx = log10(xData) - log10(lastX)`.
+            let d_log = delta_px * (log_max - log_min) / extent_px;
+            let new_min = 10f64.powf(log_min - d_log);
+            let new_max = 10f64.powf(log_max - d_log);
+            // silx keeps the axis only while both bounds stay in positive float32.
+            if new_min < FLOAT32_MINPOS || new_max > FLOAT32_SAFE_MAX {
+                (min, max)
+            } else {
+                (new_min, new_max)
+            }
+        }
+        _ => {
+            let offset = delta_px * (max - min) / extent_px;
+            let new_min = min - offset;
+            let new_max = max - offset;
+            if new_min < FLOAT32_SAFE_MIN || new_max > FLOAT32_SAFE_MAX {
+                (min, max)
+            } else {
+                (new_min, new_max)
+            }
+        }
+    }
+}
+
 /// Translate `limits` by a screen-space drag delta (pixels) so the data point
-/// under the pointer stays under the pointer (the content follows the cursor).
+/// under the pointer stays under the pointer (the content follows the cursor),
+/// mirroring silx `Pan.drag` (`PlotInteraction.py`).
 ///
 /// Screen `+x` is right and `+y` is down; the Y axis is flipped (data `y_max` at
-/// the top), so a downward drag increases the data Y limits.
-pub fn pan(limits: Limits, area: Rect, delta_px: Vec2) -> Limits {
+/// the top), so a downward drag increases the data Y limits. `x_scale` /
+/// `y_scale` select linear vs. log10 translation per axis.
+pub fn pan(limits: Limits, area: Rect, delta_px: Vec2, x_scale: Scale, y_scale: Scale) -> Limits {
     let (x_min, x_max, y_min, y_max) = limits;
     let w = area.width().max(1.0) as f64;
     let h = area.height().max(1.0) as f64;
-    let dx = delta_px.x as f64 * (x_max - x_min) / w;
-    let dy = delta_px.y as f64 * (y_max - y_min) / h;
-    (x_min - dx, x_max - dx, y_min + dy, y_max + dy)
+    // X: a rightward drag (+delta_px.x) shifts the view left.
+    let (new_x_min, new_x_max) = pan_axis(x_min, x_max, delta_px.x as f64, w, x_scale);
+    // Y is flipped: a downward drag (+delta_px.y) shifts the view up, so the
+    // subtracted pixel delta is negated relative to the X convention.
+    let (new_y_min, new_y_max) = pan_axis(y_min, y_max, -(delta_px.y as f64), h, y_scale);
+    (new_x_min, new_x_max, new_y_min, new_y_max)
 }
 
-/// Scale `limits` about a fixed data point `(cx, cy)` by `factor`. `factor < 1`
-/// zooms in (shrinks the span); `factor > 1` zooms out. The point `(cx, cy)`
-/// keeps its screen position.
-pub fn zoom_about(limits: Limits, factor: f64, cx: f64, cy: f64) -> Limits {
+/// Scale a 1D range about an invariant `center` by `scale`, mirroring silx
+/// `scale1DRange` (`_utils/panzoom.py`). `scale < 1` zooms out (widens the
+/// span); `scale > 1` zooms in. On a log axis the operation is performed in
+/// log10 space and the result is clipped to the positive float32 range; on a
+/// linear axis it is clipped to the float32 range. A degenerate (`min == max`)
+/// range is returned unchanged.
+///
+/// Note silx's `scale` is the multiplicative *zoom factor* (`range / scale`),
+/// the reciprocal of the per-axis shrink ratio used by [`zoom_about`].
+fn scale1d_range(min: f64, max: f64, center: f64, scale: f64, is_log: bool) -> (f64, f64) {
+    let (mut min, mut center, mut max) = (min, center, max);
+    if is_log {
+        // Min and center can be <= 0 when autoscale is off and the axis switched
+        // to log; silx substitutes FLOAT32_MINPOS in that case.
+        min = if min > 0.0 {
+            min.log10()
+        } else {
+            FLOAT32_MINPOS
+        };
+        center = if center > 0.0 {
+            center.log10()
+        } else {
+            FLOAT32_MINPOS
+        };
+        max = if max > 0.0 {
+            max.log10()
+        } else {
+            FLOAT32_MINPOS
+        };
+    }
+
+    if min == max {
+        return (min, max);
+    }
+
+    let offset = (center - min) / (max - min);
+    let range = (max - min) / scale;
+    let mut new_min = center - offset * range;
+    let mut new_max = center + (1.0 - offset) * range;
+
+    if is_log {
+        new_min = 10f64.powf(new_min).clamp(FLOAT32_MINPOS, FLOAT32_SAFE_MAX);
+        new_max = 10f64.powf(new_max).clamp(FLOAT32_MINPOS, FLOAT32_SAFE_MAX);
+    } else {
+        new_min = new_min.clamp(FLOAT32_SAFE_MIN, FLOAT32_SAFE_MAX);
+        new_max = new_max.clamp(FLOAT32_SAFE_MIN, FLOAT32_SAFE_MAX);
+    }
+    (new_min, new_max)
+}
+
+/// Scale `limits` about a fixed data point `(cx, cy)`, mirroring silx
+/// `applyZoomToPlot` (`_utils/panzoom.py`). `factor < 1` zooms in (shrinks the
+/// span); `factor > 1` zooms out. The point `(cx, cy)` keeps its screen
+/// position. `x_scale` / `y_scale` select log10 vs. linear scaling per axis.
+///
+/// silx `scale1DRange` divides the span by its `scale`, so to shrink the span by
+/// `factor` here the silx scale is `1 / factor`.
+pub fn zoom_about(
+    limits: Limits,
+    factor: f64,
+    cx: f64,
+    cy: f64,
+    x_scale: Scale,
+    y_scale: Scale,
+) -> Limits {
     let (x_min, x_max, y_min, y_max) = limits;
-    (
-        cx + (x_min - cx) * factor,
-        cx + (x_max - cx) * factor,
-        cy + (y_min - cy) * factor,
-        cy + (y_max - cy) * factor,
-    )
+    // silx `scale` is the reciprocal of our span-shrink `factor`.
+    let silx_scale = 1.0 / factor;
+    let (new_x_min, new_x_max) =
+        scale1d_range(x_min, x_max, cx, silx_scale, x_scale == Scale::Log10);
+    let (new_y_min, new_y_max) =
+        scale1d_range(y_min, y_max, cy, silx_scale, y_scale == Scale::Log10);
+    (new_x_min, new_x_max, new_y_min, new_y_max)
+}
+
+/// Pan a single axis range by `pan_factor` (a signed proportion of the range),
+/// mirroring silx `applyPan` (`_utils/panzoom.py`). This is the arrow-key /
+/// programmatic pan path (distinct from the mouse-drag [`pan`]). For a log axis
+/// with a positive `min` the offset is applied in log10 space; otherwise it is a
+/// linear offset. Out-of-range results are discarded (the original range is
+/// kept), matching silx.
+pub fn apply_pan(min: f64, max: f64, pan_factor: f64, is_log10: bool) -> (f64, f64) {
+    if is_log10 && min > 0.0 {
+        // Negative range with log scale can happen via other backends; skip it.
+        let log_min = min.log10();
+        let log_max = max.log10();
+        let log_offset = pan_factor * (log_max - log_min);
+        let new_min = 10f64.powf(log_min + log_offset);
+        let new_max = 10f64.powf(log_max + log_offset);
+        if new_min > 0.0 && new_max.is_finite() {
+            (new_min, new_max)
+        } else {
+            (min, max)
+        }
+    } else {
+        let offset = pan_factor * (max - min);
+        let new_min = min + offset;
+        let new_max = max + offset;
+        if new_min > f64::NEG_INFINITY && new_max < f64::INFINITY {
+            (new_min, new_max)
+        } else {
+            (min, max)
+        }
+    }
+}
+
+/// A pan direction for [`apply_pan`]-based arrow-key panning, mirroring silx
+/// `PlotWidget.pan` directions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PanDirection {
+    Up,
+    Down,
+    Left,
+    Right,
 }
 
 /// Limits covering the data-space box defined by two corners, in any order.
@@ -144,20 +298,79 @@ mod tests {
     #[test]
     fn pan_right_shifts_view_left() {
         // Drag 10px right (10% of width, span 10) -> x limits shift -1.
-        let out = pan((0.0, 10.0, 0.0, 10.0), area_100(), vec2(10.0, 0.0));
+        let out = pan(
+            (0.0, 10.0, 0.0, 10.0),
+            area_100(),
+            vec2(10.0, 0.0),
+            Scale::Linear,
+            Scale::Linear,
+        );
         assert!(close(out, (-1.0, 9.0, 0.0, 10.0)), "{out:?}");
     }
 
     #[test]
     fn pan_down_increases_y_limits() {
         // Y is flipped: dragging down raises the data Y window.
-        let out = pan((0.0, 10.0, 0.0, 10.0), area_100(), vec2(0.0, 10.0));
+        let out = pan(
+            (0.0, 10.0, 0.0, 10.0),
+            area_100(),
+            vec2(0.0, 10.0),
+            Scale::Linear,
+            Scale::Linear,
+        );
         assert!(close(out, (0.0, 10.0, 1.0, 11.0)), "{out:?}");
     }
 
     #[test]
+    fn pan_log_round_trips_in_log_space() {
+        // Boundary: a +d drag then a -d drag on a log axis returns to the start.
+        let limits = (1.0, 100.0, 1.0, 100.0);
+        let area = area_100();
+        let forward = pan(limits, area, vec2(20.0, 13.0), Scale::Log10, Scale::Log10);
+        let back = pan(
+            forward,
+            area,
+            vec2(-20.0, -13.0),
+            Scale::Log10,
+            Scale::Log10,
+        );
+        assert!(close(back, limits), "{back:?}");
+        // The intermediate state must have moved (otherwise the round-trip is trivial).
+        assert!(!close(forward, limits), "{forward:?}");
+    }
+
+    #[test]
+    fn pan_log_translates_in_log_space() {
+        // A drag of half the width on a log decade [1, 100] shifts both bounds by
+        // half a log decade in log10 space (the span is 2 decades over 100px, so
+        // 50px == 1 decade).
+        let out = pan(
+            (1.0, 100.0, 1.0, 100.0),
+            area_100(),
+            vec2(50.0, 0.0),
+            Scale::Log10,
+            Scale::Linear,
+        );
+        // X limits shift left by one decade: 1 -> 0.1, 100 -> 10.
+        assert!((out.0 - 0.1).abs() <= 1e-9, "{out:?}");
+        assert!((out.1 - 10.0).abs() <= 1e-9, "{out:?}");
+        // Y (linear) unchanged.
+        assert!(
+            (out.2 - 1.0).abs() <= 1e-9 && (out.3 - 100.0).abs() <= 1e-9,
+            "{out:?}"
+        );
+    }
+
+    #[test]
     fn zoom_about_center_halves_span_keeping_center() {
-        let out = zoom_about((0.0, 10.0, 0.0, 10.0), 0.5, 5.0, 5.0);
+        let out = zoom_about(
+            (0.0, 10.0, 0.0, 10.0),
+            0.5,
+            5.0,
+            5.0,
+            Scale::Linear,
+            Scale::Linear,
+        );
         assert!(close(out, (2.5, 7.5, 2.5, 7.5)), "{out:?}");
     }
 
@@ -166,11 +379,69 @@ mod tests {
         // The anchor's fractional position within the limits is unchanged.
         let limits = (0.0, 10.0, 0.0, 10.0);
         let (cx, cy) = (8.0, 2.0);
-        let out = zoom_about(limits, 0.3, cx, cy);
+        let out = zoom_about(limits, 0.3, cx, cy, Scale::Linear, Scale::Linear);
         let frac_before = (cx - limits.0) / (limits.1 - limits.0);
         let frac_after = (cx - out.0) / (out.1 - out.0);
         assert!((frac_before - frac_after).abs() <= 1e-9);
         let _ = cy;
+    }
+
+    #[test]
+    fn zoom_about_log_keeps_anchor_data_coord_fixed() {
+        // Boundary: on a log axis the cursor's data coordinate must stay fixed
+        // across a zoom (its fractional position in log space is invariant).
+        let limits = (1.0, 1000.0, 1.0, 1000.0);
+        let (cx, cy) = (10.0, 100.0);
+        let out = zoom_about(limits, 0.5, cx, cy, Scale::Log10, Scale::Log10);
+        let frac_log =
+            |v: f64, lo: f64, hi: f64| (v.log10() - lo.log10()) / (hi.log10() - lo.log10());
+        let fx_before = frac_log(cx, limits.0, limits.1);
+        let fx_after = frac_log(cx, out.0, out.1);
+        assert!(
+            (fx_before - fx_after).abs() <= 1e-9,
+            "x {fx_before} {fx_after}"
+        );
+        let fy_before = frac_log(cy, limits.2, limits.3);
+        let fy_after = frac_log(cy, out.2, out.3);
+        assert!(
+            (fy_before - fy_after).abs() <= 1e-9,
+            "y {fy_before} {fy_after}"
+        );
+    }
+
+    #[test]
+    fn apply_pan_linear_offsets_by_fraction() {
+        // Linear: pan 10% of the [0, 10] span to the right.
+        let (lo, hi) = apply_pan(0.0, 10.0, 0.1, false);
+        assert!(
+            (lo - 1.0).abs() <= 1e-12 && (hi - 11.0).abs() <= 1e-12,
+            "{lo} {hi}"
+        );
+    }
+
+    #[test]
+    fn apply_pan_log_round_trips() {
+        // Boundary: log pan +f then -f returns to the start in log space.
+        let (lo, hi) = apply_pan(1.0, 100.0, 0.25, true);
+        let (lo2, hi2) = apply_pan(lo, hi, -0.25, true);
+        assert!(
+            (lo2 - 1.0).abs() <= 1e-9 && (hi2 - 100.0).abs() <= 1e-9,
+            "{lo2} {hi2}"
+        );
+        // Forward step moved by 0.25 decade: 1 -> 10^0.5, 100 -> 10^2.5.
+        assert!((lo - 10f64.powf(0.5)).abs() <= 1e-9, "{lo}");
+        assert!((hi - 10f64.powf(2.5)).abs() <= 1e-9, "{hi}");
+    }
+
+    #[test]
+    fn apply_pan_log_nonpositive_min_falls_back_to_linear() {
+        // Boundary: a non-positive min on a log axis takes silx's linear branch.
+        let (lo, hi) = apply_pan(-1.0, 10.0, 0.1, true);
+        // Linear offset: 0.1 * (10 - -1) = 1.1.
+        assert!(
+            (lo - 0.1).abs() <= 1e-12 && (hi - 11.1).abs() <= 1e-12,
+            "{lo} {hi}"
+        );
     }
 
     #[test]

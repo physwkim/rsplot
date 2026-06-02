@@ -47,7 +47,7 @@ pub use crate::widget::high_level::{
     histogram_step_values, horizontal_profile_values, line_profile_values, rect_profile_values,
     vertical_profile_values,
 };
-pub use crate::widget::interaction::{PointPick, image_index, nearest_point};
+pub use crate::widget::interaction::{PanDirection, PointPick, image_index, nearest_point};
 pub use crate::widget::limits_widget::LimitsWidget;
 pub use crate::widget::mask_tools::{MaskTool, MaskToolsWidget, ThresholdMode};
 pub use crate::widget::plot_widget::{PlotInteractionMode, PlotResponse, PlotView};

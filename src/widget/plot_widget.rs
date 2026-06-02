@@ -305,7 +305,7 @@ fn apply_interaction(
     if response.dragged_by(PointerButton::Secondary) || primary_pan {
         let delta = ui.input(|i| i.pointer.delta());
         if delta != egui::Vec2::ZERO {
-            let next = interaction::pan(base, area, delta);
+            let next = interaction::pan(base, area, delta, plot.x_scale, plot.y_scale);
             commit(plot, next);
         }
     }
@@ -319,7 +319,7 @@ fn apply_interaction(
     {
         let (cx, cy) = view.pixel_to_data(p);
         let factor = interaction::wheel_zoom_factor(scroll);
-        let next = interaction::zoom_about(base, factor, cx, cy);
+        let next = interaction::zoom_about(base, factor, cx, cy, plot.x_scale, plot.y_scale);
         commit(plot, next);
     }
 
