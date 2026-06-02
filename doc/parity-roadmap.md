@@ -316,6 +316,40 @@ Single `high_level.rs`-sole-writer cluster (6 items); per-item adversarial verif
   (`PlotInteractionMode::MaskDraw`) + on-plot pencil-draw routing. **Deferred (shader):** SOLID scatter
   visualization, per-point scatter alpha.
 
+### Wave 6C-1 — HL actions module + toolbar wiring (rfd Save + arboard Copy)
+New `src/widget/actions/{mod,control,io}.rs` mirroring silx `plot/actions/` *behavior* (not the Qt
+QAction hierarchy — immediate-mode egui needs none). Added crates `rfd` (native Save dialog) + `arboard`
+(clipboard) — user-approved. Single `high_level.rs`+`actions/` sole-writer cluster (7 commits + 4
+review-fix commits); per-item adversarial verify.
+- ShowAxis toggle (`set_axes_displayed`, silx `ShowAxisAction`); ColorBar show/hide on ImageView+
+  ScatterView (silx `ColorBarAction`); CurveStyle cycle of the active curve's `LineStyle` (silx
+  `CurveStyleAction` — divergence: silx cycles plot-wide line/points booleans, accepted); ZoomIn/ZoomOut
+  about the view center at silx's 1.1 step (silx `ZoomIn/OutAction`); ZoomBack popping `Plot::
+  limits_history` with reset-zoom fallback (silx `ZoomBackAction`).
+- Save (silx `SaveAction`): `rfd` native dialog → figure PNG (existing `save_graph`, GPU-readback shim)
+  or active-curve CSV; `SaveTarget` extension→format + `curve_to_csv` are pure/tested. Copy (silx
+  `CopyAction`): figure RGBA→`arboard::ImageData` via pure `decode_png_to_rgba`/`rgba_to_clipboard_image`,
+  clipboard call is a shim.
+- CurveStyle is backed by a new `RetainedItemData::Curve` holding the full `CurveData` (so the cycle
+  preserves color/symbol/width/errors/fill); `lib.rs` gained `actions` + `SaveTarget`/`curve_to_csv`
+  re-exports.
+- Adversarial review found 4 fix-needed; all fixed at source on `main` as one-commit-per-finding:
+  (A) colorbar-toggle observable-effect test (`e748a7d`); (B) toolbar zoom must NOT push limits history —
+  silx pushes only from the drag-zoom interaction, removed the `apply_zoom` push (`5664ac8`); (C) zoom on
+  a log axis must scale in `log10` space — added silx `scale1DRange`'s log branch + per-axis log threading
+  + geometric log-midpoint, float32 clamp left to its separate item (`f2aeeae`); (D) curve CSV must emit
+  true C/numpy `%.18e` (`e+00`) not Rust's `e0`, with a non-tautological test cross-checked vs Python
+  (`08d9fe8`).
+- Integration note: the agent's leak-check passed once after the first commit but later edits still leaked
+  an uncommitted partial mirror into the MAIN checkout (missing the final `lib.rs` lines). The committed
+  branch was authoritative; `reset --hard wave6/hl-actions` discarded the leak and fast-forwarded `main`
+  to the verified tip (tree-identical), then the 4 fixes landed on top.
+- Gate: clippy `--workspace` clean, **665 tests pass** (+18), doctests ok.
+- **Deferred to 6C-2** (need `plot_widget.rs`+`interaction.rs`+`actions/mode.rs`): mask mode-vs-pan
+  (`PlotInteractionMode::MaskDraw`) + on-plot pencil-draw routing. **Deferred to Wave 7:** Print action,
+  median-filter + pixel-histogram actions, SVG/PPM/TIFF figure save (needs a public RenderState/format
+  save path), per-axis X-only/Y-only autoscale toggles.
+
 
 ## PlotWidget core, axes, frame, ticks  — 25✅ 2◐ 7☐
 
