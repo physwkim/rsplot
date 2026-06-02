@@ -487,55 +487,149 @@ fn format_coord(v: f64, lo: f64, hi: f64) -> String {
     format!("{v:.decimals$}")
 }
 
-/// Draw each region of interest: a translucent fill, a border, and a small
-/// square handle at every draggable edge midpoint (`doc/design.md` §13 C3).
+/// Per-ROI drawing overrides supplied by the ROI manager. Keeps the geometry
+/// [`Roi`] pure: color, name, and selection live alongside it, not inside it.
+#[derive(Clone, Copy, Default)]
+pub struct RoiAppearance<'a> {
+    /// Outline/handle color; falls back to the chrome axis color when `None`
+    /// (silx `RegionOfInterest.getColor`, default red applied by the manager).
+    pub color: Option<Color32>,
+    /// Optional name drawn as a small label near the ROI (silx
+    /// `RegionOfInterest.getName`).
+    pub name: Option<&'a str>,
+    /// Whether this ROI is the highlighted/current one: drawn with a thicker
+    /// outline (silx highlight style `linewidth=2` vs the default `1`).
+    pub selected: bool,
+}
+
+/// Draw each region of interest with default (axis-color, unnamed, unselected)
+/// appearance: a translucent fill, a border, and a small square handle at every
+/// draggable edge midpoint (`doc/design.md` §13 C3).
 pub fn draw_rois(painter: &Painter, t: &Transform, rois: &[Roi], style: &Style) {
-    let fill = Color32::from_rgba_unmultiplied(style.axis.r(), style.axis.g(), style.axis.b(), 24);
-    let border = Stroke::new(1.0, style.axis);
     for roi in rois {
-        match roi {
-            Roi::Point { x, y } => {
-                let p = t.data_to_pixel(*x, *y);
-                painter.circle_filled(p, 5.0, fill);
-                painter.circle_stroke(p, 5.0, border);
-            }
-            Roi::Line { start, end } => {
-                let a = t.data_to_pixel(start.0, start.1);
-                let b = t.data_to_pixel(end.0, end.1);
-                painter.line_segment([a, b], border);
-                for &p in &[a, b] {
-                    let h = Rect::from_center_size(p, egui::vec2(6.0, 6.0));
-                    painter.rect_filled(h, egui::CornerRadius::ZERO, style.axis);
-                }
-            }
-            Roi::Polygon { vertices } if !vertices.is_empty() => {
-                let pts: Vec<Pos2> = vertices
-                    .iter()
-                    .map(|&(x, y)| t.data_to_pixel(x, y))
-                    .collect();
-                painter.add(egui::Shape::convex_polygon(pts.clone(), fill, border));
-                for p in &pts {
-                    let h = Rect::from_center_size(*p, egui::vec2(6.0, 6.0));
-                    painter.rect_filled(h, egui::CornerRadius::ZERO, style.axis);
-                }
-            }
-            Roi::Polygon { .. } => {} // empty polygon, skip
-            _ => {
-                // Rect, HRange, VRange
-                let r = roi.screen_rect(t);
-                painter.rect_filled(r, egui::CornerRadius::ZERO, fill);
-                painter.rect_stroke(
-                    r,
-                    egui::CornerRadius::ZERO,
-                    border,
-                    egui::StrokeKind::Inside,
-                );
-                for c in roi.handle_centers(t) {
-                    let h = Rect::from_center_size(c, egui::vec2(6.0, 6.0));
-                    painter.rect_filled(h, egui::CornerRadius::ZERO, style.axis);
-                }
-            }
+        draw_roi(painter, t, roi, &RoiAppearance::default(), style);
+    }
+}
+
+/// Draw one ROI honoring `appearance`: the override color recolors the outline,
+/// fill, and handles; a selected ROI uses a thicker border (silx highlight
+/// `linewidth=2`); and a non-empty name is drawn as a label near the ROI.
+pub fn draw_roi(
+    painter: &Painter,
+    t: &Transform,
+    roi: &Roi,
+    appearance: &RoiAppearance,
+    style: &Style,
+) {
+    let color = appearance.color.unwrap_or(style.axis);
+    let fill = Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 24);
+    let width = if appearance.selected { 2.0 } else { 1.0 };
+    let border = Stroke::new(width, color);
+
+    // A representative anchor (in screen pixels) used to place the name label.
+    let label_anchor: Option<Pos2> = match roi {
+        Roi::Point { x, y } => {
+            let p = t.data_to_pixel(*x, *y);
+            painter.circle_filled(p, 5.0, fill);
+            painter.circle_stroke(p, 5.0, border);
+            Some(p)
         }
+        Roi::Cross { center } => {
+            // Full-span cross-hairs through the center (silx CrossROI markers).
+            let p = t.data_to_pixel(center.0, center.1);
+            let area = t.area;
+            painter.vline(p.x, area.y_range(), border);
+            painter.hline(area.x_range(), p.y, border);
+            Some(p)
+        }
+        Roi::Line { start, end } => {
+            let a = t.data_to_pixel(start.0, start.1);
+            let b = t.data_to_pixel(end.0, end.1);
+            painter.line_segment([a, b], border);
+            for &p in &[a, b] {
+                let h = Rect::from_center_size(p, egui::vec2(6.0, 6.0));
+                painter.rect_filled(h, egui::CornerRadius::ZERO, color);
+            }
+            Some(a)
+        }
+        Roi::Polygon { vertices } if !vertices.is_empty() => {
+            let pts: Vec<Pos2> = vertices
+                .iter()
+                .map(|&(x, y)| t.data_to_pixel(x, y))
+                .collect();
+            painter.add(egui::Shape::convex_polygon(pts.clone(), fill, border));
+            for p in &pts {
+                let h = Rect::from_center_size(*p, egui::vec2(6.0, 6.0));
+                painter.rect_filled(h, egui::CornerRadius::ZERO, color);
+            }
+            pts.first().copied()
+        }
+        Roi::Polygon { .. } => None, // empty polygon, skip
+        Roi::Circle { center, radius } => {
+            // Center pixel and an X-axis perimeter pixel give the screen radius
+            // (the transform may differ per axis, so derive from data points).
+            let c = t.data_to_pixel(center.0, center.1);
+            let edge = t.data_to_pixel(center.0 + radius, center.1);
+            let rpx = (edge.x - c.x).abs();
+            painter.circle_filled(c, rpx, fill);
+            painter.circle_stroke(c, rpx, border);
+            let handles = [c, edge];
+            for &p in &handles {
+                let h = Rect::from_center_size(p, egui::vec2(6.0, 6.0));
+                painter.rect_filled(h, egui::CornerRadius::ZERO, color);
+            }
+            Some(egui::pos2(c.x, c.y - rpx))
+        }
+        Roi::Ellipse { center, radii } => {
+            let c = t.data_to_pixel(center.0, center.1);
+            let ex = t.data_to_pixel(center.0 + radii.0, center.1);
+            let ey = t.data_to_pixel(center.0, center.1 + radii.1);
+            let rx = (ex.x - c.x).abs();
+            let ry = (ey.y - c.y).abs();
+            // Approximate the ellipse outline with a polygon (silx draws it with
+            // 27 points; match that segment count).
+            let n = 27usize;
+            let pts: Vec<Pos2> = (0..n)
+                .map(|i| {
+                    let a = i as f32 * std::f32::consts::TAU / n as f32;
+                    egui::pos2(c.x + rx * a.cos(), c.y + ry * a.sin())
+                })
+                .collect();
+            painter.add(egui::Shape::convex_polygon(pts, fill, border));
+            let handles = [c, ex, ey];
+            for &p in &handles {
+                let h = Rect::from_center_size(p, egui::vec2(6.0, 6.0));
+                painter.rect_filled(h, egui::CornerRadius::ZERO, color);
+            }
+            Some(egui::pos2(c.x, c.y - ry))
+        }
+        _ => {
+            // Rect, HRange, VRange
+            let r = roi.screen_rect(t);
+            painter.rect_filled(r, egui::CornerRadius::ZERO, fill);
+            painter.rect_stroke(
+                r,
+                egui::CornerRadius::ZERO,
+                border,
+                egui::StrokeKind::Inside,
+            );
+            for c in roi.handle_centers(t) {
+                let h = Rect::from_center_size(c, egui::vec2(6.0, 6.0));
+                painter.rect_filled(h, egui::CornerRadius::ZERO, color);
+            }
+            Some(egui::pos2(r.center().x, r.top()))
+        }
+    };
+
+    if let (Some(name), Some(anchor)) = (appearance.name.filter(|s| !s.is_empty()), label_anchor) {
+        draw_marker_label(
+            painter,
+            anchor + vec2(0.0, -3.0),
+            Align2::CENTER_BOTTOM,
+            name,
+            color,
+            Some(style.readout_bg),
+        );
     }
 }
 
