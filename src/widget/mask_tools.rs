@@ -1,3 +1,5 @@
+use std::io::{self, Read, Write};
+
 use egui::Color32;
 
 use crate::core::backend::ItemHandle;
@@ -642,6 +644,198 @@ impl MaskToolsWidget {
             self.mask[idx] = 0;
         }
     }
+
+    /// Write the current mask as a 2D `uint8` NumPy `.npy` array.
+    ///
+    /// Mirrors silx `MaskToolsWidget.save(filename, "npy")` (`numpy.save` of
+    /// the `uint8` mask, gui/plot/MaskToolsWidget.py:122-126). The array shape
+    /// is `(height, width)` in C (row-major) order; for `uint8` the byte order
+    /// is irrelevant (`descr: '|u1'`).
+    pub fn write_npy(&self, w: &mut impl Write) -> io::Result<()> {
+        write_npy_u8(w, self.height, self.width, &self.mask)
+    }
+
+    /// Read a 2D `uint8` `.npy` mask and apply it, cropping or padding to the
+    /// current image geometry.
+    ///
+    /// Mirrors silx `MaskToolsWidget.load(filename)` for the npy branch
+    /// (gui/plot/MaskToolsWidget.py:600-628) feeding `setSelectionMask`
+    /// (lines 350-368): if the loaded shape matches the current image it is
+    /// used as-is, otherwise it is cropped/padded into a zero buffer of the
+    /// current shape (`resizedMask[:h, :w] = mask[:h, :w]`). The mask is
+    /// committed to the undo history. Returns `Ok(true)` when the loaded
+    /// shape differed from the current image (silx raises `RuntimeWarning`),
+    /// `Ok(false)` when it matched.
+    pub fn read_npy(&mut self, r: impl Read) -> io::Result<bool> {
+        let (height, width, data) = read_npy_u8(r)?;
+        let resized = height != self.height || width != self.width;
+        if resized {
+            // silx crop/pad: zero buffer of current shape, copy the overlap.
+            let mut buf = vec![0u8; (self.width as usize) * (self.height as usize)];
+            let copy_h = self.height.min(height) as usize;
+            let copy_w = self.width.min(width) as usize;
+            for r in 0..copy_h {
+                let dst = r * self.width as usize;
+                let src = r * width as usize;
+                buf[dst..dst + copy_w].copy_from_slice(&data[src..src + copy_w]);
+            }
+            self.mask = buf;
+        } else {
+            self.mask = data;
+        }
+        self.commit();
+        self.is_dirty = true;
+        Ok(resized)
+    }
+
+    /// Save the current mask to a `.npy` file.
+    ///
+    /// File wrapper over [`write_npy`](Self::write_npy); see it for the format.
+    pub fn save_npy(&self, path: impl AsRef<std::path::Path>) -> io::Result<()> {
+        let file = std::fs::File::create(path)?;
+        let mut writer = io::BufWriter::new(file);
+        self.write_npy(&mut writer)?;
+        writer.flush()
+    }
+
+    /// Load a mask from a `.npy` file, cropping/padding to the current image.
+    ///
+    /// File wrapper over [`read_npy`](Self::read_npy); returns `Ok(true)` when
+    /// the loaded shape differed from the current image (resize occurred).
+    pub fn load_npy(&mut self, path: impl AsRef<std::path::Path>) -> io::Result<bool> {
+        let file = std::fs::File::open(path)?;
+        let reader = io::BufReader::new(file);
+        self.read_npy(reader)
+    }
+}
+
+/// Write a 2D `uint8` array `(height, width)` in NumPy `.npy` v1.0 format.
+///
+/// The `.npy` format is self-describing: a `\x93NUMPY` magic, a `\x01\x00`
+/// version, a little-endian `u16` header length, then an ASCII header dict
+/// `{'descr': '|u1', 'fortran_order': False, 'shape': (h, w), }` padded with
+/// spaces so the total preamble length is a multiple of 64 and terminated by a
+/// newline, then the raw C-order bytes. See the NumPy format spec and silx
+/// `numpy.save`.
+fn write_npy_u8(w: &mut impl Write, height: u32, width: u32, data: &[u8]) -> io::Result<()> {
+    const MAGIC: &[u8] = b"\x93NUMPY";
+    let header = format!(
+        "{{'descr': '|u1', 'fortran_order': False, 'shape': ({}, {}), }}",
+        height, width
+    );
+    // Preamble = magic(6) + version(2) + header-len(2) + header + '\n',
+    // padded with spaces so the whole preamble length is a multiple of 64.
+    let unpadded = MAGIC.len() + 2 + 2 + header.len() + 1;
+    let pad = (64 - (unpadded % 64)) % 64;
+    let header_len = header.len() + pad + 1; // padding + trailing newline
+    debug_assert!(header_len <= u16::MAX as usize);
+
+    w.write_all(MAGIC)?;
+    w.write_all(&[1u8, 0u8])?; // version 1.0
+    w.write_all(&(header_len as u16).to_le_bytes())?;
+    w.write_all(header.as_bytes())?;
+    for _ in 0..pad {
+        w.write_all(b" ")?;
+    }
+    w.write_all(b"\n")?;
+    w.write_all(data)?;
+    Ok(())
+}
+
+/// Read a 2D `uint8` array from NumPy `.npy` format, returning
+/// `(height, width, data)` in C (row-major) order.
+///
+/// Accepts only `descr` of `|u1` / `<u1` / `>u1` / `u1` (uint8) with
+/// `fortran_order: False` and a 2D shape, matching what silx's mask save
+/// produces. Any other dtype, Fortran order, dimensionality, or a truncated
+/// body is an [`io::ErrorKind::InvalidData`] error.
+fn read_npy_u8(mut r: impl Read) -> io::Result<(u32, u32, Vec<u8>)> {
+    let invalid = |msg: &str| io::Error::new(io::ErrorKind::InvalidData, msg.to_string());
+
+    let mut magic = [0u8; 6];
+    r.read_exact(&mut magic)?;
+    if &magic != b"\x93NUMPY" {
+        return Err(invalid("not a .npy file (bad magic)"));
+    }
+
+    let mut version = [0u8; 2];
+    r.read_exact(&mut version)?;
+    // Header length is u16 (v1.0) or u32 (v2.0+); support both.
+    let header_len = if version[0] >= 2 {
+        let mut len = [0u8; 4];
+        r.read_exact(&mut len)?;
+        u32::from_le_bytes(len) as usize
+    } else {
+        let mut len = [0u8; 2];
+        r.read_exact(&mut len)?;
+        u16::from_le_bytes(len) as usize
+    };
+
+    let mut header_bytes = vec![0u8; header_len];
+    r.read_exact(&mut header_bytes)?;
+    let header =
+        std::str::from_utf8(&header_bytes).map_err(|_| invalid("npy header is not UTF-8"))?;
+
+    let descr =
+        parse_header_field(header, "descr").ok_or_else(|| invalid("npy header missing 'descr'"))?;
+    // uint8: '|u1' is canonical; tolerate explicit endianness markers.
+    if !matches!(descr.as_str(), "|u1" | "<u1" | ">u1" | "u1") {
+        return Err(invalid("npy mask must be uint8 ('|u1')"));
+    }
+
+    let fortran = parse_header_field(header, "fortran_order")
+        .ok_or_else(|| invalid("npy header missing 'fortran_order'"))?;
+    if fortran != "False" {
+        return Err(invalid("npy mask must be C-order (fortran_order: False)"));
+    }
+
+    let (height, width) = parse_shape_2d(header)?;
+
+    let count = (height as usize) * (width as usize);
+    let mut data = vec![0u8; count];
+    r.read_exact(&mut data)?;
+    Ok((height, width, data))
+}
+
+/// Extract the value of a `key` from a NumPy `.npy` header dict literal.
+///
+/// Returns the value with surrounding quotes stripped (so `'|u1'` becomes
+/// `|u1` and the bare literal `False` becomes `False`). Returns `None` if the
+/// key is absent.
+fn parse_header_field(header: &str, key: &str) -> Option<String> {
+    // Match `'key':` then take up to the next ',' or '}'.
+    let needle = format!("'{key}':");
+    let start = header.find(&needle)? + needle.len();
+    let rest = &header[start..];
+    let end = rest.find([',', '}'])?;
+    let value = rest[..end].trim();
+    Some(value.trim_matches(['\'', '"']).to_string())
+}
+
+/// Parse the `shape` tuple of a 2D NumPy `.npy` header into `(height, width)`.
+///
+/// Rejects shapes that are not exactly 2D, matching silx's mask load which
+/// only handles 2D image masks (`setSelectionMask` returns `None` otherwise).
+fn parse_shape_2d(header: &str) -> io::Result<(u32, u32)> {
+    let invalid = |msg: &str| io::Error::new(io::ErrorKind::InvalidData, msg.to_string());
+    let start = header
+        .find("'shape':")
+        .ok_or_else(|| invalid("npy header missing 'shape'"))?
+        + "'shape':".len();
+    let rest = &header[start..];
+    let open = rest.find('(').ok_or_else(|| invalid("malformed shape"))?;
+    let close = rest.find(')').ok_or_else(|| invalid("malformed shape"))?;
+    let dims: Vec<u32> = rest[open + 1..close]
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.parse::<u32>())
+        .collect::<Result<_, _>>()
+        .map_err(|_| invalid("non-integer shape dimension"))?;
+    if dims.len() != 2 {
+        return Err(invalid("npy mask must be 2D"));
+    }
+    Ok((dims[0], dims[1]))
 }
 
 /// Return a boolean fill mask (row-major, `height * width`) that is `true`
@@ -1214,6 +1408,101 @@ mod tests {
             0, 0, 0, 0, //
         ];
         assert_eq!(w.mask, expected);
+    }
+
+    #[test]
+    fn npy_round_trips_through_memory() {
+        // Save the mask to an in-memory buffer, then load it into a fresh
+        // widget of the same shape: same-shape load returns false (no resize)
+        // and the mask is bit-identical.
+        let mut src = MaskToolsWidget::new(3, 2); // width 3, height 2
+        src.mask = vec![0, 1, 2, 3, 4, 5];
+
+        let mut buf = Vec::new();
+        src.write_npy(&mut buf).unwrap();
+
+        // The preamble (magic..newline) must be a multiple of 64 bytes, then 6
+        // data bytes follow.
+        assert_eq!(&buf[0..6], b"\x93NUMPY");
+        assert_eq!(buf.len() % 64, 6);
+
+        let mut dst = MaskToolsWidget::new(3, 2);
+        let resized = dst.read_npy(buf.as_slice()).unwrap();
+        assert!(!resized, "same shape must not report a resize");
+        assert_eq!(dst.mask, vec![0, 1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn npy_load_crops_larger_mask() {
+        // Loaded mask 3x3 into a 2x2 widget: crop to top-left 2x2, report a
+        // resize. silx setSelectionMask: resizedMask[:h, :w] = mask[:h, :w].
+        let mut big = MaskToolsWidget::new(3, 3);
+        big.mask = vec![
+            1, 2, 3, //
+            4, 5, 6, //
+            7, 8, 9, //
+        ];
+        let mut buf = Vec::new();
+        big.write_npy(&mut buf).unwrap();
+
+        let mut small = MaskToolsWidget::new(2, 2);
+        let resized = small.read_npy(buf.as_slice()).unwrap();
+        assert!(resized, "shape mismatch must report a resize");
+        // Top-left 2x2 of the 3x3 source.
+        assert_eq!(small.mask, vec![1, 2, 4, 5]);
+    }
+
+    #[test]
+    fn npy_load_pads_smaller_mask() {
+        // Loaded mask 2x2 into a 3x3 widget: pad with zeros, report a resize.
+        let mut small = MaskToolsWidget::new(2, 2);
+        small.mask = vec![1, 2, 3, 4];
+        let mut buf = Vec::new();
+        small.write_npy(&mut buf).unwrap();
+
+        let mut big = MaskToolsWidget::new(3, 3);
+        let resized = big.read_npy(buf.as_slice()).unwrap();
+        assert!(resized);
+        assert_eq!(
+            big.mask,
+            vec![
+                1, 2, 0, //
+                3, 4, 0, //
+                0, 0, 0, //
+            ]
+        );
+    }
+
+    #[test]
+    fn npy_load_rejects_non_uint8_dtype() {
+        // A header advertising float64 ('<f8') is rejected: silx masks are u8.
+        let header = b"{'descr': '<f8', 'fortran_order': False, 'shape': (1, 1), }";
+        let mut buf = Vec::new();
+        buf.extend_from_slice(b"\x93NUMPY");
+        buf.extend_from_slice(&[1u8, 0u8]);
+        buf.extend_from_slice(&(header.len() as u16).to_le_bytes());
+        buf.extend_from_slice(header);
+        // 8 bytes of body (one f64), never reached because dtype check fails.
+        buf.extend_from_slice(&[0u8; 8]);
+
+        let mut w = MaskToolsWidget::new(1, 1);
+        let err = w.read_npy(buf.as_slice()).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn npy_load_commits_history() {
+        // A successful load commits a snapshot so it can be undone.
+        let mut src = MaskToolsWidget::new(2, 1);
+        src.mask = vec![1, 1];
+        let mut buf = Vec::new();
+        src.write_npy(&mut buf).unwrap();
+
+        let mut dst = MaskToolsWidget::new(2, 1);
+        assert!(!dst.can_undo());
+        dst.read_npy(buf.as_slice()).unwrap();
+        assert_eq!(dst.mask, vec![1, 1]);
+        assert!(dst.can_undo(), "load must commit to history");
     }
 
     #[test]
