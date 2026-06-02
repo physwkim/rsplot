@@ -3448,18 +3448,23 @@ impl PlotWidget {
         let Some(mut data) = self.record_curve_data(handle).cloned() else {
             return false;
         };
-        // Compute the next symbol against the record's restore cache. Take the
-        // cache out, transform, then write it back: the cache lives on the
-        // record but the transform is the pure free fn.
+        // Read (do not yet consume) the record's restore cache, transform with
+        // the pure free fn, then commit the cache write-back ONLY after the
+        // drawn-state transition (`update_curve_data`) succeeds. This keeps the
+        // UI restore cache in lockstep with `CurveData.symbol`: a failed update
+        // leaves both the drawn symbol and the cache untouched.
         let mut cache = self
-            .item_record_mut(handle)
-            .and_then(|record| record.hidden_symbol.take());
+            .item_record(handle)
+            .and_then(|record| record.hidden_symbol);
         let next = set_symbol_visibility(data.symbol, visible, &mut cache);
+        data.symbol = next;
+        if !self.update_curve_data(handle, &data) {
+            return false;
+        }
         if let Some(record) = self.item_record_mut(handle) {
             record.hidden_symbol = cache;
         }
-        data.symbol = next;
-        self.update_curve_data(handle, &data)
+        true
     }
 
     /// Show or hide a curve's connecting line (silx legend checkable `Lines`).
@@ -3474,15 +3479,21 @@ impl PlotWidget {
         let Some(mut data) = self.record_curve_data(handle).cloned() else {
             return false;
         };
+        // Same finalizer ordering as `set_curve_points_visible`: read the cache
+        // without consuming it, transform, and commit the write-back only once
+        // `update_curve_data` confirms the drawn line style actually changed.
         let mut cache = self
-            .item_record_mut(handle)
-            .and_then(|record| record.hidden_line_style.take());
+            .item_record(handle)
+            .and_then(|record| record.hidden_line_style.clone());
         let next = set_line_visibility(data.line_style.clone(), visible, &mut cache);
+        data.line_style = next;
+        if !self.update_curve_data(handle, &data) {
+            return false;
+        }
         if let Some(record) = self.item_record_mut(handle) {
             record.hidden_line_style = cache;
         }
-        data.line_style = next;
-        self.update_curve_data(handle, &data)
+        true
     }
 
     /// Set the active curve-like item.
