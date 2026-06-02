@@ -54,8 +54,9 @@ pub use crate::widget::high_level::{
 };
 pub use crate::widget::image_stack::{Frame, ImageStack};
 pub use crate::widget::interaction::{
-    CursorShape, MouseButton, PanDirection, PlotPointerEvent, PointPick, cursor_for_edge,
-    cursor_for_grab, image_index, nearest_point,
+    CursorShape, DrawEvent, DrawInput, DrawMode, DrawParams, DrawState, MouseButton, PanDirection,
+    PlotPointerEvent, PointPick, cursor_for_edge, cursor_for_grab, ellipse_semi_axes, image_index,
+    nearest_point,
 };
 pub use crate::widget::limits_widget::LimitsWidget;
 pub use crate::widget::mask_tools::{MaskTool, MaskToolsWidget, ThresholdMode};

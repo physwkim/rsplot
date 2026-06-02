@@ -284,6 +284,527 @@ pub fn clamp_limits(limits: Limits, x_log: bool, y_log: bool) -> Limits {
     (nx0, nx1, ny0, ny1)
 }
 
+// Draw-mode state machine ####################################################
+
+/// Which shape an interactive draw session produces, mirroring silx's draw-mode
+/// state machines (`PlotInteraction.py`): [`SelectRectangle`], [`SelectEllipse`],
+/// [`SelectLine`], [`SelectHLine`], [`SelectVLine`], [`SelectPolygon`], and the
+/// freehand pencil ([`DrawFreeHand`] / [`SelectFreeLine`]).
+///
+/// [`SelectRectangle`]: # "PlotInteraction.py:767"
+/// [`SelectEllipse`]: # "PlotInteraction.py:681"
+/// [`SelectLine`]: # "PlotInteraction.py:809"
+/// [`SelectHLine`]: # "PlotInteraction.py:885"
+/// [`SelectVLine`]: # "PlotInteraction.py:920"
+/// [`SelectPolygon`]: # "PlotInteraction.py:485"
+/// [`DrawFreeHand`]: # "PlotInteraction.py:955"
+/// [`SelectFreeLine`]: # "PlotInteraction.py:1051"
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DrawMode {
+    /// Two-point axis-aligned rectangle drag (silx `SelectRectangle`).
+    Rectangle,
+    /// Two-point drag producing an ellipse (silx `SelectEllipse`); the press is
+    /// the center and the drag end a point on the ellipse.
+    Ellipse,
+    /// Two-point line segment drag (silx `SelectLine`).
+    Line,
+    /// One-point horizontal line at a captured Y (silx `SelectHLine`).
+    HLine,
+    /// One-point vertical line at a captured X (silx `SelectVLine`).
+    VLine,
+    /// Point-by-point polygon, closed by clicking near the first vertex (silx
+    /// `SelectPolygon`).
+    Polygon,
+    /// Continuous freehand polyline accumulated while dragging (silx
+    /// `DrawFreeHand` / `SelectFreeLine`).
+    FreeHand,
+}
+
+/// A pointer sample fed to [`DrawState`]: the data-space position plus the
+/// pixel-space position. The pixel position is needed for the polygon's
+/// snap-to-first-point pixel threshold (silx `SelectPolygon`); the data position
+/// is what the produced shape stores.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DrawInput {
+    /// Data-space `(x, y)` under the cursor.
+    pub data: (f64, f64),
+    /// Pixel-space `(x, y)` of the cursor.
+    pub pixel: (f32, f32),
+}
+
+impl DrawInput {
+    /// Build a sample from a cursor pixel and the display [`Transform`],
+    /// projecting the pixel to data space (the widget's per-event conversion).
+    pub fn from_pixel(transform: &Transform, pixel: Pos2) -> Self {
+        Self {
+            data: transform.pixel_to_data(pixel),
+            pixel: (pixel.x, pixel.y),
+        }
+    }
+}
+
+/// Parameters of a finished draw, mirroring the `points` / `parameters` payload
+/// of silx's `prepareDrawingSignal` (`PlotEvents.py:34-55`) per shape type. All
+/// coordinates are data-space.
+#[derive(Clone, Debug, PartialEq)]
+pub enum DrawParams {
+    /// Axis-aligned rectangle, as silx `prepareDrawingSignal("rectangle", ...)`
+    /// derives it: the lower-left `(x, y)` corner plus `width`/`height`
+    /// (`PlotEvents.py:49-53`).
+    Rectangle {
+        x: f64,
+        y: f64,
+        width: f64,
+        height: f64,
+    },
+    /// Ellipse from silx `SelectEllipse`: a `center` plus the semi-axes
+    /// `(width, height)` from center to the bounding box
+    /// (`PlotInteraction.py:688-746`).
+    Ellipse {
+        center: (f64, f64),
+        /// Semi-axis lengths `(a, b)` from center to bounding box.
+        semi_axes: (f64, f64),
+    },
+    /// Line segment between two endpoints (silx `SelectLine`).
+    Line { start: (f64, f64), end: (f64, f64) },
+    /// Horizontal line at data `y` (silx `SelectHLine` captures the row; the
+    /// widget extends it across the plot bounds for display).
+    HLine { y: f64 },
+    /// Vertical line at data `x` (silx `SelectVLine`).
+    VLine { x: f64 },
+    /// Closed polygon vertices (silx `SelectPolygon`). silx duplicates the first
+    /// vertex as the last on close; this stores the open vertex ring without the
+    /// duplicate so each vertex appears once.
+    Polygon { vertices: Vec<(f64, f64)> },
+    /// Freehand polyline vertices (silx `DrawFreeHand` / `SelectFreeLine`).
+    FreeHand { vertices: Vec<(f64, f64)> },
+}
+
+/// An event emitted by [`DrawState`], mirroring silx's `drawingProgress` /
+/// `drawingFinished` signals (`prepareDrawingSignal`, `PlotEvents.py:34-55`).
+#[derive(Clone, Debug, PartialEq)]
+pub enum DrawEvent {
+    /// The in-progress preview shape (silx `"drawingProgress"`). `points` are the
+    /// data-space vertices of the current rubber-band, suitable for overlay
+    /// drawing. For an ellipse these are the sampled circle-preview vertices.
+    InProgress {
+        mode: DrawMode,
+        points: Vec<(f64, f64)>,
+    },
+    /// The draw completed (silx `"drawingFinished"`), carrying the resolved
+    /// [`DrawParams`].
+    Finished { mode: DrawMode, params: DrawParams },
+}
+
+/// Default polygon close / first-point snap threshold in pixels, mirroring silx
+/// `SelectPolygon.DRAG_THRESHOLD_DIST` (`PlotInteraction.py:488`).
+pub const DRAW_CLOSE_THRESHOLD_PX: f32 = 4.0;
+
+/// Number of preview vertices silx samples for the ellipse/circle rubber band
+/// (`PlotInteraction.py:729`).
+const ELLIPSE_PREVIEW_POINTS: usize = 27;
+
+/// Internal phase of a two-/one-point or polygon/freehand draw, kept private so
+/// the only public surface is [`DrawState`]'s event API.
+#[derive(Clone, Debug, PartialEq)]
+enum Phase {
+    /// No active draw.
+    Idle,
+    /// A two-point draw in progress: `start` captured, dragging to the end.
+    TwoPoint { start: DrawInput },
+    /// A one-point draw in progress (hline/vline): tracking the current point.
+    OnePoint,
+    /// A polygon in progress: `first` is the anchor (for the close test) and
+    /// `points` is the committed vertex ring whose last entry tracks the cursor.
+    /// Each vertex keeps its pixel position so the close / near-previous tests
+    /// run in pixel space exactly as silx does.
+    Polygon {
+        first: DrawInput,
+        points: Vec<DrawInput>,
+    },
+    /// A freehand draw in progress: accumulated data-space vertices.
+    FreeHand { points: Vec<(f64, f64)> },
+}
+
+/// A pure draw-mode state machine over data-space coordinates, mirroring silx's
+/// `Select*` / `DrawFreeHand` interactions (`PlotInteraction.py:485-1110`).
+///
+/// The widget feeds it pointer press / move / release events (already projected
+/// to [`DrawInput`]); it returns an optional [`DrawEvent`] (`InProgress` preview
+/// or `Finished` result) without touching any GPU state, so it is fully
+/// unit-testable. The current preview vertices are also available via
+/// [`DrawState::preview`] for overlay drawing between events.
+#[derive(Clone, Debug)]
+pub struct DrawState {
+    mode: DrawMode,
+    phase: Phase,
+    close_threshold_px: f32,
+}
+
+impl DrawState {
+    /// A fresh idle state for `mode`, using the default close threshold.
+    pub fn new(mode: DrawMode) -> Self {
+        Self {
+            mode,
+            phase: Phase::Idle,
+            close_threshold_px: DRAW_CLOSE_THRESHOLD_PX,
+        }
+    }
+
+    /// Override the polygon close / first-point snap threshold (pixels).
+    pub fn with_close_threshold(mut self, px: f32) -> Self {
+        self.close_threshold_px = px;
+        self
+    }
+
+    /// The active draw mode.
+    pub fn mode(&self) -> DrawMode {
+        self.mode
+    }
+
+    /// Whether a draw is currently in progress (a press has started a shape that
+    /// has not finished).
+    pub fn is_active(&self) -> bool {
+        !matches!(self.phase, Phase::Idle)
+    }
+
+    /// The current preview vertices (data space) for overlay drawing, or `None`
+    /// when idle. Mirrors the rubber-band silx keeps via `setSelectionArea`.
+    pub fn preview(&self) -> Option<Vec<(f64, f64)>> {
+        match &self.phase {
+            Phase::Idle => None,
+            Phase::TwoPoint { .. } | Phase::OnePoint => None,
+            Phase::Polygon { points, .. } => Some(points.iter().map(|p| p.data).collect()),
+            Phase::FreeHand { points } => Some(points.clone()),
+        }
+    }
+
+    /// Handle a pointer *press* (left-button down). For two-/one-point and
+    /// freehand modes this begins the draw; for polygon mode it begins the
+    /// polygon on the first press and is a no-op on later presses (vertices are
+    /// added on release, mirroring silx `SelectPolygon`).
+    pub fn on_press(&mut self, input: DrawInput) -> Option<DrawEvent> {
+        match self.mode {
+            DrawMode::Rectangle | DrawMode::Ellipse | DrawMode::Line => {
+                self.phase = Phase::TwoPoint { start: input };
+                None
+            }
+            DrawMode::HLine | DrawMode::VLine => {
+                self.phase = Phase::OnePoint;
+                Some(self.one_point_progress(input))
+            }
+            DrawMode::Polygon => {
+                if matches!(self.phase, Phase::Idle) {
+                    // First press anchors the polygon (silx enterState seeds
+                    // points with [firstPos, firstPos]).
+                    self.phase = Phase::Polygon {
+                        first: input,
+                        points: vec![input, input],
+                    };
+                    Some(self.polygon_progress())
+                } else {
+                    None
+                }
+            }
+            DrawMode::FreeHand => {
+                // silx SelectFreeLine seeds the first vertex on press (beginDrag).
+                self.phase = Phase::FreeHand {
+                    points: vec![input.data],
+                };
+                Some(self.freehand_progress())
+            }
+        }
+    }
+
+    /// Handle a pointer *move*. Emits an `InProgress` preview while a draw is
+    /// active, or `None` when idle.
+    pub fn on_move(&mut self, input: DrawInput) -> Option<DrawEvent> {
+        match self.mode {
+            DrawMode::Rectangle | DrawMode::Ellipse | DrawMode::Line => match &self.phase {
+                Phase::TwoPoint { start } => Some(self.two_point_progress(*start, input)),
+                _ => None,
+            },
+            DrawMode::HLine | DrawMode::VLine => match self.phase {
+                Phase::OnePoint => Some(self.one_point_progress(input)),
+                _ => None,
+            },
+            DrawMode::Polygon => {
+                if let Phase::Polygon { first, points } = &mut self.phase {
+                    // Snap the tracked last vertex to the first point when the
+                    // cursor is within the close threshold (silx onMove,
+                    // PlotInteraction.py:593-604).
+                    let snapped = if Self::within_threshold(
+                        first.pixel,
+                        input.pixel,
+                        self.close_threshold_px,
+                    ) {
+                        *first
+                    } else {
+                        input
+                    };
+                    if let Some(last) = points.last_mut() {
+                        *last = snapped;
+                    }
+                    Some(self.polygon_progress())
+                } else {
+                    None
+                }
+            }
+            DrawMode::FreeHand => {
+                if let Phase::FreeHand { points } = &mut self.phase {
+                    // Accumulate, skipping a repeated identical point (silx
+                    // SelectFreeLine._processEvent isNewPoint check).
+                    if points.last() != Some(&input.data) {
+                        points.push(input.data);
+                    }
+                    Some(self.freehand_progress())
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    /// Handle a pointer *release* (left-button up). Two-/one-point and freehand
+    /// modes finish here; polygon mode appends a vertex (or closes if released
+    /// near the first point with more than two vertices), mirroring silx
+    /// `SelectPolygon.onRelease`.
+    pub fn on_release(&mut self, input: DrawInput) -> Option<DrawEvent> {
+        match self.mode {
+            DrawMode::Rectangle | DrawMode::Ellipse | DrawMode::Line => {
+                match std::mem::replace(&mut self.phase, Phase::Idle) {
+                    Phase::TwoPoint { start } => Some(self.two_point_finished(start, input)),
+                    other => {
+                        self.phase = other;
+                        None
+                    }
+                }
+            }
+            DrawMode::HLine | DrawMode::VLine => {
+                if matches!(self.phase, Phase::OnePoint) {
+                    self.phase = Phase::Idle;
+                    Some(self.one_point_finished(input))
+                } else {
+                    None
+                }
+            }
+            DrawMode::Polygon => self.polygon_on_release(input),
+            DrawMode::FreeHand => {
+                if let Phase::FreeHand { points } = &mut self.phase {
+                    if points.last() != Some(&input.data) {
+                        points.push(input.data);
+                    }
+                    let vertices = std::mem::take(points);
+                    self.phase = Phase::Idle;
+                    Some(DrawEvent::Finished {
+                        mode: DrawMode::FreeHand,
+                        params: DrawParams::FreeHand { vertices },
+                    })
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    /// Cancel any in-progress draw, returning to idle. Mirrors silx `cancel` /
+    /// `cancelSelect` (drops the rubber band without a finished event).
+    pub fn cancel(&mut self) {
+        self.phase = Phase::Idle;
+    }
+
+    // --- internal helpers -------------------------------------------------
+
+    fn within_threshold(a: (f32, f32), b: (f32, f32), threshold: f32) -> bool {
+        // silx tests dx <= threshold AND dy <= threshold (axis-wise box, not a
+        // radial distance), PlotInteraction.py:560-565.
+        (a.0 - b.0).abs() <= threshold && (a.1 - b.1).abs() <= threshold
+    }
+
+    fn two_point_progress(&self, start: DrawInput, cur: DrawInput) -> DrawEvent {
+        DrawEvent::InProgress {
+            mode: self.mode,
+            points: self.two_point_preview(start.data, cur.data),
+        }
+    }
+
+    fn two_point_finished(&self, start: DrawInput, end: DrawInput) -> DrawEvent {
+        let params = match self.mode {
+            DrawMode::Rectangle => {
+                let (sx, sy) = start.data;
+                let (ex, ey) = end.data;
+                let x = sx.min(ex);
+                let y = sy.min(ey);
+                DrawParams::Rectangle {
+                    x,
+                    y,
+                    width: sx.max(ex) - x,
+                    height: sy.max(ey) - y,
+                }
+            }
+            DrawMode::Ellipse => {
+                let semi_axes = ellipse_semi_axes(start.data, end.data);
+                DrawParams::Ellipse {
+                    center: start.data,
+                    semi_axes,
+                }
+            }
+            DrawMode::Line => DrawParams::Line {
+                start: start.data,
+                end: end.data,
+            },
+            _ => unreachable!("two_point_finished only for rectangle/ellipse/line"),
+        };
+        DrawEvent::Finished {
+            mode: self.mode,
+            params,
+        }
+    }
+
+    fn two_point_preview(&self, start: (f64, f64), cur: (f64, f64)) -> Vec<(f64, f64)> {
+        match self.mode {
+            DrawMode::Rectangle => {
+                // silx four corners: start, (start.x, cur.y), cur, (cur.x, start.y).
+                vec![start, (start.0, cur.1), cur, (cur.0, start.1)]
+            }
+            DrawMode::Line => vec![start, cur],
+            DrawMode::Ellipse => {
+                let (a, b) = ellipse_semi_axes(start, cur);
+                ellipse_preview(start, a, b)
+            }
+            _ => unreachable!("two_point_preview only for rectangle/ellipse/line"),
+        }
+    }
+
+    fn one_point_progress(&self, input: DrawInput) -> DrawEvent {
+        DrawEvent::InProgress {
+            mode: self.mode,
+            // The pure machine has no plot bounds; the preview point is just the
+            // captured coordinate. The widget extends it across the data area.
+            points: vec![input.data],
+        }
+    }
+
+    fn one_point_finished(&self, input: DrawInput) -> DrawEvent {
+        let params = match self.mode {
+            DrawMode::HLine => DrawParams::HLine { y: input.data.1 },
+            DrawMode::VLine => DrawParams::VLine { x: input.data.0 },
+            _ => unreachable!("one_point_finished only for hline/vline"),
+        };
+        DrawEvent::Finished {
+            mode: self.mode,
+            params,
+        }
+    }
+
+    fn polygon_progress(&self) -> DrawEvent {
+        let points = match &self.phase {
+            Phase::Polygon { points, .. } => points.iter().map(|p| p.data).collect(),
+            _ => Vec::new(),
+        };
+        DrawEvent::InProgress {
+            mode: DrawMode::Polygon,
+            points,
+        }
+    }
+
+    fn polygon_on_release(&mut self, input: DrawInput) -> Option<DrawEvent> {
+        let Phase::Polygon { first, points } = &mut self.phase else {
+            return None;
+        };
+        // Close when there is a real polygon (silx requires len > 2, i.e. the
+        // seeded pair plus at least one appended vertex) and the release is near
+        // the first point (PlotInteraction.py:565).
+        let close = points.len() > 2
+            && Self::within_threshold(first.pixel, input.pixel, self.close_threshold_px);
+        if close {
+            return Some(self.close_polygon());
+        }
+
+        // Compare the release pixel to the *previous* committed vertex's pixel
+        // (points[-2]); append only if it is far enough, else replace the tracked
+        // last vertex (silx PlotInteraction.py:581-588).
+        let prev = points.get(points.len().wrapping_sub(2)).map(|p| p.pixel);
+        let near_prev = prev
+            .map(|pp| Self::within_threshold(pp, input.pixel, self.close_threshold_px))
+            .unwrap_or(false);
+        if let Some(last) = points.last_mut() {
+            *last = input;
+        }
+        if !near_prev {
+            points.push(input);
+        }
+        Some(self.polygon_progress())
+    }
+
+    fn close_polygon(&mut self) -> DrawEvent {
+        let vertices = match &mut self.phase {
+            Phase::Polygon { points, .. } => {
+                let mut v: Vec<(f64, f64)> = points.iter().map(|p| p.data).collect();
+                // The tracked last vertex is the cursor; drop it so only the
+                // committed ring remains (silx sets points[-1] = points[0] then
+                // emits; we drop the cursor tail and keep the open ring without a
+                // duplicated first vertex).
+                v.pop();
+                v
+            }
+            _ => Vec::new(),
+        };
+        self.phase = Phase::Idle;
+        DrawEvent::Finished {
+            mode: DrawMode::Polygon,
+            params: DrawParams::Polygon { vertices },
+        }
+    }
+
+    fn freehand_progress(&self) -> DrawEvent {
+        let points = match &self.phase {
+            Phase::FreeHand { points } => points.clone(),
+            _ => Vec::new(),
+        };
+        DrawEvent::InProgress {
+            mode: DrawMode::FreeHand,
+            points,
+        }
+    }
+}
+
+/// Semi-axes `(a, b)` of the ellipse centered at `center` passing through
+/// `point`, mirroring silx `SelectEllipse._getEllipseSize`
+/// (`PlotInteraction.py:688-721`). `a`/`b` are the lengths from the center to
+/// the bounding box along X/Y. A degenerate point (zero X or Y offset) returns
+/// the raw offsets, matching silx's early return.
+pub fn ellipse_semi_axes(center: (f64, f64), point: (f64, f64)) -> (f64, f64) {
+    let mut x = (center.0 - point.0).abs();
+    let mut y = (center.1 - point.1).abs();
+    if x == 0.0 || y == 0.0 {
+        return (x, y);
+    }
+    // The eccentricity of the ellipse defined by a=x, b=y is the one we search.
+    let swap = x < y;
+    if swap {
+        std::mem::swap(&mut x, &mut y);
+    }
+    let e = (x * x - y * y).sqrt() / x;
+    // a^2 = x^2 + y^2 / (1 - e^2); b = a * sqrt(1 - e^2).
+    let a = (x * x + y * y / (1.0 - e * e)).sqrt();
+    let b = a * (1.0 - e * e).sqrt();
+    if swap { (b, a) } else { (a, b) }
+}
+
+/// Sampled vertices of the ellipse preview centered at `center` with semi-axes
+/// `(a, b)`, mirroring silx's [`ELLIPSE_PREVIEW_POINTS`]-point circle sampling
+/// (`PlotInteraction.py:729-734`).
+fn ellipse_preview(center: (f64, f64), a: f64, b: f64) -> Vec<(f64, f64)> {
+    let n = ELLIPSE_PREVIEW_POINTS;
+    (0..n)
+        .map(|i| {
+            let angle = i as f64 * std::f64::consts::TAU / n as f64;
+            (center.0 + angle.cos() * a, center.1 + angle.sin() * b)
+        })
+        .collect()
+}
+
 /// Mouse-cursor shape for a draggable plot handle, mirroring silx's
 /// `CURSOR_SIZE_HOR` / `CURSOR_SIZE_VER` / `CURSOR_SIZE_ALL` / `CURSOR_DEFAULT`
 /// (`backends/BackendBase.py:44-48`, used by `_setCursorForMarker`,
@@ -700,6 +1221,283 @@ mod tests {
     // 100×100 px area mapping data [0,10]×[0,10]; 1 data unit = 10 px.
     fn pick_transform() -> Transform {
         Transform::new(0.0, 10.0, 0.0, 10.0, area_100())
+    }
+
+    fn di(data: (f64, f64), pixel: (f32, f32)) -> DrawInput {
+        DrawInput { data, pixel }
+    }
+
+    #[test]
+    fn rectangle_two_point_bounds() {
+        // Drag from (8,1) to (2,9): finished rectangle is the ordered lower-left
+        // corner plus width/height (silx prepareDrawingSignal "rectangle").
+        let mut s = DrawState::new(DrawMode::Rectangle);
+        // A rectangle press starts the draw but emits nothing (silx beginSelect).
+        assert!(s.on_press(di((8.0, 1.0), (80.0, 90.0))).is_none());
+        assert!(matches!(
+            s.on_move(di((2.0, 9.0), (20.0, 10.0))),
+            Some(DrawEvent::InProgress {
+                mode: DrawMode::Rectangle,
+                ..
+            })
+        ));
+        let fin = s
+            .on_release(di((2.0, 9.0), (20.0, 10.0)))
+            .expect("finished");
+        match fin {
+            DrawEvent::Finished {
+                mode: DrawMode::Rectangle,
+                params:
+                    DrawParams::Rectangle {
+                        x,
+                        y,
+                        width,
+                        height,
+                    },
+            } => {
+                assert_eq!((x, y), (2.0, 1.0));
+                assert_eq!((width, height), (6.0, 8.0));
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(!s.is_active());
+    }
+
+    #[test]
+    fn line_two_point_endpoints() {
+        let mut s = DrawState::new(DrawMode::Line);
+        s.on_press(di((1.0, 2.0), (10.0, 20.0)));
+        let fin = s
+            .on_release(di((3.0, 4.0), (30.0, 40.0)))
+            .expect("finished");
+        assert_eq!(
+            fin,
+            DrawEvent::Finished {
+                mode: DrawMode::Line,
+                params: DrawParams::Line {
+                    start: (1.0, 2.0),
+                    end: (3.0, 4.0),
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn ellipse_params_from_drag() {
+        // Axis-aligned drag (center to a point straight along X): degenerate
+        // ellipse returns the raw offsets (silx early return when y offset 0).
+        let (a, b) = ellipse_semi_axes((0.0, 0.0), (5.0, 0.0));
+        assert_eq!((a, b), (5.0, 0.0));
+        // A real off-axis point: the point lies on the resulting ellipse, i.e.
+        // x^2/a^2 + y^2/b^2 == 1.
+        let center = (1.0, 2.0);
+        let point = (4.0, 6.0);
+        let (a, b) = ellipse_semi_axes(center, point);
+        let dx = point.0 - center.0;
+        let dy = point.1 - center.1;
+        let on_ellipse = dx * dx / (a * a) + dy * dy / (b * b);
+        assert!(
+            (on_ellipse - 1.0).abs() <= 1e-9,
+            "a={a} b={b} -> {on_ellipse}"
+        );
+        // The longer semi-axis follows the larger offset: here |dy| (4) > |dx|
+        // (3), so the Y semi-axis b is the larger one.
+        assert!(b > a, "a={a} b={b}");
+
+        // Through the state machine the finished event carries center + semi-axes.
+        let mut s = DrawState::new(DrawMode::Ellipse);
+        s.on_press(di(center, (10.0, 20.0)));
+        let fin = s.on_release(di(point, (40.0, 60.0))).expect("finished");
+        match fin {
+            DrawEvent::Finished {
+                mode: DrawMode::Ellipse,
+                params:
+                    DrawParams::Ellipse {
+                        center: c,
+                        semi_axes,
+                    },
+            } => {
+                assert_eq!(c, center);
+                assert!((semi_axes.0 - a).abs() <= 1e-12 && (semi_axes.1 - b).abs() <= 1e-12);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn ellipse_preview_has_full_ring() {
+        // The in-progress preview is a 27-point sampled ring around the center.
+        let mut s = DrawState::new(DrawMode::Ellipse);
+        s.on_press(di((0.0, 0.0), (0.0, 0.0)));
+        let ev = s.on_move(di((4.0, 6.0), (40.0, 60.0))).expect("progress");
+        match ev {
+            DrawEvent::InProgress { points, .. } => {
+                assert_eq!(points.len(), 27);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn hline_vline_capture_one_coordinate() {
+        // HLine captures the data Y of the release.
+        let mut s = DrawState::new(DrawMode::HLine);
+        assert!(matches!(
+            s.on_press(di((3.0, 7.0), (30.0, 70.0))),
+            Some(DrawEvent::InProgress { .. })
+        ));
+        let fin = s
+            .on_release(di((9.0, 7.5), (90.0, 75.0)))
+            .expect("finished");
+        assert_eq!(
+            fin,
+            DrawEvent::Finished {
+                mode: DrawMode::HLine,
+                params: DrawParams::HLine { y: 7.5 },
+            }
+        );
+        // VLine captures the data X of the release.
+        let mut s = DrawState::new(DrawMode::VLine);
+        s.on_press(di((3.0, 7.0), (30.0, 70.0)));
+        let fin = s
+            .on_release(di((4.2, 1.0), (42.0, 10.0)))
+            .expect("finished");
+        assert_eq!(
+            fin,
+            DrawEvent::Finished {
+                mode: DrawMode::VLine,
+                params: DrawParams::VLine { x: 4.2 },
+            }
+        );
+    }
+
+    #[test]
+    fn polygon_accumulates_vertices_and_closes_on_first_point() {
+        let mut s = DrawState::new(DrawMode::Polygon).with_close_threshold(4.0);
+        // First press anchors the polygon at (0,0)/pixel(0,0).
+        s.on_press(di((0.0, 0.0), (0.0, 0.0)));
+        // Release far from start -> appends a vertex (now 3 entries: seed pair
+        // updated + appended).
+        s.on_release(di((10.0, 0.0), (100.0, 0.0)));
+        s.on_release(di((10.0, 10.0), (100.0, 100.0)));
+        // Move the cursor near the first point (within 4px) -> snaps to first.
+        s.on_move(di((0.05, 0.05), (2.0, 3.0)));
+        // Release near the first point with >2 points -> closes.
+        let fin = s.on_release(di((0.05, 0.05), (2.0, 3.0))).expect("closed");
+        match fin {
+            DrawEvent::Finished {
+                mode: DrawMode::Polygon,
+                params: DrawParams::Polygon { vertices },
+            } => {
+                // Open ring: the three distinct corners, first not duplicated.
+                assert_eq!(vertices, vec![(0.0, 0.0), (10.0, 0.0), (10.0, 10.0)]);
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(!s.is_active());
+    }
+
+    #[test]
+    fn polygon_does_not_close_with_two_points() {
+        // Boundary: a release near the first point but with only the seed pair
+        // (len == 2, no appended vertex) must NOT close (silx len > 2 gate).
+        let mut s = DrawState::new(DrawMode::Polygon).with_close_threshold(4.0);
+        s.on_press(di((0.0, 0.0), (0.0, 0.0)));
+        // Release exactly on the first point: len is still 2, so no close; it is
+        // treated as a near-previous replace, not an append.
+        let ev = s.on_release(di((0.0, 0.0), (0.0, 0.0))).expect("progress");
+        assert!(matches!(ev, DrawEvent::InProgress { .. }));
+        assert!(s.is_active());
+    }
+
+    #[test]
+    fn polygon_replaces_near_previous_vertex() {
+        // A release within threshold of the previous committed vertex replaces
+        // the tracked last vertex instead of appending (silx 581-588).
+        let mut s = DrawState::new(DrawMode::Polygon).with_close_threshold(4.0);
+        s.on_press(di((0.0, 0.0), (0.0, 0.0)));
+        // First real release far from the seed -> append: the seeded tail is
+        // overwritten with (10,0) and a new (10,0) tail is pushed, so the ring is
+        // [first, (10,0), (10,0)] (silx's enterState seeds the pair, onRelease
+        // appends the cursor tail).
+        s.on_release(di((10.0, 0.0), (100.0, 0.0)));
+        // Second release within 4px of the previous committed vertex (100,0) ->
+        // replace the cursor tail in place, no append.
+        s.on_release(di((10.2, 0.1), (102.0, 1.0)));
+        let preview = s.preview().expect("active");
+        // Ring length unchanged at 3; the tail was replaced, not appended.
+        assert_eq!(preview.len(), 3);
+        assert_eq!(preview[1], (10.0, 0.0));
+        assert_eq!(preview[2], (10.2, 0.1));
+    }
+
+    #[test]
+    fn freehand_accumulates_and_dedups() {
+        let mut s = DrawState::new(DrawMode::FreeHand);
+        // Press seeds the first vertex.
+        assert!(matches!(
+            s.on_press(di((0.0, 0.0), (0.0, 0.0))),
+            Some(DrawEvent::InProgress {
+                mode: DrawMode::FreeHand,
+                ..
+            })
+        ));
+        s.on_move(di((1.0, 1.0), (10.0, 10.0)));
+        // Repeated identical point is skipped.
+        s.on_move(di((1.0, 1.0), (10.0, 10.0)));
+        s.on_move(di((2.0, 0.0), (20.0, 0.0)));
+        let fin = s
+            .on_release(di((3.0, 1.0), (30.0, 10.0)))
+            .expect("finished");
+        match fin {
+            DrawEvent::Finished {
+                mode: DrawMode::FreeHand,
+                params: DrawParams::FreeHand { vertices },
+            } => {
+                assert_eq!(
+                    vertices,
+                    vec![(0.0, 0.0), (1.0, 1.0), (2.0, 0.0), (3.0, 1.0)]
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn freehand_release_does_not_duplicate_last() {
+        // Boundary: releasing at the same point as the last accumulated vertex
+        // does not duplicate it (silx isLast append-if-different).
+        let mut s = DrawState::new(DrawMode::FreeHand);
+        s.on_press(di((0.0, 0.0), (0.0, 0.0)));
+        s.on_move(di((1.0, 1.0), (10.0, 10.0)));
+        let fin = s
+            .on_release(di((1.0, 1.0), (10.0, 10.0)))
+            .expect("finished");
+        match fin {
+            DrawEvent::Finished {
+                params: DrawParams::FreeHand { vertices },
+                ..
+            } => assert_eq!(vertices, vec![(0.0, 0.0), (1.0, 1.0)]),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn cancel_drops_in_progress_draw() {
+        let mut s = DrawState::new(DrawMode::Polygon);
+        s.on_press(di((0.0, 0.0), (0.0, 0.0)));
+        assert!(s.is_active());
+        s.cancel();
+        assert!(!s.is_active());
+        assert!(s.preview().is_none());
+    }
+
+    #[test]
+    fn idle_move_and_release_are_noops() {
+        // Before any press, move/release emit nothing for two-point modes.
+        let mut s = DrawState::new(DrawMode::Rectangle);
+        assert!(s.on_move(di((1.0, 1.0), (10.0, 10.0))).is_none());
+        assert!(s.on_release(di((1.0, 1.0), (10.0, 10.0))).is_none());
     }
 
     #[test]
