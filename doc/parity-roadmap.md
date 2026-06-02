@@ -93,6 +93,38 @@ Status legend: ✅ Done · ◐ Partial · ☐ Missing. Effort S/M/L. Priority H/
   `high_level.rs` ValueStats to `core::stats`; ItemsSelectionDialog; ImageStack toolbar entry;
   promoting `RoiLineStyle` to the lib.rs convenience re-export.
 
+### Wave 4 — Interaction draw-modes / Axis+datetime / Image-Marker-Shape items / Mask IO (parallel, worktree-isolated)
+- **Interaction** (`c6e6fe3`,`60fe2af`,`9bacd18`,`2a059ce`,`5383c1b`): float32-safe
+  pan/zoom clamping (silx `FLOAT32_SAFE_MIN/MAX`); new `PlotPointerEvent` (click/double-click/
+  hover with button + data+pixel pos + limits tuples — kept distinct from `high_level`'s
+  `PlotEvent`); `CursorShape` from draggable-edge detection; `DrawState` state machine
+  (Rectangle/Ellipse/Line/H-V-Line/Polygon-with-snap-close/FreeHand → `DrawEvent::{InProgress,
+  Finished}`, silx PlotInteraction Select*); selection-area fill modes (hatch/solid/none) +
+  draw-mode rubber-band overlay painted in `plot_widget.rs` (not chrome). NaN bound clamps to
+  lower (documented; keeps range finite/ordered, unlike numpy.clip).
+- **Axis** (`9961a07`,`5052b4e`,`3957d98`,`da81279`,`7480498`,`ba4ef49`): `core/dtime_ticks.rs`
+  (UTC-only DtUnit/bestUnit/calcTicks via days-from-civil, no chrono dep — silx
+  `dtime_ticklayout.py`); per-axis autoscale + `DataRange` reset-zoom; `DataMargins` per-side
+  ratios (log-aware); `axes_displayed` flag + `DirtyState{Clean,Overlay,Full}` lifecycle
+  (state only); axis-label fallback to active-curve label; `grid_color` split from foreground.
+  All additive — Plot is built only via `Plot::new`, so existing construction is untouched.
+- **Items** (`dc18c84`,`3b53a6a`,`5d2836c`,`cf8c4fe`,`21c077d`): `ScalarMask` (per-pixel
+  validity → NaN via the existing `nan_color` path; standalone since `ImageData` lives in
+  `render/gpu_image.rs`); marker `is_draggable` + `MarkerConstraint`(H/V/custom, pure
+  `apply_constraint`) + `drag`; `TextAnchor` alignment offset; `Shape::is_overlay`; infinite
+  `Line` item with `clipped_segment(bounds)` (silx shape.py `Line.__updatePoints`).
+- **Mask** (`b062e32`,`bc19767`,`233ccac`,`94f799a`): Bresenham pencil `draw_line` (width +
+  degenerate, silx `shapes.draw_line`); hand-written NumPy `.npy` save/load with crop/pad +
+  resize flag (no external crate); `mask_not_finite`; new `scatter_mask.rs` `ScatterMaskWidget`
+  (per-point disk/polygon/rect masking, point-in-polygon from `Polygon.is_inside`, shared
+  multi-level + undo/redo).
+- Gate: clippy `--workspace` clean, **510 tests pass** (+129), doctests ok.
+- **Deferred follow-ups** (actions/render wave): chrome wiring of `axes_displayed`/`grid_color`/
+  datetime tick labels; render of `Line`/marker-drag/`Shape::is_overlay` data layer; `ScalarMask`
+  applied before image upload; `DrawEvent::Finished` → ROI/mask creation; overlay-only replot
+  short-circuit; per-pixel scalar alpha (needs shader); timezone for datetime axis; on-plot mask
+  draw (plot→data coords) + mask colormap overlay + active-item sync; EDF/TIFF/HDF5/msk codecs.
+
 
 ## PlotWidget core, axes, frame, ticks  — 25✅ 2◐ 7☐
 
