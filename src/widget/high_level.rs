@@ -18,7 +18,7 @@ use crate::core::backend::{
     ShapeSpec, TriangleSpec,
 };
 use crate::core::colormap::Colormap;
-use crate::core::items::{Baseline, LineStyle, Symbol};
+use crate::core::items::{Baseline, LineStyle, ScalarMask, Symbol};
 use crate::core::marker::{Marker, MarkerKind, MarkerSymbol};
 use crate::core::plot::{GraphGrid, Plot, PlotId};
 use crate::core::roi::Roi;
@@ -1132,6 +1132,38 @@ fn image_spec_from_data(image: &ImageData) -> ImageSpec<'_> {
             aggregation_block: (1, 1),
         },
     }
+}
+
+/// Apply an optional pixel mask to a scalar field before upload, returning the
+/// masked row-major data (silx `items/image.py` `getValueData`: masked pixels →
+/// `NaN`).
+///
+/// Validates that `data.len() == width * height` and that `mask` describes the
+/// same `width × height` shape, returning [`PlotDataError::ImageDataLength`] on
+/// a mismatch; on success every pixel flagged by `mask` is `f32::NAN` and the
+/// rest pass through unchanged. Split out from
+/// [`Plot2D::try_add_masked_image`] so the pre-upload transform is unit-testable
+/// without a GPU backend.
+fn apply_image_mask(
+    width: u32,
+    height: u32,
+    data: &[f32],
+    mask: &ScalarMask,
+) -> Result<Vec<f32>, PlotDataError> {
+    let expected = (width as usize).saturating_mul(height as usize);
+    if data.len() != expected {
+        return Err(PlotDataError::ImageDataLength {
+            expected,
+            actual: data.len(),
+        });
+    }
+    if mask.width() != width as usize || mask.height() != height as usize {
+        return Err(PlotDataError::ImageDataLength {
+            expected,
+            actual: mask.width().saturating_mul(mask.height()),
+        });
+    }
+    Ok(mask.apply(data))
 }
 
 fn triangle_spec_from_data(triangles: &Triangles) -> TriangleSpec<'_> {
@@ -3556,6 +3588,32 @@ impl Plot2D {
         self.inner.try_add_image_default(width, height, data)
     }
 
+    /// Add a scalar image whose pixels are masked to `NaN` before upload, using
+    /// this plot's default colormap.
+    ///
+    /// Mirrors silx `items/image.py` `getValueData` (mask → NaN): every pixel
+    /// flagged in `mask` ([`ScalarMask::is_masked`]) becomes `f32::NAN` *before*
+    /// the data is handed to the backend, so the scalar pipeline's `nan_color`
+    /// renders it as a hole — exactly as if the data had arrived with NaNs. The
+    /// mask is optional and applied here, keeping the upload path additive.
+    ///
+    /// `mask` must describe a `width × height` image (its own
+    /// [`ScalarMask::width`]/[`ScalarMask::height`]); a mismatch with the
+    /// supplied `(width, height)` or `data.len()` returns
+    /// [`PlotDataError::ImageDataLength`].
+    pub fn try_add_masked_image(
+        &mut self,
+        width: u32,
+        height: u32,
+        data: &[f32],
+        mask: &ScalarMask,
+    ) -> Result<ItemHandle, PlotDataError> {
+        // silx getValueData: masked pixels become NaN before reaching the
+        // backend (the existing NaN rendering then displays the hole).
+        let masked = apply_image_mask(width, height, data, mask)?;
+        self.inner.try_add_image_default(width, height, &masked)
+    }
+
     /// Add a boolean mask overlay.
     pub fn add_mask(
         &mut self,
@@ -4534,6 +4592,43 @@ mod tests {
         assert_eq!(stats.min, Some(1.0));
         assert_eq!(stats.max, Some(4.0));
         assert_eq!(stats.mean, Some(2.5));
+    }
+
+    #[test]
+    fn masked_image_yields_nan_at_masked_pixels_before_upload() {
+        // Item 6: a ScalarMask applied to a 2x2 image turns masked pixels into
+        // NaN BEFORE upload, leaving the rest unchanged.
+        let data = [1.0_f32, 2.0, 3.0, 4.0];
+        let mut mask = ScalarMask::new(2, 2);
+        // Mask the top-right (col 1, row 0) and bottom-left (col 0, row 1).
+        mask.set_mask_data(&[0, 1, 1, 0], 2);
+        let out = apply_image_mask(2, 2, &data, &mask).unwrap();
+        assert_eq!(out[0], 1.0);
+        assert!(out[1].is_nan());
+        assert!(out[2].is_nan());
+        assert_eq!(out[3], 4.0);
+    }
+
+    #[test]
+    fn masked_image_validates_shape() {
+        let mask = ScalarMask::new(2, 2);
+        // data length mismatch.
+        assert_eq!(
+            apply_image_mask(2, 2, &[1.0, 2.0, 3.0], &mask).unwrap_err(),
+            PlotDataError::ImageDataLength {
+                expected: 4,
+                actual: 3,
+            }
+        );
+        // mask shape mismatch.
+        let small = ScalarMask::new(1, 1);
+        assert_eq!(
+            apply_image_mask(2, 2, &[1.0, 2.0, 3.0, 4.0], &small).unwrap_err(),
+            PlotDataError::ImageDataLength {
+                expected: 4,
+                actual: 1,
+            }
+        );
     }
 
     #[test]
