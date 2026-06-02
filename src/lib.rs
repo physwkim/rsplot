@@ -74,9 +74,9 @@ pub use crate::widget::fit_widget::{
 pub use crate::widget::high_level::{
     CompareImages, CompareMode, CurveStats, ImageGeometry, ImageStats, ImageView, ItemStats,
     LegendResponse, Plot1D, Plot2D, PlotDataError, PlotEvent, PlotItemKind, PlotWidget, PlotWindow,
-    PlotWithToolbarResponse, ProfileMode, ScatterView, StackView, ToolbarResponse, ValueStats,
-    histogram_step_values, horizontal_profile_values, line_profile_values, rect_profile_values,
-    vertical_profile_values,
+    PlotWithToolbarResponse, ProfileMode, ScatterView, ScatterVisualization, StackView,
+    ToolbarResponse, ValueStats, histogram_step_values, horizontal_profile_values,
+    line_profile_values, rect_profile_values, vertical_profile_values,
 };
 pub use crate::widget::image_stack::{Frame, ImageStack};
 pub use crate::widget::interaction::{
