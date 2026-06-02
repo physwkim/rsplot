@@ -1369,6 +1369,34 @@ fn compose_per_point_alpha(colors: &mut [Color32], alpha: &[f64]) {
     }
 }
 
+/// Map each per-point `value` through `colormap` to its RGBA color, optionally
+/// scaling each color's alpha by the matching `alpha` entry, mirroring silx
+/// `Scatter.__applyColormapToData` (scatter.py:526-535).
+///
+/// silx shares `__applyColormapToData` between the `POINTS` and `SOLID`
+/// visualizations, so both [`ScatterView`] render arms call this single helper:
+/// the value is normalized through the colormap into its 256-entry LUT, then —
+/// when a per-point `alpha` array is present — the per-point alpha multiplies
+/// the colormap RGBA alpha (stage 2 of the three-stage `colormap.alpha *
+/// per_point.alpha * global.alpha`; see [`compose_per_point_alpha`]). Factored
+/// out so the two arms cannot drift and the mapping is unit-testable without a
+/// GPU backend.
+fn point_colors(values: &[f64], colormap: &Colormap, alpha: Option<&[f64]>) -> Vec<Color32> {
+    let mut colors: Vec<Color32> = values
+        .iter()
+        .map(|&v| {
+            let t = colormap.normalize(v);
+            let idx = (t * 255.0).clamp(0.0, 255.0) as usize;
+            let [r, g, b, a] = colormap.lut[idx];
+            Color32::from_rgba_unmultiplied(r, g, b, a)
+        })
+        .collect();
+    if let Some(alpha) = alpha {
+        compose_per_point_alpha(&mut colors, alpha);
+    }
+    colors
+}
+
 /// Clamp each per-point alpha entry to `[0, 1]`, mirroring silx
 /// `Scatter.setData` (`numpy.clip(alpha, 0.0, 1.0)`, scatter.py:1058-1059).
 /// Stored at the setter so the retained array is already in range; the
@@ -6642,10 +6670,13 @@ impl ScatterView {
 
     /// Set the scatter visualization mode (silx `Scatter.setVisualization`).
     ///
-    /// [`ScatterVisualization::Points`] shows the marker cloud; the grid modes
-    /// render the retained `(x, y, value)` points as a colormapped image
-    /// (built via [`scatter_grid_image`]). Re-renders immediately against the
-    /// data from the last [`Self::set_data`].
+    /// [`ScatterVisualization::Points`] shows the marker cloud;
+    /// [`ScatterVisualization::Solid`] renders the per-vertex-colored Delaunay
+    /// triangle surface (built via
+    /// [`crate::core::scatter_viz::solid_triangles`]); the grid modes render the
+    /// retained `(x, y, value)` points as a colormapped image (built via
+    /// [`scatter_grid_image`]). Re-renders immediately against the data from the
+    /// last [`Self::set_data`].
     pub fn set_visualization(&mut self, mode: ScatterVisualization) {
         if self.visualization == mode {
             return;
@@ -6683,11 +6714,12 @@ impl ScatterView {
 
     /// Render the retained points under the current visualization mode through
     /// the appropriate backend path: the marker cloud for
-    /// [`ScatterVisualization::Points`], otherwise the converted grid image.
+    /// [`ScatterVisualization::Points`], the per-vertex-colored triangle surface
+    /// for [`ScatterVisualization::Solid`], otherwise the converted grid image.
     ///
-    /// Single owner of the scatter/grid item handles so the displayed item
-    /// always matches `self.visualization`. The non-active path's item is
-    /// removed so the two never overlap.
+    /// Single owner of the scatter/grid/triangles item handles so the displayed
+    /// item always matches `self.visualization`. The non-active paths' items are
+    /// removed so they never overlap.
     fn rebuild_visualization(&mut self) {
         let Some((x, y, values)) = self.points.clone() else {
             return;
@@ -6706,22 +6738,12 @@ impl ScatterView {
                 if let Some(h) = self.triangles_handle.take() {
                     self.inner.remove(h);
                 }
-                let mut colors: Vec<Color32> = values
-                    .iter()
-                    .map(|&v| {
-                        let t = colormap.normalize(v);
-                        let idx = (t * 255.0).clamp(0.0, 255.0) as usize;
-                        let [r, g, b, a] = colormap.lut[idx];
-                        Color32::from_rgba_unmultiplied(r, g, b, a)
-                    })
-                    .collect();
-                // Stage 2 of the silx three-stage alpha: scale each colormap
-                // RGBA alpha by the per-point alpha (silx `__applyColormapToData`
-                // `rgbacolors[:, -1] *= __alpha`). The curve's global alpha
-                // (CurveSpec.alpha) multiplies on top in-shader for stage 3.
-                if let Some(alpha) = &self.alpha {
-                    compose_per_point_alpha(&mut colors, alpha);
-                }
+                // Stage 1+2 of the silx three-stage alpha: per-point colormap
+                // RGBA scaled by the per-point alpha (silx shares
+                // `__applyColormapToData` between POINTS and SOLID — see the
+                // Solid arm below). The curve's global alpha (CurveSpec.alpha)
+                // multiplies on top in-shader for stage 3.
+                let colors = point_colors(&values, &colormap, self.alpha.as_deref());
 
                 let mut spec = CurveSpec::new(&x, &y, Color32::WHITE);
                 spec.color = crate::core::backend::CurveColor::PerVertex(&colors);
@@ -6736,6 +6758,43 @@ impl ScatterView {
                     self.scatter_handle = Some(h);
                     self.inner.set_item_legend(h, "scatter");
                 }
+            }
+            ScatterVisualization::Solid => {
+                // Drop the marker cloud / grid image so neither shadows the
+                // triangle surface (single owner: only the active arm keeps its
+                // handle).
+                if let Some(h) = self.scatter_handle.take() {
+                    self.inner.remove(h);
+                }
+                if let Some(h) = self.grid_handle.take() {
+                    self.inner.remove(h);
+                }
+                // Same per-point colormap+alpha colors as the Points arm: silx
+                // shares `__applyColormapToData` between POINTS and SOLID
+                // (scatter.py:526-535, 612-629), then hands the per-vertex RGBA
+                // to `backend.addTriangles` for GL Gouraud interpolation.
+                let colors = point_colors(&values, &colormap, self.alpha.as_deref());
+
+                // Build the Delaunay triangle surface (silx
+                // `scatter_viz::solid_triangles`). `None` for degenerate input
+                // (fewer than 3 finite points or all collinear) matches silx's
+                // "Cannot display as solid surface" early-out: nothing is drawn.
+                let Some(tri) = crate::core::scatter_viz::solid_triangles(&x, &y, &colors) else {
+                    if let Some(h) = self.triangles_handle.take() {
+                        self.inner.remove(h);
+                    }
+                    return;
+                };
+
+                // No backend update_triangles primitive exists, so re-add the
+                // mesh from scratch on each rebuild (remove the prior handle
+                // first). `triangles_handle` is Some iff a mesh is displayed.
+                if let Some(h) = self.triangles_handle.take() {
+                    self.inner.remove(h);
+                }
+                let h = self.inner.add_triangles_data(&tri);
+                self.triangles_handle = Some(h);
+                self.inner.set_item_legend(h, "scatter solid");
             }
             mode => {
                 // Drop the marker cloud / triangle surface so neither shadows
