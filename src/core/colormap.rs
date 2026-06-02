@@ -815,9 +815,12 @@ pub fn mask_overlay_lut(
 mod tests {
     use super::*;
 
-    /// rgba("gray") = 0.50196 in float, which truncates to byte 128 via
-    /// silx's `(c * 256).astype(uint8)` (0.50196 * 256 = 128.5 -> 128).
-    const GRAY: [f32; 3] = [0.50196, 0.50196, 0.50196];
+    /// silx `rgba("gray")` = `#a0a0a4` = (160, 160, 164) (gui/colors.py:71;
+    /// `#808080`/128 is the commented-out `darkGray`, not silx's "gray"). In
+    /// float: R=G=160/255, B=164/255, which truncate to bytes 160/160/164 via
+    /// silx's `(c * 256).astype(uint8)` (160/255 * 256 = 160.6 -> 160;
+    /// 164/255 * 256 = 164.6 -> 164).
+    const GRAY: [f32; 3] = [160.0 / 255.0, 160.0 / 255.0, 164.0 / 255.0];
 
     #[test]
     fn mask_overlay_lut_matches_silx_set_mask_colors() {
@@ -828,12 +831,12 @@ mod tests {
         // silx line 1008: no-mask level is fully transparent.
         assert_eq!(lut[0], [0, 0, 0, 0]);
         // silx line 1005: selected level 1 gets full alpha.
-        // rgb 0.50196 * 256 = 128.5 -> trunc 128; alpha 0.8 * 256 = 204.8 -> 204.
-        assert_eq!(lut[1], [128, 128, 128, 204]);
+        // rgb 160/255 * 256 = 160.6 -> trunc 160 (B 164); alpha 0.8 * 256 = 204.8 -> 204.
+        assert_eq!(lut[1], [160, 160, 164, 204]);
         // silx line 1002: other masked levels get alpha / 2.
         // alpha/2 = 0.4; 0.4 * 256 = 102.4 -> trunc 102.
-        assert_eq!(lut[2], [128, 128, 128, 102]);
-        assert_eq!(lut[5], [128, 128, 128, 102]);
+        assert_eq!(lut[2], [160, 160, 164, 102]);
+        assert_eq!(lut[5], [160, 160, 164, 102]);
     }
 
     #[test]

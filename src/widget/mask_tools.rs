@@ -191,9 +191,11 @@ impl MaskToolsWidget {
             mask,
             width,
             height,
-            // silx `_defaultOverlayColor = rgba("gray")`; only the RGB drives
-            // the overlay color, the alpha is computed by the LUT rule.
-            color: Color32::from_rgb(128, 128, 128),
+            // silx `_defaultOverlayColor = rgba("gray")`, which silx defines as
+            // `#a0a0a4` = (160, 160, 164) (gui/colors.py:71; `#808080` is the
+            // commented-out `darkGray`, NOT silx's "gray"). Only the RGB drives
+            // the overlay color; the alpha is computed by the LUT rule.
+            color: Color32::from_rgb(160, 160, 164),
             level: 1,
             // silx transparencySlider default 8/10 = 0.8.
             alpha: 0.8,
@@ -1680,9 +1682,10 @@ mod tests {
 
     #[test]
     fn default_overlay_color_is_silx_gray() {
-        // silx `_defaultOverlayColor = rgba("gray")` -> opaque gray byte 128.
+        // silx `_defaultOverlayColor = rgba("gray")` = `#a0a0a4` = (160,160,164)
+        // (gui/colors.py:71), opaque.
         let w = MaskToolsWidget::new(2, 2);
-        assert_eq!(w.color, Color32::from_rgb(128, 128, 128));
+        assert_eq!(w.color, Color32::from_rgb(160, 160, 164));
         // silx transparencySlider default 8/10.
         assert_eq!(w.alpha, 0.8);
         // silx `_defaultColors` all True -> no per-level override.
@@ -1694,8 +1697,14 @@ mod tests {
     fn mask_overlay_rgba_maps_each_level_through_lut() {
         // The overlay is a direct LUT index: level 0 -> transparent, the
         // selected level -> full alpha, other masked levels -> alpha / 2.
-        // base gray byte 128, alpha 0.8, selected level 1.
-        let lut = crate::core::colormap::mask_overlay_lut([0.50196, 0.50196, 0.50196], &[], 1, 0.8);
+        // base gray = silx `rgba("gray")` = `#a0a0a4` (160,160,164), alpha 0.8,
+        // selected level 1.
+        let lut = crate::core::colormap::mask_overlay_lut(
+            [160.0 / 255.0, 160.0 / 255.0, 164.0 / 255.0],
+            &[],
+            1,
+            0.8,
+        );
         let mask = vec![0u8, 1, 2, 5, 1, 0];
         let rgba = mask_overlay_rgba(&mask, &lut);
         assert_eq!(rgba.len(), mask.len());
@@ -1703,11 +1712,11 @@ mod tests {
         assert_eq!(rgba[0], [0, 0, 0, 0]);
         assert_eq!(rgba[5], [0, 0, 0, 0]);
         // selected level 1 -> full alpha (silx line 1005): 0.8 * 256 -> 204.
-        assert_eq!(rgba[1], [128, 128, 128, 204]);
-        assert_eq!(rgba[4], [128, 128, 128, 204]);
+        assert_eq!(rgba[1], [160, 160, 164, 204]);
+        assert_eq!(rgba[4], [160, 160, 164, 204]);
         // other masked levels -> alpha / 2 (silx line 1002): 0.4 * 256 -> 102.
-        assert_eq!(rgba[2], [128, 128, 128, 102]);
-        assert_eq!(rgba[3], [128, 128, 128, 102]);
+        assert_eq!(rgba[2], [160, 160, 164, 102]);
+        assert_eq!(rgba[3], [160, 160, 164, 102]);
         // Each pixel equals its LUT entry exactly (no interpolation).
         for (px, &level) in rgba.iter().zip(mask.iter()) {
             assert_eq!(*px, lut[level as usize]);
