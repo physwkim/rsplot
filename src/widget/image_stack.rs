@@ -203,6 +203,69 @@ impl FrameNav {
     }
 }
 
+/// A navigation action selected from the toolbar this frame (silx
+/// `FrameBrowser` first/prev/next/last buttons and the slider).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NavAction {
+    First,
+    Previous,
+    Next,
+    Last,
+    /// Jump to an absolute index (the slider).
+    Goto(usize),
+}
+
+impl NavAction {
+    /// Apply this action to `nav`, mirroring the silx `FrameBrowser` slots.
+    fn apply(self, nav: &mut FrameNav) {
+        match self {
+            NavAction::First => nav.first_frame(),
+            NavAction::Previous => nav.prev_frame(),
+            NavAction::Next => nav.next_frame(),
+            NavAction::Last => nav.last_frame(),
+            NavAction::Goto(index) => nav.set_current(index),
+        }
+    }
+}
+
+/// Render the first/prev slider next/last navigation row with a `cur/len`
+/// counter and return the action the user selected this frame, or `None` if no
+/// control was activated. An empty stack (`len == 0`) renders nothing.
+///
+/// Pure over an [`egui::Ui`] plus the `current` index and `len` (no GPU /
+/// [`Plot2D`]), so the toolbar's button/slider behaviour is unit-testable with
+/// a headless egui context. [`ImageStack::navigation_ui`] applies the returned
+/// [`NavAction`] to its [`FrameNav`].
+fn navigation_toolbar_ui(ui: &mut egui::Ui, current: usize, len: usize) -> Option<NavAction> {
+    if len == 0 {
+        return None;
+    }
+    let mut action = None;
+    ui.horizontal(|ui| {
+        if ui.button("⏮").on_hover_text("First frame").clicked() {
+            action = Some(NavAction::First);
+        }
+        if ui.button("◀").on_hover_text("Previous frame").clicked() {
+            action = Some(NavAction::Previous);
+        }
+        let mut idx = current;
+        if ui
+            .add(egui::Slider::new(&mut idx, 0..=len - 1).text("frame"))
+            .changed()
+        {
+            action = Some(NavAction::Goto(idx));
+        }
+        if ui.button("▶").on_hover_text("Next frame").clicked() {
+            action = Some(NavAction::Next);
+        }
+        if ui.button("⏭").on_hover_text("Last frame").clicked() {
+            action = Some(NavAction::Last);
+        }
+        ui.label(format!("{}/{}", current + 1, len));
+    });
+    action
+}
+
 /// Browse an in-memory ordered list of 2D frames.
 ///
 /// Owns an internal [`Plot2D`] (like `ComplexImageView`/`StackView`) plus the
@@ -454,35 +517,22 @@ impl ImageStack {
             });
     }
 
+    /// Show only the navigation toolbar (first/prev slider next/last with a
+    /// `cur/len` counter), without the frame table or plot. A standalone entry
+    /// point over the same row [`Self::ui`] draws, for callers that lay the
+    /// plot out themselves (silx `FrameBrowser` / `HorizontalSliderWithBrowser`).
+    pub fn show_toolbar(&mut self, ui: &mut egui::Ui) {
+        self.navigation_ui(ui);
+    }
+
     /// The first/prev slider next/last navigation row with a `cur/len` counter,
-    /// mirroring silx `FrameBrowser` + `HorizontalSliderWithBrowser`.
+    /// mirroring silx `FrameBrowser` + `HorizontalSliderWithBrowser`. Renders
+    /// via the pure [`navigation_toolbar_ui`] and applies the returned action to
+    /// the frame nav.
     fn navigation_ui(&mut self, ui: &mut egui::Ui) {
-        let len = self.nav.len();
-        if len == 0 {
-            return;
+        if let Some(action) = navigation_toolbar_ui(ui, self.nav.current, self.nav.len()) {
+            action.apply(&mut self.nav);
         }
-        ui.horizontal(|ui| {
-            if ui.button("⏮").on_hover_text("First frame").clicked() {
-                self.nav.first_frame();
-            }
-            if ui.button("◀").on_hover_text("Previous frame").clicked() {
-                self.nav.prev_frame();
-            }
-            let mut idx = self.nav.current;
-            if ui
-                .add(egui::Slider::new(&mut idx, 0..=len - 1).text("frame"))
-                .changed()
-            {
-                self.nav.set_current(idx);
-            }
-            if ui.button("▶").on_hover_text("Next frame").clicked() {
-                self.nav.next_frame();
-            }
-            if ui.button("⏭").on_hover_text("Last frame").clicked() {
-                self.nav.last_frame();
-            }
-            ui.label(format!("{}/{}", self.nav.current + 1, len));
-        });
     }
 
     /// Paint a centred spinner with a "Loading…" caption over `rect`,
@@ -732,5 +782,125 @@ mod tests {
         assert_eq!(n.frame_label(1), "Frame 2"); // 1-based, no label.
         assert_eq!(n.frame_label(2), "Frame 3 (empty)");
         assert_eq!(n.frame_label(99), ""); // out of range.
+    }
+
+    // ── Navigation toolbar (Item 4) ─────────────────────────────────────────
+
+    /// Capture the toolbar widget rects by running one headless layout frame
+    /// with the same sequence `navigation_toolbar_ui` emits. The geometry is
+    /// deterministic, so these rects line up with the real call.
+    fn capture_toolbar_rects(
+        ctx: &egui::Context,
+        current: usize,
+        len: usize,
+    ) -> (egui::Rect, egui::Rect, egui::Rect, egui::Rect) {
+        let mut first = egui::Rect::NOTHING;
+        let mut prev = egui::Rect::NOTHING;
+        let mut next = egui::Rect::NOTHING;
+        let mut last = egui::Rect::NOTHING;
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            ui.horizontal(|ui| {
+                first = ui.button("⏮").rect;
+                prev = ui.button("◀").rect;
+                let mut idx = current;
+                let _ = ui.add(egui::Slider::new(&mut idx, 0..=len - 1).text("frame"));
+                next = ui.button("▶").rect;
+                last = ui.button("⏭").rect;
+                let _ = ui.label(format!("{}/{}", current + 1, len));
+            });
+        });
+        (first, prev, next, last)
+    }
+
+    fn run_toolbar(
+        ctx: &egui::Context,
+        current: usize,
+        len: usize,
+        raw: egui::RawInput,
+    ) -> Option<NavAction> {
+        let mut action = None;
+        let _ = ctx.run_ui(raw, |ui| {
+            action = navigation_toolbar_ui(ui, current, len);
+        });
+        action
+    }
+
+    fn click_at(point: egui::Pos2) -> egui::RawInput {
+        egui::RawInput {
+            events: vec![
+                egui::Event::PointerMoved(point),
+                egui::Event::PointerButton {
+                    pos: point,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::default(),
+                },
+                egui::Event::PointerButton {
+                    pos: point,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::default(),
+                },
+            ],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn empty_toolbar_renders_nothing_and_returns_none() {
+        let ctx = egui::Context::default();
+        assert_eq!(run_toolbar(&ctx, 0, 0, egui::RawInput::default()), None);
+    }
+
+    #[test]
+    fn next_button_click_yields_next_action() {
+        let ctx = egui::Context::default();
+        let (_first, _prev, next, _last) = capture_toolbar_rects(&ctx, 0, 3);
+        let _ = run_toolbar(&ctx, 0, 3, egui::RawInput::default());
+        let action = run_toolbar(&ctx, 0, 3, click_at(next.center()));
+        assert_eq!(action, Some(NavAction::Next));
+    }
+
+    #[test]
+    fn prev_first_last_button_clicks_yield_their_actions() {
+        let ctx = egui::Context::default();
+        let (first, prev, _next, last) = capture_toolbar_rects(&ctx, 1, 3);
+
+        let _ = run_toolbar(&ctx, 1, 3, egui::RawInput::default());
+        assert_eq!(
+            run_toolbar(&ctx, 1, 3, click_at(prev.center())),
+            Some(NavAction::Previous)
+        );
+        let _ = run_toolbar(&ctx, 1, 3, egui::RawInput::default());
+        assert_eq!(
+            run_toolbar(&ctx, 1, 3, click_at(first.center())),
+            Some(NavAction::First)
+        );
+        let _ = run_toolbar(&ctx, 1, 3, egui::RawInput::default());
+        assert_eq!(
+            run_toolbar(&ctx, 1, 3, click_at(last.center())),
+            Some(NavAction::Last)
+        );
+    }
+
+    #[test]
+    fn toolbar_actions_keep_index_in_bounds_when_applied() {
+        // Apply each toolbar action to a FrameNav and confirm the index stays
+        // within [0, len): Next clamps at the last, Previous at the first.
+        let mut n = nav(vec![frame("a"), frame("b"), frame("c")]);
+        NavAction::Next.apply(&mut n);
+        assert_eq!(n.current, 1);
+        NavAction::Last.apply(&mut n);
+        assert_eq!(n.current, 2);
+        NavAction::Next.apply(&mut n); // already last -> clamp.
+        assert_eq!(n.current, 2);
+        NavAction::Goto(99).apply(&mut n); // slider clamps to len-1.
+        assert_eq!(n.current, 2);
+        NavAction::First.apply(&mut n);
+        assert_eq!(n.current, 0);
+        NavAction::Previous.apply(&mut n); // already first -> clamp.
+        assert_eq!(n.current, 0);
+        NavAction::Goto(1).apply(&mut n);
+        assert_eq!(n.current, 1);
     }
 }
