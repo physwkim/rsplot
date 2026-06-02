@@ -4393,6 +4393,17 @@ fn roi_description(roi: &Roi) -> String {
             start.0, start.1, end.0, end.1
         ),
         Roi::Polygon { vertices } => format!("Polygon  {} vertices", vertices.len()),
+        Roi::Cross { center } => format!("Cross  ({:.3}, {:.3})", center.0, center.1),
+        Roi::Circle { center, radius } => {
+            format!(
+                "Circle  c=({:.3}, {:.3})  r={radius:.3}",
+                center.0, center.1
+            )
+        }
+        Roi::Ellipse { center, radii } => format!(
+            "Ellipse  c=({:.3}, {:.3})  r=({:.3}, {:.3})",
+            center.0, center.1, radii.0, radii.1
+        ),
     }
 }
 

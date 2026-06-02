@@ -77,6 +77,19 @@ impl eframe::App for RoiApp {
                     Roi::Polygon { ref vertices } => {
                         format!("polygon #{i}  {} vertices", vertices.len())
                     }
+                    Roi::Cross { center } => {
+                        format!("cross #{i}  ({:.2}, {:.2})", center.0, center.1)
+                    }
+                    Roi::Circle { center, radius } => {
+                        format!(
+                            "circle #{i}  c=({:.2}, {:.2})  r={radius:.2}",
+                            center.0, center.1
+                        )
+                    }
+                    Roi::Ellipse { center, radii } => format!(
+                        "ellipse #{i}  c=({:.2}, {:.2})  r=({:.2}, {:.2})",
+                        center.0, center.1, radii.0, radii.1
+                    ),
                 };
                 ui.painter().text(
                     pos2(ui.max_rect().left() + 12.0, ui.max_rect().top() + 12.0),
