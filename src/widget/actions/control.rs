@@ -176,6 +176,37 @@ pub fn curve_style_cycle(plot: &mut PlotWidget) -> Option<LineStyle> {
     plot.cycle_active_curve_style()
 }
 
+/// Toggle the X-axis autoscale flag, mirroring silx `XAxisAutoScaleAction`
+/// (`actions/control.py`): its `_actionTriggered(checked)` calls
+/// `plot.getXAxis().setAutoScale(checked)` and, when enabling, `plot.resetZoom()`.
+///
+/// This flips the current `x_autoscale` flag; when the new value is `true` it
+/// also reset-zooms the widget so the X axis immediately refits to data (silx
+/// only reset-zooms on enable, never on disable — disabling just pins the
+/// current view). The reset routes through [`PlotWidget::reset_zoom`], which
+/// honors the per-axis autoscale flags. Returns the new `x_autoscale` value.
+pub fn toggle_x_autoscale(plot: &mut PlotWidget) -> bool {
+    let next = !plot.plot().x_autoscale();
+    plot.plot_mut().set_x_autoscale(next);
+    if next {
+        plot.reset_zoom();
+    }
+    next
+}
+
+/// Toggle the Y-axis autoscale flag, mirroring silx `YAxisAutoScaleAction`
+/// (`actions/control.py`). Like [`toggle_x_autoscale`], reset-zooms only when
+/// enabling (silx `if checked: plot.resetZoom()`). Returns the new
+/// `y_autoscale` value.
+pub fn toggle_y_autoscale(plot: &mut PlotWidget) -> bool {
+    let next = !plot.plot().y_autoscale();
+    plot.plot_mut().set_y_autoscale(next);
+    if next {
+        plot.reset_zoom();
+    }
+    next
+}
+
 /// Toggle the [`ImageView`] side colorbar's visibility, mirroring silx
 /// `ColorBarAction`: its `_actionTriggered(checked)` sets the `ColorBarWidget`'s
 /// visibility. Returns the new `show_colorbar` value.
@@ -306,6 +337,51 @@ mod tests {
         // Empty history: zoom_back returns false (the action then reset-zooms;
         // here we just assert it does not panic and signals empty).
         assert!(!plot.zoom_back(), "empty history signals fallback");
+    }
+
+    #[test]
+    fn autoscale_toggle_reset_on_enable_refits_only_that_axis() {
+        // Mirror toggle_x_autoscale / toggle_y_autoscale on the bare Plot model
+        // the actions drive through PlotWidget (no GPU backend): flip the flag,
+        // and on enable reset-zoom through the flag-aware owner.
+        use crate::core::plot::{DataRange, Plot};
+
+        // Start with X autoscale OFF and a pinned X view; Y autoscale ON.
+        let mut plot = Plot::new(0);
+        plot.limits = (0.0, 1.0, 0.0, 1.0);
+        plot.set_x_autoscale(false);
+        plot.set_y_autoscale(true);
+        let data = DataRange {
+            x: Some((10.0, 20.0)),
+            y: Some((-5.0, 5.0)),
+            y2: None,
+        };
+
+        // Enable X autoscale: flag flips true, and the reset-on-enable refits X
+        // (now autoscale-on) while Y also refits (it was already on).
+        let next = !plot.x_autoscale();
+        plot.set_x_autoscale(next);
+        assert!(next, "X autoscale enabled");
+        plot.reset_zoom_to_data_range(data);
+        assert_eq!(plot.limits, (10.0, 20.0, -5.0, 5.0));
+    }
+
+    #[test]
+    fn autoscale_toggle_disable_does_not_reset() {
+        // silx reset-zooms only on enable; disabling pins the current view.
+        // Mirror the disable branch: flag flips false, no reset-zoom is called,
+        // so limits are untouched.
+        use crate::core::plot::Plot;
+
+        let mut plot = Plot::new(0);
+        plot.limits = (3.0, 7.0, 2.0, 8.0);
+        assert!(plot.x_autoscale(), "default on");
+
+        let next = !plot.x_autoscale();
+        plot.set_x_autoscale(next);
+        assert!(!next, "X autoscale disabled");
+        // No reset-zoom on disable -> limits unchanged.
+        assert_eq!(plot.limits, (3.0, 7.0, 2.0, 8.0));
     }
 
     #[test]

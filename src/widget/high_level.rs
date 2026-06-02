@@ -304,6 +304,10 @@ pub struct ToolbarResponse {
     pub x_log_changed: bool,
     /// Y log toggle was clicked.
     pub y_log_changed: bool,
+    /// X autoscale toggle was clicked (silx `XAxisAutoScaleAction`).
+    pub autoscale_x_changed: bool,
+    /// Y autoscale toggle was clicked (silx `YAxisAutoScaleAction`).
+    pub autoscale_y_changed: bool,
     /// X invert toggle was clicked.
     pub x_inverted_changed: bool,
     /// Y invert toggle was clicked.
@@ -374,6 +378,8 @@ enum ToolbarIcon {
     Save,
     Copy,
     Print,
+    AutoscaleX,
+    AutoscaleY,
 }
 
 impl ToolbarIcon {
@@ -473,6 +479,54 @@ fn draw_toolbar_icon(painter: &egui::Painter, rect: egui::Rect, icon: ToolbarIco
         ToolbarIcon::Save => draw_save_icon(painter, rect, stroke),
         ToolbarIcon::Copy => draw_copy_icon(painter, rect, stroke),
         ToolbarIcon::Print => draw_print_icon(painter, rect, stroke),
+        ToolbarIcon::AutoscaleX => draw_autoscale_icon(painter, rect, "X", false, stroke),
+        ToolbarIcon::AutoscaleY => draw_autoscale_icon(painter, rect, "Y", true, stroke),
+    }
+}
+
+/// Draw a labeled axis with a double-headed fit-arrow for the
+/// [`ToolbarIcon::AutoscaleX`] / [`ToolbarIcon::AutoscaleY`] toggles (silx
+/// `plot-xauto` / `plot-yauto`). The double arrow reads as "fit this axis to the
+/// data extent"; `vertical` selects the Y orientation, `axis` is the label.
+fn draw_autoscale_icon(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    axis: &str,
+    vertical: bool,
+    stroke: egui::Stroke,
+) {
+    let center = rect.center();
+    let arrow = 3.0;
+    if vertical {
+        let top = egui::pos2(center.x, rect.top() + 2.0);
+        let bottom = egui::pos2(center.x, rect.bottom() - 2.0);
+        painter.line_segment([top, bottom], stroke);
+        painter.line_segment([top, top + egui::vec2(-arrow, arrow)], stroke);
+        painter.line_segment([top, top + egui::vec2(arrow, arrow)], stroke);
+        painter.line_segment([bottom, bottom + egui::vec2(-arrow, -arrow)], stroke);
+        painter.line_segment([bottom, bottom + egui::vec2(arrow, -arrow)], stroke);
+        painter.text(
+            egui::pos2(rect.right() - 2.0, center.y),
+            egui::Align2::RIGHT_CENTER,
+            axis,
+            egui::FontId::proportional(11.0),
+            stroke.color,
+        );
+    } else {
+        let left = egui::pos2(rect.left() + 2.0, center.y);
+        let right = egui::pos2(rect.right() - 2.0, center.y);
+        painter.line_segment([left, right], stroke);
+        painter.line_segment([left, left + egui::vec2(arrow, -arrow)], stroke);
+        painter.line_segment([left, left + egui::vec2(arrow, arrow)], stroke);
+        painter.line_segment([right, right + egui::vec2(-arrow, -arrow)], stroke);
+        painter.line_segment([right, right + egui::vec2(-arrow, arrow)], stroke);
+        painter.text(
+            egui::pos2(center.x, rect.top() + 1.0),
+            egui::Align2::CENTER_TOP,
+            axis,
+            egui::FontId::proportional(11.0),
+            stroke.color,
+        );
     }
 }
 
@@ -3517,6 +3571,34 @@ impl PlotWidget {
             y_log = !y_log;
             self.set_y_log(y_log);
             out.y_log_changed = true;
+        }
+
+        ui.separator();
+
+        let x_auto = self.plot().x_autoscale();
+        if toolbar_icon_button(
+            ui,
+            ToolbarIcon::AutoscaleX,
+            x_auto,
+            "Auto-scale X axis on reset zoom",
+        )
+        .clicked()
+        {
+            crate::widget::actions::control::toggle_x_autoscale(self);
+            out.autoscale_x_changed = true;
+        }
+
+        let y_auto = self.plot().y_autoscale();
+        if toolbar_icon_button(
+            ui,
+            ToolbarIcon::AutoscaleY,
+            y_auto,
+            "Auto-scale Y axis on reset zoom",
+        )
+        .clicked()
+        {
+            crate::widget::actions::control::toggle_y_autoscale(self);
+            out.autoscale_y_changed = true;
         }
 
         ui.separator();
