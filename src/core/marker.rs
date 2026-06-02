@@ -108,6 +108,74 @@ pub fn apply_constraint(
     }
 }
 
+/// Where a marker's label text attaches to the marker point (silx marker text
+/// `horizontalalignment` / `verticalalignment`, e.g.
+/// `BackendMatplotlib.addMarker` `marker.py` rendering and the pygfx
+/// `_mapAnchor` `BackendPygfx.py:1998`).
+///
+/// The named point of the text rectangle is placed at the marker point (plus the
+/// pixel offset the backend applies). For example [`TextAnchor::TopLeft`] puts
+/// the rect's top-left corner at the marker (silx point-marker default:
+/// `horizontalalignment="left"` with the text growing down-right), and
+/// [`TextAnchor::TopRight`] puts the rect's top-right corner there (silx hline
+/// default: `horizontalalignment="right", verticalalignment="top"`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum TextAnchor {
+    /// Marker at the text rect's top-left corner; text extends right and down.
+    /// silx point-marker default (`ha="left"`).
+    #[default]
+    TopLeft,
+    /// Marker at the center of the rect's top edge.
+    Top,
+    /// Marker at the text rect's top-right corner. silx hline default
+    /// (`ha="right", va="top"`).
+    TopRight,
+    /// Marker at the center of the rect's left edge.
+    Left,
+    /// Marker at the rect's center.
+    Center,
+    /// Marker at the center of the rect's right edge.
+    Right,
+    /// Marker at the text rect's bottom-left corner.
+    BottomLeft,
+    /// Marker at the center of the rect's bottom edge.
+    Bottom,
+    /// Marker at the text rect's bottom-right corner.
+    BottomRight,
+}
+
+impl TextAnchor {
+    /// The top-left offset of the text rectangle relative to the marker point so
+    /// that the anchor named by this variant lands on the marker (a pure layout
+    /// computation, no egui input).
+    ///
+    /// Given the rendered text `size` (`(width, height)`), the returned `(dx, dy)`
+    /// is added to the marker's screen position to get the rect's top-left corner.
+    /// Y grows downward (egui screen convention), so e.g. [`TextAnchor::TopLeft`]
+    /// returns `(0, 0)` (rect starts at the marker) and [`TextAnchor::BottomRight`]
+    /// returns `(-w, -h)` (rect ends at the marker).
+    ///
+    /// This is the alignment offset only; the backend's fixed pixel padding (silx
+    /// `pixel_offset`, e.g. `(10, 3)` for a symbol point) is applied separately by
+    /// the renderer.
+    pub fn rect_offset(self, size: (f32, f32)) -> (f32, f32) {
+        let (w, h) = size;
+        // Horizontal: Left edge -> 0, Center -> -w/2, Right edge -> -w.
+        let dx = match self {
+            TextAnchor::TopLeft | TextAnchor::Left | TextAnchor::BottomLeft => 0.0,
+            TextAnchor::Top | TextAnchor::Center | TextAnchor::Bottom => -w / 2.0,
+            TextAnchor::TopRight | TextAnchor::Right | TextAnchor::BottomRight => -w,
+        };
+        // Vertical: Top edge -> 0, Center -> -h/2, Bottom edge -> -h.
+        let dy = match self {
+            TextAnchor::TopLeft | TextAnchor::Top | TextAnchor::TopRight => 0.0,
+            TextAnchor::Left | TextAnchor::Center | TextAnchor::Right => -h / 2.0,
+            TextAnchor::BottomLeft | TextAnchor::Bottom | TextAnchor::BottomRight => -h,
+        };
+        (dx, dy)
+    }
+}
+
 /// A point / vertical-line / horizontal-line marker drawn over the data area
 /// (silx `BackendBase.addMarker`).
 ///
@@ -141,6 +209,10 @@ pub struct Marker {
     /// `Marker` `'horizontal'` / `'vertical'` presets). Defaults to
     /// [`MarkerConstraint::None`].
     pub constraint: MarkerConstraint,
+    /// Where the label text attaches to the marker point (silx marker text
+    /// `horizontalalignment` / `verticalalignment`). Defaults to
+    /// [`TextAnchor::TopLeft`], the silx point-marker default.
+    pub text_anchor: TextAnchor,
 }
 
 impl Marker {
@@ -176,6 +248,7 @@ impl Marker {
             y_axis: YAxis::Left,
             is_draggable: false,
             constraint: MarkerConstraint::None,
+            text_anchor: TextAnchor::TopLeft,
         }
     }
 
@@ -243,6 +316,12 @@ impl Marker {
     /// `'vertical'` presets).
     pub fn with_constraint(mut self, constraint: MarkerConstraint) -> Self {
         self.constraint = constraint;
+        self
+    }
+
+    /// Set where the label text attaches to the marker point.
+    pub fn with_text_anchor(mut self, anchor: TextAnchor) -> Self {
+        self.text_anchor = anchor;
         self
     }
 
@@ -480,6 +559,31 @@ mod tests {
         let from = h.position();
         h.drag(from, (99.0, 7.0));
         assert_eq!(h.kind, MarkerKind::HLine { y: 7.0 });
+    }
+
+    #[test]
+    fn text_anchor_default_is_top_left() {
+        // silx point-marker default is horizontalalignment="left".
+        assert_eq!(TextAnchor::default(), TextAnchor::TopLeft);
+        assert_eq!(Marker::point(0.0, 0.0).text_anchor, TextAnchor::TopLeft);
+    }
+
+    #[test]
+    fn text_anchor_offsets_against_a_known_rect() {
+        // A 40x10 text rect; check each anchor's top-left offset.
+        let size = (40.0, 10.0);
+        // Corners.
+        assert_eq!(TextAnchor::TopLeft.rect_offset(size), (0.0, 0.0));
+        assert_eq!(TextAnchor::TopRight.rect_offset(size), (-40.0, 0.0));
+        assert_eq!(TextAnchor::BottomLeft.rect_offset(size), (0.0, -10.0));
+        assert_eq!(TextAnchor::BottomRight.rect_offset(size), (-40.0, -10.0));
+        // Edge midpoints.
+        assert_eq!(TextAnchor::Top.rect_offset(size), (-20.0, 0.0));
+        assert_eq!(TextAnchor::Bottom.rect_offset(size), (-20.0, -10.0));
+        assert_eq!(TextAnchor::Left.rect_offset(size), (0.0, -5.0));
+        assert_eq!(TextAnchor::Right.rect_offset(size), (-40.0, -5.0));
+        // Center.
+        assert_eq!(TextAnchor::Center.rect_offset(size), (-20.0, -5.0));
     }
 
     #[test]

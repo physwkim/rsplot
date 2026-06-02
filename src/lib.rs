@@ -28,7 +28,8 @@ pub use crate::core::dtime_ticks::{
 };
 pub use crate::core::items::{Baseline, ErrorBars, LineStyle, ScalarMask, Symbol};
 pub use crate::core::marker::{
-    DEFAULT_MARKER_SIZE, Marker, MarkerConstraint, MarkerKind, MarkerSymbol, apply_constraint,
+    DEFAULT_MARKER_SIZE, Marker, MarkerConstraint, MarkerKind, MarkerSymbol, TextAnchor,
+    apply_constraint,
 };
 pub use crate::core::plot::{
     AxisConstraints, DataMargins, DataRange, DirtyState, GraphGrid, Plot, PlotId,
