@@ -82,8 +82,8 @@ hookup. Grouped by where the wiring lands.
   `interaction.rs`, not emitted).
 - **Curve/Hist/Scatter polish (4):** curve highlight style, plot-item selection state,
   histogram bin alignment, histogram filled-region picking.
-- **Stats/Profile/Legend/Print/Selection (5):** profile line-width/method,
-  profile-over-stack, print preview, legend context menu, ItemsSelectionDialog.
+- **Stats/Profile/Print/Selection (4):** profile line-width/method,
+  profile-over-stack, print preview, ItemsSelectionDialog.
 - **Backend render (3):** time-series X-axis render, GPU async stats/histogram,
   postRedisplay.
 
@@ -553,6 +553,42 @@ worktree-isolated implement + parallel adversarial verify; ff-merged to `main` p
   backlog = marker drag/cursor (needs ownership decision) + `is_overlay` data-layer + `DirtyState::Overlay`
   + true vector SVG export + `delaunator` robustness upgrade (separately approvable).
 
+### Wave 9 — Legend right-click context menu (silx `LegendSelector`)
+Single cluster, all in `high_level.rs` (the single-writer long-pole), one worktree-isolated implement +
+two parallel adversarial reviews (both **accept**), ff-merged preserving verified SHAs + one review-fix
+commit. Recon confirmed **all 7 actions were already primitively backed** (no backend/render/shader change):
+`CurveData` carries `symbol: Option<Symbol>` / `line_style: LineStyle` / `y_axis: YAxis`, and `GpuCurve::draw`
+(gated on `line_style.draws_line()`) and `draw_markers` (gated on `symbol.is_none()`) are separate CPU-side
+draw calls re-synced by the existing `update_curve_data` path. Verification boundary: PlotWidget cannot be
+constructed without a GPU `RenderState` (no crate test builds one), so the egui menu render, the right-click
+interaction, the rename `egui::Window`, and the on-screen toggle/axis-move EFFECT are **GPU/UI-UNVERIFIED**
+on this machine; the testable core — the pure style transforms — is fully unit-tested.
+- **`f10185c` — per-curve style setters + lossless restore cache** (730 tests; 6 new pure-fn tests). Public
+  `set_curve_y_axis(handle, YAxis)` (recomputes data bounds + auto limits like `remove`, since Left↔Right
+  reassigns which Y/Y2 bounds the curve feeds), `set_curve_points_visible`, `set_curve_lines_visible`.
+  Checkable Points/Lines are **lossless**: pure free fns `set_symbol_visibility` / `set_line_visibility`
+  stash the visible `Symbol`/`LineStyle` in a UI-only restore cache (`ItemRecord.hidden_symbol` /
+  `hidden_line_style`) so hide→show restores the exact variant (e.g. `Dashed`, not `Solid`), falling back to
+  documented defaults (`Symbol::Point` / `LineStyle::Solid`) only on an empty cache. Tests assert exact
+  variants + no-op-does-not-clobber + empty-cache-default boundaries. **No dual meaning:** the cache is never
+  read by any render/bounds/legend path — `CurveData.symbol`/`.line_style` stays the single source of truth.
+- **`fd81309` — legend context menu + rename popup + response reporting**. `pub enum LegendAction`
+  (re-exported in `lib.rs` beside `LegendResponse`); `legend_row_response` now returns the row
+  `egui::Response` so `show_legend` attaches `Response::context_menu` while holding `&mut self`. Curve rows
+  (`PlotItemKind::Curve`) get the full silx `LegendListContextMenu` set — Set Active (disabled if already
+  active), Map to Y Left / Map to Y Right (current axis disabled), checkable Points (`symbol.is_some()`) and
+  Lines (`line_style.draws_line()`), separator, Rename, Remove — re-read from the record each frame so a
+  reopened menu is current. Non-curve rows (Image/Scatter/Histogram/Mask) get a graceful subset (Set Active /
+  Rename / Remove). Rename = silx `RenameCurveDialog` as an `egui::Window` (single-line `TextEdit` +
+  Apply/Cancel, Enter applies, Escape/close cancels) driven by `PlotWidget.rename_state`. Each action
+  self-applies and records `(handle, LegendAction)` in `LegendResponse.context_action`.
+- **`71f5653` — review fix (one commit, structural):** the visibility setters wrote the restore cache back to
+  the record *before* `update_curve_data`; a failed update would have desynced the cache from the unchanged
+  drawn state. Now the cache is read by copy/clone and committed only on the update-success path (strong
+  state transition: the side cache commits through a finalizer that runs only after the real transition lands).
+- **Wave 9 complete**, `main` @ `71f5653`, 730 tests, full-workspace gate green (`-p egui-silx` == sole
+  workspace member). The on-screen menu/rename/toggle render is GPU/UI-UNVERIFIED (see boundary above).
+
 
 ## PlotWidget core, axes, frame, ticks  — 25✅ 2◐ 7☐
 
@@ -835,9 +871,9 @@ egui-silx implements ImageView, ScatterView, StackView, and CompareImages at a b
 | ☐ | L | S | ComplexImageView: complex display mode toolbar | `ComplexImageView.py:157-256` | No _ComplexDataToolButton; silx provides dropdown to select amplitude/phase/real/imag/complex mode |
 | ☐ | L | S | ImageStack: waiting/loading overlay | `ImageStack.py:43` | No WaitingOverlay; silx shows progress spinner while loading frames |
 
-## Stats, Legends, Profile, Fit, Position-Info, Print, Selection Dialogs  — 10✅ 4◐ 17☐
+## Stats, Legends, Profile, Fit, Position-Info, Print, Selection Dialogs  — 11✅ 4◐ 16☐
 
-egui-silx implements core stats tracking (min/max/mean for X/Y and image scalars, with finite-value filtering), basic legend display with single-click row selection and eye-icon visibility toggles, profile extraction helpers for horizontal/vertical/line/rect ROI types with automatic window placement mirroring silx, fit widget supporting linear and gaussian estimation, and limits dialog for axis control. Major gaps: no StatsWidget table UI, no context menu on legend rows, no profile-over-stack support, only 2 fit models vs silx's 10+, no PositionInfo readout bar, no RadarView overview, no print preview, no item selection dialog, and stats do not compute center-of-mass, coordinate min/max, integral, or delta.
+egui-silx implements core stats tracking (min/max/mean for X/Y and image scalars, with finite-value filtering), legend display with single-click row selection, eye-icon visibility toggles, and a right-click context menu (Wave 9), profile extraction helpers for horizontal/vertical/line/rect ROI types with automatic window placement mirroring silx, fit widget supporting linear and gaussian estimation, and limits dialog for axis control. Major gaps: no StatsWidget table UI, no profile-over-stack support, only 2 fit models vs silx's 10+, no PositionInfo readout bar, no RadarView overview, no print preview, no item selection dialog, and stats do not compute center-of-mass, coordinate min/max, integral, or delta.
 
 | | P | E | Feature | silx | gap |
 |---|---|---|---|---|---|
@@ -852,7 +888,7 @@ egui-silx implements core stats tracking (min/max/mean for X/Y and image scalars
 | ☐ | L | L | Profile: profile-over-stack (slice extraction across stack dimension) | `tools/profile/rois.py:1058-1165 (ProfileImageStack* classes)` | No support for stack profiles (extracting multiple images' worth of profile lines and showing them as separate curves in the profile window). |
 | ☐ | L | L | RadarView: miniature overview of full data extent with draggable viewport rect | `tools/RadarView.py:139-300` | No overview widget showing the full data range with a draggable rect indicating current view limits. |
 | ☐ | L | L | Print preview: send plot to printable page with movable/resizable rect | `PrintPreviewToolButton.py:24-120` | No print preview or print button. Would require integrating with system print dialog and rendering to PDF/printer. |
-| ☐ | L | M | Legend context menu (copy color, toggle colormap, delete item, rename) | `LegendSelector.py:180-280 (contextMenuEvent, _copyAction, _deleteAction)` | No right-click context menu on legend rows in egui-silx. Would require tracking row rect and popping a context menu. |
+| ✅ | L | M | Legend context menu (set active, map-to-Y-left/right, toggle points/lines, rename, remove) | `LegendSelector.py:697-845 (LegendListContextMenu)` | Wave 9: right-click on a legend row pops an `egui::Response::context_menu`. Curve rows get Set Active / Map to Y Left / Map to Y Right / checkable Points / checkable Lines / Rename / Remove; non-curve rows get a Set Active / Rename / Remove subset. Points/Lines toggle losslessly via a UI-only restore cache; rename via an `egui::Window`. Backend was already primitively complete. **GPU/UI-UNVERIFIED:** the menu render, right-click interaction, and rename window need a GPU `RenderState` no crate test constructs; only the pure style transforms are unit-tested. silx's copy-color / toggle-colormap actions are not ported (egui has no equivalent clipboard color affordance here). |
 | ☐ | L | M | Fit: Lorentzian fit (amplitude, center, width, background) | `silx.math.fit.fittheories: Lorentzian` | No Lorentzian fitting. |
 | ☐ | L | M | Fit: Pseudo-Voigt fit (Gaussian + Lorentzian blend) | `silx.math.fit.fittheories: PseudoVoigt` | No Pseudo-Voigt fitting. |
 | ☐ | L | M | PositionInfo readout bar (X, Y, plus custom converters) | `tools/PositionInfo.py:64-250` | No toolbar-mounted label showing current mouse coordinates in data space, with customizable converters (e.g. polar coords, distances). |
