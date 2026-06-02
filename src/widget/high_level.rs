@@ -4003,6 +4003,22 @@ fn colormap_to_rgba(_width: u32, data: &[f32], colormap: &Colormap) -> Vec<[u8; 
 ///
 /// The horizontal histogram (top) shows column sums; the vertical histogram
 /// (right) shows row sums.  Both use `SyncAxes` to track the image-plot limits.
+/// A colorbar column sits at the far right, synced to the active image's
+/// colormap (silx `ImageView` grid column 2, ImageView.py:501).
+///
+/// Width in points reserved for the right-hand colorbar column. Wide enough for
+/// the 25 pt gradient strip (silx `_ColorScale`) plus ticks and end labels.
+const COLORBAR_WIDTH: f32 = 70.0;
+
+/// Build the side [`ColorBarWidget`](crate::widget::colorbar::ColorBarWidget)
+/// for an [`ImageView`], synced to `colormap`'s value limits (silx
+/// `ImageView.getColorBarWidget`, ImageView.py:501). Split out from
+/// [`ImageView::colorbar`] so the colormap→colorbar sync is unit-testable
+/// without a GPU backend.
+fn image_view_colorbar(colormap: &Colormap) -> crate::widget::colorbar::ColorBarWidget {
+    crate::widget::colorbar::ColorBarWidget::new(colormap.clone())
+}
+
 pub struct ImageView {
     image_plot: Plot2D,
     histo_h: Plot1D,
@@ -4015,6 +4031,10 @@ pub struct ImageView {
     width: u32,
     height: u32,
     pixels: Vec<f32>,
+    /// Colormap of the active image, retained so the side colorbar
+    /// (silx `ImageView` `getColorBarWidget`, ImageView.py:501) reflects the
+    /// current value limits.
+    colormap: Colormap,
 }
 
 impl ImageView {
@@ -4050,6 +4070,7 @@ impl ImageView {
             width: 0,
             height: 0,
             pixels: Vec::new(),
+            colormap: Colormap::viridis(0.0, 1.0),
         }
     }
 
@@ -4071,12 +4092,16 @@ impl ImageView {
         self.width = width;
         self.height = height;
         self.pixels = pixels.to_vec();
+        self.colormap = colormap.clone();
 
         if let Some(handle) = self.image_handle {
             self.image_plot
                 .try_update_image(handle, width, height, pixels, colormap)
                 .ok();
         } else {
+            // Seed the plot's default colormap so the add path uses the same
+            // colormap as the colorbar (and as a subsequent update).
+            self.image_plot.set_default_colormap(colormap);
             let h = self
                 .image_plot
                 .try_add_default_image(width, height, pixels)?;
@@ -4084,6 +4109,19 @@ impl ImageView {
         }
         self.rebuild_histograms();
         Ok(())
+    }
+
+    /// The active image's colormap (silx `ImageView.getColormap`).
+    pub fn colormap(&self) -> &Colormap {
+        &self.colormap
+    }
+
+    /// A [`ColorBarWidget`] for the active image's colormap, used by
+    /// [`Self::show`] to render the side colorbar (silx
+    /// `ImageView.getColorBarWidget`, ImageView.py:501). The bar's value limits
+    /// track the colormap's `vmin`/`vmax`.
+    pub fn colorbar(&self) -> crate::widget::colorbar::ColorBarWidget {
+        image_view_colorbar(&self.colormap)
     }
 
     /// Render the image + side histogram panels.
@@ -4103,14 +4141,21 @@ impl ImageView {
 
         let avail = ui.available_size();
 
-        // Top row: horizontal histogram.
-        ui.allocate_ui(egui::vec2(avail.x - histo_v_w, histo_h_h), |ui| {
-            self.histo_h.show(ui);
-        });
+        // Reserve the far-right colorbar column (silx grid column 2,
+        // ImageView.py:501).
+        let colorbar_w = COLORBAR_WIDTH;
 
-        // Bottom row: image + vertical histogram side by side.
+        // Top row: horizontal histogram.
+        ui.allocate_ui(
+            egui::vec2(avail.x - histo_v_w - colorbar_w, histo_h_h),
+            |ui| {
+                self.histo_h.show(ui);
+            },
+        );
+
+        // Bottom row: image + vertical histogram + colorbar side by side.
         ui.horizontal(|ui| {
-            let img_w = avail.x - histo_v_w;
+            let img_w = avail.x - histo_v_w - colorbar_w;
             let img_h = avail.y - histo_h_h;
             ui.allocate_ui(egui::vec2(img_w, img_h), |ui| {
                 self.image_plot.show(ui);
@@ -4118,6 +4163,8 @@ impl ImageView {
             ui.allocate_ui(egui::vec2(histo_v_w, img_h), |ui| {
                 self.histo_v.show(ui);
             });
+            // Colorbar column, synced to the active image's colormap limits.
+            self.colorbar().ui(ui, egui::vec2(colorbar_w, img_h));
         });
     }
 
@@ -4592,6 +4639,20 @@ mod tests {
         assert_eq!(stats.min, Some(1.0));
         assert_eq!(stats.max, Some(4.0));
         assert_eq!(stats.mean, Some(2.5));
+    }
+
+    #[test]
+    fn image_view_colorbar_tracks_colormap_limits() {
+        // Item 1: the ImageView side colorbar is synced to the active image's
+        // colormap value limits (silx getColorBarWidget).
+        let cmap = Colormap::viridis(-3.0, 9.5);
+        let bar = image_view_colorbar(&cmap);
+        assert_eq!(bar.colormap.vmin, -3.0);
+        assert_eq!(bar.colormap.vmax, 9.5);
+        assert_eq!(
+            bar.orientation,
+            crate::widget::colorbar::ColorBarOrientation::Vertical
+        );
     }
 
     #[test]
