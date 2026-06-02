@@ -922,6 +922,113 @@ mod tests {
         }
     }
 
+    /// Press + release `button` at `px` across two frames and return the
+    /// [`PlotResponse`] from the release frame (where egui registers the click).
+    fn click_cycle(
+        ctx: &egui::Context,
+        plot: &mut Plot,
+        screen: egui::Vec2,
+        px: Pos2,
+        button: egui::PointerButton,
+    ) -> PlotResponse {
+        let mut press = screen_input(screen);
+        press.events.push(egui::Event::PointerMoved(px));
+        press.events.push(egui::Event::PointerButton {
+            pos: px,
+            button,
+            pressed: true,
+            modifiers: egui::Modifiers::default(),
+        });
+        let _ = run_frame(ctx, plot, press);
+        let mut release = screen_input(screen);
+        release.events.push(egui::Event::PointerButton {
+            pos: px,
+            button,
+            pressed: false,
+            modifiers: egui::Modifiers::default(),
+        });
+        run_frame(ctx, plot, release).0
+    }
+
+    #[test]
+    fn right_and_middle_click_emit_clicked_with_correct_button() {
+        // silx's prepareMouseSignal reports the actual button; detect_pointer_event
+        // maps Secondary/Middle through MouseButton::from_egui. Both paths are
+        // exercised here (the click test above only covers the left button).
+        let ctx = egui::Context::default();
+        let mut plot = Plot::new(0);
+        plot.limits = (0.0, 10.0, 0.0, 10.0);
+        let screen = egui::vec2(200.0, 200.0);
+        let (_r0, area) = run_frame(&ctx, &mut plot, screen_input(screen));
+        let px = area.center();
+
+        for (button, expected) in [
+            (
+                egui::PointerButton::Secondary,
+                interaction::MouseButton::Right,
+            ),
+            (
+                egui::PointerButton::Middle,
+                interaction::MouseButton::Middle,
+            ),
+        ] {
+            let resp = click_cycle(&ctx, &mut plot, screen, px, button);
+            match resp.pointer_event {
+                Some(interaction::PlotPointerEvent::Clicked {
+                    button: got, data, ..
+                }) => {
+                    assert_eq!(got, expected, "button for {button:?}");
+                    // Data coordinate is still the transform inverse of the pixel.
+                    let want = resp.transform.pixel_to_data(px);
+                    assert!((data.0 - want.0).abs() < 1e-6, "x {data:?} {want:?}");
+                    assert!((data.1 - want.1).abs() < 1e-6, "y {data:?} {want:?}");
+                }
+                other => panic!("expected Clicked({expected:?}), got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn double_click_emits_double_clicked_event() {
+        // silx emits mouseDoubleClicked only for the left button; detect_pointer_event
+        // checks response.double_clicked() before the single-click loop. Two rapid
+        // left press/release cycles at one pixel, with explicit close timestamps
+        // inside egui's double-click delay, make the run deterministic.
+        let ctx = egui::Context::default();
+        let mut plot = Plot::new(0);
+        plot.limits = (0.0, 10.0, 0.0, 10.0);
+        let screen = egui::vec2(200.0, 200.0);
+        let (_r0, area) = run_frame(&ctx, &mut plot, screen_input(screen));
+        let px = area.center();
+
+        let button_frame = |pressed: bool, time: f64| {
+            let mut raw = screen_input(screen);
+            raw.time = Some(time);
+            raw.events.push(egui::Event::PointerMoved(px));
+            raw.events.push(egui::Event::PointerButton {
+                pos: px,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::default(),
+            });
+            raw
+        };
+
+        // First click (press @0.10, release @0.12), then a second click within
+        // egui's default 0.30s double-click delay (press @0.18, release @0.20).
+        let _ = run_frame(&ctx, &mut plot, button_frame(true, 0.10));
+        let _ = run_frame(&ctx, &mut plot, button_frame(false, 0.12));
+        let _ = run_frame(&ctx, &mut plot, button_frame(true, 0.18));
+        let (resp, _) = run_frame(&ctx, &mut plot, button_frame(false, 0.20));
+
+        match resp.pointer_event {
+            Some(interaction::PlotPointerEvent::DoubleClicked { button, .. }) => {
+                assert_eq!(button, interaction::MouseButton::Left);
+            }
+            other => panic!("expected DoubleClicked, got {other:?}"),
+        }
+    }
+
     #[test]
     fn show_with_draw_surfaces_finished_draw_event_through_plot_response() {
         // A Line draw: press at one point, release at another -> Finished event,
