@@ -6,7 +6,7 @@
 //!
 //! [`Plot`]: crate::core::plot::Plot
 
-use crate::widget::high_level::PlotWidget;
+use crate::widget::high_level::{ImageView, PlotWidget, ScatterView};
 
 /// Toggle whether the plot axes (frame/ticks/labels) are displayed, mirroring
 /// silx `ShowAxisAction` (`actions/control.py`): its `_actionTriggered(checked)`
@@ -16,6 +16,23 @@ use crate::widget::high_level::PlotWidget;
 pub fn show_axis_toggle(plot: &mut PlotWidget) -> bool {
     let next = !plot.plot().axes_displayed();
     plot.plot_mut().set_axes_displayed(next);
+    next
+}
+
+/// Toggle the [`ImageView`] side colorbar's visibility, mirroring silx
+/// `ColorBarAction`: its `_actionTriggered(checked)` sets the `ColorBarWidget`'s
+/// visibility. Returns the new `show_colorbar` value.
+pub fn image_colorbar_toggle(view: &mut ImageView) -> bool {
+    let next = !view.show_colorbar();
+    view.set_show_colorbar(next);
+    next
+}
+
+/// Toggle the [`ScatterView`] side colorbar's visibility, mirroring silx
+/// `ColorBarAction`. Returns the new `show_colorbar` value.
+pub fn scatter_colorbar_toggle(view: &mut ScatterView) -> bool {
+    let next = !view.show_colorbar();
+    view.set_show_colorbar(next);
     next
 }
 

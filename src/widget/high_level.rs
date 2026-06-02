@@ -4556,6 +4556,23 @@ pub struct ImageView {
     /// Data-space `(col, row)` where the current profile drag began, or `None`
     /// when no drag is in progress.
     profile_drag_start: Option<(f64, f64)>,
+    /// Whether the side colorbar column is shown (silx `ColorBarAction`,
+    /// ImageView's `ColorBarWidget` visibility). Defaults to `true`; when `false`
+    /// the colorbar column is not reserved and the image fills its width.
+    show_colorbar: bool,
+}
+
+/// Width in points to reserve for the side colorbar column given the show flag
+/// and whether a colorbar is available, mirroring silx `ColorBarAction` toggling
+/// the `ColorBarWidget`'s visibility. Returns [`COLORBAR_WIDTH`] only when the
+/// bar is both shown and available, else `0.0` (no column reserved). Split out
+/// so the show/hide reservation is unit-testable without a GPU backend.
+fn colorbar_column_width(show: bool, has_colorbar: bool) -> f32 {
+    if show && has_colorbar {
+        COLORBAR_WIDTH
+    } else {
+        0.0
+    }
 }
 
 impl ImageView {
@@ -4605,7 +4622,20 @@ impl ImageView {
                 image_id + 3,
             ),
             profile_drag_start: None,
+            show_colorbar: true,
         }
+    }
+
+    /// Whether the side colorbar column is shown (silx `ColorBarAction`).
+    pub fn show_colorbar(&self) -> bool {
+        self.show_colorbar
+    }
+
+    /// Show or hide the side colorbar column (silx `ColorBarAction`). When
+    /// hidden, [`Self::show`] does not reserve the colorbar column and the image
+    /// fills the freed width.
+    pub fn set_show_colorbar(&mut self, show: bool) {
+        self.show_colorbar = show;
     }
 
     /// Upload and display a new image.
@@ -4771,6 +4801,15 @@ impl ImageView {
             if aggregation != self.aggregation || bx.changed() || by.changed() {
                 self.set_aggregation(aggregation, block);
             }
+
+            // Colorbar show/hide toggle (silx `ColorBarAction`).
+            if ui
+                .selectable_label(self.show_colorbar, "colorbar")
+                .on_hover_text("Show/hide the colorbar")
+                .clicked()
+            {
+                crate::widget::actions::control::image_colorbar_toggle(self);
+            }
         });
 
         let response = self.alpha.ui(ui);
@@ -4836,8 +4875,9 @@ impl ImageView {
         let avail = ui.available_size();
 
         // Reserve the far-right colorbar column (silx grid column 2,
-        // ImageView.py:501).
-        let colorbar_w = COLORBAR_WIDTH;
+        // ImageView.py:501), unless the colorbar is hidden (silx
+        // `ColorBarAction`).
+        let colorbar_w = colorbar_column_width(self.show_colorbar, true);
 
         // Top row: horizontal histogram.
         ui.allocate_ui(
@@ -4877,7 +4917,9 @@ impl ImageView {
                 }
             });
             // Colorbar column, synced to the active image's colormap limits.
-            self.colorbar().ui(ui, egui::vec2(colorbar_w, img_h));
+            if colorbar_w > 0.0 {
+                self.colorbar().ui(ui, egui::vec2(colorbar_w, img_h));
+            }
             response
         });
 
@@ -5275,6 +5317,10 @@ pub struct ScatterView {
     /// (silx `ScatterView` `ScatterMaskToolsWidget`, ScatterView.py:116-122).
     /// Its non-zero levels flag the masked-point selection.
     mask: crate::widget::scatter_mask::ScatterMaskWidget,
+    /// Whether the side colorbar column is shown (silx `ColorBarAction`,
+    /// ScatterView's `ColorBarWidget` visibility). Defaults to `true`; even when
+    /// `true` the column is only reserved once data with a colormap exists.
+    show_colorbar: bool,
 }
 
 impl ScatterView {
@@ -5291,7 +5337,20 @@ impl ScatterView {
             visualization: ScatterVisualization::Points,
             grid_resolution: (100, 100),
             mask: crate::widget::scatter_mask::ScatterMaskWidget::new(0),
+            show_colorbar: true,
         }
+    }
+
+    /// Whether the side colorbar column is shown (silx `ColorBarAction`).
+    pub fn show_colorbar(&self) -> bool {
+        self.show_colorbar
+    }
+
+    /// Show or hide the side colorbar column (silx `ColorBarAction`). When
+    /// hidden, [`Self::show`] does not reserve the colorbar column and the
+    /// scatter plot fills the freed width.
+    pub fn set_show_colorbar(&mut self, show: bool) {
+        self.show_colorbar = show;
     }
 
     /// Upload data.  `values` drives point colours through `colormap`.
@@ -5618,9 +5677,27 @@ impl ScatterView {
         changed
     }
 
-    /// Show the standard toolbar.
+    /// Show the standard toolbar plus a colorbar show/hide toggle.
+    ///
+    /// The colorbar toggle mirrors silx `ColorBarAction`; clicking it flips
+    /// whether [`Self::show`] reserves the side colorbar column.
     pub fn show_toolbar(&mut self, ui: &mut egui::Ui) -> ToolbarResponse {
-        self.inner.show_toolbar(ui)
+        let show_colorbar = self.show_colorbar;
+        let mut toggle = false;
+        let (out, ()) = self.inner.show_toolbar_with(ui, |ui, _| {
+            ui.separator();
+            if ui
+                .selectable_label(show_colorbar, "colorbar")
+                .on_hover_text("Show/hide the colorbar")
+                .clicked()
+            {
+                toggle = true;
+            }
+        });
+        if toggle {
+            crate::widget::actions::control::scatter_colorbar_toggle(self);
+        }
+        out
     }
 
     /// Render the scatter plot with the value colorbar beside it.
@@ -5631,17 +5708,15 @@ impl ScatterView {
     pub fn show(&mut self, ui: &mut egui::Ui) -> PlotResponse {
         let avail = ui.available_size();
         let colorbar = self.colorbar();
-        let colorbar_w = if colorbar.is_some() {
-            COLORBAR_WIDTH
-        } else {
-            0.0
-        };
+        let colorbar_w = colorbar_column_width(self.show_colorbar, colorbar.is_some());
         ui.horizontal(|ui| {
             let plot_w = avail.x - colorbar_w;
             let response = ui
                 .allocate_ui(egui::vec2(plot_w, avail.y), |ui| self.inner.show(ui))
                 .inner;
-            if let Some(bar) = colorbar {
+            if colorbar_w > 0.0
+                && let Some(bar) = colorbar
+            {
                 bar.ui(ui, egui::vec2(colorbar_w, avail.y));
             }
             response
@@ -5879,6 +5954,18 @@ fn roi_description(roi: &Roi) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn colorbar_column_width_reserves_only_when_shown_and_available() {
+        // Shown and available: column reserved.
+        assert_eq!(colorbar_column_width(true, true), COLORBAR_WIDTH);
+        // Hidden: no column even when available.
+        assert_eq!(colorbar_column_width(false, true), 0.0);
+        // Shown but no colorbar available (e.g. ScatterView before data): none.
+        assert_eq!(colorbar_column_width(true, false), 0.0);
+        // Hidden and unavailable: none.
+        assert_eq!(colorbar_column_width(false, false), 0.0);
+    }
 
     #[test]
     fn finite_bounds_ignores_non_finite_values() {
