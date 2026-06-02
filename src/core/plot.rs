@@ -136,6 +136,55 @@ pub struct DataRange {
     pub y2: Option<(f64, f64)>,
 }
 
+/// Per-side data-margin ratios added around the visible data on reset-zoom
+/// (silx `PlotWidget.setDataMargins` / `_utils.addMarginsToLimits`).
+///
+/// Each field is a ratio of the data range applied to one limit. silx names
+/// these `(xMinMargin, xMaxMargin, yMinMargin, yMaxMargin)`; the field names
+/// here keep that axis/side mapping explicit:
+///
+/// - `x_min` — the X lower (left) side,
+/// - `x_max` — the X upper (right) side,
+/// - `y_min` — the Y lower (bottom) side,
+/// - `y_max` — the Y upper (top) side.
+///
+/// The Y margins also apply to the y2 axis, matching silx (the y2 branch in
+/// `addMarginsToLimits` reuses `yMinMargin`/`yMaxMargin`). Zero by default.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct DataMargins {
+    /// X lower (left) margin ratio.
+    pub x_min: f64,
+    /// X upper (right) margin ratio.
+    pub x_max: f64,
+    /// Y lower (bottom) margin ratio.
+    pub y_min: f64,
+    /// Y upper (top) margin ratio.
+    pub y_max: f64,
+}
+
+impl DataMargins {
+    /// Expand `(lo, hi)` on a single axis by the low/high ratios, in log space
+    /// when `is_log` (silx `addMarginsToLimits`). For a log axis with a
+    /// non-positive bound the margin is skipped (silx "Do not apply margins if
+    /// limits < 0").
+    fn expand_axis(lo: f64, hi: f64, low_ratio: f64, high_ratio: f64, is_log: bool) -> (f64, f64) {
+        if !is_log {
+            let range = hi - lo;
+            (lo - low_ratio * range, hi + high_ratio * range)
+        } else if lo > 0.0 && hi > 0.0 {
+            let lo_log = lo.log10();
+            let hi_log = hi.log10();
+            let range_log = hi_log - lo_log;
+            (
+                10f64.powf(lo_log - low_ratio * range_log),
+                10f64.powf(hi_log + high_ratio * range_log),
+            )
+        } else {
+            (lo, hi)
+        }
+    }
+}
+
 /// One plot.
 pub struct Plot {
     /// Instance identifier.
@@ -237,6 +286,9 @@ pub struct Plot {
     /// pushes the accumulated bounds here via [`Self::set_data_range`]; the model
     /// layer holds no items, so this is `None` until populated.
     data_range: Option<DataRange>,
+    /// Per-side data margins applied around the visible data on reset-zoom
+    /// (silx `setDataMargins`). Zero by default.
+    data_margins: DataMargins,
 }
 
 /// One snapshot in [`Plot::limits_history`]: the left-axes limits plus the
@@ -282,6 +334,7 @@ impl Plot {
             y_autoscale: true,
             y2_autoscale: true,
             data_range: None,
+            data_margins: DataMargins::default(),
         }
     }
 
@@ -374,6 +427,19 @@ impl Plot {
         self.reset_zoom_to_data_range(self.data_range());
     }
 
+    /// The per-side data margins applied around the data on reset-zoom (silx
+    /// `getDataMargins`).
+    pub fn data_margins(&self) -> DataMargins {
+        self.data_margins
+    }
+
+    /// Set the per-side data margins (silx `setDataMargins`). The ratios expand
+    /// each refit axis around its data range on the next reset-zoom; for log
+    /// axes they expand in log space.
+    pub fn set_data_margins(&mut self, margins: DataMargins) {
+        self.data_margins = margins;
+    }
+
     /// Refit the view to `data` honoring the per-axis autoscale flags, mirroring
     /// silx `PlotWidget.resetZoom`. An axis whose autoscale flag is off keeps its
     /// current display range; an axis whose flag is on is refit to its data
@@ -400,16 +466,43 @@ impl Plot {
         let y_auto = self.y_autoscale || y_log_force;
         let y2_auto = self.y2_autoscale || y_log_force;
 
+        // Track which axes are refit; only those receive data margins, matching
+        // silx (pinned axes are restored after _forceResetZoom without margins).
+        let mut x_refit = false;
+        let mut y_refit = false;
+        let mut y2_refit = false;
+
         if x_auto && let Some((dmin, dmax)) = data.x {
             x_min = dmin;
             x_max = dmax;
+            x_refit = true;
         }
         if y_auto && let Some((dmin, dmax)) = data.y {
             y_min = dmin;
             y_max = dmax;
+            y_refit = true;
         }
         if y2_auto && let Some((dmin, dmax)) = data.y2 {
             y2 = Some((dmin, dmax));
+            y2_refit = true;
+        }
+
+        // Expand refit axes by the data margins (silx applies margins=True in
+        // setLimits during _forceResetZoom; addMarginsToLimits respects log
+        // axes and the shared y/y2 margin ratios).
+        let m = self.data_margins;
+        let x_is_log = self.x_scale == Scale::Log10;
+        let y_is_log = self.y_scale == Scale::Log10;
+        if x_refit {
+            (x_min, x_max) = DataMargins::expand_axis(x_min, x_max, m.x_min, m.x_max, x_is_log);
+        }
+        if y_refit {
+            (y_min, y_max) = DataMargins::expand_axis(y_min, y_max, m.y_min, m.y_max, y_is_log);
+        }
+        if y2_refit && let Some((lo, hi)) = y2 {
+            // y2 axis uses the Y margin ratios and the Y log flag (silx reuses
+            // yMinMargin/yMaxMargin and isYLog for the y2 branch).
+            y2 = Some(DataMargins::expand_axis(lo, hi, m.y_min, m.y_max, y_is_log));
         }
 
         self.limits = (x_min, x_max, y_min, y_max);
@@ -704,6 +797,106 @@ mod tests {
         assert_eq!(plot.limits.1, 1000.0);
         // Y stays pinned.
         assert_eq!((plot.limits.2, plot.limits.3), (0.0, 1.0));
+    }
+
+    #[test]
+    fn data_margins_default_zero_and_noop() {
+        let mut plot = Plot::new(0);
+        assert_eq!(plot.data_margins(), DataMargins::default());
+        plot.set_data_range(DataRange {
+            x: Some((0.0, 10.0)),
+            y: Some((0.0, 10.0)),
+            y2: None,
+        });
+        plot.reset_zoom();
+        // No margins -> exact data bounds.
+        assert_eq!(plot.limits, (0.0, 10.0, 0.0, 10.0));
+    }
+
+    #[test]
+    fn data_margins_linear_left_expands_xmin_by_ratio_of_range() {
+        // 0.1 left margin on a [0, 10] range expands xmin by 10% of 10 = 1.
+        let mut plot = Plot::new(0);
+        plot.set_data_margins(DataMargins {
+            x_min: 0.1,
+            ..Default::default()
+        });
+        plot.set_data_range(DataRange {
+            x: Some((0.0, 10.0)),
+            y: Some((0.0, 10.0)),
+            y2: None,
+        });
+        plot.reset_zoom();
+        assert!(
+            (plot.limits.0 - (-1.0)).abs() < 1e-9,
+            "xmin={}",
+            plot.limits.0
+        );
+        // xmax untouched (no right margin), y untouched (no y margins).
+        assert_eq!(plot.limits.1, 10.0);
+        assert_eq!((plot.limits.2, plot.limits.3), (0.0, 10.0));
+    }
+
+    #[test]
+    fn data_margins_log_expands_in_log_space() {
+        // Log X over [1, 100] (2 decades). A 0.1 left margin expands xmin by 10%
+        // of the 2-decade range in log space: 10^(0 - 0.1*2) = 10^-0.2.
+        let mut plot = Plot::new(0);
+        plot.x_scale = Scale::Log10;
+        plot.set_data_margins(DataMargins {
+            x_min: 0.1,
+            ..Default::default()
+        });
+        plot.set_data_range(DataRange {
+            x: Some((1.0, 100.0)),
+            y: Some((1.0, 100.0)),
+            y2: None,
+        });
+        plot.reset_zoom();
+        let expected = 10f64.powf(-0.2);
+        assert!(
+            (plot.limits.0 - expected).abs() < 1e-9,
+            "xmin={} expected={expected}",
+            plot.limits.0
+        );
+        assert_eq!(plot.limits.1, 100.0);
+    }
+
+    #[test]
+    fn data_margins_log_skips_nonpositive_bound() {
+        // Boundary: log axis with a non-positive lower bound -> margin skipped
+        // (silx "Do not apply margins if limits < 0"), but the bound itself is
+        // still the refit value.
+        let (lo, hi) = DataMargins::expand_axis(0.0, 100.0, 0.1, 0.1, true);
+        assert_eq!((lo, hi), (0.0, 100.0));
+    }
+
+    #[test]
+    fn data_margins_only_applied_to_refit_axes() {
+        // X autoscale off -> X keeps its range and gets NO margin even though a
+        // left margin is set; Y refit and margined.
+        let mut plot = Plot::new(0);
+        plot.limits = (5.0, 6.0, 0.0, 0.0);
+        plot.set_x_autoscale(false);
+        plot.set_data_margins(DataMargins {
+            x_min: 0.5,
+            y_min: 0.1,
+            ..Default::default()
+        });
+        plot.set_data_range(DataRange {
+            x: Some((0.0, 10.0)),
+            y: Some((0.0, 10.0)),
+            y2: None,
+        });
+        plot.reset_zoom();
+        // X pinned, no margin applied.
+        assert_eq!((plot.limits.0, plot.limits.1), (5.0, 6.0));
+        // Y refit with 0.1 bottom margin: ymin = 0 - 0.1*10 = -1.
+        assert!(
+            (plot.limits.2 - (-1.0)).abs() < 1e-9,
+            "ymin={}",
+            plot.limits.2
+        );
     }
 
     #[test]
