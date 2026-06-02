@@ -60,7 +60,9 @@ pub use crate::widget::alpha_slider::{AlphaSlider, AlphaSliderOrientation};
 pub use crate::widget::colorbar::{ColorBarOrientation, ColorBarWidget};
 pub use crate::widget::colormap_dialog::ColormapDialog;
 pub use crate::widget::complex_image_view::{ComplexImageView, ComplexMode};
-pub use crate::widget::fit_widget::FitWidget;
+pub use crate::widget::fit_widget::{
+    FitModelChoice, FitWidget, format_param_value_error, format_reduced_chisq,
+};
 pub use crate::widget::high_level::{
     CompareImages, CompareMode, CurveStats, ImageGeometry, ImageStats, ImageView, ItemStats,
     LegendResponse, Plot1D, Plot2D, PlotDataError, PlotEvent, PlotItemKind, PlotWidget, PlotWindow,
