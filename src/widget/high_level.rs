@@ -8,7 +8,7 @@
 use std::fmt;
 use std::mem;
 use std::ops::{Deref, DerefMut};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use egui::Color32;
 use egui_wgpu::RenderState;
@@ -322,6 +322,8 @@ pub struct ToolbarResponse {
     pub save: bool,
     /// Copy-to-clipboard button was clicked (silx `CopyAction`).
     pub copy: bool,
+    /// Print button was clicked (silx `PrintAction`).
+    pub print: bool,
 }
 
 /// Return value of [`PlotWidget::show_with_toolbar`].
@@ -371,6 +373,7 @@ enum ToolbarIcon {
     ZoomBack,
     Save,
     Copy,
+    Print,
 }
 
 impl ToolbarIcon {
@@ -384,6 +387,14 @@ impl ToolbarIcon {
 
 fn expected_image_len(width: u32, height: u32) -> usize {
     (width as usize).saturating_mul(height as usize)
+}
+
+/// Build the temp PNG path the print shim rasterizes into before handing it to
+/// the printer. Joins `dir` with a process-unique file name so concurrent plots
+/// (or a copy in flight) do not collide. Pure (no filesystem touch), so the
+/// naming is unit-testable; the actual write + printer submit are the shims.
+fn print_temp_png_path(dir: &Path, pid: u32) -> PathBuf {
+    dir.join(format!("egui-silx-print-{pid}.png"))
 }
 
 fn validate_image_len(width: u32, height: u32, actual: usize) -> Result<usize, PlotDataError> {
@@ -461,6 +472,7 @@ fn draw_toolbar_icon(painter: &egui::Painter, rect: egui::Rect, icon: ToolbarIco
         ToolbarIcon::ZoomBack => draw_zoom_back_icon(painter, rect, stroke),
         ToolbarIcon::Save => draw_save_icon(painter, rect, stroke),
         ToolbarIcon::Copy => draw_copy_icon(painter, rect, stroke),
+        ToolbarIcon::Print => draw_print_icon(painter, rect, stroke),
     }
 }
 
@@ -497,6 +509,31 @@ fn draw_save_icon(painter: &egui::Painter, rect: egui::Rect, stroke: egui::Strok
         egui::pos2(body.right() - 3.0, body.top() + body.height() * 0.3),
     );
     painter.rect_filled(notch, 0.0, stroke.color);
+}
+
+/// Draw a printer glyph (paper feed, body, output tray) for the
+/// [`ToolbarIcon::Print`] button.
+fn draw_print_icon(painter: &egui::Painter, rect: egui::Rect, stroke: egui::Stroke) {
+    let cx_left = rect.left() + 5.0;
+    let cx_right = rect.right() - 5.0;
+    // Paper feeding in from the top.
+    let feed = egui::Rect::from_min_max(
+        egui::pos2(cx_left + 2.0, rect.top() + 2.0),
+        egui::pos2(cx_right - 2.0, rect.top() + rect.height() * 0.32),
+    );
+    painter.rect_stroke(feed, 0.0, stroke, egui::StrokeKind::Inside);
+    // Printer body.
+    let body = egui::Rect::from_min_max(
+        egui::pos2(cx_left, rect.top() + rect.height() * 0.34),
+        egui::pos2(cx_right, rect.bottom() - rect.height() * 0.18),
+    );
+    painter.rect_stroke(body, 1.0, stroke, egui::StrokeKind::Inside);
+    // Output tray (printed sheet emerging at the bottom).
+    let tray = egui::Rect::from_min_max(
+        egui::pos2(cx_left + 2.0, rect.bottom() - rect.height() * 0.34),
+        egui::pos2(cx_right - 2.0, rect.bottom() - 2.0),
+    );
+    painter.rect_stroke(tray, 0.0, stroke, egui::StrokeKind::Inside);
 }
 
 /// Draw a leftward back-arrow for the [`ToolbarIcon::ZoomBack`] button.
@@ -3545,6 +3582,12 @@ impl PlotWidget {
             let _ = self.copy_to_clipboard(DEFAULT_SAVE_SIZE);
             out.copy = true;
         }
+        if toolbar_icon_button(ui, ToolbarIcon::Print, false, "Print figure").clicked() {
+            // GPU readback + printer submission are native shims; ignore the
+            // result here (the toolbar only reports the click).
+            let _ = self.print_graph(DEFAULT_SAVE_SIZE);
+            out.print = true;
+        }
     }
 
     /// Set graph limits.
@@ -4176,6 +4219,44 @@ impl PlotWidget {
         clipboard
             .set_image(image)
             .map_err(|e| SaveError::Readback(format!("clipboard set_image: {e}")))?;
+        Ok(true)
+    }
+
+    /// Print a `size` pixel snapshot of the figure to the default system printer
+    /// (silx `PrintAction.printPlot`).
+    ///
+    /// Mirrors silx's raster print path: silx renders the plot to a PNG
+    /// (`_plotAsPNG`) and draws that bitmap onto the printer via
+    /// `QPainter`/`QPrinter` — not vector graphics. Here the figure is rasterized
+    /// to a temp PNG via [`Self::save_graph`] (the only public figure-encoding
+    /// entry point), then submitted to the default printer with the
+    /// [`printers`] crate. Returns `Ok(true)` when a print job was queued,
+    /// `Ok(false)` when no default printer is available (the silx
+    /// `getDefaultPrinter` analogue).
+    ///
+    /// The GPU readback and the printer submission are untested native shims (a
+    /// real printer / spooler is required); the rasterization step reuses the
+    /// unit-tested [`crate::render::save`] encoders, and the temp-path naming is
+    /// unit-tested via [`print_temp_png_path`]. Print preview and printer-settings
+    /// dialogs (silx's `QPrintDialog`) are intentionally not implemented; this
+    /// prints to the default printer.
+    pub fn print_graph(&self, size: (u32, u32)) -> Result<bool, SaveError> {
+        // Rasterize to a temp PNG, then hand the file to the printer. save_graph
+        // is the only public figure-encoding entry point (it writes a PNG file),
+        // and silx prints a PNG bitmap, so PNG is the faithful intermediate.
+        let path = print_temp_png_path(&std::env::temp_dir(), std::process::id());
+        self.save_graph(&path, size)?;
+
+        let Some(printer) = printers::get_default_printer() else {
+            let _ = std::fs::remove_file(&path);
+            return Ok(false);
+        };
+        let submit = printer.print_file(
+            &path.to_string_lossy(),
+            printers::common::base::job::PrinterJobOptions::none(),
+        );
+        let _ = std::fs::remove_file(&path);
+        submit.map_err(|e| SaveError::Readback(format!("print submit: {}", e.message)))?;
         Ok(true)
     }
 
@@ -6553,6 +6634,20 @@ mod tests {
         // so save_to_path returns Ok(false) for them.
         assert_eq!(SaveTarget::from_path(Path::new("/tmp/fig.pdf")), None);
         assert_eq!(SaveTarget::from_path(Path::new("/tmp/noext")), None);
+    }
+
+    #[test]
+    fn print_temp_png_path_is_process_unique_under_dir() {
+        // The print shim rasterizes into this temp path before submitting to the
+        // printer; the GPU readback + submit are shims, but the naming is pure.
+        let dir = Path::new("/tmp/egui-silx-test");
+        let p = print_temp_png_path(dir, 4242);
+        assert_eq!(p, Path::new("/tmp/egui-silx-test/egui-silx-print-4242.png"));
+        // Always under the requested dir, always a .png, with the pid embedded so
+        // concurrent plots / a copy in flight do not collide.
+        assert!(p.starts_with(dir));
+        assert_eq!(p.extension().and_then(|e| e.to_str()), Some("png"));
+        assert_ne!(p, print_temp_png_path(dir, 4243));
     }
 
     #[test]
