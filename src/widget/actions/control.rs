@@ -54,16 +54,32 @@ pub fn show_axis_toggle(plot: &mut PlotWidget) -> bool {
 pub const ZOOM_STEP: f64 = 1.1;
 
 /// Scale a 1D `(min, max)` range about `center` by `scale`, mirroring silx
-/// `scale1DRange` (`_utils/panzoom.py`) for the linear case: the new range is
-/// `(max - min) / scale`, keeping `center` fixed at its original fractional
-/// offset within the range. A degenerate range (`min == max`) is returned
-/// unchanged, as in silx. Pure and deterministic so the zoom math is
-/// unit-testable without a GPU backend.
+/// `scale1DRange` (`_utils/panzoom.py`): the new range is `(max - min) / scale`,
+/// keeping `center` fixed at its original fractional offset within the range. A
+/// degenerate range (`min == max`, compared in the working space) is returned
+/// unchanged, as in silx.
 ///
-/// silx also handles a log10 branch (it scales in log space); this helper covers
-/// the linear axis only — the log branch is deferred with the per-axis log
-/// handling in the action wiring.
-pub fn scale_1d_range(min: f64, max: f64, center: f64, scale: f64) -> (f64, f64) {
+/// When `is_log` is true the scaling happens in `log10` space (a [`Scale::Log10`]
+/// axis guarantees `min`/`max`/`center > 0` by construction): the three inputs
+/// are mapped through `log10`, scaled linearly there, then mapped back via
+/// `10^x` — identical to silx's log branch. silx additionally clips the result
+/// to the float32 safe range; that clip is the separately-tracked float32-safety
+/// zoom item and is intentionally not applied here. Pure and deterministic so the
+/// zoom math is unit-testable without a GPU backend.
+///
+/// [`Scale::Log10`]: crate::core::transform::Scale::Log10
+pub fn scale_1d_range(min: f64, max: f64, center: f64, scale: f64, is_log: bool) -> (f64, f64) {
+    if is_log {
+        let (lmin, lmax, lcenter) = (min.log10(), max.log10(), center.log10());
+        if lmin == lmax {
+            return (min, max);
+        }
+        let offset = (lcenter - lmin) / (lmax - lmin);
+        let range = (lmax - lmin) / scale;
+        let new_min = lcenter - offset * range;
+        let new_max = lcenter + (1.0 - offset) * range;
+        return (10f64.powf(new_min), 10f64.powf(new_max));
+    }
     if min == max {
         return (min, max);
     }
@@ -74,14 +90,20 @@ pub fn scale_1d_range(min: f64, max: f64, center: f64, scale: f64) -> (f64, f64)
     (new_min, new_max)
 }
 
-/// Scale a 1D `(min, max)` range by `scale` about its own midpoint, the center
-/// used by the toolbar zoom buttons when the whole view is visible (silx
+/// Scale a 1D `(min, max)` range by `scale` about its own midpoint — the center
+/// the toolbar zoom buttons use when the whole view is visible (silx
 /// `applyZoomToPlot` defaults the center to the plot-bounds center, which for a
-/// fully-visible view is the range midpoint). Convenience over
-/// [`scale_1d_range`].
-pub fn scale_1d_range_about_midpoint(min: f64, max: f64, scale: f64) -> (f64, f64) {
-    let center = 0.5 * (min + max);
-    scale_1d_range(min, max, center, scale)
+/// fully-visible view is the range midpoint). For a `is_log` axis the visual
+/// midpoint is the geometric mean `sqrt(min * max)` (the data value at the middle
+/// pixel, matching silx mapping the pixel center through `pixelToData`).
+/// Convenience over [`scale_1d_range`].
+pub fn scale_1d_range_about_midpoint(min: f64, max: f64, scale: f64, is_log: bool) -> (f64, f64) {
+    let center = if is_log {
+        (min * max).sqrt()
+    } else {
+        0.5 * (min + max)
+    };
+    scale_1d_range(min, max, center, scale, is_log)
 }
 
 /// Apply a zoom `scale` to the plot's X and Y limits about their midpoints,
@@ -96,20 +118,27 @@ pub fn scale_1d_range_about_midpoint(min: f64, max: f64, scale: f64) -> (f64, f6
 ///
 /// [`zoom_back`]: zoom_back
 fn apply_zoom(plot: &mut PlotWidget, scale: f64) {
+    use crate::core::transform::Scale;
+    // Per-axis log state drives whether each range scales in log space, matching
+    // silx applyZoomToPlot passing each axis' _isLogarithmic() to scale1DRange.
+    let x_log = plot.plot().x_scale == Scale::Log10;
+    let y_log = plot.plot().y_scale == Scale::Log10;
     let (xmin, xmax) = plot.x_limits();
-    let (nxmin, nxmax) = scale_1d_range_about_midpoint(xmin, xmax, scale);
+    let (nxmin, nxmax) = scale_1d_range_about_midpoint(xmin, xmax, scale, x_log);
     let y = plot.y_limits(crate::core::transform::YAxis::Left);
     let (nymin, nymax) = match y {
-        Some((ymin, ymax)) => scale_1d_range_about_midpoint(ymin, ymax, scale),
+        Some((ymin, ymax)) => scale_1d_range_about_midpoint(ymin, ymax, scale, y_log),
         None => {
             let (_, _, ymin, ymax) = plot.plot().limits;
-            scale_1d_range_about_midpoint(ymin, ymax, scale)
+            scale_1d_range_about_midpoint(ymin, ymax, scale, y_log)
         }
     };
+    // silx scales y2 with the left Y axis' log state (applyZoomToPlot passes
+    // plot.getYAxis()._isLogarithmic() for the right axis too); mirror that.
     let y2 = plot
         .plot()
         .y2
-        .map(|(y2min, y2max)| scale_1d_range_about_midpoint(y2min, y2max, scale));
+        .map(|(y2min, y2max)| scale_1d_range_about_midpoint(y2min, y2max, scale, y_log));
     plot.set_limits(nxmin, nxmax, nymin, nymax, y2);
 }
 
@@ -209,13 +238,13 @@ mod tests {
         // Range [0, 10], midpoint 5.
         // Zoom in by 1.1: range 10/1.1 = 9.0909..., centered on 5 →
         // [0.4545..., 9.5454...].
-        let (zin_min, zin_max) = scale_1d_range_about_midpoint(0.0, 10.0, ZOOM_STEP);
+        let (zin_min, zin_max) = scale_1d_range_about_midpoint(0.0, 10.0, ZOOM_STEP, false);
         assert!((zin_min - (5.0 - 10.0 / 1.1 / 2.0)).abs() < 1e-12);
         assert!((zin_max - (5.0 + 10.0 / 1.1 / 2.0)).abs() < 1e-12);
         assert!(zin_max - zin_min < 10.0, "zoom in shrinks the range");
 
         // Zoom out by 1/1.1: range 10*1.1 = 11, centered on 5 → [-0.5, 10.5].
-        let (zout_min, zout_max) = scale_1d_range_about_midpoint(0.0, 10.0, 1.0 / ZOOM_STEP);
+        let (zout_min, zout_max) = scale_1d_range_about_midpoint(0.0, 10.0, 1.0 / ZOOM_STEP, false);
         assert!((zout_min - (-0.5)).abs() < 1e-12);
         assert!((zout_max - 10.5).abs() < 1e-12);
         assert!(zout_max - zout_min > 10.0, "zoom out grows the range");
@@ -224,14 +253,36 @@ mod tests {
     #[test]
     fn scale_1d_range_keeps_off_center_invariant_point() {
         // center at min keeps min fixed; new max = min + (max-min)/scale.
-        let (min, max) = scale_1d_range(2.0, 12.0, 2.0, 2.0);
+        let (min, max) = scale_1d_range(2.0, 12.0, 2.0, 2.0, false);
         assert!((min - 2.0).abs() < 1e-12, "center stays put");
         assert!((max - 7.0).abs() < 1e-12, "range halved from the center");
     }
 
     #[test]
     fn scale_1d_range_degenerate_is_unchanged() {
-        assert_eq!(scale_1d_range(3.0, 3.0, 3.0, 1.5), (3.0, 3.0));
+        assert_eq!(scale_1d_range(3.0, 3.0, 3.0, 1.5, false), (3.0, 3.0));
+    }
+
+    #[test]
+    fn scale_1d_range_log_scales_in_log10_space() {
+        // Log axis [1, 1000]: silx scale1DRange scales in log10 space. Zoom about
+        // the geometric midpoint keeps the geometric center fixed and divides the
+        // log10 span (= 3 decades) by the scale.
+        let (lo, hi) = scale_1d_range_about_midpoint(1.0, 1000.0, ZOOM_STEP, true);
+        // Geometric center preserved (the log-space midpoint is the invariant).
+        assert!(
+            ((lo * hi).sqrt() - (1.0_f64 * 1000.0).sqrt()).abs() < 1e-9,
+            "geometric center fixed"
+        );
+        // log10 span divided by the zoom step (3 decades / 1.1).
+        let new_span = hi.log10() - lo.log10();
+        assert!(
+            (new_span - 3.0 / ZOOM_STEP).abs() < 1e-9,
+            "log span / scale"
+        );
+        assert!(new_span < 3.0, "zoom in shrinks the log span");
+        // Both bounds stay positive (a valid log axis).
+        assert!(lo > 0.0 && hi > lo);
     }
 
     #[test]
