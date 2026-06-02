@@ -102,6 +102,14 @@ pub struct ChromeRequest {
     pub y_label: bool,
     /// A right (y2) Y-axis label at the far right (only honored with `y2`).
     pub y2_label: bool,
+    /// Whether the axes (frame/ticks/labels) are *hidden* (the inverse of silx
+    /// `isAxesDisplayed`). When `true` the axis gutters collapse to zero so the
+    /// data area fills the whole rect, mirroring silx `setAxesDisplayed(False)`
+    /// -> `setAxesMargins(0, 0, 0, 0)` (`PlotWidget.py:2838-2851`). Defaults to
+    /// `false` (axes shown, normal gutters), so a `ChromeRequest::default()`
+    /// reserves the usual gutters. The widget sets it from
+    /// `!Plot::axes_displayed()`.
+    pub axes_hidden: bool,
 }
 
 /// Reserve gutters for axis labels (a colorbar and/or a right y2 axis, if
@@ -109,6 +117,33 @@ pub struct ChromeRequest {
 /// and a y2 axis both claim the right gutter; the colorbar takes precedence when
 /// both are requested. Titles and axis labels each grow their own gutter.
 pub fn layout(full: Rect, req: &ChromeRequest) -> ChromeLayout {
+    // Axes hidden: collapse every axis gutter to zero so the data area fills the
+    // whole rect (silx setAxesDisplayed(False) -> setAxesMargins(0,0,0,0)). A
+    // colorbar still claims its right strip, matching silx where the colorbar is
+    // a separate widget unaffected by the axes-margins toggle.
+    if req.axes_hidden {
+        let right = if req.colorbar {
+            GUTTER_RIGHT + CBAR_WIDTH + CBAR_LABELS
+        } else {
+            0.0
+        };
+        let data_area = Rect::from_min_max(
+            pos2(full.left(), full.top()),
+            pos2(full.right() - right, full.bottom()),
+        );
+        let colorbar = req.colorbar.then(|| {
+            let x0 = data_area.right() + GUTTER_RIGHT;
+            Rect::from_min_max(
+                pos2(x0, data_area.top()),
+                pos2(x0 + CBAR_WIDTH, data_area.bottom()),
+            )
+        });
+        return ChromeLayout {
+            data_area,
+            colorbar,
+        };
+    }
+
     let right_axis = if req.colorbar {
         GUTTER_RIGHT + CBAR_WIDTH + CBAR_LABELS
     } else if req.y2 {
@@ -1368,6 +1403,48 @@ mod tests {
         let ts = axis_ticks_with_mode(&axis, 8, TickMode::TimeSeries);
         let log = axis_ticks_with_mode(&axis, 8, TickMode::Numeric);
         assert_eq!(ts, log, "log axis should ignore TimeSeries");
+    }
+
+    #[test]
+    fn layout_axes_hidden_zeroes_all_gutters() {
+        let full = Rect::from_min_max(pos2(0.0, 0.0), pos2(400.0, 300.0));
+        // Axes shown (default): non-zero gutters reserve space inside the rect.
+        let shown = layout(full, &ChromeRequest::default());
+        assert!(shown.data_area.left() > full.left());
+        assert!(shown.data_area.bottom() < full.bottom());
+        // Axes hidden: every axis gutter collapses to zero; the data area is the
+        // whole rect (silx setAxesDisplayed(False) -> setAxesMargins(0,0,0,0)).
+        let hidden = layout(
+            full,
+            &ChromeRequest {
+                axes_hidden: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(hidden.data_area, full);
+        assert!(hidden.colorbar.is_none());
+    }
+
+    #[test]
+    fn layout_axes_hidden_still_reserves_colorbar_strip() {
+        // Hiding the axes zeroes the axis gutters but the colorbar (a separate
+        // silx widget) still claims its right strip.
+        let full = Rect::from_min_max(pos2(0.0, 0.0), pos2(400.0, 300.0));
+        let hidden_cbar = layout(
+            full,
+            &ChromeRequest {
+                axes_hidden: true,
+                colorbar: true,
+                ..Default::default()
+            },
+        );
+        let bar = hidden_cbar.colorbar.expect("colorbar rect");
+        // Top/bottom/left gutters are zero; only the right is reduced for the bar.
+        assert_eq!(hidden_cbar.data_area.left(), full.left());
+        assert_eq!(hidden_cbar.data_area.top(), full.top());
+        assert_eq!(hidden_cbar.data_area.bottom(), full.bottom());
+        assert!(hidden_cbar.data_area.right() < full.right());
+        assert!(bar.left() >= hidden_cbar.data_area.right());
     }
 
     #[test]

@@ -119,6 +119,7 @@ impl PlotView {
         // limits.
         let with_colorbar = plot.colormap.is_some();
         let with_y2 = plot.y2.is_some();
+        let axes_displayed = plot.axes_displayed();
         let chrome_request = chrome::ChromeRequest {
             colorbar: with_colorbar,
             y2: with_y2,
@@ -126,6 +127,8 @@ impl PlotView {
             x_label: plot.x_label.is_some(),
             y_label: plot.y_label.is_some(),
             y2_label: plot.y2_label.is_some(),
+            // Hidden axes zero the axis gutters (silx setAxesDisplayed(False)).
+            axes_hidden: !axes_displayed,
         };
         let chrome_layout = chrome::layout(rect, &chrome_request);
         let area = plot.margins.data_area(chrome_layout.data_area);
@@ -209,38 +212,44 @@ impl PlotView {
         }
 
         // Chrome (egui), drawn on top of / in the gutters around the data layer.
-        // Per-axis tick mode routes date-time axes through dtime_ticks.
-        chrome::draw_axes_with_tick_modes(
-            painter,
-            &transform,
-            &style,
-            plot.grid,
-            plot.x_max_ticks,
-            plot.y_max_ticks,
-            plot.x_tick_mode(),
-            plot.y_tick_mode(),
-        );
-        if let Some(t_right) = &transform_right {
-            chrome::draw_y2_ticks(painter, t_right, &style);
+        // Per-axis tick mode routes date-time axes through dtime_ticks. When the
+        // axes are hidden the frame/ticks/labels are not drawn (silx
+        // setAxesDisplayed(False) hides the axes and zeroes their margins).
+        if axes_displayed {
+            chrome::draw_axes_with_tick_modes(
+                painter,
+                &transform,
+                &style,
+                plot.grid,
+                plot.x_max_ticks,
+                plot.y_max_ticks,
+                plot.x_tick_mode(),
+                plot.y_tick_mode(),
+            );
+            if let Some(t_right) = &transform_right {
+                chrome::draw_y2_ticks(painter, t_right, &style);
+            }
         }
         if let (Some(cbar), Some(cmap)) = (chrome_layout.colorbar, plot.colormap.as_ref()) {
             chrome::draw_colorbar(painter, cbar, cmap, &style);
         }
 
-        // Title + axis labels in the reserved gutters.
-        chrome::draw_labels(
-            painter,
-            rect,
-            area,
-            &chrome::Labels {
-                title: plot.title.as_deref(),
-                x: plot.x_label.as_deref(),
-                y: plot.y_label.as_deref(),
-                y2: plot.y2_label.as_deref(),
-            },
-            with_y2,
-            &style,
-        );
+        // Title + axis labels in the reserved gutters (hidden with the axes).
+        if axes_displayed {
+            chrome::draw_labels(
+                painter,
+                rect,
+                area,
+                &chrome::Labels {
+                    title: plot.title.as_deref(),
+                    x: plot.x_label.as_deref(),
+                    y: plot.y_label.as_deref(),
+                    y2: plot.y2_label.as_deref(),
+                },
+                with_y2,
+                &style,
+            );
+        }
 
         // Regions of interest (fill, border, edge handles) over the data layer.
         if !plot.rois.is_empty() {
