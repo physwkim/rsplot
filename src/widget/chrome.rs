@@ -15,7 +15,7 @@ use crate::core::items::LineStyle;
 use crate::core::marker::{Marker, MarkerKind, MarkerSymbol};
 use crate::core::plot::{GraphGrid, TickMode};
 use crate::core::roi::{HandleKind, Roi};
-use crate::core::shape::{Shape, ShapeKind};
+use crate::core::shape::{Line, Shape, ShapeKind};
 use crate::core::transform::{Axis, Scale, Transform, YAxis};
 use crate::core::triangles::Triangles;
 
@@ -1179,6 +1179,42 @@ pub fn draw_shapes(painter: &Painter, t: &Transform, shapes: &[Shape]) {
     }
 }
 
+/// Draw each infinite line item over the data area (silx `Line`,
+/// `items/shape.py:289-393`). Per line, [`Line::clipped_segment`] computes the
+/// visible segment in data coordinates against the current viewport (the data
+/// `(x_min, x_max)` × `(y_min, y_max)` window from `t`); the two endpoints are
+/// then mapped data→pixel via the shared transform and drawn with the line's
+/// style. A line that does not cross the viewport produces no segment and is
+/// skipped (silx `__updatePoints` sets `coordinates = None`). Drawing is clipped
+/// to the data area.
+pub fn draw_lines(painter: &Painter, t: &Transform, lines: &[Line]) {
+    let painter = painter.with_clip_rect(t.area);
+    // The data-space viewport window the line is clipped against (silx uses the
+    // axes' current limits). `Rect::min` is (x_min, y_min), `max` is (x_max,
+    // y_max); the transform's per-axis min/max already fold in any aspect
+    // expansion. silx Line is a numeric overlay (no log modeling), so the raw
+    // window is used.
+    let bounds = Rect::from_min_max(
+        pos2(t.x.min as f32, t.y.min as f32),
+        pos2(t.x.max as f32, t.y.max as f32),
+    );
+    for line in lines {
+        if let Some((a, b)) = line.clipped_segment(bounds) {
+            // `a`/`b` are data coordinates; map to pixels.
+            let pa = t.data_to_pixel(a.x as f64, a.y as f64);
+            let pb = t.data_to_pixel(b.x as f64, b.y as f64);
+            draw_styled_line(
+                &painter,
+                vec![pa, pb],
+                line.color,
+                line.line_width,
+                &line.line_style,
+                line.gap_color,
+            );
+        }
+    }
+}
+
 /// Draw a crosshair through `pos` (clipped to the data area) and a readout box
 /// with the data coordinates under the pointer (`doc/design.md` §13 C1). `pos`
 /// is expected to lie within `t.area`.
@@ -1403,6 +1439,45 @@ mod tests {
         let ts = axis_ticks_with_mode(&axis, 8, TickMode::TimeSeries);
         let log = axis_ticks_with_mode(&axis, 8, TickMode::Numeric);
         assert_eq!(ts, log, "log axis should ignore TimeSeries");
+    }
+
+    #[test]
+    fn draw_lines_clips_vertical_and_horizontal_to_viewport() {
+        // Reproduce the data-space bounds draw_lines builds from a transform and
+        // assert the infinite lines clip to the viewport edges. The transform
+        // maps data [0,10]x[0,10] over a 100x100 area.
+        let area = Rect::from_min_max(pos2(0.0, 0.0), pos2(100.0, 100.0));
+        let t = Transform::new(0.0, 10.0, 0.0, 10.0, area);
+        let bounds = Rect::from_min_max(
+            pos2(t.x.min as f32, t.y.min as f32),
+            pos2(t.x.max as f32, t.y.max as f32),
+        );
+
+        // Vertical infinite line x = 4 (slope inf, intercept 4).
+        let vline = Line::new(f64::INFINITY, 4.0);
+        let (a, b) = vline
+            .clipped_segment(bounds)
+            .expect("vline crosses viewport");
+        // Endpoints land on the top/bottom data-y edges at x = 4.
+        assert_eq!(a.x, 4.0);
+        assert_eq!(b.x, 4.0);
+        assert_eq!(a.y.min(b.y), 0.0); // y_min edge
+        assert_eq!(a.y.max(b.y), 10.0); // y_max edge
+
+        // Horizontal infinite line y = 7 (slope 0, intercept 7).
+        let hline = Line::new(0.0, 7.0);
+        let (a, b) = hline
+            .clipped_segment(bounds)
+            .expect("hline crosses viewport");
+        // Endpoints land on the left/right data-x edges at y = 7.
+        assert_eq!(a.x.min(b.x), 0.0); // x_min edge
+        assert_eq!(a.x.max(b.x), 10.0); // x_max edge
+        assert_eq!(a.y, 7.0);
+        assert_eq!(b.y, 7.0);
+
+        // A line outside the viewport yields no segment (skipped by draw_lines).
+        let outside = Line::new(f64::INFINITY, 99.0);
+        assert!(outside.clipped_segment(bounds).is_none());
     }
 
     #[test]

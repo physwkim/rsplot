@@ -262,6 +262,12 @@ impl PlotView {
             chrome::draw_shapes(painter, &transform, &plot.shapes);
         }
 
+        // Infinite line items (silx Line), clipped to the viewport. Drawn right
+        // after shapes, on the main (left) axes.
+        if !plot.lines().is_empty() {
+            chrome::draw_lines(painter, &transform, plot.lines());
+        }
+
         // Point / line markers over the data layer (silx addMarker).
         if !plot.markers.is_empty() {
             chrome::draw_markers(painter, &transform, transform_right.as_ref(), &plot.markers);

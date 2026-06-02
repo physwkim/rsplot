@@ -10,7 +10,7 @@ use egui::{Color32, Rect};
 use crate::core::colormap::Colormap;
 use crate::core::marker::Marker;
 use crate::core::roi::Roi;
-use crate::core::shape::Shape;
+use crate::core::shape::{Line, Shape};
 use crate::core::transform::{Axis, Margins, Scale, Transform, keep_aspect_limits};
 use crate::core::triangles::Triangles;
 
@@ -354,6 +354,10 @@ pub struct Plot {
     /// Left-Y-axis tick mode (silx `getYAxis().getTickMode`). Defaults to
     /// [`TickMode::Numeric`].
     y_tick_mode: TickMode,
+    /// Infinite line items drawn over the data area (silx `Line`,
+    /// `items/shape.py:289`). Each is clipped to the current viewport and drawn
+    /// every frame.
+    lines: Vec<Line>,
 }
 
 /// One snapshot in [`Plot::limits_history`]: the left-axes limits plus the
@@ -405,6 +409,7 @@ impl Plot {
             autoreplot: true,
             x_tick_mode: TickMode::Numeric,
             y_tick_mode: TickMode::Numeric,
+            lines: Vec::new(),
         }
     }
 
@@ -584,6 +589,22 @@ impl Plot {
     /// Set the left-Y-axis tick mode (silx `getYAxis().setTickMode`).
     pub fn set_y_tick_mode(&mut self, mode: TickMode) {
         self.y_tick_mode = mode;
+    }
+
+    /// Append an infinite line item (silx `addItem` of a `Line`). The widget
+    /// clips each line to the current viewport and draws it every frame.
+    pub fn add_line(&mut self, line: Line) {
+        self.lines.push(line);
+    }
+
+    /// The infinite line items (silx `Line` items).
+    pub fn lines(&self) -> &[Line] {
+        &self.lines
+    }
+
+    /// Mutable access to the infinite line items.
+    pub fn lines_mut(&mut self) -> &mut Vec<Line> {
+        &mut self.lines
     }
 
     /// The X-axis label to display, given the active curve's X label (silx
@@ -1118,6 +1139,19 @@ mod tests {
         plot.set_axes_displayed(false);
         assert!(!plot.axes_displayed());
         assert_eq!(plot.dirty(), DirtyState::Full);
+    }
+
+    #[test]
+    fn lines_start_empty_and_append() {
+        let mut plot = Plot::new(0);
+        assert!(plot.lines().is_empty());
+        plot.add_line(Line::new(f64::INFINITY, 3.0));
+        plot.add_line(Line::new(0.0, 1.0));
+        assert_eq!(plot.lines().len(), 2);
+        // lines_mut allows in-place edits.
+        plot.lines_mut()[1].intercept = 2.0;
+        assert_eq!(plot.lines()[1].intercept, 2.0);
+        assert!(!plot.lines()[0].slope.is_finite());
     }
 
     #[test]
