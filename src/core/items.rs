@@ -162,6 +162,87 @@ impl Symbol {
             _ => marker_size,
         }
     }
+
+    /// The silx symbol code for this symbol, or `None` for [`Symbol::Triangle`]
+    /// (an egui extra silx has no code for). The inverse of the codes accepted by
+    /// [`Symbol::from_code`]; matches the keys of silx
+    /// `SymbolMixIn._SUPPORTED_SYMBOLS`.
+    pub fn code_str(self) -> Option<&'static str> {
+        Some(match self {
+            Symbol::Circle => "o",
+            Symbol::Diamond => "d",
+            Symbol::Square => "s",
+            Symbol::Plus => "+",
+            Symbol::Cross => "x",
+            Symbol::Point => ".",
+            Symbol::Pixel => ",",
+            Symbol::VerticalLine => "|",
+            Symbol::HorizontalLine => "_",
+            Symbol::TickLeft => "tickleft",
+            Symbol::TickRight => "tickright",
+            Symbol::TickUp => "tickup",
+            Symbol::TickDown => "tickdown",
+            Symbol::CaretLeft => "caretleft",
+            Symbol::CaretRight => "caretright",
+            Symbol::CaretUp => "caretup",
+            Symbol::CaretDown => "caretdown",
+            Symbol::Triangle => return None,
+        })
+    }
+
+    /// Parse a silx symbol code or human-readable name into a [`Symbol`], or
+    /// `None` if unrecognized. Mirrors silx `SymbolMixIn.setSymbol`: a code from
+    /// `_SUPPORTED_SYMBOLS` matches first, otherwise the human-readable name is
+    /// matched case-insensitively. silx's empty-string ("None") symbol and the
+    /// `'♥'` Heart glyph are not representable here, so they return `None`.
+    /// [`Symbol::Triangle`] has no silx code and is reachable only by its name
+    /// `"triangle"`.
+    pub fn from_code(s: &str) -> Option<Symbol> {
+        let symbol = match s {
+            "o" => Symbol::Circle,
+            "d" => Symbol::Diamond,
+            "s" => Symbol::Square,
+            "+" => Symbol::Plus,
+            "x" => Symbol::Cross,
+            "." => Symbol::Point,
+            "," => Symbol::Pixel,
+            "|" => Symbol::VerticalLine,
+            "_" => Symbol::HorizontalLine,
+            "tickleft" => Symbol::TickLeft,
+            "tickright" => Symbol::TickRight,
+            "tickup" => Symbol::TickUp,
+            "tickdown" => Symbol::TickDown,
+            "caretleft" => Symbol::CaretLeft,
+            "caretright" => Symbol::CaretRight,
+            "caretup" => Symbol::CaretUp,
+            "caretdown" => Symbol::CaretDown,
+            // Not a silx code: case-insensitive match on the human-readable name.
+            _ => {
+                return match s.to_ascii_lowercase().as_str() {
+                    "circle" => Some(Symbol::Circle),
+                    "diamond" => Some(Symbol::Diamond),
+                    "square" => Some(Symbol::Square),
+                    "plus" => Some(Symbol::Plus),
+                    "cross" => Some(Symbol::Cross),
+                    "point" => Some(Symbol::Point),
+                    "pixel" => Some(Symbol::Pixel),
+                    "vertical line" => Some(Symbol::VerticalLine),
+                    "horizontal line" => Some(Symbol::HorizontalLine),
+                    "tick left" => Some(Symbol::TickLeft),
+                    "tick right" => Some(Symbol::TickRight),
+                    "tick up" => Some(Symbol::TickUp),
+                    "tick down" => Some(Symbol::TickDown),
+                    "caret left" => Some(Symbol::CaretLeft),
+                    "caret right" => Some(Symbol::CaretRight),
+                    "caret up" => Some(Symbol::CaretUp),
+                    "caret down" => Some(Symbol::CaretDown),
+                    "triangle" => Some(Symbol::Triangle),
+                    _ => None,
+                };
+            }
+        };
+        Some(symbol)
+    }
 }
 
 /// Where a filled curve's area extends to (silx `baseline`). The fill is the
@@ -269,6 +350,92 @@ mod tests {
             LineStyle::DashDot.painter_dashes(1.0),
             Some((vec![6.0, 1.5], vec![3.0, 3.0], 0.0))
         );
+    }
+
+    /// Every silx symbol code and its corresponding [`Symbol`]; the canonical
+    /// set used to check the code mapping in both directions.
+    const SILX_CODES: &[(&str, Symbol)] = &[
+        ("o", Symbol::Circle),
+        ("d", Symbol::Diamond),
+        ("s", Symbol::Square),
+        ("+", Symbol::Plus),
+        ("x", Symbol::Cross),
+        (".", Symbol::Point),
+        (",", Symbol::Pixel),
+        ("|", Symbol::VerticalLine),
+        ("_", Symbol::HorizontalLine),
+        ("tickleft", Symbol::TickLeft),
+        ("tickright", Symbol::TickRight),
+        ("tickup", Symbol::TickUp),
+        ("tickdown", Symbol::TickDown),
+        ("caretleft", Symbol::CaretLeft),
+        ("caretright", Symbol::CaretRight),
+        ("caretup", Symbol::CaretUp),
+        ("caretdown", Symbol::CaretDown),
+    ];
+
+    #[test]
+    fn from_code_maps_every_silx_code() {
+        for &(code, symbol) in SILX_CODES {
+            assert_eq!(Symbol::from_code(code), Some(symbol), "code {code:?}");
+        }
+    }
+
+    #[test]
+    fn code_str_round_trips_every_coded_symbol() {
+        for &(code, symbol) in SILX_CODES {
+            assert_eq!(symbol.code_str(), Some(code), "reverse of {symbol:?}");
+            assert_eq!(
+                Symbol::from_code(symbol.code_str().unwrap()),
+                Some(symbol),
+                "round-trip of {symbol:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn from_code_matches_human_names_case_insensitively() {
+        // Each silx human-readable name (case-insensitive), one per symbol.
+        assert_eq!(Symbol::from_code("Circle"), Some(Symbol::Circle));
+        assert_eq!(Symbol::from_code("DIAMOND"), Some(Symbol::Diamond));
+        assert_eq!(Symbol::from_code("square"), Some(Symbol::Square));
+        assert_eq!(Symbol::from_code("Plus"), Some(Symbol::Plus));
+        assert_eq!(Symbol::from_code("Cross"), Some(Symbol::Cross));
+        assert_eq!(Symbol::from_code("Point"), Some(Symbol::Point));
+        assert_eq!(Symbol::from_code("Pixel"), Some(Symbol::Pixel));
+        assert_eq!(
+            Symbol::from_code("Vertical line"),
+            Some(Symbol::VerticalLine)
+        );
+        assert_eq!(
+            Symbol::from_code("Horizontal line"),
+            Some(Symbol::HorizontalLine)
+        );
+        assert_eq!(Symbol::from_code("Tick left"), Some(Symbol::TickLeft));
+        assert_eq!(Symbol::from_code("Tick right"), Some(Symbol::TickRight));
+        assert_eq!(Symbol::from_code("Tick up"), Some(Symbol::TickUp));
+        assert_eq!(Symbol::from_code("Tick down"), Some(Symbol::TickDown));
+        assert_eq!(Symbol::from_code("Caret left"), Some(Symbol::CaretLeft));
+        assert_eq!(Symbol::from_code("Caret right"), Some(Symbol::CaretRight));
+        assert_eq!(Symbol::from_code("Caret up"), Some(Symbol::CaretUp));
+        assert_eq!(Symbol::from_code("Caret down"), Some(Symbol::CaretDown));
+    }
+
+    #[test]
+    fn triangle_has_a_name_but_no_silx_code() {
+        // egui extra: reachable by name, but silx has no code for it.
+        assert_eq!(Symbol::from_code("triangle"), Some(Symbol::Triangle));
+        assert_eq!(Symbol::from_code("Triangle"), Some(Symbol::Triangle));
+        assert_eq!(Symbol::Triangle.code_str(), None);
+    }
+
+    #[test]
+    fn from_code_rejects_unsupported_codes() {
+        // silx None symbol (empty string), the Heart glyph, and any garbage.
+        assert_eq!(Symbol::from_code(""), None);
+        assert_eq!(Symbol::from_code("\u{2665}"), None);
+        assert_eq!(Symbol::from_code("heart"), None);
+        assert_eq!(Symbol::from_code("nope"), None);
     }
 
     #[test]
