@@ -99,6 +99,22 @@ impl AxisConstraints {
 /// current steps handle a single plot, so no separation map exists yet.
 pub type PlotId = u64;
 
+/// Whether an axis lays out regular numeric ticks or date-time ticks, mirroring
+/// silx `items.axis.TickMode` (`items/axis.py:43-47`). silx exposes this per
+/// axis via `Axis.getTickMode` / `Axis.setTickMode`; the X axis is the usual
+/// time axis (`getXAxisTimeZone`), but the field is per-axis here as in silx.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TickMode {
+    /// Ticks are regular numbers (silx `TickMode.DEFAULT = 0`). Zero behavior
+    /// change from the pre-existing numeric tick layout.
+    #[default]
+    Numeric,
+    /// Ticks are date-times: the axis data values are epoch seconds (UTC) and
+    /// labels are formatted via [`crate::core::dtime_ticks`] (silx
+    /// `TickMode.TIME_SERIES = 1`).
+    TimeSeries,
+}
+
 /// Grid lines drawn in the plot data area.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum GraphGrid {
@@ -331,6 +347,13 @@ pub struct Plot {
     /// Whether the plot is redrawn automatically on change (silx `_autoreplot`).
     /// Defaults to `true`, matching silx after `_init`.
     autoreplot: bool,
+    /// X-axis tick mode (silx `getXAxis().getTickMode`). Defaults to
+    /// [`TickMode::Numeric`] (zero behavior change). When [`TickMode::TimeSeries`]
+    /// the chrome formats the X tick labels as date-times.
+    x_tick_mode: TickMode,
+    /// Left-Y-axis tick mode (silx `getYAxis().getTickMode`). Defaults to
+    /// [`TickMode::Numeric`].
+    y_tick_mode: TickMode,
 }
 
 /// One snapshot in [`Plot::limits_history`]: the left-axes limits plus the
@@ -380,6 +403,8 @@ impl Plot {
             axes_displayed: true,
             dirty: DirtyState::Clean,
             autoreplot: true,
+            x_tick_mode: TickMode::Numeric,
+            y_tick_mode: TickMode::Numeric,
         }
     }
 
@@ -537,6 +562,28 @@ impl Plot {
     /// the render loop that would honor this is at the widget layer (deferred).
     pub fn set_autoreplot(&mut self, autoreplot: bool) {
         self.autoreplot = autoreplot;
+    }
+
+    /// The X-axis tick mode (silx `getXAxis().getTickMode`).
+    pub fn x_tick_mode(&self) -> TickMode {
+        self.x_tick_mode
+    }
+
+    /// Set the X-axis tick mode (silx `getXAxis().setTickMode`). With
+    /// [`TickMode::TimeSeries`] the chrome formats the X tick labels as
+    /// date-times (the data values are epoch seconds, UTC).
+    pub fn set_x_tick_mode(&mut self, mode: TickMode) {
+        self.x_tick_mode = mode;
+    }
+
+    /// The left-Y-axis tick mode (silx `getYAxis().getTickMode`).
+    pub fn y_tick_mode(&self) -> TickMode {
+        self.y_tick_mode
+    }
+
+    /// Set the left-Y-axis tick mode (silx `getYAxis().setTickMode`).
+    pub fn set_y_tick_mode(&mut self, mode: TickMode) {
+        self.y_tick_mode = mode;
     }
 
     /// The X-axis label to display, given the active curve's X label (silx
@@ -1071,6 +1118,19 @@ mod tests {
         plot.set_axes_displayed(false);
         assert!(!plot.axes_displayed());
         assert_eq!(plot.dirty(), DirtyState::Full);
+    }
+
+    #[test]
+    fn tick_mode_defaults_numeric_and_sets_per_axis() {
+        let mut plot = Plot::new(0);
+        assert_eq!(plot.x_tick_mode(), TickMode::Numeric);
+        assert_eq!(plot.y_tick_mode(), TickMode::Numeric);
+        plot.set_x_tick_mode(TickMode::TimeSeries);
+        assert_eq!(plot.x_tick_mode(), TickMode::TimeSeries);
+        // Y axis is independent and still Numeric.
+        assert_eq!(plot.y_tick_mode(), TickMode::Numeric);
+        plot.set_y_tick_mode(TickMode::TimeSeries);
+        assert_eq!(plot.y_tick_mode(), TickMode::TimeSeries);
     }
 
     #[test]

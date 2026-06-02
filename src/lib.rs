@@ -39,7 +39,7 @@ pub use crate::core::marker::{
     apply_constraint,
 };
 pub use crate::core::plot::{
-    AxisConstraints, DataMargins, DataRange, DirtyState, GraphGrid, Plot, PlotId,
+    AxisConstraints, DataMargins, DataRange, DirtyState, GraphGrid, Plot, PlotId, TickMode,
     resolved_axis_label,
 };
 pub use crate::core::roi::{Roi, RoiEdge};

@@ -10,9 +10,10 @@ use egui::epaint::TextShape;
 use egui::{Align2, Color32, FontId, Painter, Pos2, Rect, Stroke, Visuals, pos2, vec2};
 
 use crate::core::colormap::{Colormap, Normalization};
+use crate::core::dtime_ticks;
 use crate::core::items::LineStyle;
 use crate::core::marker::{Marker, MarkerKind, MarkerSymbol};
-use crate::core::plot::GraphGrid;
+use crate::core::plot::{GraphGrid, TickMode};
 use crate::core::roi::{HandleKind, Roi};
 use crate::core::shape::{Shape, ShapeKind};
 use crate::core::transform::{Axis, Scale, Transform, YAxis};
@@ -218,9 +219,36 @@ fn format_log_tick(v: f64) -> String {
     }
 }
 
+/// Default target tick count for a date-time (TimeSeries) axis, mirroring silx
+/// `NiceDateLocator(numTicks=5)` (`backends/BackendMatplotlib.py:162`).
+const TIME_SERIES_NUM_TICKS: usize = 5;
+
 /// Tick values plus their formatted labels for one axis: "nice" numbers on a
-/// linear axis, one-per-decade on a log axis.
+/// linear axis, one-per-decade on a log axis. The default [`TickMode::Numeric`]
+/// path is unchanged.
 fn axis_ticks(axis: &Axis, max_ticks: usize) -> Vec<(f64, String)> {
+    axis_ticks_with_mode(axis, max_ticks, TickMode::Numeric)
+}
+
+/// As [`axis_ticks`] but honoring the axis [`TickMode`]. With
+/// [`TickMode::TimeSeries`] the axis data values are treated as epoch seconds
+/// (UTC) and tick positions + labels are produced by [`dtime_ticks`]
+/// (`calc_ticks` / `format_ticks`), mirroring silx `NiceDateLocator` +
+/// `NiceAutoDateFormatter` (`backends/BackendMatplotlib.py:153-242`). A
+/// TimeSeries tick mode is honored only on a [`Scale::Linear`] axis (silx ties
+/// the time locator to the linear/numeric axis); a log axis falls back to the
+/// numeric decade ticks.
+fn axis_ticks_with_mode(axis: &Axis, max_ticks: usize, tick_mode: TickMode) -> Vec<(f64, String)> {
+    if tick_mode == TickMode::TimeSeries && axis.scale == Scale::Linear {
+        let (lo, hi) = if axis.max >= axis.min {
+            (axis.min, axis.max)
+        } else {
+            (axis.max, axis.min)
+        };
+        let (ticks, spacing, unit) = dtime_ticks::calc_ticks(lo, hi, TIME_SERIES_NUM_TICKS);
+        let labels = dtime_ticks::format_ticks(&ticks, spacing, unit);
+        return ticks.into_iter().zip(labels).collect();
+    }
     match axis.scale {
         Scale::Linear => {
             let (ticks, step) = nice_ticks(axis.min, axis.max, max_ticks);
@@ -304,6 +332,34 @@ pub fn draw_axes(
     x_max_ticks: Option<usize>,
     y_max_ticks: Option<usize>,
 ) {
+    draw_axes_with_tick_modes(
+        painter,
+        t,
+        style,
+        grid_mode,
+        x_max_ticks,
+        y_max_ticks,
+        TickMode::Numeric,
+        TickMode::Numeric,
+    );
+}
+
+/// As [`draw_axes`] but honoring a per-axis [`TickMode`]: with
+/// [`TickMode::TimeSeries`] that axis' tick positions and labels are produced
+/// by [`dtime_ticks`] (epoch-seconds data values, UTC), mirroring silx's
+/// `NiceDateLocator` time-axis path (`backends/BackendMatplotlib.py:153-242`).
+/// The default `Numeric`/`Numeric` matches [`draw_axes`] exactly.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_axes_with_tick_modes(
+    painter: &Painter,
+    t: &Transform,
+    style: &Style,
+    grid_mode: GraphGrid,
+    x_max_ticks: Option<usize>,
+    y_max_ticks: Option<usize>,
+    x_tick_mode: TickMode,
+    y_tick_mode: TickMode,
+) {
     let area = t.area;
     let axis = Stroke::new(1.0, style.axis);
     let grid = Stroke::new(1.0, style.grid);
@@ -319,8 +375,8 @@ pub fn draw_axes(
     let font = FontId::proportional(11.0);
     let tick_len = 4.0;
 
-    let xticks = axis_ticks(&t.x, x_max_ticks.unwrap_or(8));
-    let yticks = axis_ticks(&t.y, y_max_ticks.unwrap_or(6));
+    let xticks = axis_ticks_with_mode(&t.x, x_max_ticks.unwrap_or(8), x_tick_mode);
+    let yticks = axis_ticks_with_mode(&t.y, y_max_ticks.unwrap_or(6), y_tick_mode);
 
     if grid_mode.minor() {
         for xv in minor_ticks(&t.x, &xticks) {
@@ -1247,6 +1303,71 @@ mod tests {
         assert_eq!(format_log_tick(10.0), "10");
         assert_eq!(format_log_tick(0.01), "0.01");
         assert_eq!(format_log_tick(1e8), "1e8");
+    }
+
+    #[test]
+    fn axis_ticks_time_series_yields_datetime_labels() {
+        // A one-week window in epoch seconds (2021-01-04 .. 2021-01-11 UTC).
+        let min = crate::core::dtime_ticks::DateTime::from_civil(2021, 1, 4, 0, 0, 0, 0)
+            .to_epoch_seconds();
+        let max = crate::core::dtime_ticks::DateTime::from_civil(2021, 1, 11, 0, 0, 0, 0)
+            .to_epoch_seconds();
+        let axis = Axis {
+            min,
+            max,
+            scale: Scale::Linear,
+            inverted: false,
+        };
+        let ticks = axis_ticks_with_mode(&axis, 8, TickMode::TimeSeries);
+        assert!(!ticks.is_empty(), "time-series ticks empty");
+        // The week window selects the Days unit -> ISO date labels "YYYY-MM-DD".
+        for (_, label) in &ticks {
+            assert_eq!(label.len(), 10, "label {label:?} not an ISO date");
+            let parts: Vec<&str> = label.split('-').collect();
+            assert_eq!(parts.len(), 3, "label {label:?} not Y-M-D");
+            assert_eq!(parts[0], "2021", "year wrong in {label:?}");
+        }
+        // The positions bracket the range (calc_ticks brackets [min, max]).
+        assert!(ticks.first().unwrap().0 <= min + 1e-6);
+        assert!(ticks.last().unwrap().0 >= max - 1e-6);
+    }
+
+    #[test]
+    fn axis_ticks_numeric_mode_matches_default_path() {
+        // The Numeric tick mode must produce exactly the pre-existing numeric
+        // ticks (zero behavior change).
+        let axis = Axis {
+            min: 0.0,
+            max: 256.0,
+            scale: Scale::Linear,
+            inverted: false,
+        };
+        let numeric = axis_ticks_with_mode(&axis, 8, TickMode::Numeric);
+        let default_path = axis_ticks(&axis, 8);
+        assert_eq!(numeric, default_path);
+        // And the labels are plain numbers, not dates (no '-' separators after a
+        // possible leading sign).
+        for (_, label) in &numeric {
+            assert!(
+                !label.trim_start_matches('-').contains('-'),
+                "numeric label {label:?} looks like a date"
+            );
+        }
+    }
+
+    #[test]
+    fn axis_ticks_time_series_log_axis_falls_back_to_numeric_decades() {
+        // A TimeSeries request on a log axis is ignored (silx ties the time
+        // locator to the linear/numeric axis): decade ticks are produced.
+        let axis = Axis {
+            min: 1.0,
+            max: 1000.0,
+            scale: Scale::Log10,
+            inverted: false,
+        };
+        let ts = axis_ticks_with_mode(&axis, 8, TickMode::TimeSeries);
+        let log = axis_ticks_with_mode(&axis, 8, TickMode::Numeric);
+        assert_eq!(ts, log, "log axis should ignore TimeSeries");
     }
 
     #[test]

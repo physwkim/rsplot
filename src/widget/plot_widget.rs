@@ -209,13 +209,16 @@ impl PlotView {
         }
 
         // Chrome (egui), drawn on top of / in the gutters around the data layer.
-        chrome::draw_axes(
+        // Per-axis tick mode routes date-time axes through dtime_ticks.
+        chrome::draw_axes_with_tick_modes(
             painter,
             &transform,
             &style,
             plot.grid,
             plot.x_max_ticks,
             plot.y_max_ticks,
+            plot.x_tick_mode(),
+            plot.y_tick_mode(),
         );
         if let Some(t_right) = &transform_right {
             chrome::draw_y2_ticks(painter, t_right, &style);
