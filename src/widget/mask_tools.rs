@@ -340,13 +340,20 @@ impl MaskToolsWidget {
         self.is_dirty = true;
     }
 
-    /// Reset every level's color override back to the base overlay color.
+    /// Reset one mask level's color override, or all of them, back to the base
+    /// overlay color.
     ///
-    /// Mirrors silx `resetMaskColors` (gui/plot/_BaseMaskToolsWidget.py:1012):
-    /// clears `_overlayColors` back to `_defaultColors = True`, so every level
-    /// falls back to [`color`](Self::color).
-    pub fn reset_mask_colors(&mut self) {
-        self.overrides.iter_mut().for_each(|c| *c = None);
+    /// Mirrors silx `resetMaskColors(level=None)`
+    /// (gui/plot/_BaseMaskToolsWidget.py:1012-1023): `level = None` clears every
+    /// override (`_defaultColors[:] = True`); `level = Some(l)` clears only that
+    /// level (`_defaultColors[l] = True`). Either way the affected level(s) fall
+    /// back to [`color`](Self::color). Symmetric with
+    /// [`set_mask_colors`](Self::set_mask_colors)'s `Option<u8>` level.
+    pub fn reset_mask_colors(&mut self, level: Option<u8>) {
+        match level {
+            None => self.overrides.iter_mut().for_each(|c| *c = None),
+            Some(l) => self.overrides[l as usize] = None,
+        }
         self.is_dirty = true;
     }
 
@@ -1762,8 +1769,14 @@ mod tests {
         w.set_mask_colors([0, 0, 255], None);
         assert!(w.overrides.iter().all(|c| *c == Some([0, 0, 255])));
 
-        // reset_mask_colors clears all overrides (silx resetMaskColors).
-        w.reset_mask_colors();
+        // reset_mask_colors(Some(l)) clears only that level (silx
+        // resetMaskColors(level)); the rest keep their override.
+        w.reset_mask_colors(Some(7));
+        assert_eq!(w.overrides[7], None);
+        assert_eq!(w.overrides[6], Some([0, 0, 255]));
+
+        // reset_mask_colors(None) clears every override (silx resetMaskColors()).
+        w.reset_mask_colors(None);
         assert!(w.overrides.iter().all(|c| c.is_none()));
     }
 
