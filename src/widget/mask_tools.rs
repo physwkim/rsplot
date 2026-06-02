@@ -421,11 +421,7 @@ impl MaskToolsWidget {
         // the overlay one layer above the active image (silx default _z = 1
         // when there is no active image).
         if let Some(handle) = self.mask_handle {
-            let z = plot
-                .active_image()
-                .map(|img| plot.item_z_value(img))
-                .unwrap_or(0.0)
-                + 1.0;
+            let z = overlay_z_value(plot.active_image().map(|img| plot.item_z_value(img)));
             plot.set_item_z(handle, z);
         }
 
@@ -876,6 +872,18 @@ impl MaskToolsWidget {
 /// transparent entry; the selected level yields its full-alpha entry.
 fn mask_overlay_rgba(mask: &[u8], lut: &[[u8; 4]; 256]) -> Vec<[u8; 4]> {
     mask.iter().map(|&level| lut[level as usize]).collect()
+}
+
+/// The z-value for the mask overlay: one layer above the active image, or the
+/// silx default `1` when there is no active image.
+///
+/// Faithful to silx `MaskToolsWidget.py:482` (`z = activeImage.getZValue() +
+/// 1`) with the no-active-image default `_z = 1` (`MaskToolsWidget.py:285`).
+/// Factored out of [`MaskToolsWidget::apply`] so the rule is the single source
+/// of truth and is unit-testable without a GPU (`apply` itself needs a
+/// [`Plot2D`], hence a render device, so its `set_item_z` wiring is not).
+fn overlay_z_value(active_image_z: Option<f32>) -> f32 {
+    active_image_z.unwrap_or(0.0) + 1.0
 }
 
 /// Write a 2D `uint8` array `(height, width)` in NumPy `.npy` v1.0 format.
@@ -1760,14 +1768,16 @@ mod tests {
     }
 
     #[test]
-    fn overlay_z_is_one_above_active_image() {
-        // silx MaskToolsWidget.py:482 `z = activeImage.getZValue() + 1`. The z
-        // VALUE arithmetic is verified here; on-screen layering is GPU-only.
-        // With an active image at z, the overlay sits at z + 1; with no active
-        // image the silx default _z = 1 (0.0 + 1.0).
-        let active_z = 3.0_f32;
-        assert_eq!(active_z + 1.0, 4.0);
-        let no_active = 0.0_f32 + 1.0;
-        assert_eq!(no_active, 1.0);
+    fn overlay_z_value_is_one_above_active_image() {
+        // silx MaskToolsWidget.py:482 `z = activeImage.getZValue() + 1`: the
+        // overlay sits one layer above the active image, whatever its z. This
+        // exercises the actual helper `apply` calls (so a regression in the
+        // `+1` or the no-active fallback is caught). The `apply` -> set_item_z
+        // wiring is GPU-bound (Plot2D needs a RenderState/device) and so the
+        // on-screen layering itself stays UNVERIFIED.
+        assert_eq!(overlay_z_value(Some(3.0)), 4.0);
+        assert_eq!(overlay_z_value(Some(-2.5)), -1.5);
+        // No active image -> silx default _z = 1 (MaskToolsWidget.py:285).
+        assert_eq!(overlay_z_value(None), 1.0);
     }
 }
