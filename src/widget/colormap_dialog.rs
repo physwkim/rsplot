@@ -21,6 +21,12 @@ pub struct ColormapDialog {
     // Gamma for Gamma normalization
     pub gamma: f32,
 
+    /// RGBA color used for Not-A-Number values, fed into the applied colormap
+    /// (silx `Colormap.setNaNColor`). Defaults to silx's
+    /// `Colormap._DEFAULT_NAN_COLOR`: fully transparent white `(255, 255, 255,
+    /// 0)`.
+    pub nan_color: [u8; 4],
+
     window_id: egui::Id,
     pub open: bool,
 }
@@ -36,6 +42,8 @@ impl Default for ColormapDialog {
             autoscale_mode: AutoscaleMode::MinMax,
             percentiles: DEFAULT_PERCENTILES,
             gamma: 2.0,
+            // silx Colormap._DEFAULT_NAN_COLOR = (255, 255, 255, 0).
+            nan_color: [255, 255, 255, 0],
             window_id: egui::Id::new("colormap_dialog"),
             open: false,
         }
@@ -54,6 +62,7 @@ impl ColormapDialog {
         self.vmax = cmap.vmax;
         self.normalization = cmap.normalization;
         self.gamma = cmap.gamma;
+        self.nan_color = cmap.nan_color;
         self
     }
 
@@ -129,6 +138,20 @@ impl ColormapDialog {
                         }
                     });
                 }
+
+                // NaN color picker (silx Colormap.setNaNColor): the RGBA shown
+                // for Not-A-Number samples. The picker round-trips through an
+                // egui Color32 (unmultiplied sRGBA) so the stored bytes match the
+                // colormap's `nan_color` exactly.
+                ui.horizontal(|ui| {
+                    ui.label("NaN color:");
+                    let [r, g, b, a] = self.nan_color;
+                    let mut color = egui::Color32::from_rgba_unmultiplied(r, g, b, a);
+                    if ui.color_edit_button_srgba(&mut color).changed() {
+                        self.nan_color = color.to_array();
+                        changed = true;
+                    }
+                });
 
                 ui.separator();
 
@@ -237,10 +260,53 @@ impl ColormapDialog {
             }
         }
 
-        let cmap = Colormap::new(self.name, final_vmin, final_vmax)
-            .with_normalization(self.normalization)
-            .with_gamma(self.gamma);
+        plot.set_default_colormap(self.build_colormap(final_vmin, final_vmax));
+    }
 
-        plot.set_default_colormap(cmap);
+    /// Build the [`Colormap`] for the dialog's current settings over
+    /// `[vmin, vmax]`, carrying the chosen name, normalization, gamma, and NaN
+    /// color (silx `Colormap` with `setNaNColor`). Pure so the colormap wiring
+    /// is testable without a GPU-backed [`Plot2D`]; [`Self::apply`] computes the
+    /// effective range and delegates here.
+    fn build_colormap(&self, vmin: f64, vmax: f64) -> Colormap {
+        Colormap::new(self.name, vmin, vmax)
+            .with_normalization(self.normalization)
+            .with_gamma(self.gamma)
+            .with_nan_color(self.nan_color)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── Item 1: NaN color control ───────────────────────────────────────────
+
+    #[test]
+    fn nan_color_defaults_to_silx_transparent_white() {
+        // silx Colormap._DEFAULT_NAN_COLOR = (255, 255, 255, 0).
+        let dialog = ColormapDialog::new();
+        assert_eq!(dialog.nan_color, [255, 255, 255, 0]);
+    }
+
+    #[test]
+    fn picking_a_nan_color_feeds_the_built_colormap() {
+        // The picker writes `self.nan_color`; the built colormap must carry it
+        // (the egui color picker round-trips an unmultiplied sRGBA Color32).
+        let mut dialog = ColormapDialog::new();
+        let picked = egui::Color32::from_rgba_unmultiplied(10, 20, 30, 255);
+        dialog.nan_color = picked.to_array();
+        assert_eq!(dialog.nan_color, [10, 20, 30, 255]);
+
+        let cmap = dialog.build_colormap(0.0, 1.0);
+        assert_eq!(cmap.nan_color, [10, 20, 30, 255]);
+    }
+
+    #[test]
+    fn with_colormap_carries_over_nan_color() {
+        let source = Colormap::viridis(0.0, 1.0).with_nan_color([1, 2, 3, 4]);
+        let dialog = ColormapDialog::new().with_colormap(&source);
+        assert_eq!(dialog.nan_color, [1, 2, 3, 4]);
+        assert_eq!(dialog.build_colormap(0.0, 1.0).nan_color, [1, 2, 3, 4]);
     }
 }
