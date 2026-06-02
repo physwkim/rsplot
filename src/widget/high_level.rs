@@ -4855,6 +4855,31 @@ fn profile_roi_from_drag(mode: ProfileMode, start: (f64, f64), end: (f64, f64)) 
     }
 }
 
+/// Whether [`ImageView::show`] should route the captured pointer to the mask
+/// tool and paint this frame: only when the plot is in
+/// [`PlotInteractionMode::MaskDraw`] *and* the mask panel is enabled for the
+/// active image. Gating strictly on `MaskDraw` keeps pan / zoom / select from
+/// ever painting (silx's pencil draw interaction is its own mode). Pure, so the
+/// gate is unit-testable without a `Ui`/GPU.
+fn image_view_should_paint_mask(mode: PlotInteractionMode, mask_enabled: bool) -> bool {
+    mask_enabled && mode == PlotInteractionMode::MaskDraw
+}
+
+/// Build a [`ScalarMask`] from a [`MaskToolsWidget`](crate::widget::mask_tools::MaskToolsWidget)
+/// level buffer (`levels`, row-major, `width * height`, `0` unmasked / non-zero
+/// masked). The resulting mask is the representation re-uploaded through
+/// [`Plot2D::try_add_masked_image`] / [`apply_image_mask`]: every non-zero level
+/// becomes a masked (→ `NaN`) pixel, matching silx `getValueData`
+/// (`items/image.py`). A `levels` length not equal to `width * height` is
+/// clip/zero-extended by [`ScalarMask::set_mask_data`] (silx's lazy clip/extend),
+/// so the returned mask always has the image shape. Pure, so the conversion is
+/// unit-testable without a GPU backend.
+fn scalar_mask_from_level_buffer(width: u32, height: u32, levels: &[u8]) -> ScalarMask {
+    let mut mask = ScalarMask::new(width as usize, height as usize);
+    mask.set_mask_data(levels, width as usize);
+    mask
+}
+
 /// Build the [`ImageSpec`] for an [`ImageView`]'s active image from its retained
 /// colormap and `alpha` (silx `ActiveImageAlphaSlider` propagation,
 /// ImageView.py:513-517). Split out from [`ImageView::upload_image`] so the
@@ -4931,6 +4956,13 @@ pub struct ImageView {
     /// ImageView's `ColorBarWidget` visibility). Defaults to `true`; when `false`
     /// the colorbar column is not reserved and the image fills its width.
     show_colorbar: bool,
+    /// Per-pixel mask editor for the active image (silx `ImageView`'s mask
+    /// `MaskToolsWidget`). Resized to the active image on [`Self::set_image`].
+    /// Painting is gated strictly on [`PlotInteractionMode::MaskDraw`]
+    /// ([`image_view_should_paint_mask`]); the painted level buffer is converted
+    /// to a [`ScalarMask`] and re-uploaded (masked pixels → `NaN`) via the same
+    /// pre-upload path as [`Plot2D::try_add_masked_image`].
+    mask: crate::widget::mask_tools::MaskToolsWidget,
 }
 
 /// Width in points to reserve for the side colorbar column given the show flag
@@ -4994,6 +5026,7 @@ impl ImageView {
             ),
             profile_drag_start: None,
             show_colorbar: true,
+            mask: crate::widget::mask_tools::MaskToolsWidget::new(0, 0),
         }
     }
 
@@ -5030,6 +5063,12 @@ impl ImageView {
         self.colormap = colormap.clone();
         self.image_plot.set_default_colormap(colormap);
 
+        // Resize the mask editor to the new active image (silx `MaskToolsWidget`
+        // resets to the image shape; a shape change clears the undo history).
+        if self.mask.width != width || self.mask.height != height {
+            self.mask.reset_geometry(width, height);
+        }
+
         // The image uses default geometry (origin (0,0), unit scale), so its
         // data extent is [0, width] × [0, height]. Feed it to the radar overview
         // (silx `_updateDataContent` from `getDataRange`).
@@ -5049,10 +5088,27 @@ impl ImageView {
         if self.width == 0 || self.pixels.is_empty() {
             return;
         }
+        // Mask path (silx `getValueData`): when the mask editor has any masked
+        // pixel for this image, NaN those pixels before upload so the scalar
+        // pipeline's `nan_color` renders them as holes (the 6B-1 pre-upload mask
+        // representation, identical to `Plot2D::try_add_masked_image`). When no
+        // pixel is masked, upload the pixels verbatim (no extra allocation).
+        let masked: Option<Vec<f32>> = if self.mask.width == self.width
+            && self.mask.height == self.height
+            && self.mask.mask.iter().any(|&level| level != 0)
+        {
+            let scalar_mask =
+                scalar_mask_from_level_buffer(self.width, self.height, &self.mask.mask);
+            Some(scalar_mask.apply(&self.pixels))
+        } else {
+            None
+        };
+        let pixels: &[f32] = masked.as_deref().unwrap_or(&self.pixels);
+
         let spec = image_view_image_spec(
             self.width,
             self.height,
-            &self.pixels,
+            pixels,
             &self.colormap,
             self.alpha.alpha(),
             self.interpolation,
@@ -5213,6 +5269,87 @@ impl ImageView {
                 }
             }
         });
+
+        // Mask-draw tool: toggle MaskDraw mode (silx `MaskToolsWidget`
+        // activating the plot's pencil draw interaction). Entering it sets the
+        // mask tool to Pencil so the primary drag paints; exiting restores Zoom
+        // and disables the tool. While active, a brush-size slider and the
+        // pencil/eraser/clear controls are exposed.
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            ui.label("mask:");
+            let in_mask_draw = self.image_plot.interaction_mode() == PlotInteractionMode::MaskDraw;
+            if ui
+                .selectable_label(in_mask_draw, "✏")
+                .on_hover_text("Draw mask (pencil): primary drag paints the mask")
+                .clicked()
+            {
+                self.set_mask_draw(!in_mask_draw);
+            }
+            if in_mask_draw {
+                ui.selectable_value(
+                    &mut self.mask.active_tool,
+                    crate::widget::mask_tools::MaskTool::Pencil,
+                    "pencil",
+                )
+                .on_hover_text("Paint mask");
+                ui.selectable_value(
+                    &mut self.mask.active_tool,
+                    crate::widget::mask_tools::MaskTool::Eraser,
+                    "eraser",
+                )
+                .on_hover_text("Erase mask");
+                ui.add(egui::Slider::new(&mut self.mask.brush_size, 1..=50).text("brush"));
+                if ui.button("clear mask").clicked() {
+                    self.mask.clear_all();
+                    self.mask.commit();
+                    self.upload_image();
+                }
+            }
+        });
+    }
+
+    /// Enter or leave pencil / mask-draw mode (silx `MaskToolsWidget` activating
+    /// the plot's pencil draw interaction). Entering sets the image plot to
+    /// [`PlotInteractionMode::MaskDraw`] and the mask tool to
+    /// [`crate::widget::mask_tools::MaskTool::Pencil`] so the primary drag
+    /// paints; leaving restores [`PlotInteractionMode::Zoom`] and disables the
+    /// tool ([`crate::widget::mask_tools::MaskTool::None`]).
+    pub fn set_mask_draw(&mut self, on: bool) {
+        if on {
+            crate::widget::actions::mode::mask_draw_mode(&mut self.image_plot);
+            if !matches!(
+                self.mask.active_tool,
+                crate::widget::mask_tools::MaskTool::Pencil
+                    | crate::widget::mask_tools::MaskTool::Eraser
+            ) {
+                self.mask.active_tool = crate::widget::mask_tools::MaskTool::Pencil;
+            }
+        } else {
+            crate::widget::actions::mode::zoom_mode(&mut self.image_plot);
+            self.mask.active_tool = crate::widget::mask_tools::MaskTool::None;
+        }
+    }
+
+    /// Whether the image plot is in pencil / mask-draw mode
+    /// ([`PlotInteractionMode::MaskDraw`]).
+    pub fn is_mask_draw(&self) -> bool {
+        self.image_plot.interaction_mode() == PlotInteractionMode::MaskDraw
+    }
+
+    /// The mask editor for the active image (silx `ImageView` mask
+    /// `MaskToolsWidget`), exposing whole-mask operations and the painted level
+    /// buffer.
+    pub fn mask(&self) -> &crate::widget::mask_tools::MaskToolsWidget {
+        &self.mask
+    }
+
+    /// Mutable access to the mask editor for the active image, for programmatic
+    /// mask operations (silx `ImageView` mask `MaskToolsWidget`). After mutating
+    /// the mask, call [`Self::set_image`] or re-show to re-upload the masked
+    /// image.
+    pub fn mask_mut(&mut self) -> &mut crate::widget::mask_tools::MaskToolsWidget {
+        &mut self.mask
     }
 
     /// The active image's colormap (silx `ImageView.getColormap`).
@@ -5303,11 +5440,38 @@ impl ImageView {
         }
         self.position_info.ui(ui, self.cursor);
 
+        // Mask draw: in MaskDraw mode, route the captured pointer to the mask
+        // tool (brush paint / erase) and re-upload the masked image. Gated
+        // strictly on MaskDraw so pan/zoom/select never paint.
+        self.handle_mask_paint(&plot_response);
+
         // Profile tool: a drag on the image plot extracts a profile via the
         // existing helpers and shows it in the profile window (silx
         // _ProfileToolBar, ImageView.py:692-697).
         self.handle_profile_drag(&plot_response);
         self.profile_window.show(ui.ctx());
+    }
+
+    /// In [`PlotInteractionMode::MaskDraw`], route the captured pointer to the
+    /// mask tool (its existing brush paint / erase in
+    /// [`crate::widget::mask_tools::MaskToolsWidget::handle_interaction`]) and
+    /// re-upload the masked image when the mask changed. Gated strictly on
+    /// [`image_view_should_paint_mask`] so pan / zoom / select never paint
+    /// (silx's pencil draw interaction is its own mode).
+    fn handle_mask_paint(&mut self, plot_response: &PlotResponse) {
+        let mode = self.image_plot.interaction_mode();
+        let mask_enabled =
+            self.mask.width == self.width && self.mask.height == self.height && self.width != 0;
+        if !image_view_should_paint_mask(mode, mask_enabled) {
+            return;
+        }
+        let before = self.mask.mask.clone();
+        self.mask.handle_interaction(plot_response);
+        if self.mask.mask != before {
+            // Painted this frame: re-upload the active image with the new mask
+            // applied (masked pixels → NaN).
+            self.upload_image();
+        }
     }
 
     /// Track a profile drag on the image plot and extract the profile on
@@ -6981,6 +7145,88 @@ mod tests {
                 actual: 1,
             }
         );
+    }
+
+    #[test]
+    fn image_view_paints_mask_only_in_mask_draw_mode() {
+        // Item 6C-2 gate: ImageView paints the mask ONLY when the plot is in
+        // MaskDraw mode AND the mask panel is enabled. Pan / Zoom / Select must
+        // never paint, and MaskDraw with the panel disabled must not paint.
+        for mode in [
+            PlotInteractionMode::Pan,
+            PlotInteractionMode::Zoom,
+            PlotInteractionMode::Select,
+        ] {
+            assert!(
+                !image_view_should_paint_mask(mode, true),
+                "{mode:?} must not paint even with the mask panel enabled",
+            );
+        }
+        assert!(
+            !image_view_should_paint_mask(PlotInteractionMode::MaskDraw, false),
+            "MaskDraw must not paint when the mask panel is disabled",
+        );
+        assert!(
+            image_view_should_paint_mask(PlotInteractionMode::MaskDraw, true),
+            "MaskDraw with the mask panel enabled is the only painting state",
+        );
+    }
+
+    #[test]
+    fn painted_level_buffer_round_trips_to_reupload_mask() {
+        // Item 6C-2 conversion: a painted MaskToolsWidget level buffer becomes a
+        // ScalarMask where every non-zero level is a masked pixel, and that mask
+        // re-uploaded (applied to the scalar field) NaNs exactly those pixels —
+        // matching Plot2D::try_add_masked_image / apply_image_mask.
+        //
+        // 2x3 image (width 2, height 3), row-major. Paint a couple of pixels at
+        // distinct non-zero levels (silx levels 1..=255 all mask).
+        let levels = [0u8, 1, 0, 0, 7, 0]; // (col1,row0) and (col0,row2) masked
+        let scalar_mask = scalar_mask_from_level_buffer(2, 3, &levels);
+
+        assert_eq!(scalar_mask.width(), 2);
+        assert_eq!(scalar_mask.height(), 3);
+        // The boolean masked view matches "level != 0".
+        for (i, &lvl) in levels.iter().enumerate() {
+            let col = i % 2;
+            let row = i / 2;
+            assert_eq!(
+                scalar_mask.is_masked(col, row),
+                lvl != 0,
+                "pixel ({col},{row}) level {lvl}",
+            );
+        }
+
+        // Re-upload representation: applying the mask NaNs exactly the masked
+        // pixels and passes the rest through unchanged.
+        let pixels = [10.0_f32, 20.0, 30.0, 40.0, 50.0, 60.0];
+        let masked = scalar_mask.apply(&pixels);
+        for (i, (&lvl, &out)) in levels.iter().zip(masked.iter()).enumerate() {
+            if lvl != 0 {
+                assert!(out.is_nan(), "masked pixel {i} (level {lvl}) must be NaN");
+            } else {
+                assert_eq!(out, pixels[i], "unmasked pixel {i} unchanged");
+            }
+        }
+
+        // It is the same representation try_add_masked_image / apply_image_mask
+        // produce for an equivalent ScalarMask built directly from the bool view.
+        let mut direct = ScalarMask::new(2, 3);
+        direct.set_mask_data(&levels, 2);
+        assert_eq!(scalar_mask, direct);
+    }
+
+    #[test]
+    fn scalar_mask_from_level_buffer_clips_oversized_to_image_shape() {
+        // A level buffer longer than width*height is clipped to the image shape
+        // by ScalarMask::set_mask_data (silx lazy clip), so the result always has
+        // the image dimensions.
+        let oversized = [1u8; 10]; // image is 2x2 = 4 pixels
+        let mask = scalar_mask_from_level_buffer(2, 2, &oversized);
+        assert_eq!(mask.width(), 2);
+        assert_eq!(mask.height(), 2);
+        assert_eq!(mask.get_mask_data().len(), 4);
+        assert!(mask.get_mask_data().iter().all(|&m| m != 0));
     }
 
     #[test]
