@@ -6289,14 +6289,23 @@ impl ImageView {
 /// [`Points`](Self::Points) draws the marker cloud (the default); the three
 /// grid modes convert the unstructured points into a value image (via the
 /// matching [`crate::core::scatter_viz`] primitive) rendered through the image
-/// path. `SOLID` (the per-vertex-colored triangle surface) is intentionally not
-/// offered here: it needs a GPU triangle pipeline + shader that is unverifiable
-/// without a render device.
+/// path; [`Solid`](Self::Solid) renders the per-vertex-colored Delaunay
+/// triangle surface through the existing CPU triangle (egui `epaint::Mesh`)
+/// path.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ScatterVisualization {
     /// `Visualization.POINTS`: a marker per point (the existing default).
     #[default]
     Points,
+    /// `Visualization.SOLID`: the filled Delaunay triangle surface, each vertex
+    /// carrying its point's colormap color so the GPU interpolates the fill
+    /// (silx `scatter.py:610-625` `backend.addTriangles`, GL Gouraud shading).
+    /// Built via [`crate::core::scatter_viz::solid_triangles`] over the same
+    /// per-point colormap+alpha colors as [`Points`](Self::Points). When the
+    /// points cannot be triangulated (fewer than 3 finite points or all
+    /// collinear) nothing is drawn, matching silx's "Cannot display as solid
+    /// surface" early-out.
+    Solid,
     /// `Visualization.IRREGULAR_GRID`: the Delaunay triangulation rasterized to
     /// a value image by barycentric linear interpolation
     /// ([`crate::core::scatter_viz::irregular_grid_image`]). Pixels outside the
@@ -6458,7 +6467,10 @@ fn scatter_grid_image(
 ) -> Option<GridImage> {
     let (rows, cols) = resolution;
     match mode {
-        ScatterVisualization::Points => None,
+        // Neither the marker cloud nor the SOLID triangle surface produce a
+        // grid image — SOLID is rendered through the CPU triangle path, not the
+        // image path.
+        ScatterVisualization::Points | ScatterVisualization::Solid => None,
         ScatterVisualization::IrregularGrid => {
             crate::core::scatter_viz::irregular_grid_image(x, y, values, rows, cols)
         }
@@ -6489,6 +6501,10 @@ pub struct ScatterView {
     ///
     /// [`Points`]: ScatterVisualization::Points
     grid_handle: Option<ItemHandle>,
+    /// Handle of the per-vertex-colored triangle mesh rendered for
+    /// [`ScatterVisualization::Solid`] (silx `backend.addTriangles`). `None`
+    /// outside `Solid` mode and when the points cannot be triangulated.
+    triangles_handle: Option<ItemHandle>,
     /// Colormap that maps the per-point `values` to marker colors, retained so
     /// the side colorbar (silx `ScatterView` `getColorBarWidget`,
     /// ScatterView.py:83-88) reflects the current value limits. `None` until
@@ -6528,6 +6544,7 @@ impl ScatterView {
             inner,
             scatter_handle: None,
             grid_handle: None,
+            triangles_handle: None,
             colormap: None,
             points: None,
             visualization: ScatterVisualization::Points,
@@ -6681,8 +6698,12 @@ impl ScatterView {
 
         match self.visualization {
             ScatterVisualization::Points => {
-                // Drop any grid image so it does not shadow the markers.
+                // Drop any grid image / triangle surface so neither shadows the
+                // markers (single owner: only the active arm keeps its handle).
                 if let Some(h) = self.grid_handle.take() {
+                    self.inner.remove(h);
+                }
+                if let Some(h) = self.triangles_handle.take() {
                     self.inner.remove(h);
                 }
                 let mut colors: Vec<Color32> = values
@@ -6717,8 +6738,13 @@ impl ScatterView {
                 }
             }
             mode => {
-                // Drop the marker cloud so it does not shadow the grid image.
+                // Drop the marker cloud / triangle surface so neither shadows
+                // the grid image (single owner: only the active arm keeps its
+                // handle).
                 if let Some(h) = self.scatter_handle.take() {
+                    self.inner.remove(h);
+                }
+                if let Some(h) = self.triangles_handle.take() {
                     self.inner.remove(h);
                 }
                 let Some(grid) = scatter_grid_image(mode, &x, &y, &values, self.grid_resolution)
