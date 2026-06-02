@@ -64,6 +64,8 @@ pub use crate::render::save::{
     SaveError, SaveFormat, encode_png, encode_ppm, encode_svg, encode_tiff, rgba_to_rgb,
     save_graph, save_graph_with_format,
 };
+pub use crate::widget::actions;
+pub use crate::widget::actions::io::{SaveTarget, curve_to_csv};
 pub use crate::widget::alpha_slider::{AlphaSlider, AlphaSliderOrientation};
 pub use crate::widget::colorbar::{ColorBarOrientation, ColorBarWidget};
 pub use crate::widget::colormap_dialog::ColormapDialog;

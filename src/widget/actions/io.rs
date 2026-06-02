@@ -6,6 +6,7 @@
 //! — is pure and unit-tested; the native `rfd` file dialog and the GPU figure
 //! readback are thin untestable shims around it.
 
+use std::borrow::Cow;
 use std::path::Path;
 
 use crate::render::save::SaveFormat;
@@ -72,6 +73,63 @@ pub fn curve_to_csv(x: &[f64], y: &[f64]) -> String {
     out
 }
 
+/// Decode an 8-bit RGBA PNG into a tightly packed, row-major `width * height`
+/// RGBA8 buffer, returning `(width, height, rgba)`. Used by the clipboard-copy
+/// shim to turn the figure PNG (the only in-memory figure encoding available
+/// here) back into the RGBA the clipboard expects; the figure encoder
+/// ([`encode_png`](crate::render::save::encode_png)) always writes 8-bit RGBA,
+/// so no channel expansion is needed. Returns an error for a non-RGBA8 PNG. Pure
+/// (no GPU/clipboard), so the decode is testable via an `encode_png` round-trip.
+pub fn decode_png_to_rgba(png_bytes: &[u8]) -> std::io::Result<(u32, u32, Vec<u8>)> {
+    let decoder = png::Decoder::new(std::io::Cursor::new(png_bytes));
+    let mut reader = decoder
+        .read_info()
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    let buf_size = reader.output_buffer_size().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, "PNG output size overflow")
+    })?;
+    let mut buf = vec![0u8; buf_size];
+    let info = reader
+        .next_frame(&mut buf)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    if info.color_type != png::ColorType::Rgba || info.bit_depth != png::BitDepth::Eight {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "expected 8-bit RGBA PNG",
+        ));
+    }
+    buf.truncate(info.buffer_size());
+    Ok((info.width, info.height, buf))
+}
+
+/// Shape a tightly packed, row-major `width * height` RGBA8 buffer into an
+/// owned [`arboard::ImageData`] for the clipboard (silx `CopyAction` puts a
+/// figure bitmap on the clipboard via `QApplication.clipboard().setImage`).
+///
+/// arboard expects `width * height * 4` bytes, top-to-bottom rows, RGBA channel
+/// order — the same layout the GPU figure readback produces — so the bytes are
+/// taken verbatim. Returns `None` when `rgba.len()` does not equal
+/// `width * height * 4` (the only shaping invariant), so a malformed buffer is
+/// rejected before the clipboard shim. Pure and unit-testable without touching
+/// the clipboard.
+pub fn rgba_to_clipboard_image(
+    rgba: &[u8],
+    width: u32,
+    height: u32,
+) -> Option<arboard::ImageData<'static>> {
+    let expected = (width as usize)
+        .checked_mul(height as usize)?
+        .checked_mul(4)?;
+    if rgba.len() != expected {
+        return None;
+    }
+    Some(arboard::ImageData {
+        width: width as usize,
+        height: height as usize,
+        bytes: Cow::Owned(rgba.to_vec()),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -130,5 +188,40 @@ mod tests {
     #[test]
     fn curve_to_csv_empty_is_header_only() {
         assert_eq!(curve_to_csv(&[], &[]), "x,y\n");
+    }
+
+    #[test]
+    fn rgba_to_clipboard_image_shapes_a_valid_buffer() {
+        // 2x1 image: two RGBA pixels (8 bytes).
+        let rgba: Vec<u8> = vec![10, 20, 30, 255, 40, 50, 60, 128];
+        let image = rgba_to_clipboard_image(&rgba, 2, 1).expect("valid buffer");
+        assert_eq!(image.width, 2);
+        assert_eq!(image.height, 1);
+        assert_eq!(image.bytes.len(), 8);
+        // Bytes are taken verbatim in row order.
+        assert_eq!(image.bytes.as_ref(), rgba.as_slice());
+    }
+
+    #[test]
+    fn rgba_to_clipboard_image_rejects_wrong_length() {
+        // 7 bytes for a 2x1 (needs 8) is rejected.
+        assert!(rgba_to_clipboard_image(&[0; 7], 2, 1).is_none());
+        // 9 bytes is also rejected.
+        assert!(rgba_to_clipboard_image(&[0; 9], 2, 1).is_none());
+    }
+
+    #[test]
+    fn decode_png_to_rgba_round_trips_encode_png() {
+        use crate::render::save::encode_png;
+
+        // 2x2 RGBA image.
+        let rgba: Vec<u8> = vec![
+            1, 2, 3, 255, 4, 5, 6, 255, // row 0
+            7, 8, 9, 255, 10, 11, 12, 255, // row 1
+        ];
+        let png = encode_png(&rgba, 2, 2).expect("encode");
+        let (w, h, decoded) = decode_png_to_rgba(&png).expect("decode");
+        assert_eq!((w, h), (2, 2));
+        assert_eq!(decoded, rgba);
     }
 }

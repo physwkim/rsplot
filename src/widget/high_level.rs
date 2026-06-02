@@ -320,6 +320,8 @@ pub struct ToolbarResponse {
     pub zoom_back: bool,
     /// Save button was clicked (silx `SaveAction`).
     pub save: bool,
+    /// Copy-to-clipboard button was clicked (silx `CopyAction`).
+    pub copy: bool,
 }
 
 /// Return value of [`PlotWidget::show_with_toolbar`].
@@ -362,6 +364,7 @@ enum ToolbarIcon {
     ZoomOut,
     ZoomBack,
     Save,
+    Copy,
 }
 
 impl ToolbarIcon {
@@ -451,7 +454,22 @@ fn draw_toolbar_icon(painter: &egui::Painter, rect: egui::Rect, icon: ToolbarIco
         ToolbarIcon::ZoomOut => draw_zoom_step_icon(painter, rect, stroke, false),
         ToolbarIcon::ZoomBack => draw_zoom_back_icon(painter, rect, stroke),
         ToolbarIcon::Save => draw_save_icon(painter, rect, stroke),
+        ToolbarIcon::Copy => draw_copy_icon(painter, rect, stroke),
     }
+}
+
+/// Draw two overlapping document outlines for the [`ToolbarIcon::Copy`] button.
+fn draw_copy_icon(painter: &egui::Painter, rect: egui::Rect, stroke: egui::Stroke) {
+    let back = egui::Rect::from_min_max(
+        egui::pos2(rect.left() + 2.0, rect.top() + 2.0),
+        egui::pos2(rect.right() - 5.0, rect.bottom() - 5.0),
+    );
+    let front = egui::Rect::from_min_max(
+        egui::pos2(rect.left() + 5.0, rect.top() + 5.0),
+        egui::pos2(rect.right() - 2.0, rect.bottom() - 2.0),
+    );
+    painter.rect_stroke(back, 1.0, stroke, egui::StrokeKind::Inside);
+    painter.rect_stroke(front, 1.0, stroke, egui::StrokeKind::Inside);
 }
 
 /// Draw a floppy-disk save glyph for the [`ToolbarIcon::Save`] button.
@@ -3516,6 +3534,11 @@ impl PlotWidget {
             let _ = self.save_dialog(DEFAULT_SAVE_SIZE);
             out.save = true;
         }
+        if toolbar_icon_button(ui, ToolbarIcon::Copy, false, "Copy figure to clipboard").clicked() {
+            // GPU readback + clipboard are native shims; ignore the result here.
+            let _ = self.copy_to_clipboard(DEFAULT_SAVE_SIZE);
+            out.copy = true;
+        }
     }
 
     /// Set graph limits.
@@ -4092,6 +4115,41 @@ impl PlotWidget {
             return Ok(false);
         };
         self.save_to_path(&path, size)
+    }
+
+    /// Copy a `size` pixel snapshot of the figure to the system clipboard as an
+    /// image (silx `CopyAction`, which renders the plot to a bitmap and calls
+    /// `QApplication.clipboard().setImage`).
+    ///
+    /// The figure is rendered to a PNG (the only in-memory figure encoding
+    /// available), decoded back to RGBA via
+    /// [`decode_png_to_rgba`](crate::widget::actions::io::decode_png_to_rgba),
+    /// shaped into an [`arboard::ImageData`] via
+    /// [`rgba_to_clipboard_image`](crate::widget::actions::io::rgba_to_clipboard_image),
+    /// then placed on the clipboard. The GPU readback and the clipboard call are
+    /// untested native shims; the PNG-decode and RGBA-shaping logic between them
+    /// is unit-tested.
+    pub fn copy_to_clipboard(&self, size: (u32, u32)) -> Result<bool, SaveError> {
+        use crate::widget::actions::io::{decode_png_to_rgba, rgba_to_clipboard_image};
+
+        // Render the figure to a temp PNG, then read it back. save_graph is the
+        // only public figure-encoding entry point (it writes a PNG file).
+        let mut path = std::env::temp_dir();
+        path.push(format!("egui-silx-copy-{}.png", std::process::id()));
+        self.save_graph(&path, size)?;
+        let png = std::fs::read(&path)?;
+        let _ = std::fs::remove_file(&path);
+
+        let (w, h, rgba) = decode_png_to_rgba(&png)?;
+        let Some(image) = rgba_to_clipboard_image(&rgba, w, h) else {
+            return Err(SaveError::Readback("clipboard image shaping failed".into()));
+        };
+        let mut clipboard = arboard::Clipboard::new()
+            .map_err(|e| SaveError::Readback(format!("clipboard open: {e}")))?;
+        clipboard
+            .set_image(image)
+            .map_err(|e| SaveError::Readback(format!("clipboard set_image: {e}")))?;
+        Ok(true)
     }
 
     /// Apply accumulated data bounds to the current view.
