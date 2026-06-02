@@ -140,7 +140,9 @@ struct ErrorBarParams {
 
 /// Uniform block for the marker shader. Layout matches `Params` in
 /// `markers.wgsl` (std140: mat4 @0, vec4 @64, vec2 @80, vec2 @88, f32 @96,
-/// u32 @100; padded to 112).
+/// u32 @100, f32 @104; padded to 112). `use_vertex_color` consumes one of the
+/// former `_pad` slots, so the 112-byte std140 size is unchanged (see the
+/// `marker_params_std140_size_unchanged` test).
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct MarkerParams {
@@ -152,7 +154,10 @@ struct MarkerParams {
     half_size_px: f32,
     /// Symbol code; see [`Symbol::code`].
     symbol: u32,
-    _pad: [f32; 2],
+    /// 1.0 to take each marker's color from the per-vertex color buffer
+    /// (binding 2), else 0.0 to use the uniform `color`.
+    use_vertex_color: f32,
+    _pad: f32,
 }
 
 /// A polyline to draw, in data coordinates. `x[i], y[i]` is vertex `i`; the
@@ -406,10 +411,10 @@ impl CurvePipeline {
             immediate_size: 0,
         });
 
-        // Markers have their own minimal layout (uniform at 0 + points at 1) so
-        // the curve uniform/layout can grow per-vertex color, dashes, etc.
-        // without forcing the marker uniform to match the curve uniform's size
-        // or carry dead curve-only bindings.
+        // Markers have their own minimal layout (uniform at 0 + points at 1 +
+        // per-vertex colors at 2) so the curve uniform/layout can grow dashes,
+        // etc. without forcing the marker uniform to match the curve uniform's
+        // size or carry dead curve-only bindings.
         let marker_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("egui-silx marker bgl"),
@@ -434,6 +439,20 @@ impl CurvePipeline {
                             has_dynamic_offset: false,
                             min_binding_size: NonZeroU64::new(
                                 std::mem::size_of::<[f32; 2]>() as u64
+                            ),
+                        },
+                        count: None,
+                    },
+                    // Per-vertex marker colors (linear premultiplied RGBA), read
+                    // in the vertex shader; a 1-element placeholder when unused.
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::VERTEX,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: NonZeroU64::new(
+                                std::mem::size_of::<[f32; 4]>() as u64
                             ),
                         },
                         count: None,
@@ -979,6 +998,13 @@ impl GpuCurve {
                     binding: 1,
                     resource: points.as_entire_binding(),
                 },
+                // Shares the curve's per-vertex color buffer: silx draws the
+                // scatter cloud with one colormap RGBA per point, the same data
+                // the line pipeline reads at binding 2.
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: vcolors.as_entire_binding(),
+                },
             ],
         });
 
@@ -1343,7 +1369,10 @@ impl GpuCurve {
             viewport_px,
             half_size_px: 0.5 * render_size,
             symbol: self.symbol.map_or(0, Symbol::code),
-            _pad: [0.0; 2],
+            // Per-point marker color when the curve carries per-vertex colors
+            // (silx scatter cloud), shared with the line pipeline's flag.
+            use_vertex_color: if self.vertex_color { 1.0 } else { 0.0 },
+            _pad: 0.0,
         };
         queue.write_buffer(&self.marker_params, 0, bytemuck::bytes_of(&marker));
 
@@ -1499,6 +1528,18 @@ mod tests {
     fn with_colors_rejects_length_mismatch() {
         CurveData::new(vec![0.0, 1.0, 2.0], vec![0.0, 1.0, 0.0], Color32::WHITE)
             .with_colors(vec![Color32::RED, Color32::GREEN]);
+    }
+
+    #[test]
+    fn marker_params_std140_size_unchanged() {
+        // `use_vertex_color` consumed a former `_pad` slot, so the std140 size
+        // must stay 112 bytes (the value the WGSL `Params` struct is laid out
+        // for: mat4 @0, vec4 @64, vec2 @80, vec2 @88, f32 @96, u32 @100,
+        // f32 @104, padded to 112). A size change here silently desyncs the
+        // CPU uniform from the shader's binding offsets — fail loudly instead.
+        assert_eq!(std::mem::size_of::<MarkerParams>(), 112);
+        // The block must be 16-byte aligned for std140 (the mat4 governs it).
+        assert_eq!(std::mem::size_of::<MarkerParams>() % 16, 0);
     }
 
     #[test]

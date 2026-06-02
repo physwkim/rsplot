@@ -16,10 +16,15 @@ struct Params {
     // 7 pixel, 8 vertical line, 9 horizontal line, 10..13 tick left/right/up/down,
     // 14..17 caret left/right/up/down (matches Symbol::code).
     symbol: u32,
+    use_vertex_color: f32,    // >0.5 to take each marker's color from `vcolors`
 };
 
 @group(0) @binding(0) var<uniform> params: Params;
 @group(0) @binding(1) var<storage, read> points: array<vec2<f32>>;
+// Per-vertex linear premultiplied RGBA, one per point (silx per-point scatter
+// colormap color). A 1-element placeholder when `use_vertex_color` is 0 (never
+// sampled, but the binding must be present). Mirrors curve.wgsl's vcolors.
+@group(0) @binding(2) var<storage, read> vcolors: array<vec4<f32>>;
 
 const INV_LN10: f32 = 0.4342944819032518;
 
@@ -38,6 +43,9 @@ fn to_ndc(p: vec2<f32>) -> vec2<f32> {
 struct VsOut {
     @builtin(position) pos: vec4<f32>,
     @location(0) uv: vec2<f32>,
+    // This marker's per-point color (constant across the quad — flat would do,
+    // but the six quad vertices all read the same `vcolors[inst]`).
+    @location(1) color: vec4<f32>,
 };
 
 @vertex
@@ -56,9 +64,15 @@ fn vs_main(@builtin(vertex_index) vid: u32) -> VsOut {
     let center_px = to_ndc(points[inst]) * half_vp;
     let pos_px = center_px + corner * params.half_size_px;
 
+    // This marker's per-point color. `vcolors` is a 1-element placeholder when
+    // per-vertex color is off, so clamp the index to the bound array length to
+    // stay in-bounds (the fragment shader discards it via `use_vertex_color`).
+    let ci = min(inst, arrayLength(&vcolors) - 1u);
+
     var out: VsOut;
     out.pos = vec4<f32>(pos_px / half_vp, 0.0, 1.0);
     out.uv = corner;
+    out.color = vcolors[ci];
     return out;
 }
 
@@ -150,5 +164,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     if (!inside(in.uv)) {
         discard;
     }
-    return params.color;
+    // Per-point scatter color when set (silx Scatter colormap RGBA, with any
+    // per-point alpha already baked in on the CPU side), else the uniform color.
+    return select(params.color, in.color, params.use_vertex_color > 0.5);
 }
