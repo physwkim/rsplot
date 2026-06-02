@@ -110,43 +110,44 @@ pub struct ValueStats {
 impl ValueStats {
     /// Compute statistics from `f64` values, ignoring non-finite values for
     /// min/max/mean while still counting them in [`Self::count`].
+    ///
+    /// Delegates to [`crate::core::stats::Stats`] (the single source of truth
+    /// for the silx statistic set) by treating the flat value array as a
+    /// `width = len`, `height = 1` scalar image with unit geometry, then keeps
+    /// only the count/finite-count/min/max/mean fields of the public
+    /// `ValueStats` shape.
     pub fn from_f64(values: &[f64]) -> Self {
-        let mut stats = Self {
-            count: values.len(),
-            ..Self::default()
-        };
-        let mut sum = 0.0;
-        for value in values.iter().copied().filter(|value| value.is_finite()) {
-            stats.finite_count += 1;
-            stats.min = Some(stats.min.map_or(value, |min| min.min(value)));
-            stats.max = Some(stats.max.map_or(value, |max| max.max(value)));
-            sum += value;
-        }
-        if stats.finite_count > 0 {
-            stats.mean = Some(sum / stats.finite_count as f64);
-        }
-        stats
+        Self::from_stats(crate::core::stats::Stats::for_image(
+            values,
+            values.len(),
+            1,
+            (0.0, 0.0),
+            (1.0, 1.0),
+            crate::core::stats::StatScope::All,
+        ))
     }
 
     /// Compute statistics from `f32` values, ignoring non-finite values for
     /// min/max/mean while still counting them in [`Self::count`].
+    ///
+    /// Widens to `f64` and delegates to [`crate::core::stats::Stats`], the same
+    /// single-source-of-truth path as [`Self::from_f64`].
     pub fn from_f32(values: &[f32]) -> Self {
-        let mut stats = Self {
-            count: values.len(),
-            ..Self::default()
-        };
-        let mut sum = 0.0;
-        for value in values.iter().copied().filter(|value| value.is_finite()) {
-            let value = value as f64;
-            stats.finite_count += 1;
-            stats.min = Some(stats.min.map_or(value, |min| min.min(value)));
-            stats.max = Some(stats.max.map_or(value, |max| max.max(value)));
-            sum += value;
+        let widened: Vec<f64> = values.iter().map(|&v| v as f64).collect();
+        Self::from_f64(&widened)
+    }
+
+    /// Project a [`crate::core::stats::Stats`] result onto the `ValueStats`
+    /// fields. `Stats` carries the full silx statistic set (delta/sum/COM/
+    /// argmin/argmax); `ValueStats` keeps only count/finite-count/min/max/mean.
+    fn from_stats(stats: crate::core::stats::Stats) -> Self {
+        Self {
+            count: stats.count,
+            finite_count: stats.finite_count,
+            min: stats.min,
+            max: stats.max,
+            mean: stats.mean,
         }
-        if stats.finite_count > 0 {
-            stats.mean = Some(sum / stats.finite_count as f64);
-        }
-        stats
     }
 }
 
@@ -4533,6 +4534,27 @@ mod tests {
         assert_eq!(stats.min, Some(1.0));
         assert_eq!(stats.max, Some(4.0));
         assert_eq!(stats.mean, Some(2.5));
+    }
+
+    #[test]
+    fn value_stats_match_core_stats_engine() {
+        // Item 8: ValueStats must equal a direct core::stats::Stats run on the
+        // same data (single source of truth).
+        let data = [3.0, -2.0, 7.5, f64::NAN, 0.0, -2.0];
+        let vs = ValueStats::from_f64(&data);
+        let core = crate::core::stats::Stats::for_image(
+            &data,
+            data.len(),
+            1,
+            (0.0, 0.0),
+            (1.0, 1.0),
+            crate::core::stats::StatScope::All,
+        );
+        assert_eq!(vs.count, core.count);
+        assert_eq!(vs.finite_count, core.finite_count);
+        assert_eq!(vs.min, core.min);
+        assert_eq!(vs.max, core.max);
+        assert_eq!(vs.mean, core.mean);
     }
 
     #[test]
