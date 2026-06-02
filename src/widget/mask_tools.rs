@@ -157,6 +157,11 @@ pub struct MaskToolsWidget {
     history: MaskHistory,
     mask_handle: Option<ItemHandle>,
     is_dirty: bool,
+    /// Last array cell `(row, col)` painted in the current pencil/eraser
+    /// stroke, or `None` between strokes. Mirrors silx `_lastPencilPos`: it
+    /// anchors the interpolating line so a fast drag leaves no gap, and is
+    /// cleared when the stroke finishes or the image geometry changes.
+    last_pencil_pos: Option<(i64, i64)>,
 }
 
 impl MaskToolsWidget {
@@ -175,6 +180,7 @@ impl MaskToolsWidget {
             history,
             mask_handle: None,
             is_dirty: true, // Force initial upload
+            last_pencil_pos: None,
         }
     }
 
@@ -187,6 +193,9 @@ impl MaskToolsWidget {
         self.mask = vec![0; (width * height) as usize];
         self.history.reset(&self.mask);
         self.is_dirty = true;
+        // The previous stroke anchor refers to the old geometry; drop it so the
+        // next stroke does not interpolate from a stale cell.
+        self.last_pencil_pos = None;
     }
 
     /// Set all pixels of the current level back to `0`.
@@ -383,60 +392,81 @@ impl MaskToolsWidget {
         });
     }
 
-    /// Handle pointer interaction from the plot response to paint/erase the mask.
+    /// Handle pointer interaction from the plot response to paint/erase the
+    /// mask along a pencil stroke.
+    ///
+    /// Mirrors the silx pencil drag (`MaskToolsWidget.py:848-876`): while the
+    /// primary button is held, the pointer is converted to an array cell and
+    /// fed to [`Self::paint_pencil_point`], which interpolates a thick line
+    /// from the previous sample (so a fast drag leaves no gap) and stamps a
+    /// disk at the point. Releasing the button ends the stroke
+    /// ([`Self::end_pencil_stroke`]) so the next stroke starts fresh.
     pub fn handle_interaction(&mut self, plot_response: &PlotResponse) {
         if !matches!(self.active_tool, MaskTool::Pencil | MaskTool::Eraser) {
+            // Not in a drawing tool: drop any in-progress stroke so re-entering
+            // a drawing tool does not connect to a stale position.
+            self.end_pencil_stroke();
             return;
         }
 
-        // Only draw when the primary pointer button is held down
-        if (plot_response
-            .response
-            .dragged_by(egui::PointerButton::Primary)
-            || plot_response
-                .response
-                .clicked_by(egui::PointerButton::Primary))
-            && let Some(pointer_pos) = plot_response.response.interact_pointer_pos()
+        let response = &plot_response.response;
+        let primary = egui::PointerButton::Primary;
+        let drawing = response.dragged_by(primary) || response.clicked_by(primary);
+        // egui reports the release on its own frame (`drag_stopped_by`) with the
+        // final pointer position still available; paint that last sample too,
+        // matching silx drawing the point on the `drawingFinished` event.
+        let finished = response.drag_stopped_by(primary) || response.clicked_by(primary);
+
+        if (drawing || finished)
+            && let Some(pointer_pos) = response.interact_pointer_pos()
         {
             let (data_x, data_y) = plot_response.transform.pixel_to_data(pointer_pos);
-            let center_col = data_x.floor() as i64;
-            let center_row = data_y.floor() as i64;
-
-            let value = if self.active_tool == MaskTool::Pencil {
-                self.level
-            } else {
-                0
-            };
-            let r = self.brush_size as i64;
-            let r_squared = r * r;
-
-            let w = self.width as i64;
-            let h = self.height as i64;
-
-            let mut changed = false;
-
-            for dy in -r..=r {
-                for dx in -r..=r {
-                    // Circular brush
-                    if dx * dx + dy * dy <= r_squared {
-                        let col = center_col + dx;
-                        let row = center_row + dy;
-
-                        if col >= 0 && col < w && row >= 0 && row < h {
-                            let idx = (row as usize) * (self.width as usize) + (col as usize);
-                            if self.mask[idx] != value {
-                                self.mask[idx] = value;
-                                changed = true;
-                            }
-                        }
-                    }
-                }
-            }
-
-            if changed {
-                self.is_dirty = true;
-            }
+            // Pencil masks the current level; eraser unmasks it (silx
+            // `_isMasking()`), both routed through the shared mask primitives.
+            let do_mask = self.active_tool == MaskTool::Pencil;
+            self.paint_pencil_point(data_y.floor() as i64, data_x.floor() as i64, do_mask);
         }
+
+        if finished {
+            self.end_pencil_stroke();
+        }
+    }
+
+    /// Paint one pencil/eraser sample at array cell `(row, col)`, interpolating
+    /// from the previous sample of the current stroke so a fast drag leaves no
+    /// gap.
+    ///
+    /// Mirrors the silx pencil drag body (`MaskToolsWidget.py:856-870`): when
+    /// the cell differs from the last one, draw a thick Bresenham line from the
+    /// previous sample (silx `updateLine`, width = brush size) — skipped on the
+    /// first sample — then a disk of radius `brush_size / 2` at the point (silx
+    /// `updateDisk`). `do_mask` masks (pencil) or unmasks the current level
+    /// (eraser). Both go through [`Self::update_line`] / [`Self::update_disk`],
+    /// so on-plot painting shares one faithful implementation with the shape
+    /// tools instead of an inline brush.
+    fn paint_pencil_point(&mut self, row: i64, col: i64, do_mask: bool) {
+        if self.last_pencil_pos == Some((row, col)) {
+            return;
+        }
+        let level = self.level;
+        if let Some((last_row, last_col)) = self.last_pencil_pos {
+            self.update_line(
+                level,
+                (last_row, last_col),
+                (row, col),
+                self.brush_size as i64,
+                do_mask,
+            );
+        }
+        self.update_disk(level, row, col, self.brush_size as f32 / 2.0, do_mask);
+        self.last_pencil_pos = Some((row, col));
+    }
+
+    /// End the current pencil stroke so the next painted sample starts a fresh
+    /// line. Mirrors silx resetting `_lastPencilPos` to `None` on
+    /// `drawingFinished`.
+    fn end_pencil_stroke(&mut self) {
+        self.last_pencil_pos = None;
     }
 
     // Drawing operations on the level buffer, mirroring silx ImageMask.
@@ -1337,6 +1367,45 @@ mod tests {
             0, 0, 0, 0, //
         ];
         assert_eq!(w.mask, expected);
+    }
+
+    #[test]
+    fn pencil_stroke_interpolates_between_fast_drag_samples() {
+        // A pencil drag that jumps from cell (0,0) to (3,3) in one frame must
+        // interpolate: paint_pencil_point draws update_line from the previous
+        // sample so the diagonal is continuous, unlike a per-frame point brush
+        // that would leave (1,1) and (2,2) unmasked. (Mirrors silx updateLine
+        // when _lastPencilPos != current, MaskToolsWidget.py:856-869.)
+        let mut w = MaskToolsWidget::new(4, 4);
+        w.level = 1;
+        w.active_tool = MaskTool::Pencil;
+        // First sample: disk only (no previous anchor).
+        w.paint_pencil_point(0, 0, true);
+        // Second sample, far jump: line (0,0)->(3,3) fills the diagonal.
+        w.paint_pencil_point(3, 3, true);
+        let expected: Vec<u8> = vec![
+            1, 0, 0, 0, //
+            0, 1, 0, 0, //
+            0, 0, 1, 0, //
+            0, 0, 0, 1, //
+        ];
+        assert_eq!(w.mask, expected);
+    }
+
+    #[test]
+    fn ending_a_stroke_prevents_connecting_to_the_next() {
+        // After a stroke ends (button released / new click), the next sample
+        // must not draw a line back to the previous stroke's last cell. Width-1
+        // column: paint row 0, end the stroke, paint row 3 -> rows 1 and 2 stay
+        // unmasked (a fresh stroke), whereas an un-reset anchor would fill them.
+        // (Mirrors silx resetting _lastPencilPos to None on drawingFinished.)
+        let mut w = MaskToolsWidget::new(1, 4); // width 1, height 4
+        w.level = 1;
+        w.active_tool = MaskTool::Pencil;
+        w.paint_pencil_point(0, 0, true);
+        w.end_pencil_stroke();
+        w.paint_pencil_point(3, 0, true);
+        assert_eq!(w.mask, vec![1, 0, 0, 1]);
     }
 
     #[test]
