@@ -52,7 +52,7 @@ pub use crate::widget::limits_widget::LimitsWidget;
 pub use crate::widget::mask_tools::{MaskTool, MaskToolsWidget, ThresholdMode};
 pub use crate::widget::plot_widget::{PlotInteractionMode, PlotResponse, PlotView};
 pub use crate::widget::profile_window::ProfileWindow;
-pub use crate::widget::roi_manager::RoiManagerWidget;
+pub use crate::widget::roi_manager::{ManagedRoi, RoiManagerWidget};
 pub use crate::widget::sync::SyncAxes;
 
 // Plotting-library convention: re-export so downstreams use the same
