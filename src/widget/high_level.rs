@@ -353,12 +353,6 @@ pub struct ToolbarResponse {
     pub copy: bool,
     /// Print button was clicked (silx `PrintAction`).
     pub print: bool,
-    /// The median-filter Apply button replaced the active image this frame
-    /// (silx `MedianFilterAction` re-adding the filtered image).
-    pub median_filter_applied: bool,
-    /// The pixel-intensity histogram window is open this frame (silx
-    /// `PixelIntensitiesHistoAction` toggling its `HistogramWidget`).
-    pub pixel_histogram_open: bool,
 }
 
 /// Return value of [`PlotWidget::show_with_toolbar`].
