@@ -22,7 +22,9 @@ use crate::core::shape::{Shape, ShapeKind};
 use crate::core::transform::{Margins, Scale, Transform, YAxis};
 use crate::core::triangles::Triangles;
 use crate::render::gpu_curve::{CurveData, CurvePipeline, GpuCurve};
-use crate::render::gpu_image::{GpuImage, ImageData, ImagePipeline, ImagePixels};
+use crate::render::gpu_image::{
+    AggregationMode, GpuImage, ImageData, ImagePipeline, ImagePixels, aggregate_blocks,
+};
 
 const OVERLAY_PICK_TOLERANCE_PX: f32 = 5.0;
 
@@ -804,13 +806,27 @@ fn curve_data_from_spec(spec: CurveSpec<'_>) -> CurveData {
 }
 
 fn image_data_from_spec(spec: ImageSpec<'_>) -> ImageData {
+    // Scale grows with the aggregation block factor so the (downsampled) image
+    // covers the same data-space extent, mirroring silx
+    // ImageDataAggregated._addBackendRenderer: `scale = sx * lodx, sy * lody`.
+    let mut scale = spec.scale;
     let mut image = match spec.pixels {
         ImagePixelsSpec::Scalar {
             width,
             height,
             data,
             colormap,
-        } => ImageData::new(width, height, data.to_vec(), *colormap),
+        } => {
+            let (bx, by) = spec.aggregation_block;
+            let (agg_data, agg_w, agg_h) =
+                aggregate_blocks(data, width, height, bx, by, spec.aggregation);
+            if spec.aggregation != AggregationMode::None {
+                scale = (scale.0 * bx.max(1) as f64, scale.1 * by.max(1) as f64);
+            }
+            ImageData::new(agg_w, agg_h, agg_data, *colormap)
+        }
+        // Aggregation is a scalar-data reduction; RGBA images are passed through
+        // unaggregated (silx ImageDataAggregated is a scalar density map).
         ImagePixelsSpec::Rgba {
             width,
             height,
@@ -818,7 +834,7 @@ fn image_data_from_spec(spec: ImageSpec<'_>) -> ImageData {
         } => ImageData::rgba(width, height, data.to_vec()),
     };
     image.origin = spec.origin;
-    image.scale = spec.scale;
+    image.scale = scale;
     image.alpha = spec.alpha.clamp(0.0, 1.0);
     image.interpolation = spec.interpolation;
     image
@@ -1478,6 +1494,31 @@ mod tests {
         assert_eq!(image.interpolation, InterpolationMode::Nearest);
         match image.pixels {
             ImagePixels::Scalar { data, .. } => assert_eq!(data, pixels),
+            ImagePixels::Rgba { .. } => panic!("expected scalar image"),
+        }
+    }
+
+    #[test]
+    fn image_spec_conversion_aggregates_and_scales() {
+        // A 4×4 field aggregated by 2×2 MAX -> 2×2, with the scale multiplied by
+        // the block factor so the image keeps the same data-space extent (silx
+        // ImageDataAggregated: scale = sx*lodx, sy*lody).
+        #[rustfmt::skip]
+        let pixels = [
+            0.0,  1.0,  2.0,  3.0,
+            4.0,  5.0,  6.0,  7.0,
+            8.0,  9.0,  10.0, 11.0,
+            12.0, 13.0, 14.0, 15.0,
+        ];
+        let mut spec = ImageSpec::scalar(4, 4, &pixels, Colormap::viridis(0.0, 15.0))
+            .with_aggregation(AggregationMode::Max, (2, 2));
+        spec.scale = (1.0, 3.0);
+        let image = image_data_from_spec(spec);
+
+        assert_eq!((image.width, image.height), (2, 2));
+        assert_eq!(image.scale, (2.0, 6.0)); // (1*2, 3*2)
+        match image.pixels {
+            ImagePixels::Scalar { data, .. } => assert_eq!(data, vec![5.0, 7.0, 13.0, 15.0]),
             ImagePixels::Rgba { .. } => panic!("expected scalar image"),
         }
     }

@@ -27,7 +27,7 @@ use crate::core::transform::{Margins, Scale, YAxis};
 use crate::core::triangles::Triangles;
 use crate::render::backend_wgpu::WgpuBackend;
 use crate::render::gpu_curve::CurveData;
-use crate::render::gpu_image::{ImageData, ImagePixels};
+use crate::render::gpu_image::{AggregationMode, ImageData, ImagePixels};
 use crate::render::save::SaveError;
 use crate::widget::plot_widget::{PlotInteractionMode, PlotResponse, PlotView};
 
@@ -1112,6 +1112,10 @@ fn image_spec_from_data(image: &ImageData) -> ImageSpec<'_> {
             scale: image.scale,
             alpha: image.alpha,
             interpolation: image.interpolation,
+            // `image` already holds the (possibly aggregated) data, so the
+            // round-tripped spec must not re-aggregate.
+            aggregation: AggregationMode::None,
+            aggregation_block: (1, 1),
         },
         ImagePixels::Rgba { data } => ImageSpec {
             pixels: ImagePixelsSpec::Rgba {
@@ -1123,6 +1127,8 @@ fn image_spec_from_data(image: &ImageData) -> ImageSpec<'_> {
             scale: image.scale,
             alpha: image.alpha,
             interpolation: image.interpolation,
+            aggregation: AggregationMode::None,
+            aggregation_block: (1, 1),
         },
     }
 }

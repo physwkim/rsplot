@@ -53,6 +53,91 @@ impl InterpolationMode {
     }
 }
 
+/// How a scalar image is reduced when several data pixels map to one screen
+/// pixel (silx `ImageDataAggregated.Aggregation`). The aggregator ignores NaNs,
+/// matching silx (`numpy.nanmax` / `numpy.nanmean` / `numpy.nanmin`); a block
+/// whose values are all NaN aggregates to NaN.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum AggregationMode {
+    /// Display the data as is — no block downsampling (silx default).
+    #[default]
+    None,
+    /// Reduce each block to its maximum (NaNs ignored).
+    Max,
+    /// Reduce each block to its mean (NaNs ignored).
+    Mean,
+    /// Reduce each block to its minimum (NaNs ignored).
+    Min,
+}
+
+/// Block-downsample a row-major `width × height` scalar field by integer factors
+/// `block_x` (columns) and `block_y` (rows), reducing each `block_y × block_x`
+/// block with `mode`. Mirrors silx `ImageDataAggregated._addBackendRenderer`:
+///
+/// ```text
+/// data[:(height // lody) * lody, :(width // lodx) * lodx]
+///     .reshape(height // lody, lody, width // lodx, lodx)
+/// aggregator(..., axis=(1, 3))   # nanmax / nanmean / nanmin
+/// ```
+///
+/// i.e. the remainder rows/columns that do not fill a whole block are dropped,
+/// the output is `(width // block_x) × (height // block_y)`, and the aggregation
+/// ignores NaNs (an all-NaN block yields NaN). Returns the new data with its new
+/// `(width, height)`; for [`AggregationMode::None`], or a factor `<= 1` on both
+/// axes, the data is returned unchanged.
+pub fn aggregate_blocks(
+    data: &[f32],
+    width: u32,
+    height: u32,
+    block_x: u32,
+    block_y: u32,
+    mode: AggregationMode,
+) -> (Vec<f32>, u32, u32) {
+    let bx = block_x.max(1);
+    let by = block_y.max(1);
+    if mode == AggregationMode::None || (bx == 1 && by == 1) {
+        return (data.to_vec(), width, height);
+    }
+    let out_w = width / bx;
+    let out_h = height / by;
+    let mut out = Vec::with_capacity((out_w as usize) * (out_h as usize));
+    for oy in 0..out_h {
+        for ox in 0..out_w {
+            // Reduce the block, ignoring NaNs. `acc` is None until a finite
+            // value is seen; all-NaN blocks stay None and emit NaN, matching
+            // numpy.nan{max,mean,min}.
+            let mut acc: Option<f32> = None;
+            let mut count: u32 = 0; // finite-value count, for the mean
+            for j in 0..by {
+                let row = (oy * by + j) as usize;
+                let base = row * (width as usize) + (ox * bx) as usize;
+                for i in 0..bx {
+                    let v = data[base + i as usize];
+                    if v.is_nan() {
+                        continue;
+                    }
+                    count += 1;
+                    acc = Some(match (acc, mode) {
+                        (None, _) => v,
+                        (Some(a), AggregationMode::Max) => a.max(v),
+                        (Some(a), AggregationMode::Min) => a.min(v),
+                        (Some(a), AggregationMode::Mean) => a + v,
+                        // None handled above; unreachable for the early-return.
+                        (Some(a), AggregationMode::None) => a,
+                    });
+                }
+            }
+            let value = match acc {
+                None => f32::NAN, // all-NaN block
+                Some(a) if mode == AggregationMode::Mean => a / count as f32,
+                Some(a) => a,
+            };
+            out.push(value);
+        }
+    }
+    (out, out_w, out_h)
+}
+
 /// Identity ortho matrix; replaced every frame by the widget's transform.
 const IDENTITY: [[f32; 4]; 4] = [
     [1.0, 0.0, 0.0, 0.0],
@@ -957,6 +1042,110 @@ mod tests {
     fn interpolation_default_matches_silx() {
         // silx default image interpolation is "nearest".
         assert_eq!(InterpolationMode::default(), InterpolationMode::Nearest);
+    }
+
+    /// A 4×4 row-major field aggregated by 2×2 blocks: each 2×2 block reduces to
+    /// one output value, row-major. Blocks (max / min / mean):
+    /// {0,1,4,5} {2,3,6,7} / {8,9,12,13} {10,11,14,15}.
+    #[rustfmt::skip]
+    fn field_4x4() -> Vec<f32> {
+        vec![
+            0.0,  1.0,  2.0,  3.0,
+            4.0,  5.0,  6.0,  7.0,
+            8.0,  9.0,  10.0, 11.0,
+            12.0, 13.0, 14.0, 15.0,
+        ]
+    }
+
+    #[test]
+    fn aggregate_max_over_4x4_into_2x2() {
+        let (out, w, h) = aggregate_blocks(&field_4x4(), 4, 4, 2, 2, AggregationMode::Max);
+        assert_eq!((w, h), (2, 2));
+        assert_eq!(out, vec![5.0, 7.0, 13.0, 15.0]);
+    }
+
+    #[test]
+    fn aggregate_min_over_4x4_into_2x2() {
+        let (out, w, h) = aggregate_blocks(&field_4x4(), 4, 4, 2, 2, AggregationMode::Min);
+        assert_eq!((w, h), (2, 2));
+        assert_eq!(out, vec![0.0, 2.0, 8.0, 10.0]);
+    }
+
+    #[test]
+    fn aggregate_mean_over_4x4_into_2x2() {
+        let (out, w, h) = aggregate_blocks(&field_4x4(), 4, 4, 2, 2, AggregationMode::Mean);
+        assert_eq!((w, h), (2, 2));
+        assert_eq!(out, vec![2.5, 4.5, 10.5, 12.5]);
+    }
+
+    #[test]
+    fn aggregate_none_returns_data_unchanged() {
+        let (out, w, h) = aggregate_blocks(&field_4x4(), 4, 4, 2, 2, AggregationMode::None);
+        // NONE ignores the block factor entirely (silx Aggregation.NONE).
+        assert_eq!((w, h), (4, 4));
+        assert_eq!(out, field_4x4());
+    }
+
+    #[test]
+    fn aggregate_block_factor_one_is_a_no_op() {
+        // (1, 1) blocks reduce nothing even with an aggregation mode set.
+        let (out, w, h) = aggregate_blocks(&field_4x4(), 4, 4, 1, 1, AggregationMode::Max);
+        assert_eq!((w, h), (4, 4));
+        assert_eq!(out, field_4x4());
+    }
+
+    #[test]
+    fn aggregate_drops_remainder_rows_and_cols() {
+        // 3×3 with 2×2 blocks: only the top-left 2×2 fills a block; the
+        // remainder row/col is dropped (silx truncates to (w//b)*b, (h//b)*b).
+        #[rustfmt::skip]
+        let data = vec![
+            0.0, 1.0, 2.0,
+            3.0, 4.0, 5.0,
+            6.0, 7.0, 8.0,
+        ];
+        let (out, w, h) = aggregate_blocks(&data, 3, 3, 2, 2, AggregationMode::Max);
+        assert_eq!((w, h), (1, 1));
+        assert_eq!(out, vec![4.0]); // max{0,1,3,4}
+    }
+
+    #[test]
+    fn aggregate_ignores_nans_and_all_nan_block_is_nan() {
+        // Block {NaN, 1, NaN, 5}: max ignores NaNs -> 5; the second block is all
+        // NaN -> NaN (numpy.nanmax over an all-NaN slice).
+        let nan = f32::NAN;
+        #[rustfmt::skip]
+        let data = vec![
+            nan, 1.0, nan, nan,
+            nan, 5.0, nan, nan,
+            0.0, 0.0, 0.0, 0.0,
+            0.0, 0.0, 0.0, 0.0,
+        ];
+        let (out, _, _) = aggregate_blocks(&data, 4, 4, 2, 2, AggregationMode::Max);
+        assert_eq!(out[0], 5.0); // NaNs ignored
+        assert!(out[1].is_nan()); // all-NaN block
+        assert_eq!(out[2], 0.0);
+        assert_eq!(out[3], 0.0);
+    }
+
+    #[test]
+    fn aggregate_mean_ignores_nans_in_count() {
+        // Block {NaN, 2, 4, NaN}: nanmean = (2 + 4) / 2 = 3 (NaNs not counted).
+        let nan = f32::NAN;
+        #[rustfmt::skip]
+        let data = vec![
+            nan, 2.0,
+            4.0, nan,
+        ];
+        let (out, w, h) = aggregate_blocks(&data, 2, 2, 2, 2, AggregationMode::Mean);
+        assert_eq!((w, h), (1, 1));
+        assert_eq!(out, vec![3.0]);
+    }
+
+    #[test]
+    fn aggregation_default_matches_silx() {
+        // silx default aggregation is Aggregation.NONE.
+        assert_eq!(AggregationMode::default(), AggregationMode::None);
     }
 
     #[test]

@@ -15,7 +15,7 @@ use crate::core::items::{Baseline, ErrorBars, LineStyle, Symbol};
 use crate::core::marker::MarkerSymbol;
 use crate::core::shape::ShapeKind;
 use crate::core::transform::{Margins, YAxis};
-use crate::render::gpu_image::InterpolationMode;
+use crate::render::gpu_image::{AggregationMode, InterpolationMode};
 
 /// Backend item handle. Equivalent to silx's opaque backend item object.
 pub type ItemHandle = u64;
@@ -98,6 +98,16 @@ pub struct ImageSpec<'a> {
     /// Data-to-screen interpolation (silx image `interpolation`, default
     /// [`Nearest`](InterpolationMode::Nearest)).
     pub interpolation: InterpolationMode,
+    /// Block aggregation applied to a scalar field before upload (silx
+    /// `ImageDataAggregated`, default [`None`](AggregationMode::None)). Ignored
+    /// for an RGBA image.
+    pub aggregation: AggregationMode,
+    /// Per-axis block factors `(block_x, block_y)` for [`aggregation`], mirroring
+    /// silx's level-of-detail `(lodx, lody)`. Each must be `>= 1`; `(1, 1)` is a
+    /// no-op even with an aggregation mode set.
+    ///
+    /// [`aggregation`]: ImageSpec::aggregation
+    pub aggregation_block: (u32, u32),
 }
 
 impl<'a> ImageSpec<'a> {
@@ -114,6 +124,8 @@ impl<'a> ImageSpec<'a> {
             scale: (1.0, 1.0),
             alpha: 1.0,
             interpolation: InterpolationMode::default(),
+            aggregation: AggregationMode::default(),
+            aggregation_block: (1, 1),
         }
     }
 
@@ -129,12 +141,22 @@ impl<'a> ImageSpec<'a> {
             scale: (1.0, 1.0),
             alpha: 1.0,
             interpolation: InterpolationMode::default(),
+            aggregation: AggregationMode::default(),
+            aggregation_block: (1, 1),
         }
     }
 
     /// Set the data-to-screen interpolation (silx image `interpolation`).
     pub fn with_interpolation(mut self, interpolation: InterpolationMode) -> Self {
         self.interpolation = interpolation;
+        self
+    }
+
+    /// Set the block aggregation and per-axis block factors `(block_x, block_y)`
+    /// applied to a scalar field before upload (silx `ImageDataAggregated`).
+    pub fn with_aggregation(mut self, mode: AggregationMode, block: (u32, u32)) -> Self {
+        self.aggregation = mode;
+        self.aggregation_block = block;
         self
     }
 }

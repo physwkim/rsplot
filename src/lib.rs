@@ -35,7 +35,9 @@ pub use crate::render::backend_wgpu::{
     update_curve_at, update_image_region,
 };
 pub use crate::render::gpu_curve::CurveData;
-pub use crate::render::gpu_image::{ImageData, ImagePixels, InterpolationMode};
+pub use crate::render::gpu_image::{
+    AggregationMode, ImageData, ImagePixels, InterpolationMode, aggregate_blocks,
+};
 pub use crate::render::save::{SaveError, encode_png, save_graph};
 pub use crate::widget::colormap_dialog::ColormapDialog;
 pub use crate::widget::complex_image_view::{ComplexImageView, ComplexMode};
