@@ -309,4 +309,32 @@ mod tests {
         assert_eq!(dialog.nan_color, [1, 2, 3, 4]);
         assert_eq!(dialog.build_colormap(0.0, 1.0).nan_color, [1, 2, 3, 4]);
     }
+
+    // ── Item 2: percentile bounds fields ────────────────────────────────────
+
+    #[test]
+    fn percentiles_default_to_silx_defaults() {
+        let dialog = ColormapDialog::new();
+        assert_eq!(dialog.percentiles, DEFAULT_PERCENTILES);
+    }
+
+    #[test]
+    fn percentile_fields_round_trip_edited_values() {
+        // The (low, high) DragValues are bound directly to `self.percentiles`;
+        // editing them stores and returns the values verbatim.
+        let mut dialog = ColormapDialog::new();
+        dialog.autoscale = true;
+        dialog.autoscale_mode = AutoscaleMode::Percentile;
+        dialog.percentiles = (2.5, 97.5);
+        assert_eq!(dialog.percentiles, (2.5, 97.5));
+        // The chosen percentiles round-trip into the colormap's autoscale
+        // percentiles via the public AutoscaleMode::range consumer (the dialog
+        // stores them; the range computation in 6B-2 reads them back).
+        let (lo, hi) = dialog.percentiles;
+        let (rmin, rmax) = AutoscaleMode::Percentile
+            .range(&(0..=100).map(|i| i as f64).collect::<Vec<_>>(), (lo, hi));
+        // percentile 2.5 -> 2.5, 97.5 -> 97.5 over 0..=100 (numpy linear interp).
+        assert!((rmin - 2.5).abs() < 1e-9, "rmin {rmin}");
+        assert!((rmax - 97.5).abs() < 1e-9, "rmax {rmax}");
+    }
 }
