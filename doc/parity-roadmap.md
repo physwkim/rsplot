@@ -12,6 +12,93 @@ Status legend: ✅ Done · ◐ Partial · ☐ Missing. Effort S/M/L. Priority H/
 > baseline**; landed work is recorded in the Progress log so the baseline stays
 > a stable reference. Follow-ups that a wave deliberately deferred are listed too.
 
+## Remaining work (live, code-verified 2026-06-02)
+
+The per-area tables further down are the **frozen** as-of-sweep baseline and
+over-count what is left. This section is the **live** view: every Missing/Partial
+baseline row was re-audited against the code on `main` after Waves 1–5 (audit
+workflow `wf_cceb6655-482`, then 5 rows hand-corrected against Wave 4–5 code).
+These numbers supersede the table headers below.
+
+Re-audited every open baseline row against `main` → **90 closed by Waves 1–5**;
+the rest splits **52 deferred-wiring · 74 not-started · 7 blocked** (±1: one
+source section's tally and row-list disagreed by one). With the 165 done at
+sweep time, ≈255 / 397 features now land.
+
+### A. Next — chrome / actions wave (52: primitive is on `main`, only hookup left)
+The core type/algorithm exists and is tested; what is missing is the UI/render
+hookup. Grouped by where the wiring lands.
+
+**→ `high_level.rs` (toolbar / API hub):**
+- **Toolbar actions:** Save (PNG/SVG via `save_graph_with_format`), Zoom-Back
+  (`LimitsHistory`), X/Y per-axis autoscale toggles (`set_x_autoscale`/…),
+  Zoom-Mode + axes menu, Pan-with-arrow-keys toggle, Show-Axis toggle
+  (`axes_displayed`), Grid toggle, Aspect menu, X-origin-invert; the
+  InteractiveModeToolBar / CurveToolBar / ImageToolBar composites.
+- **ROI:** interactive creation mode; ROITable rich-stats columns (wire
+  `image_roi_stats`/`curve_roi_stats`); manager add/finalize signals; handle-symbol
+  render.
+- **Colormap:** percentile-autoscale bounds + ColormapDialog Stddev3/Percentile
+  (need raw-pixel access) + NaN-color control; `ColorBarWidget` + `AlphaSlider`
+  into ImageView/ScatterView.
+- **Mask:** file save/load dialog (`.npy` core exists), colormap overlay, mode-vs-pan
+  switch, pencil drag→`draw_line`.
+- ScatterView mask-tools panel; RadarView into ImageView; cross-profile UI;
+  ROI-scoped stats display.
+
+**→ `chrome.rs` (rendering):**
+- Datetime tick labels (`dtime_ticks`), foreground/grid color split (`grid_color`),
+  draw-mode rubber-band → drawingProgress/Finished signals, mouseClicked +
+  selection-area emit, interaction-state-machine surfacing.
+
+**→ GPU backend / render path:**
+- Scatter SOLID / IrregularGrid / RegularGrid / BinnedStatistic viz + their params
+  (`GridMajorOrder`, `BinnedStatisticFunction`) + per-mode picking (`scatter_viz` →
+  triangle/image path); per-point alpha (`PointsViz`); image interpolation
+  (nearest/linear) + aggregation (max/mean/min) mode selectors; image masking
+  (`ScalarMask::apply` before upload); marker drag + constraint hookup.
+
+### B. Not yet started (73)
+- **Composite views — largest gap (24):** ScatterView colorbar / position-info /
+  profile / selection-mask API; StackView perspective-select / 3D-transpose /
+  dim-labels / aggregation / 3D-profile / calibration; ImageView side-histogram
+  toggle / valueChanged / getHistogram / profile-window-behavior / aggregation
+  action; CompareImages v/h-line separators / composite-RGB / alignment modes /
+  affine tracking / keypoint toggle / status bar; ComplexImageView amplitude-range
+  dialog; ImageStack URL table.
+- **Toolbars / tool-buttons (17):** OutputToolBar (Copy/Save/Print), Copy-to-clipboard,
+  Print, Zoom-In/Out factor buttons, LimitsToolBar editable fields, ColorBarAction
+  toggle, Curve-style cycling, Pixel-intensity histogram, Median-filter, Scatter-viz /
+  Symbol / Profile / Ruler / Profile-option tool-buttons, Close-polygon action,
+  Data-aggregation selector.
+- **ROI editing UX (8):** CurvesROIWidget + ROIStatsWidget display, creation-phase
+  preview UI, context menu, interaction modes, edge constraints, dictdump save/load,
+  keyboard/naming.
+- **Mask UX polish (7):** active-item sync, transparency slider, Ctrl mask/unmask
+  toggle, load-colormap-range button, per-level color, pan/browse tool, pencil
+  spin+slider sync.
+- **Event signals (6):** hover / markerClicked / markerMoving / curveClicked /
+  imageClicked / doubleClicked structured callbacks (types partly stubbed in
+  `interaction.rs`, not emitted).
+- **Curve/Hist/Scatter polish (4):** curve highlight style, plot-item selection state,
+  histogram bin alignment, histogram filled-region picking.
+- **Stats/Profile/Legend/Print/Selection (5):** profile line-width/method,
+  profile-over-stack, print preview, legend context menu, ItemsSelectionDialog.
+- **Backend render (3):** time-series X-axis render, GPU async stats/histogram,
+  postRedisplay.
+
+### C. Blocked / out of scope (7)
+- **Needs a `.wgsl` shader change** (runtime-unverifiable here — no GPU / no `naga`):
+  line joins (round/bevel/miter), line caps (butt/round/square), image per-pixel
+  alpha map.
+- **Needs `silx.io`-equivalent codecs / threading** (out of declared scope):
+  ImageStack lazy URL loading + prefetch queue; CompareImages SIFT keypoint
+  detection/alignment.
+- **N/A to this backend:** OpenGL-backend toggle (egui-wgpu only).
+
+Per-row closed/deferred detail also lives in each Wave's "Deferred follow-ups" in the
+Progress log below.
+
 ## Progress log
 
 ### Wave 0 — cited detail
