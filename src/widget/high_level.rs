@@ -1803,6 +1803,20 @@ struct ItemRecord {
     /// the line style, and re-apply without losing color/symbol/error bars.
     /// `None` for non-curve items.
     curve_data: Option<CurveData>,
+    /// UI-only restore cache for the legend "Points" toggle (silx checkable
+    /// `Points` action). When the symbol is hidden, the previously visible
+    /// [`Symbol`] is stashed here so toggling back on restores the *same*
+    /// variant losslessly instead of a default. NOT a source of truth: no
+    /// render/bounds/legend-visual path may read it — what is drawn is decided
+    /// solely by [`CurveData::symbol`]. `None` means "nothing stashed".
+    hidden_symbol: Option<Symbol>,
+    /// UI-only restore cache for the legend "Lines" toggle (silx checkable
+    /// `Lines` action). When the line is hidden, the previously visible
+    /// [`LineStyle`] is stashed here so toggling back on restores the *same*
+    /// style (e.g. `Dashed`, not just `Solid`). NOT a source of truth: no
+    /// render/bounds/legend-visual path may read it — what is drawn is decided
+    /// solely by [`CurveData::line_style`]. `None` means "nothing stashed".
+    hidden_line_style: Option<LineStyle>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1834,6 +1848,90 @@ impl LegendVisual {
 
 fn legend_row_width(available_width: f32) -> f32 {
     available_width.max(LEGEND_ROW_MIN_WIDTH)
+}
+
+/// Default symbol restored when "Points" is toggled on for a curve that never
+/// had a visible symbol cached (e.g. it was created with `symbol: None`). silx
+/// has no recorded prior symbol either; a small filled point is the neutral
+/// choice. Used only as the empty-cache fallback in [`set_symbol_visibility`].
+const DEFAULT_RESTORE_SYMBOL: Symbol = Symbol::Point;
+
+/// Default line style restored when "Lines" is toggled on for a curve that
+/// never had a visible line cached (e.g. it was created with
+/// `line_style: LineStyle::None`). A solid line is the neutral default; used
+/// only as the empty-cache fallback in [`set_line_visibility`].
+const DEFAULT_RESTORE_LINE_STYLE: LineStyle = LineStyle::Solid;
+
+/// Pure transform for the legend "Points" checkable toggle (silx
+/// `togglePointsAction`). Returns the new [`CurveData::symbol`] value and
+/// maintains a lossless restore `cache` so a hide→show round-trip restores the
+/// exact prior [`Symbol`] variant, not a default.
+///
+/// - hide (`visible == false`) when currently visible: stash `current` into
+///   `cache`, return `None`.
+/// - show (`visible == true`) when currently hidden: take from `cache`
+///   (falling back to [`DEFAULT_RESTORE_SYMBOL`] only if the cache is empty),
+///   return `Some(symbol)`.
+/// - no-op cases (show-when-visible, hide-when-hidden) return `current`
+///   unchanged and never clobber `cache`.
+///
+/// The returned value is the only thing the caller writes to `CurveData`; the
+/// `cache` is UI memory and must not be read by any render/bounds/legend path.
+fn set_symbol_visibility(
+    current: Option<Symbol>,
+    visible: bool,
+    cache: &mut Option<Symbol>,
+) -> Option<Symbol> {
+    match (visible, current) {
+        // Show while already visible: no-op, keep the cache untouched.
+        (true, Some(symbol)) => Some(symbol),
+        // Show while hidden: restore the stashed symbol, or the default if the
+        // curve was created hidden (empty cache). Consume the cache entry.
+        (true, None) => Some(cache.take().unwrap_or(DEFAULT_RESTORE_SYMBOL)),
+        // Hide while visible: stash the current symbol for a lossless restore.
+        (false, Some(symbol)) => {
+            *cache = Some(symbol);
+            None
+        }
+        // Hide while already hidden: no-op, do not clobber a prior stash.
+        (false, None) => None,
+    }
+}
+
+/// Pure transform for the legend "Lines" checkable toggle (silx
+/// `toggleLinesAction`). Returns the new [`CurveData::line_style`] value and
+/// maintains a lossless restore `cache` so a hide→show round-trip restores the
+/// exact prior [`LineStyle`] (e.g. `Dashed`), not a default.
+///
+/// - hide (`visible == false`) when currently drawing a line: stash `current`
+///   into `cache`, return [`LineStyle::None`].
+/// - show (`visible == true`) when currently hidden: take from `cache`
+///   (falling back to [`DEFAULT_RESTORE_LINE_STYLE`] only if the cache is
+///   empty), return that style.
+/// - no-op cases (show-when-drawing, hide-when-hidden) return `current`
+///   unchanged and never clobber `cache`.
+///
+/// The returned value is the only thing the caller writes to `CurveData`; the
+/// `cache` is UI memory and must not be read by any render/bounds/legend path.
+fn set_line_visibility(
+    current: LineStyle,
+    visible: bool,
+    cache: &mut Option<LineStyle>,
+) -> LineStyle {
+    match (visible, current.draws_line()) {
+        // Show while already drawing a line: no-op, keep the cache untouched.
+        (true, true) => current,
+        // Show while hidden: restore the stashed style, or the default if the
+        // curve was created with no line (empty cache). Consume the cache.
+        (true, false) => cache.take().unwrap_or(DEFAULT_RESTORE_LINE_STYLE),
+        // Hide while drawing a line: stash the current style for restore.
+        (false, true) => {
+            *cache = Some(current);
+            LineStyle::None
+        }
+        // Hide while already hidden: no-op, do not clobber a prior stash.
+        (false, false) => current,
+    }
 }
 
 /// What a single legend-row interaction returned.
@@ -2275,6 +2373,8 @@ impl PlotWidget {
             visual,
             data: None,
             curve_data: None,
+            hidden_symbol: None,
+            hidden_line_style: None,
         });
         self.events.push(PlotEvent::ItemAdded { handle, kind });
         if self.active_item.is_none() {
@@ -2315,6 +2415,8 @@ impl PlotWidget {
                 visual,
                 data: None,
                 curve_data: None,
+                hidden_symbol: None,
+                hidden_line_style: None,
             });
             self.events.push(PlotEvent::ItemAdded { handle, kind });
         }
@@ -3277,6 +3379,76 @@ impl PlotWidget {
         data.line_style = next.clone();
         self.update_curve_data(handle, &data);
         Some(next)
+    }
+
+    /// Move a curve between the left (`YAxis::Left`) and right (`YAxis::Right`)
+    /// Y axis (silx legend `Map to left` / `Map to right`). Clones the retained
+    /// [`CurveData`], sets `y_axis`, re-applies it through
+    /// [`Self::update_curve_data`], then recomputes auto limits because the
+    /// curve's bounds now contribute to a different Y/Y2 range. Returns `false`
+    /// if the handle is unknown or has no retained curve data (non-curve item).
+    pub fn set_curve_y_axis(&mut self, handle: ItemHandle, axis: YAxis) -> bool {
+        let Some(mut data) = self.record_curve_data(handle).cloned() else {
+            return false;
+        };
+        data.y_axis = axis;
+        if !self.update_curve_data(handle, &data) {
+            return false;
+        }
+        // Moving a curve between the Left and Right axes changes which axis its
+        // data feeds, so the left-Y / right-Y data bounds must be re-evaluated
+        // (same auto-limit path `remove` uses).
+        self.recompute_data_bounds();
+        self.apply_auto_limits();
+        true
+    }
+
+    /// Show or hide a curve's point markers (silx legend checkable `Points`).
+    /// Toggling is lossless: hiding stashes the current [`Symbol`] in a UI-only
+    /// restore cache and showing restores that exact variant (falling back to a
+    /// default only if the curve was created with no symbol). The drawn state
+    /// is decided solely by [`CurveData::symbol`]; the cache is never read by
+    /// any render/bounds/legend path. Returns `false` if the handle is unknown
+    /// or has no retained curve data (non-curve item).
+    pub fn set_curve_points_visible(&mut self, handle: ItemHandle, visible: bool) -> bool {
+        let Some(mut data) = self.record_curve_data(handle).cloned() else {
+            return false;
+        };
+        // Compute the next symbol against the record's restore cache. Take the
+        // cache out, transform, then write it back: the cache lives on the
+        // record but the transform is the pure free fn.
+        let mut cache = self
+            .item_record_mut(handle)
+            .and_then(|record| record.hidden_symbol.take());
+        let next = set_symbol_visibility(data.symbol, visible, &mut cache);
+        if let Some(record) = self.item_record_mut(handle) {
+            record.hidden_symbol = cache;
+        }
+        data.symbol = next;
+        self.update_curve_data(handle, &data)
+    }
+
+    /// Show or hide a curve's connecting line (silx legend checkable `Lines`).
+    /// Toggling is lossless: hiding stashes the current [`LineStyle`] in a
+    /// UI-only restore cache and showing restores that exact style (e.g.
+    /// `Dashed`), falling back to a solid line only if the curve was created
+    /// with no line. The drawn state is decided solely by
+    /// [`CurveData::line_style`]; the cache is never read by any
+    /// render/bounds/legend path. Returns `false` if the handle is unknown or
+    /// has no retained curve data (non-curve item).
+    pub fn set_curve_lines_visible(&mut self, handle: ItemHandle, visible: bool) -> bool {
+        let Some(mut data) = self.record_curve_data(handle).cloned() else {
+            return false;
+        };
+        let mut cache = self
+            .item_record_mut(handle)
+            .and_then(|record| record.hidden_line_style.take());
+        let next = set_line_visibility(data.line_style.clone(), visible, &mut cache);
+        if let Some(record) = self.item_record_mut(handle) {
+            record.hidden_line_style = cache;
+        }
+        data.line_style = next;
+        self.update_curve_data(handle, &data)
     }
 
     /// Set the active curve-like item.
@@ -7296,6 +7468,86 @@ fn roi_description(roi: &Roi) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn set_symbol_visibility_hide_then_show_is_lossless() {
+        // silx checkable Points: hiding a Diamond then showing must restore the
+        // SAME variant (Diamond), not a default. The cache holds it meanwhile.
+        let mut cache = None;
+        let hidden = set_symbol_visibility(Some(Symbol::Diamond), false, &mut cache);
+        assert_eq!(hidden, None);
+        assert_eq!(cache, Some(Symbol::Diamond));
+        let shown = set_symbol_visibility(hidden, true, &mut cache);
+        assert_eq!(shown, Some(Symbol::Diamond));
+        // The cache was consumed on restore.
+        assert_eq!(cache, None);
+    }
+
+    #[test]
+    fn set_line_visibility_hide_then_show_is_lossless() {
+        // silx checkable Lines: hiding a Dashed line then showing must restore
+        // Dashed, not Solid. The cache holds the exact style meanwhile.
+        let mut cache = None;
+        let hidden = set_line_visibility(LineStyle::Dashed, false, &mut cache);
+        assert_eq!(hidden, LineStyle::None);
+        assert_eq!(cache, Some(LineStyle::Dashed));
+        let shown = set_line_visibility(hidden, true, &mut cache);
+        assert_eq!(shown, LineStyle::Dashed);
+        assert_eq!(cache, None);
+    }
+
+    #[test]
+    fn set_symbol_visibility_no_op_when_already_in_state() {
+        // Show while already visible: no change, cache untouched (a stale stash
+        // from a prior hide must not be clobbered or consumed).
+        let mut cache = Some(Symbol::Square);
+        let out = set_symbol_visibility(Some(Symbol::Circle), true, &mut cache);
+        assert_eq!(out, Some(Symbol::Circle));
+        assert_eq!(cache, Some(Symbol::Square));
+
+        // Hide while already hidden: no change, cache not clobbered.
+        let mut cache = Some(Symbol::Diamond);
+        let out = set_symbol_visibility(None, false, &mut cache);
+        assert_eq!(out, None);
+        assert_eq!(cache, Some(Symbol::Diamond));
+    }
+
+    #[test]
+    fn set_line_visibility_no_op_when_already_in_state() {
+        // Show while already drawing a line: no change, cache untouched.
+        let mut cache = Some(LineStyle::Dotted);
+        let out = set_line_visibility(LineStyle::Dashed, true, &mut cache);
+        assert_eq!(out, LineStyle::Dashed);
+        assert_eq!(cache, Some(LineStyle::Dotted));
+
+        // Hide while already hidden (LineStyle::None): no change, cache kept.
+        let mut cache = Some(LineStyle::Dashed);
+        let out = set_line_visibility(LineStyle::None, false, &mut cache);
+        assert_eq!(out, LineStyle::None);
+        assert_eq!(cache, Some(LineStyle::Dashed));
+    }
+
+    #[test]
+    fn set_symbol_visibility_show_from_never_cached_uses_default() {
+        // A curve created hidden (symbol None) with an empty cache: showing
+        // falls back to the documented default Symbol::Point.
+        let mut cache = None;
+        let out = set_symbol_visibility(None, true, &mut cache);
+        assert_eq!(out, Some(Symbol::Point));
+        assert_eq!(out, Some(DEFAULT_RESTORE_SYMBOL));
+        assert_eq!(cache, None);
+    }
+
+    #[test]
+    fn set_line_visibility_show_from_never_cached_uses_default() {
+        // A curve created with no line (LineStyle::None) with an empty cache:
+        // showing falls back to the documented default LineStyle::Solid.
+        let mut cache = None;
+        let out = set_line_visibility(LineStyle::None, true, &mut cache);
+        assert_eq!(out, LineStyle::Solid);
+        assert_eq!(out, DEFAULT_RESTORE_LINE_STYLE);
+        assert_eq!(cache, None);
+    }
 
     #[test]
     fn clamp_alpha_clamps_out_of_range_entries() {
