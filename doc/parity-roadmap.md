@@ -456,6 +456,54 @@ already complete.
 - **Deferred:** Y2 (right-axis) autoscale toolbar button (model flag already honored; a third button would
   bloat the toolbar row). **Wave 7C next:** median filter (`medians` crate) + pixel-intensity histogram.
 
+### Wave 7C — Median filter + pixel-intensity histogram (FINAL substantive Wave-7 sub-wave)
+Single worktree-isolated cluster owning new `src/widget/actions/analysis.rs` + `high_level.rs` +
+`actions/mod.rs` + `Cargo.toml` (3 commits); per-item adversarial verify (both `accept`, no issues). BASE
+`3d27137`. The pure compute is the tested deliverable; the kernel/conditional popup, the histogram window,
+and the GPU image re-upload are UI/GPU shims. Agent read silx `silx.math.medianfilter` (`.pyx` defaults +
+the C++ `median<T>()` in `include/median_filter.hpp`) and `actions/{medfilt,histogram}.py` for ground truth.
+- **Median filter** (user-approved `medians` v3.0.12, build-verified on macOS): pure `median_filter_2d(data,
+  w, h, kernel_h, kernel_w, conditional)` + `median_filter_1d` (= 2D with kernel `(kw, 1)`, silx
+  `MedianFilter1DAction`) in `analysis.rs`. Faithful to silx `medfilt2d` for the **default `mode='nearest'`**
+  that `MedianFilterAction` relies on (calls `medfilt2d` with no `mode`): out-of-bounds window indices clamp
+  to `[0, dim-1]`; window median = `sorted[n/2]` (`std::nth_element` semantics — the *higher* of two
+  centrals, not an average). Odd NaN-free windows use the crate's `Medianf64::medf_unchecked`; even/NaN-
+  reduced windows use `select_nth_unstable_by(n/2)` because the crate's even path AVERAGES the two centrals
+  (would diverge from silx) — pinned by `nan_ignored_even_count_takes_higher_central` ({10,20}→20). NaN
+  ignored in-window; all-NaN window→NaN. `conditional`: replace center only if it equals the window min or
+  max (a NaN center is never an extremum, so it propagates). `apply_median_filter`/`_1d` (on `PlotWidget`)
+  read `RetainedItemData::Image` and re-upload in place via the existing `update_image_spec` (silx
+  `addImage(replace=True)`) — no non-owned file. `MedianFilterParams` (kernel_width odd, conditional;
+  default 3×3) + `Plot2D::show_median_filter`/`show_median_filter_toolbar` popup (silx `MedianFilterDialog`;
+  spinbox min 1 step 2 enforced by `force_odd`). 11 unit tests (salt-spike removal, sorted-middle interior,
+  NEAREST corner clamp, constant image, conditional keep-vs-fix, 1D≡2D-(k,1), 1×1 identity, NaN cases).
+- **Pixel-intensity histogram**: pure `pixel_intensity_histogram(pixels, n_bins) → Option<PixelHistogram>`
+  (edges/counts/min/max/mean/std/sum/n_bins) in `analysis.rs`. Faithful to silx `PixelIntensitiesHistoAction`
+  / `HistogramWidget._updateFromItem` (histogram.py:226-419): bins = `min(1024, floor(sqrt(finite_count)))`
+  then `max(2, …)` (a `Some(n)` override also floored at 2); range = finite `(min,max)` (NaN/±inf excluded
+  from range, counts AND stats); `last_bin_closed=True` (max lands in the last bin, interior `v` →
+  `floor((v-min)·n_bins/range)`); degenerate `min==max` range enlarged exactly as silx (`(-0.01,0.01)` at 0,
+  else sorted `(v·0.99, v·1.01)`); stats = `nanmean`/population `nanstd`(ddof=0)/`nansum`; `None` on all-not-
+  finite (silx `reset`). `active_image_histogram` (on `PlotWidget`) reuses `get_image_pixels_raw`;
+  `Plot2D::show_pixel_histogram`/`_toolbar` is a CPU/egui-painter shim (bars in silx `#66aad7` + stats +
+  editable bin count, NO second GPU `Plot1D`). 9 unit tests (sqrt-floor bins, exact last-bin-closed counts,
+  stats, non-finite exclusion, degenerate ranges, all-not-finite None, bins-floored-at-2, interior floor).
+- **Self-review fix (caught in my own integration diff, not by the reviewers — 1 commit `d0b86a9`):** the
+  branch added `ToolbarResponse.median_filter_applied`/`pixel_histogram_open` but **nothing ever set them** —
+  the buttons live on `Plot2D`'s standalone `show_*_toolbar` methods (own bool returns), while the field-
+  producing `show_toolbar_controls` is on `PlotWidget` (shared with curve-only `Plot1D`, which silx never
+  shows image actions on). Removed the dead fields (their doc comments falsely claimed "this frame"
+  semantics); the `Plot2D` toolbar methods remain the API. f64-vs-float32 note: silx casts to float32 before
+  `Histogramnd`; this port stays f64 (spec says `pixels: &[f64]`) — binning algebra is exact, a boundary
+  value can shift ≤ float32-epsilon vs silx.
+- Gate (main, post-fix): fmt clean, clippy `-p egui-silx --all-targets` clean (medians compiled),
+  **700 tests pass** (+20: 11 median + 9 histogram), no doctest changed (new fences are ```ignore).
+- **Deferred:** non-default silx median edge modes (reflect/mirror/shrink/constant — `MedianFilterAction`
+  only uses `nearest`); silx `HistogramWidget` RangeSlider for custom range, weighted (count·value)
+  histograms, and the embedded full `Plot1D`. **Wave 7 is now complete** (7A/7B/7C). Remaining backlog =
+  the shader-gated items (SOLID scatter-triangle pipeline, per-point scatter alpha, mask colormap GPU
+  overlay — NaN-holes) + marker drag/cursor + `is_overlay` data-layer (render-refactor) + true vector SVG.
+
 
 ## PlotWidget core, axes, frame, ticks  — 25✅ 2◐ 7☐
 
