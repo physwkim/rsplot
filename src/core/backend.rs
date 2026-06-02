@@ -15,6 +15,7 @@ use crate::core::items::{Baseline, ErrorBars, LineStyle, Symbol};
 use crate::core::marker::MarkerSymbol;
 use crate::core::shape::ShapeKind;
 use crate::core::transform::{Margins, YAxis};
+use crate::render::gpu_image::InterpolationMode;
 
 /// Backend item handle. Equivalent to silx's opaque backend item object.
 pub type ItemHandle = u64;
@@ -94,6 +95,9 @@ pub struct ImageSpec<'a> {
     pub origin: (f64, f64),
     pub scale: (f64, f64),
     pub alpha: f32,
+    /// Data-to-screen interpolation (silx image `interpolation`, default
+    /// [`Nearest`](InterpolationMode::Nearest)).
+    pub interpolation: InterpolationMode,
 }
 
 impl<'a> ImageSpec<'a> {
@@ -109,6 +113,7 @@ impl<'a> ImageSpec<'a> {
             origin: (0.0, 0.0),
             scale: (1.0, 1.0),
             alpha: 1.0,
+            interpolation: InterpolationMode::default(),
         }
     }
 
@@ -123,7 +128,14 @@ impl<'a> ImageSpec<'a> {
             origin: (0.0, 0.0),
             scale: (1.0, 1.0),
             alpha: 1.0,
+            interpolation: InterpolationMode::default(),
         }
+    }
+
+    /// Set the data-to-screen interpolation (silx image `interpolation`).
+    pub fn with_interpolation(mut self, interpolation: InterpolationMode) -> Self {
+        self.interpolation = interpolation;
+        self
     }
 }
 

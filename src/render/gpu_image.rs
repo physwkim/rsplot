@@ -24,6 +24,35 @@ use egui_wgpu::wgpu;
 
 use crate::core::colormap::Colormap;
 
+/// How an image's data is resampled to screen pixels (silx image
+/// `interpolation`). [`Nearest`](InterpolationMode::Nearest) is the silx default
+/// (its matplotlib backend hardcodes `interpolation="nearest"` and the GL data
+/// texture uses `GL_NEAREST`); [`Linear`](InterpolationMode::Linear) bilinearly
+/// interpolates the underlying values.
+///
+/// For a scalar image the interpolation happens on the SCALAR data and the
+/// colormap is applied afterwards, matching silx (the GL backend filters the
+/// data texture before the colormap lookup).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum InterpolationMode {
+    /// Sample the texel whose cell contains the pixel centre (silx default).
+    #[default]
+    Nearest,
+    /// Bilinearly interpolate the four neighbouring texels.
+    Linear,
+}
+
+impl InterpolationMode {
+    /// Shader interpolation code (must match the branch in `image.wgsl`):
+    /// nearest 0, linear 1.
+    fn code(self) -> u32 {
+        match self {
+            InterpolationMode::Nearest => 0,
+            InterpolationMode::Linear => 1,
+        }
+    }
+}
+
 /// Identity ortho matrix; replaced every frame by the widget's transform.
 const IDENTITY: [[f32; 4]; 4] = [
     [1.0, 0.0, 0.0, 0.0],
@@ -34,7 +63,7 @@ const IDENTITY: [[f32; 4]; 4] = [
 
 /// Uniform block for the image shader. Field order keeps `repr(C)` offsets
 /// std140-aligned: mat4 @0, vec4 @64, vec2 @80, then scalars f32 @88/92/96/100,
-/// u32 @104; padded to 112. Matches `Params` in `image.wgsl`.
+/// u32 @104/108; total 112. Matches `Params` in `image.wgsl`.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct ImageParams {
@@ -51,7 +80,8 @@ struct ImageParams {
     gamma: f32,
     /// Normalization code; see [`Normalization::code`](crate::core::colormap::Normalization).
     norm: u32,
-    _pad: f32,
+    /// Interpolation code; see [`InterpolationMode::code`]: nearest 0, linear 1.
+    interp: u32,
 }
 
 /// Uniform block for the RGBA (direct) image shader: just the transform, rect,
@@ -98,6 +128,9 @@ pub struct ImageData {
     pub origin: (f64, f64),
     pub scale: (f64, f64),
     pub alpha: f32,
+    /// How the data is resampled to screen pixels (silx `interpolation`),
+    /// defaulting to [`Nearest`](InterpolationMode::Nearest).
+    pub interpolation: InterpolationMode,
 }
 
 impl ImageData {
@@ -119,6 +152,7 @@ impl ImageData {
             origin: (0.0, 0.0),
             scale: (1.0, 1.0),
             alpha: 1.0,
+            interpolation: InterpolationMode::default(),
         }
     }
 
@@ -138,6 +172,7 @@ impl ImageData {
             origin: (0.0, 0.0),
             scale: (1.0, 1.0),
             alpha: 1.0,
+            interpolation: InterpolationMode::default(),
         }
     }
 
@@ -148,6 +183,12 @@ impl ImageData {
             ImagePixels::Scalar { colormap, .. } => Some(colormap.as_ref()),
             ImagePixels::Rgba { .. } => None,
         }
+    }
+
+    /// Set the data-to-screen interpolation (silx `interpolation`).
+    pub fn with_interpolation(mut self, interpolation: InterpolationMode) -> Self {
+        self.interpolation = interpolation;
+        self
     }
 }
 
@@ -264,8 +305,10 @@ impl ImagePipeline {
         });
 
         // RGBA pipeline: its own minimal layout (uniform + RGBA texture +
-        // nearest sampler, no LUT). The texture is sampled non-filtering so it
-        // shares the nearest data sampler.
+        // sampler, no LUT). The texture is declared filterable and the sampler
+        // slot is filtering so the bind group can choose the nearest or linear
+        // sampler per image (silx `interpolation`). `Rgba8UnormSrgb` is a
+        // filterable format, so this needs no extra wgpu feature.
         let rgba_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("egui-silx image rgba bgl"),
@@ -282,22 +325,23 @@ impl ImagePipeline {
                         },
                         count: None,
                     },
-                    // 1: RGBA texture (sampled non-filtering / nearest)
+                    // 1: RGBA texture (filterable; nearest or linear per image)
                     wgpu::BindGroupLayoutEntry {
                         binding: 1,
                         visibility: wgpu::ShaderStages::FRAGMENT,
                         ty: wgpu::BindingType::Texture {
-                            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
                             view_dimension: wgpu::TextureViewDimension::D2,
                             multisampled: false,
                         },
                         count: None,
                     },
-                    // 2: sampler (non-filtering / nearest)
+                    // 2: sampler (filtering: the nearest or linear sampler is
+                    // bound per image; a Filtering slot accepts either)
                     wgpu::BindGroupLayoutEntry {
                         binding: 2,
                         visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                         count: None,
                     },
                 ],
@@ -424,6 +468,8 @@ enum GpuImageKind {
         gamma: f32,
         /// Normalization code; see `Normalization::code`.
         norm: u32,
+        /// Interpolation code; see [`InterpolationMode::code`].
+        interp: u32,
     },
     Rgba,
 }
@@ -594,10 +640,18 @@ impl GpuImage {
                         cmap_one_over_range,
                         gamma: colormap.gamma,
                         norm: colormap.normalization.code(),
+                        interp: image.interpolation.code(),
                     },
                 )
             }
             ImagePixels::Rgba { data } => {
+                // silx interpolation on a direct RGBA image: `Rgba8UnormSrgb` is
+                // filterable, so the hardware sampler does it (no manual bilinear
+                // and no extra wgpu feature). Nearest reuses the data sampler.
+                let rgba_sampler = match image.interpolation {
+                    InterpolationMode::Nearest => &pipeline.data_sampler,
+                    InterpolationMode::Linear => &pipeline.lut_sampler,
+                };
                 let tiles = tile_bounds(image.width, image.height, max_dim)
                     .into_iter()
                     .map(|(x0, y0, w, h)| {
@@ -656,9 +710,7 @@ impl GpuImage {
                                 },
                                 wgpu::BindGroupEntry {
                                     binding: 2,
-                                    resource: wgpu::BindingResource::Sampler(
-                                        &pipeline.data_sampler,
-                                    ),
+                                    resource: wgpu::BindingResource::Sampler(rgba_sampler),
                                 },
                             ],
                         });
@@ -775,6 +827,7 @@ impl GpuImage {
                     cmap_one_over_range,
                     gamma,
                     norm,
+                    interp,
                 } => {
                     let params = ImageParams {
                         ortho,
@@ -785,7 +838,7 @@ impl GpuImage {
                         cmap_one_over_range,
                         gamma,
                         norm,
-                        _pad: 0.0,
+                        interp,
                     };
                     queue.write_buffer(&tile.params, 0, bytemuck::bytes_of(&params));
                 }
@@ -898,5 +951,26 @@ mod tests {
     #[should_panic(expected = "data length must equal width * height")]
     fn rgba_constructor_rejects_length_mismatch() {
         ImageData::rgba(2, 2, vec![[0, 0, 0, 0]; 3]);
+    }
+
+    #[test]
+    fn interpolation_default_matches_silx() {
+        // silx default image interpolation is "nearest".
+        assert_eq!(InterpolationMode::default(), InterpolationMode::Nearest);
+    }
+
+    #[test]
+    fn interpolation_codes_match_shader() {
+        // Must stay in sync with the branch in image.wgsl.
+        assert_eq!(InterpolationMode::Nearest.code(), 0);
+        assert_eq!(InterpolationMode::Linear.code(), 1);
+    }
+
+    #[test]
+    fn new_image_defaults_to_nearest_interpolation() {
+        let img = ImageData::new(2, 2, vec![0.0, 1.0, 2.0, 3.0], Colormap::viridis(0.0, 3.0));
+        assert_eq!(img.interpolation, InterpolationMode::Nearest);
+        let img = img.with_interpolation(InterpolationMode::Linear);
+        assert_eq!(img.interpolation, InterpolationMode::Linear);
     }
 }

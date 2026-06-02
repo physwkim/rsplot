@@ -3,8 +3,9 @@
 // A quad covering the image's data-space rect is generated from the vertex
 // index, transformed to NDC by the ortho matrix (data -> NDC, the single
 // source of truth in core::transform). The fragment samples the scalar data
-// texture (nearest), maps it to a [0, 1] LUT coordinate under the colormap
-// normalization (linear / log10 / sqrt / gamma — mirrors silx GLPlotImage),
+// texture (nearest or bilinear-on-data, mirroring silx interpolation),
+// maps it to a [0, 1] LUT coordinate under the colormap normalization
+// (linear / log10 / sqrt / gamma / arcsinh — mirrors silx GLPlotImage),
 // and looks up the color in a 256x1 sRGB LUT texture (linear).
 
 struct Params {
@@ -16,6 +17,7 @@ struct Params {
     cmap_one_over_range: f32,  // 1 / (norm(vmax) - norm(vmin)), or 0 if degenerate
     gamma: f32,                // exponent for norm == 3 (gamma)
     norm: u32,                 // normalization code: 0 linear, 1 log, 2 sqrt, 3 gamma, 4 arcsinh
+    interp: u32,               // interpolation: 0 nearest, 1 linear (bilinear on data)
 };
 
 // 1 / ln(10), to turn the natural log into log10.
@@ -33,7 +35,9 @@ fn apply_scale(p: vec2<f32>) -> vec2<f32> {
 
 @group(0) @binding(0) var<uniform> params: Params;
 @group(0) @binding(1) var data_tex: texture_2d<f32>;   // R32Float, unfilterable
-@group(0) @binding(2) var data_samp: sampler;          // non-filtering (nearest)
+@group(0) @binding(2) var data_samp: sampler;          // unused: data is fetched
+                                                       // via textureLoad below,
+                                                       // kept for layout parity
 @group(0) @binding(3) var lut_tex: texture_2d<f32>;    // 256x1 sRGB
 @group(0) @binding(4) var lut_samp: sampler;           // filtering (linear)
 
@@ -100,9 +104,43 @@ fn normalize_value(raw: f32) -> f32 {
     return clamp(params.cmap_one_over_range * (raw - params.cmap_min), 0.0, 1.0);
 }
 
+// Fetch one texel's scalar value by integer coordinate, clamped to the texture
+// bounds so edge interpolation does not wrap. R32Float is not a filterable
+// format, so the bilinear path is done by hand here via textureLoad rather than
+// a linear sampler (avoids requiring the FLOAT32_FILTERABLE wgpu feature).
+fn texel(coord: vec2<i32>, size: vec2<i32>) -> f32 {
+    let c = clamp(coord, vec2<i32>(0, 0), size - vec2<i32>(1, 1));
+    return textureLoad(data_tex, c, 0).r;
+}
+
+// Sample the scalar data at normalized uv. NEAREST takes the centre texel;
+// LINEAR bilinearly interpolates the four neighbouring texels of the SCALAR
+// data — silx interpolates the data and only then colormaps (GLPlotImage
+// texture filtering is applied to the data texture before the cmap lookup).
+fn sample_data(uv: vec2<f32>) -> f32 {
+    let size = vec2<i32>(textureDimensions(data_tex));
+    if (params.interp == 1u) { // linear
+        // Texel centres sit at (i + 0.5) / size, so shift by -0.5 to put the
+        // fractional weight between the surrounding texel centres.
+        let p = uv * vec2<f32>(size) - vec2<f32>(0.5, 0.5);
+        let base = vec2<i32>(floor(p));
+        let f = p - floor(p);
+        let v00 = texel(base, size);
+        let v10 = texel(base + vec2<i32>(1, 0), size);
+        let v01 = texel(base + vec2<i32>(0, 1), size);
+        let v11 = texel(base + vec2<i32>(1, 1), size);
+        let top = mix(v00, v10, f.x);
+        let bot = mix(v01, v11, f.x);
+        return mix(top, bot, f.y);
+    }
+    // nearest: the texel whose cell contains uv.
+    let c = vec2<i32>(floor(uv * vec2<f32>(size)));
+    return texel(c, size);
+}
+
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    let v = textureSample(data_tex, data_samp, in.uv).r;
+    let v = sample_data(in.uv);
     let value = normalize_value(v);
     let rgb = textureSample(lut_tex, lut_samp, vec2<f32>(value, 0.5)).rgb;
     return vec4<f32>(rgb, params.alpha);

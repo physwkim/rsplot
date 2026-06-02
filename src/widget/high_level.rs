@@ -1111,6 +1111,7 @@ fn image_spec_from_data(image: &ImageData) -> ImageSpec<'_> {
             origin: image.origin,
             scale: image.scale,
             alpha: image.alpha,
+            interpolation: image.interpolation,
         },
         ImagePixels::Rgba { data } => ImageSpec {
             pixels: ImagePixelsSpec::Rgba {
@@ -1121,6 +1122,7 @@ fn image_spec_from_data(image: &ImageData) -> ImageSpec<'_> {
             origin: image.origin,
             scale: image.scale,
             alpha: image.alpha,
+            interpolation: image.interpolation,
         },
     }
 }

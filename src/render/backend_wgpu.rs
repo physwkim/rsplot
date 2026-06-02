@@ -820,6 +820,7 @@ fn image_data_from_spec(spec: ImageSpec<'_>) -> ImageData {
     image.origin = spec.origin;
     image.scale = spec.scale;
     image.alpha = spec.alpha.clamp(0.0, 1.0);
+    image.interpolation = spec.interpolation;
     image
 }
 
@@ -1399,7 +1400,7 @@ mod tests {
     use crate::core::colormap::Colormap;
     use crate::core::items::{Baseline, ErrorBars, LineStyle, Symbol};
     use crate::core::marker::{MarkerKind, MarkerSymbol};
-    use crate::render::gpu_image::ImagePixels;
+    use crate::render::gpu_image::{ImagePixels, InterpolationMode};
 
     #[test]
     fn curve_spec_conversion_preserves_backend_fields() {
@@ -1463,23 +1464,18 @@ mod tests {
     #[test]
     fn image_spec_conversion_sets_geometry_and_alpha() {
         let pixels = [0.0, 1.0, 2.0, 3.0];
-        let image = image_data_from_spec(ImageSpec {
-            pixels: ImagePixelsSpec::Scalar {
-                width: 2,
-                height: 2,
-                data: &pixels,
-                colormap: Box::new(Colormap::viridis(0.0, 3.0)),
-            },
-            origin: (10.0, 20.0),
-            scale: (0.5, 2.0),
-            alpha: 1.5,
-        });
+        let mut spec = ImageSpec::scalar(2, 2, &pixels, Colormap::viridis(0.0, 3.0));
+        spec.origin = (10.0, 20.0);
+        spec.scale = (0.5, 2.0);
+        spec.alpha = 1.5;
+        let image = image_data_from_spec(spec);
 
         assert_eq!(image.width, 2);
         assert_eq!(image.height, 2);
         assert_eq!(image.origin, (10.0, 20.0));
         assert_eq!(image.scale, (0.5, 2.0));
         assert_eq!(image.alpha, 1.0);
+        assert_eq!(image.interpolation, InterpolationMode::Nearest);
         match image.pixels {
             ImagePixels::Scalar { data, .. } => assert_eq!(data, pixels),
             ImagePixels::Rgba { .. } => panic!("expected scalar image"),
