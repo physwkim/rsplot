@@ -17,7 +17,7 @@ use crate::core::backend::{
     Backend, CurveColor, CurveSpec, ImagePixelsSpec, ImageSpec, ItemHandle, MarkerSpec, PickResult,
     ShapeSpec, TriangleSpec,
 };
-use crate::core::colormap::Colormap;
+use crate::core::colormap::{AutoscaleMode, Colormap};
 use crate::core::items::{Baseline, LineStyle, ScalarMask, Symbol};
 use crate::core::marker::{Marker, MarkerKind, MarkerSymbol};
 use crate::core::plot::{GraphGrid, Plot, PlotId};
@@ -1007,6 +1007,7 @@ fn retained_data_to_stats_input(
             height,
             origin,
             scale,
+            ..
         } => StatsInput::Image {
             data,
             width: *width,
@@ -1015,6 +1016,24 @@ fn retained_data_to_stats_input(
             scale: *scale,
         },
     }
+}
+
+/// Clone `base` with its value limits replaced by the [`AutoscaleMode`] range
+/// over `pixels` (NaN-ignoring), for a raw-pixel autoscale (silx
+/// `ColormapDialog` Stddev3 / Percentile autoscale, ColormapDialog.py:450-480).
+///
+/// The percentile pair comes from the base colormap's
+/// [`autoscale_percentiles`](Colormap::autoscale_percentiles) (silx
+/// `Colormap._percentiles`); [`AutoscaleMode::Stddev3`] ignores it. The LUT,
+/// normalization, gamma, and NaN color are preserved — only `vmin`/`vmax`
+/// change. Split out so the autoscale computation is unit-testable without a GPU
+/// backend.
+fn autoscaled_colormap(base: &Colormap, mode: AutoscaleMode, pixels: &[f64]) -> Colormap {
+    let (vmin, vmax) = mode.range(pixels, base.autoscale_percentiles);
+    let mut cm = base.clone();
+    cm.vmin = vmin;
+    cm.vmax = vmax;
+    cm
 }
 
 /// Borrow a [`RetainedItemData`]'s curve `(x, y)` arrays for a live
@@ -1038,13 +1057,14 @@ fn image_spec_retained_data(spec: &ImageSpec<'_>) -> Option<RetainedItemData> {
             width,
             height,
             data,
-            ..
+            colormap,
         } => Some(RetainedItemData::Image {
             data: data.iter().map(|&v| v as f64).collect(),
             width: *width as usize,
             height: *height as usize,
             origin: spec.origin,
             scale: spec.scale,
+            colormap: colormap.clone(),
         }),
         ImagePixelsSpec::Rgba { .. } => None,
     }
@@ -1288,13 +1308,18 @@ fn marker_spec_from_data(marker: &Marker) -> MarkerSpec<'_> {
 enum RetainedItemData {
     /// A curve's `(x, y)` arrays.
     Curve { x: Vec<f64>, y: Vec<f64> },
-    /// A scalar image's row-major pixels (as `f64`) plus its geometry.
+    /// A scalar image's row-major pixels (as `f64`), its geometry, and its
+    /// colormap (retained so a raw-pixel autoscale can re-upload the image with
+    /// new value limits without depending on transient render state). The
+    /// colormap is boxed: its 256-entry LUT would otherwise dominate the enum's
+    /// size and bloat every `Curve` variant too.
     Image {
         data: Vec<f64>,
         width: usize,
         height: usize,
         origin: (f64, f64),
         scale: (f64, f64),
+        colormap: Box<Colormap>,
     },
 }
 
@@ -3534,6 +3559,63 @@ impl PlotWidget {
 
     pub fn colorbar_colormap(&self) -> Option<&Colormap> {
         self.backend.plot().colormap.as_ref()
+    }
+
+    /// The active image's raw scalar pixels as `f64`, row-major (silx
+    /// `ImageData.getData`), or `None` when the active item is not a scalar
+    /// image with retained data.
+    ///
+    /// Used by [`Self::autoscale_active_image`] to drive a raw-pixel autoscale,
+    /// and exposed so callers can compute their own value statistics over the
+    /// exact pixels the image was uploaded with (NaN-preserving).
+    pub fn get_image_pixels_raw(&self) -> Option<Vec<f64>> {
+        match self
+            .active_item
+            .and_then(|handle| self.retained_data(handle))
+        {
+            Some(RetainedItemData::Image { data, .. }) => Some(data.clone()),
+            _ => None,
+        }
+    }
+
+    /// Autoscale the active image's colormap value limits from its raw pixels
+    /// using `mode` (silx `ColormapDialog` Stddev3 / Percentile autoscale,
+    /// ColormapDialog.py:450-480).
+    ///
+    /// Computes the `(vmin, vmax)` range over the active image's raw scalar
+    /// pixels (NaN-ignoring; [`AutoscaleMode::Stddev3`] = mean ± 3·std,
+    /// [`AutoscaleMode::Percentile`] = the colormap's percentile pair), then
+    /// re-uploads the image with a colormap carrying those limits (preserving
+    /// the LUT / normalization / gamma). Returns the applied `(vmin, vmax)`, or
+    /// `None` when the active item is not a scalar image with retained data.
+    pub fn autoscale_active_image(&mut self, mode: AutoscaleMode) -> Option<(f64, f64)> {
+        let handle = self.active_item?;
+        let (data, width, height, origin, scale, base) = match self.retained_data(handle)? {
+            RetainedItemData::Image {
+                data,
+                width,
+                height,
+                origin,
+                scale,
+                colormap,
+            } => (
+                data.clone(),
+                *width,
+                *height,
+                *origin,
+                *scale,
+                (**colormap).clone(),
+            ),
+            RetainedItemData::Curve { .. } => return None,
+        };
+        let cm = autoscaled_colormap(&base, mode, &data);
+        let limits = (cm.vmin, cm.vmax);
+        let pixels: Vec<f32> = data.iter().map(|&v| v as f32).collect();
+        let mut spec = ImageSpec::scalar(width as u32, height as u32, &pixels, cm);
+        spec.origin = origin;
+        spec.scale = scale;
+        self.update_image_spec(handle, spec);
+        Some(limits)
     }
 
     pub fn set_graph_cursor(&mut self, on: bool) {
@@ -6266,6 +6348,7 @@ mod tests {
             height: 2,
             origin: (0.0, 0.0),
             scale: (1.0, 1.0),
+            colormap: Box::new(Colormap::viridis(0.0, 1.0)),
         };
         let input = retained_data_to_stats_input(&data);
         let mut w = StatsWidget::new();
@@ -6305,8 +6388,47 @@ mod tests {
             height: 2,
             origin: (0.0, 0.0),
             scale: (1.0, 1.0),
+            colormap: Box::new(Colormap::viridis(0.0, 1.0)),
         };
         assert!(retained_curve_xy(&image).is_none());
+    }
+
+    #[test]
+    fn raw_pixel_stddev3_autoscale_matches_mean_plus_minus_3std() {
+        // Item 6: Stddev3 autoscale over a known pixel array (NaN ignored) sets
+        // vmin/vmax to clamp(mean ± 3·std) and preserves the rest of the
+        // colormap. Symmetric data [-1, 0, 1] has mean 0, population std
+        // sqrt(2/3); mean ± 3·std = ±3·sqrt(2/3) ≈ ±2.449, both outside the
+        // data range, so silx clamps to the data min/max (-1, 1).
+        let pixels = [-1.0, 0.0, 1.0, f64::NAN];
+        let base = Colormap::viridis(7.0, 9.0); // arbitrary prior limits
+        let cm = autoscaled_colormap(&base, AutoscaleMode::Stddev3, &pixels);
+        // Cross-check against the core primitive on the same data.
+        let (evmin, evmax) =
+            AutoscaleMode::Stddev3.range(&pixels, crate::core::colormap::DEFAULT_PERCENTILES);
+        assert_eq!(cm.vmin, evmin);
+        assert_eq!(cm.vmax, evmax);
+        assert_eq!((cm.vmin, cm.vmax), (-1.0, 1.0));
+        // The LUT (colormap identity) is preserved; only limits changed.
+        assert_eq!(cm.lut, base.lut);
+    }
+
+    #[test]
+    fn raw_pixel_percentile_autoscale_matches_percentile_bounds() {
+        // Item 6: Percentile autoscale over a known pixel array uses the
+        // colormap's percentile pair, NaN-ignoring.
+        let pixels = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, f64::NAN];
+        let mut base = Colormap::viridis(0.0, 1.0);
+        base.set_autoscale_percentiles(10.0, 90.0);
+        let cm = autoscaled_colormap(&base, AutoscaleMode::Percentile, &pixels);
+        // numpy linear-interpolation percentile over the 10 finite values
+        // [0..=9]: rank = p/100 * (n-1) = p/100 * 9. p=10 -> rank 0.9 -> 0.9;
+        // p=90 -> rank 8.1 -> 8.1.
+        let (evmin, evmax) = AutoscaleMode::Percentile.range(&pixels, (10.0, 90.0));
+        assert_eq!(cm.vmin, evmin);
+        assert_eq!(cm.vmax, evmax);
+        assert!((cm.vmin - 0.9).abs() < 1e-12, "vmin {}", cm.vmin);
+        assert!((cm.vmax - 8.1).abs() < 1e-12, "vmax {}", cm.vmax);
     }
 
     #[test]
