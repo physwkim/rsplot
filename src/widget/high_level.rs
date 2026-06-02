@@ -1344,6 +1344,42 @@ fn apply_curve_alpha(color: Color32, alpha: f32) -> Color32 {
     Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), a)
 }
 
+/// Multiply per-point alpha into each color's alpha channel in place, mirroring
+/// silx `Scatter.__applyColormapToData` (`rgbacolors[:, -1] *= __alpha`,
+/// scatter.py:534-535): the colormap RGBA alpha is scaled by the per-point
+/// alpha *before* the global item alpha multiplies on top in-shader (the
+/// three-stage `colormap.alpha * per_point.alpha * global.alpha`).
+///
+/// Each `alpha` entry is clamped to `[0, 1]` (silx `setData` clamps the alpha
+/// array, scatter.py:1051-1060). Composition runs over `min(colors, alpha)`
+/// entries: a shorter `alpha` leaves the trailing colors unchanged, and extra
+/// `alpha` entries past the colors are ignored — neither panics. `alpha`
+/// matching the point count (the silx contract) scales every color.
+///
+/// silx operates on *straight* (un-premultiplied) RGBA, so this scales the
+/// straight alpha (`Color32::to_srgba_unmultiplied`) and rebuilds via
+/// `from_rgba_unmultiplied`, leaving the straight RGB unchanged. (Reading the
+/// premultiplied `Color32::a/r/g/b` accessors and re-wrapping would
+/// double-premultiply the RGB.)
+fn compose_per_point_alpha(colors: &mut [Color32], alpha: &[f64]) {
+    for (color, &a) in colors.iter_mut().zip(alpha) {
+        let [r, g, b, sa] = color.to_srgba_unmultiplied();
+        let sa = ((a.clamp(0.0, 1.0) as f32) * (sa as f32)).round() as u8;
+        *color = Color32::from_rgba_unmultiplied(r, g, b, sa);
+    }
+}
+
+/// Clamp each per-point alpha entry to `[0, 1]`, mirroring silx
+/// `Scatter.setData` (`numpy.clip(alpha, 0.0, 1.0)`, scatter.py:1058-1059).
+/// Stored at the setter so the retained array is already in range; the
+/// composition in [`compose_per_point_alpha`] clamps again defensively.
+fn clamp_alpha(mut alpha: Vec<f64>) -> Vec<f64> {
+    for a in &mut alpha {
+        *a = a.clamp(0.0, 1.0);
+    }
+    alpha
+}
+
 /// Build a [`CurveData`] from a [`CurveSpec`], mirroring the backend's
 /// `curve_data_from_spec`. Retained in the [`ItemRecord`] so the curve-style
 /// cycle action can clone, edit the line style, and re-apply the full curve
@@ -6476,6 +6512,11 @@ pub struct ScatterView {
     /// ScatterView's `ColorBarWidget` visibility). Defaults to `true`; even when
     /// `true` the column is only reserved once data with a colormap exists.
     show_colorbar: bool,
+    /// Optional per-point alpha in `[0, 1]` (silx `Scatter` `alpha` array,
+    /// scatter.py:1051-1060). When set, it scales each point's colormap RGBA
+    /// alpha in the `Points` visualization (silx
+    /// `__applyColormapToData`); `None` leaves the colormap alpha untouched.
+    alpha: Option<Vec<f64>>,
 }
 
 impl ScatterView {
@@ -6493,6 +6534,7 @@ impl ScatterView {
             grid_resolution: (100, 100),
             mask: crate::widget::scatter_mask::ScatterMaskWidget::new(0),
             show_colorbar: true,
+            alpha: None,
         }
     }
 
@@ -6506,6 +6548,41 @@ impl ScatterView {
     /// scatter plot fills the freed width.
     pub fn set_show_colorbar(&mut self, show: bool) {
         self.show_colorbar = show;
+    }
+
+    /// The retained per-point alpha array in `[0, 1]` (silx `Scatter` `alpha`),
+    /// or `None` when no per-point alpha is set.
+    pub fn alpha(&self) -> Option<&[f64]> {
+        self.alpha.as_deref()
+    }
+
+    /// Set the per-point alpha array (silx `Scatter.setData(alpha=...)`,
+    /// scatter.py:1051-1060), consumed at construction. Each entry is clamped to
+    /// `[0, 1]`; the array should have one entry per point (the silx contract),
+    /// but a length mismatch does not panic — see [`compose_per_point_alpha`].
+    /// In [`ScatterVisualization::Points`] mode each point's colormap RGBA alpha
+    /// is multiplied by its per-point alpha, with the curve's global alpha
+    /// multiplying on top in-shader (silx three-stage `colormap.alpha *
+    /// per_point.alpha * global.alpha`).
+    #[must_use]
+    pub fn with_alpha(mut self, alpha: Vec<f64>) -> Self {
+        self.alpha = Some(clamp_alpha(alpha));
+        self
+    }
+
+    /// Set the per-point alpha array and re-render the current visualization
+    /// (silx `Scatter.setData(alpha=...)`). Each entry is clamped to `[0, 1]`.
+    /// See [`Self::with_alpha`] for the three-stage alpha composition.
+    pub fn set_alpha(&mut self, alpha: Vec<f64>) {
+        self.alpha = Some(clamp_alpha(alpha));
+        self.rebuild_visualization();
+    }
+
+    /// Clear any per-point alpha (silx `Scatter.setData(alpha=None)`) and
+    /// re-render, restoring the unscaled colormap RGBA alpha.
+    pub fn clear_alpha(&mut self) {
+        self.alpha = None;
+        self.rebuild_visualization();
     }
 
     /// Upload data.  `values` drives point colours through `colormap`.
@@ -6608,7 +6685,7 @@ impl ScatterView {
                 if let Some(h) = self.grid_handle.take() {
                     self.inner.remove(h);
                 }
-                let colors: Vec<Color32> = values
+                let mut colors: Vec<Color32> = values
                     .iter()
                     .map(|&v| {
                         let t = colormap.normalize(v);
@@ -6617,6 +6694,13 @@ impl ScatterView {
                         Color32::from_rgba_unmultiplied(r, g, b, a)
                     })
                     .collect();
+                // Stage 2 of the silx three-stage alpha: scale each colormap
+                // RGBA alpha by the per-point alpha (silx `__applyColormapToData`
+                // `rgbacolors[:, -1] *= __alpha`). The curve's global alpha
+                // (CurveSpec.alpha) multiplies on top in-shader for stage 3.
+                if let Some(alpha) = &self.alpha {
+                    compose_per_point_alpha(&mut colors, alpha);
+                }
 
                 let mut spec = CurveSpec::new(&x, &y, Color32::WHITE);
                 spec.color = crate::core::backend::CurveColor::PerVertex(&colors);
@@ -7109,6 +7193,56 @@ fn roi_description(roi: &Roi) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clamp_alpha_clamps_out_of_range_entries() {
+        // silx Scatter.setData clips alpha to [0, 1] (scatter.py:1058-1059):
+        // >1 -> 1, <0 -> 0, in-range unchanged.
+        assert_eq!(
+            clamp_alpha(vec![1.5, -0.5, 0.25, 1.0, 0.0]),
+            vec![1.0, 0.0, 0.25, 1.0, 0.0]
+        );
+    }
+
+    #[test]
+    fn compose_per_point_alpha_multiplies_color_alpha() {
+        // silx `rgbacolors[:, -1] *= __alpha`: a color with straight alpha 200
+        // and per-point alpha 0.5 -> 100 (200 * 0.5). RGB is unchanged.
+        let mut colors = vec![Color32::from_rgba_unmultiplied(10, 20, 30, 200)];
+        compose_per_point_alpha(&mut colors, &[0.5]);
+        assert_eq!(colors[0], Color32::from_rgba_unmultiplied(10, 20, 30, 100));
+    }
+
+    #[test]
+    fn compose_per_point_alpha_clamps_each_entry() {
+        // An out-of-range alpha clamps to [0, 1] inside the compose step too:
+        // 2.0 -> 1.0 (alpha unchanged at 200), -1.0 -> 0.0 (alpha 0).
+        let mut colors = vec![
+            Color32::from_rgba_unmultiplied(10, 20, 30, 200),
+            Color32::from_rgba_unmultiplied(40, 50, 60, 200),
+        ];
+        compose_per_point_alpha(&mut colors, &[2.0, -1.0]);
+        assert_eq!(colors[0], Color32::from_rgba_unmultiplied(10, 20, 30, 200));
+        assert_eq!(colors[1], Color32::from_rgba_unmultiplied(40, 50, 60, 0));
+    }
+
+    #[test]
+    fn compose_per_point_alpha_handles_length_mismatch() {
+        // alpha shorter than colors: the trailing colors keep their alpha
+        // (composition runs over min(len), no panic).
+        let mut colors = vec![
+            Color32::from_rgba_unmultiplied(0, 0, 0, 200),
+            Color32::from_rgba_unmultiplied(0, 0, 0, 200),
+        ];
+        compose_per_point_alpha(&mut colors, &[0.5]);
+        assert_eq!(colors[0].a(), 100);
+        assert_eq!(colors[1].a(), 200);
+
+        // alpha longer than colors: the extra entries are ignored, no panic.
+        let mut colors = vec![Color32::from_rgba_unmultiplied(0, 0, 0, 200)];
+        compose_per_point_alpha(&mut colors, &[0.5, 0.25, 0.1]);
+        assert_eq!(colors[0].a(), 100);
+    }
 
     /// Build the `DataBounds` the widget would accumulate, with non-degenerate
     /// spans on every axis so `as_non_degenerate` does not pad.
