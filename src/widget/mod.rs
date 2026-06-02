@@ -6,6 +6,7 @@
 //! (`doc/design.md` §8).
 
 pub mod chrome;
+pub mod colorbar;
 pub mod colormap_dialog;
 pub mod complex_image_view;
 pub mod fit_widget;

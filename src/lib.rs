@@ -39,6 +39,7 @@ pub use crate::render::gpu_image::{
     AggregationMode, ImageData, ImagePixels, InterpolationMode, aggregate_blocks,
 };
 pub use crate::render::save::{SaveError, encode_png, save_graph};
+pub use crate::widget::colorbar::{ColorBarOrientation, ColorBarWidget};
 pub use crate::widget::colormap_dialog::ColormapDialog;
 pub use crate::widget::complex_image_view::{ComplexImageView, ComplexMode};
 pub use crate::widget::fit_widget::FitWidget;
