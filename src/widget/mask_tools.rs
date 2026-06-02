@@ -529,6 +529,47 @@ impl MaskToolsWidget {
         self.update_points(level, &rows, &cols, mask);
     }
 
+    /// Mask or unmask a thickened Bresenham line at the given level.
+    ///
+    /// Mirrors silx `ImageMask.updateLine` (gui/plot/MaskToolsWidget.py:261):
+    /// `shapes.draw_line` then `updatePoints`. `from`/`to` are `(row, col)`
+    /// endpoints, both inclusive, and the line is thickened to `width` pixels.
+    pub fn update_line(
+        &mut self,
+        level: u8,
+        from: (i64, i64),
+        to: (i64, i64),
+        width: i64,
+        mask: bool,
+    ) {
+        let (rows, cols) = line_coords(from.0, from.1, to.0, to.1, width);
+        self.update_points(level, &rows, &cols, mask);
+    }
+
+    /// Draw a thickened pencil line between two `(col, row)` cells at the
+    /// current level, filling every cell the line crosses so a fast drag
+    /// leaves no gaps.
+    ///
+    /// Mirrors the silx pencil drag path (`MaskToolsWidget.py:849-876`
+    /// `updateLine` when `lastPencilPos != current`): a Bresenham line at the
+    /// current pencil width. Coordinates are `(x, y) = (col, row)` to match the
+    /// plot's data-coordinate ordering; `width` is the brush width in pixels.
+    /// Always masks (sets the current level); use [`update_line`] with
+    /// `mask = false` for the eraser.
+    ///
+    /// [`update_line`]: Self::update_line
+    pub fn draw_line(&mut self, from: (i32, i32), to: (i32, i32), width: u32) {
+        let (col0, row0) = (from.0 as i64, from.1 as i64);
+        let (col1, row1) = (to.0 as i64, to.1 as i64);
+        self.update_line(
+            self.level,
+            (row0, col0),
+            (row1, col1),
+            width.max(1) as i64,
+            true,
+        );
+    }
+
     /// Mask/unmask pixels selected by a boolean stencil at the current level.
     ///
     /// Mirrors silx `BaseMask.updateStencil`: when `mask` is true, every
@@ -754,6 +795,76 @@ pub fn ellipse_fill(crow: i64, ccol: i64, radius_r: f32, radius_c: f32) -> (Vec<
         }
     }
     (rows, cols)
+}
+
+/// Generate the `(rows, cols)` image coordinates of a line between two end
+/// points, both inclusive, thickened to `width` pixels.
+///
+/// Faithful port of `silx.image.shapes.draw_line` (image/shapes.pyx:195): a
+/// Bresenham line where width is handled by drawing `width` parallel pixels
+/// along the minor axis, offset back by `(width - 1) / 2`. The degenerate
+/// case (`from == to`) returns the single end point regardless of width,
+/// matching silx. Coordinates may be negative.
+pub fn line_coords(row0: i64, col0: i64, row1: i64, col1: i64, width: i64) -> (Vec<i64>, Vec<i64>) {
+    let dcol = (col1 - col0).abs();
+    let drow = (row1 - row0).abs();
+    let invert_coords = dcol < drow;
+
+    // silx: single point when both deltas are zero (width ignored).
+    if dcol == 0 && drow == 0 {
+        return (vec![row0], vec![col0]);
+    }
+
+    let width = width.max(1);
+
+    // Set the major axis `a` and minor axis `b` per the segment's octant.
+    // `a` is the driving axis, `b` is thickened by `width`.
+    let (da, db, step_a, step_b, a0, b0);
+    if !invert_coords {
+        da = dcol;
+        db = drow;
+        step_a = if col1 > col0 { 1 } else { -1 };
+        step_b = if row1 > row0 { 1 } else { -1 };
+        a0 = col0;
+        b0 = row0;
+    } else {
+        da = drow;
+        db = dcol;
+        step_a = if row1 > row0 { 1 } else { -1 };
+        step_b = if col1 > col0 { 1 } else { -1 };
+        a0 = row0;
+        b0 = col0;
+    }
+
+    let count = (da + 1) as usize;
+    let wsize = width as usize;
+    // Row-major (index, offset) buffers, matching silx's (da+1, width) arrays.
+    let mut a_coords = Vec::with_capacity(count * wsize);
+    let mut b_coords = Vec::with_capacity(count * wsize);
+
+    let mut a = a0;
+    let mut b = b0 - (width - 1) / 2;
+    let mut delta = 2 * db - da;
+    for _ in 0..count {
+        for offset in 0..width {
+            b_coords.push(b + offset);
+            a_coords.push(a);
+        }
+        if delta >= 0 {
+            b += step_b;
+            delta -= 2 * da;
+        }
+        a += step_a;
+        delta += 2 * db;
+    }
+
+    if !invert_coords {
+        // a is the column axis, b is the row axis.
+        (b_coords, a_coords)
+    } else {
+        // a is the row axis, b is the column axis.
+        (a_coords, b_coords)
+    }
 }
 
 #[cfg(test)]
@@ -1038,6 +1149,71 @@ mod tests {
         // Unmask level 1 below threshold 3: covers idx 0,1,2; only level-1 clear.
         w.update_below_threshold(1, &data, 3.0, false);
         assert_eq!(w.mask, vec![0, 2, 0, 2]);
+    }
+
+    #[test]
+    fn line_coords_diagonal_hits_every_cell() {
+        // silx draw_line: Bresenham diagonal includes both endpoints with no
+        // gaps. (row, col) order for a 45-degree line is the identity diagonal.
+        let (rows, cols) = line_coords(0, 0, 3, 3, 1);
+        assert_eq!(rows, vec![0, 1, 2, 3]);
+        assert_eq!(cols, vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn line_coords_single_point_is_degenerate() {
+        // silx draw_line: dcol == 0 and drow == 0 returns the single point,
+        // width ignored.
+        let (rows, cols) = line_coords(2, 5, 2, 5, 7);
+        assert_eq!(rows, vec![2]);
+        assert_eq!(cols, vec![5]);
+    }
+
+    #[test]
+    fn line_coords_width_thickens_minor_axis() {
+        // silx draw_line: width draws `width` parallel pixels offset back by
+        // (width-1)/2 on the minor axis. A horizontal width-2 line covers two
+        // adjacent rows along the whole span.
+        let (rows, cols) = line_coords(1, 0, 1, 3, 2);
+        assert_eq!(rows, vec![1, 2, 1, 2, 1, 2, 1, 2]);
+        assert_eq!(cols, vec![0, 0, 1, 1, 2, 2, 3, 3]);
+    }
+
+    #[test]
+    fn draw_line_fills_gap_left_by_a_fast_drag() {
+        // The pencil drag interpolates between sampled positions so a jump from
+        // (0,0) to (3,3) leaves no unmasked cells along the diagonal.
+        let mut w = MaskToolsWidget::new(4, 4);
+        w.level = 1;
+        // from/to are (col, row) = (x, y).
+        w.draw_line((0, 0), (3, 3), 1);
+        let expected: Vec<u8> = vec![
+            1, 0, 0, 0, //
+            0, 1, 0, 0, //
+            0, 0, 1, 0, //
+            0, 0, 0, 1, //
+        ];
+        assert_eq!(w.mask, expected);
+    }
+
+    #[test]
+    fn update_line_eraser_clears_only_current_level() {
+        // silx updateLine with mask=False unmasks only cells already at level.
+        let mut w = MaskToolsWidget::new(4, 4);
+        // Pre-fill the diagonal with mixed levels: (0,0)->1, (1,1)->2, etc.
+        w.mask[0] = 1; // (0,0)
+        w.mask[5] = 2; // (1,1)
+        w.mask[10] = 1; // (2,2)
+        w.mask[15] = 1; // (3,3)
+        // Erase level 1 along the diagonal: only the level-1 cells clear.
+        w.update_line(1, (0, 0), (3, 3), 1, false);
+        let expected: Vec<u8> = vec![
+            0, 0, 0, 0, //
+            0, 2, 0, 0, //
+            0, 0, 0, 0, //
+            0, 0, 0, 0, //
+        ];
+        assert_eq!(w.mask, expected);
     }
 
     #[test]
