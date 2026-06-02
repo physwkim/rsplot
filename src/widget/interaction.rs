@@ -769,6 +769,104 @@ impl DrawState {
     }
 }
 
+/// How a selection / draw-mode area is filled, mirroring silx
+/// `setSelectionArea(fill=...)` (`PlotInteraction.py:98-141`): `'hatch'`,
+/// `'solid'`, or `'none'`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FillMode {
+    /// Diagonal hatch fill (silx `fill="hatch"`), the default for closed
+    /// selection areas (rectangle/ellipse/polygon).
+    #[default]
+    Hatch,
+    /// Solid fill (silx `fill="solid"`).
+    Solid,
+    /// No fill, outline only (silx `fill="none"`), used for the freehand
+    /// polyline and the polygon first-point marker.
+    None,
+}
+
+/// Style of an in-progress selection / draw-mode overlay, mirroring the
+/// parameters silx passes to `setSelectionArea` (`PlotInteraction.py:98-141`):
+/// a [`FillMode`] and an RGBA color. silx draws the outline dashed
+/// (`linestyle="--"`); the widget honors that when painting.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SelectionStyle {
+    /// How the area is filled.
+    pub fill: FillMode,
+    /// The outline / fill color.
+    pub color: egui::Color32,
+}
+
+impl Default for SelectionStyle {
+    fn default() -> Self {
+        // silx default selection color is a translucent black; the widget can
+        // override per draw session.
+        Self {
+            fill: FillMode::Hatch,
+            color: egui::Color32::from_rgba_unmultiplied(0, 0, 0, 128),
+        }
+    }
+}
+
+impl SelectionStyle {
+    /// A style with the given fill and color.
+    pub fn new(fill: FillMode, color: egui::Color32) -> Self {
+        Self { fill, color }
+    }
+}
+
+/// Diagonal (45°) hatch line endpoints covering `rect`, spaced `spacing` pixels
+/// apart, mirroring the visual of silx's `fill="hatch"`
+/// (`PlotInteraction.py:98-141`). Each returned pair `(a, b)` is a line segment
+/// (in `rect`'s coordinate space) clipped to the rectangle. Pure so the line
+/// layout is unit-testable without a painter. A non-positive `spacing` or
+/// degenerate `rect` yields no lines.
+pub fn hatch_lines(rect: Rect, spacing: f32) -> Vec<(Pos2, Pos2)> {
+    if spacing <= 0.0 || rect.width() <= 0.0 || rect.height() <= 0.0 {
+        return Vec::new();
+    }
+    let mut lines = Vec::new();
+    // Lines of slope +1 (going down-right): x - y = c. c ranges so the line
+    // crosses the rect. For a line x = y + c, it intersects the rect when
+    // c ∈ [left - bottom, right - top].
+    let (left, right, top, bottom) = (rect.left(), rect.right(), rect.top(), rect.bottom());
+    // Start c at the first multiple of spacing at or below the min, so the
+    // pattern is stable regardless of rect offset.
+    let c_min = left - bottom;
+    let c_max = right - top;
+    let mut c = (c_min / spacing).floor() * spacing;
+    while c <= c_max {
+        // Clip the infinite line x = y + c to the rect, collecting entry/exit.
+        let mut pts: Vec<Pos2> = Vec::new();
+        // Intersection with the four edges; keep those within the rect.
+        // Top edge y = top: x = top + c.
+        let xt = top + c;
+        if xt >= left && xt <= right {
+            pts.push(egui::pos2(xt, top));
+        }
+        // Bottom edge y = bottom: x = bottom + c.
+        let xb = bottom + c;
+        if xb >= left && xb <= right {
+            pts.push(egui::pos2(xb, bottom));
+        }
+        // Left edge x = left: y = left - c.
+        let yl = left - c;
+        if yl >= top && yl <= bottom {
+            pts.push(egui::pos2(left, yl));
+        }
+        // Right edge x = right: y = right - c.
+        let yr = right - c;
+        if yr >= top && yr <= bottom {
+            pts.push(egui::pos2(right, yr));
+        }
+        if pts.len() >= 2 {
+            lines.push((pts[0], pts[1]));
+        }
+        c += spacing;
+    }
+    lines
+}
+
 /// Semi-axes `(a, b)` of the ellipse centered at `center` passing through
 /// `point`, mirroring silx `SelectEllipse._getEllipseSize`
 /// (`PlotInteraction.py:688-721`). `a`/`b` are the lengths from the center to
@@ -1498,6 +1596,43 @@ mod tests {
         let mut s = DrawState::new(DrawMode::Rectangle);
         assert!(s.on_move(di((1.0, 1.0), (10.0, 10.0))).is_none());
         assert!(s.on_release(di((1.0, 1.0), (10.0, 10.0))).is_none());
+    }
+
+    #[test]
+    fn fill_mode_and_style_defaults() {
+        assert_eq!(FillMode::default(), FillMode::Hatch);
+        let s = SelectionStyle::default();
+        assert_eq!(s.fill, FillMode::Hatch);
+        let s = SelectionStyle::new(FillMode::Solid, egui::Color32::RED);
+        assert_eq!(s.fill, FillMode::Solid);
+        assert_eq!(s.color, egui::Color32::RED);
+    }
+
+    #[test]
+    fn hatch_lines_cover_rect() {
+        let rect = Rect::from_min_max(pos2(0.0, 0.0), pos2(40.0, 40.0));
+        let lines = hatch_lines(rect, 10.0);
+        // Diagonal lines spanning a 40x40 box at 10px spacing produce several
+        // segments, each with both endpoints on the rect boundary.
+        assert!(!lines.is_empty());
+        for (a, b) in &lines {
+            assert!(rect.contains(*a) && rect.contains(*b), "{a:?} {b:?}");
+            // Slope +1 within tolerance (segment is a 45-degree line).
+            let dx = b.x - a.x;
+            let dy = b.y - a.y;
+            assert!((dx.abs() - dy.abs()).abs() <= 1e-3, "dx={dx} dy={dy}");
+        }
+    }
+
+    #[test]
+    fn hatch_lines_degenerate_inputs_empty() {
+        let rect = Rect::from_min_max(pos2(0.0, 0.0), pos2(40.0, 40.0));
+        // Non-positive spacing -> no lines.
+        assert!(hatch_lines(rect, 0.0).is_empty());
+        assert!(hatch_lines(rect, -5.0).is_empty());
+        // Degenerate rect -> no lines.
+        let zero = Rect::from_min_max(pos2(0.0, 0.0), pos2(0.0, 0.0));
+        assert!(hatch_lines(zero, 10.0).is_empty());
     }
 
     #[test]

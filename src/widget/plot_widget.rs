@@ -66,6 +66,17 @@ pub struct PlotResponse {
     pub roi_changed: Option<usize>,
 }
 
+/// What [`PlotView::show_with_draw`] returns: the [`PlotResponse`] plus the
+/// draw-mode event (if any) produced this frame.
+pub struct DrawResponse {
+    /// The underlying plot response (egui response + display transform).
+    pub plot: PlotResponse,
+    /// The [`DrawEvent`](interaction::DrawEvent) produced this frame: an
+    /// `InProgress` preview while drawing, or `Finished` when the shape
+    /// completes. `None` when nothing changed this frame.
+    pub event: Option<interaction::DrawEvent>,
+}
+
 /// Stateless view that renders a [`Plot`] into an egui `Ui`.
 #[derive(Default)]
 pub struct PlotView;
@@ -273,6 +284,124 @@ impl PlotView {
             roi_changed,
         }
     }
+
+    /// Render the plot in a draw/select mode driven by `draw`, painting the
+    /// in-progress shape as a rubber-band overlay and returning any
+    /// [`DrawEvent`](interaction::DrawEvent) produced this frame.
+    ///
+    /// The plot is shown in [`PlotInteractionMode::Select`] so a primary drag
+    /// feeds the draw state machine instead of box-zooming (secondary drag still
+    /// pans, wheel still zooms). Press / move / release on the data area are fed
+    /// to `draw` (silx `Select*` `onPress` / `onMove` / `onRelease`); the
+    /// resulting preview/finished shape is drawn with `style`
+    /// (silx `setSelectionArea`, `PlotInteraction.py:98-141`).
+    ///
+    /// Wiring a `Finished` event to ROI / mask creation is left to the caller
+    /// (silx high-level widgets / mask tools).
+    pub fn show_with_draw(
+        self,
+        ui: &mut Ui,
+        plot: &mut Plot,
+        draw: &mut interaction::DrawState,
+        style: interaction::SelectionStyle,
+    ) -> DrawResponse {
+        let plot_response =
+            PlotView::new().show_with_interaction(ui, plot, PlotInteractionMode::Select);
+        let response = &plot_response.response;
+        let transform = plot_response.transform;
+
+        // Feed pointer events to the draw state machine, mapping each pixel to
+        // data through the display transform.
+        let mut event = None;
+        if let Some(p) = response.interact_pointer_pos() {
+            let input = interaction::DrawInput::from_pixel(&transform, p);
+            if response.drag_started_by(PointerButton::Primary) || response.clicked() {
+                event = draw.on_press(input).or(event);
+            }
+            if response.dragged_by(PointerButton::Primary) {
+                event = draw.on_move(input).or(event);
+            }
+            if response.drag_stopped_by(PointerButton::Primary) || response.clicked() {
+                event = draw.on_release(input).or(event);
+            }
+        }
+        // A bare hover (no button) still drives polygon snap / preview.
+        if !response.is_pointer_button_down_on()
+            && let Some(p) = response.hover_pos()
+            && draw.is_active()
+        {
+            let input = interaction::DrawInput::from_pixel(&transform, p);
+            event = draw.on_move(input).or(event);
+        }
+
+        // Paint the in-progress preview overlay (the rubber band).
+        if let Some(points) = draw.preview() {
+            draw_overlay(ui.painter(), &transform, draw.mode(), &points, style);
+        } else if let Some(interaction::DrawEvent::InProgress { mode, points }) = &event {
+            draw_overlay(ui.painter(), &transform, *mode, points, style);
+        }
+
+        DrawResponse {
+            plot: plot_response,
+            event,
+        }
+    }
+}
+
+/// Paint a draw-mode rubber-band overlay: the fill per `style.fill` plus the
+/// dashed outline silx uses (`linestyle="--"`, `PlotInteraction.py:98-141`).
+/// `points` are data-space vertices (already in the preview shape for the mode).
+fn draw_overlay(
+    painter: &egui::Painter,
+    transform: &Transform,
+    mode: interaction::DrawMode,
+    points: &[(f64, f64)],
+    style: interaction::SelectionStyle,
+) {
+    use interaction::{DrawMode, FillMode};
+
+    if points.is_empty() {
+        return;
+    }
+    let pix: Vec<Pos2> = points
+        .iter()
+        .map(|&(x, y)| transform.data_to_pixel(x, y))
+        .collect();
+
+    // FreeHand / Line are open polylines; the rest are closed areas.
+    let closed = !matches!(mode, DrawMode::FreeHand | DrawMode::Line);
+
+    if closed && pix.len() >= 3 {
+        let bb = Rect::from_points(&pix);
+        match style.fill {
+            FillMode::Solid => {
+                let fill = Color32::from_rgba_unmultiplied(
+                    style.color.r(),
+                    style.color.g(),
+                    style.color.b(),
+                    style.color.a() / 2,
+                );
+                painter.add(egui::Shape::convex_polygon(pix.clone(), fill, Stroke::NONE));
+            }
+            FillMode::Hatch => {
+                // Diagonal hatch over the bounding box (the box-clipped
+                // approximation silx renders for the hatch fill).
+                let clipped = painter.with_clip_rect(bb);
+                for (a, b) in interaction::hatch_lines(bb, 6.0) {
+                    clipped.line_segment([a, b], Stroke::new(1.0, style.color));
+                }
+            }
+            FillMode::None => {}
+        }
+    }
+
+    // Dashed outline (silx linestyle="--").
+    let stroke = Stroke::new(1.5, style.color);
+    let mut outline = pix.clone();
+    if closed && outline.len() >= 2 {
+        outline.push(outline[0]);
+    }
+    painter.add(egui::Shape::dashed_line(&outline, stroke, 6.0, 4.0));
 }
 
 /// Per-axis log flags `[x, y]` (1.0 = log10) for the shaders, matching a
