@@ -1330,13 +1330,18 @@ impl GpuCurve {
         queue.write_buffer(&self.params, 0, bytemuck::bytes_of(&params));
 
         // Marker uniform shares the same transform/viewport; symbol code is the
-        // sentinel `0` (unused) when no marker is set.
+        // sentinel `0` (unused) when no marker is set. The drawn size honors the
+        // silx per-symbol overrides (pixel = 1px, point shrinks, strokes round to
+        // odd) via `render_size_px`.
+        let render_size = self
+            .symbol
+            .map_or(self.marker_size, |s| s.render_size_px(self.marker_size));
         let marker = MarkerParams {
             ortho,
             color: self.color,
             axis_log,
             viewport_px,
-            half_size_px: 0.5 * self.marker_size,
+            half_size_px: 0.5 * render_size,
             symbol: self.symbol.map_or(0, Symbol::code),
             _pad: [0.0; 2],
         };
@@ -1444,6 +1449,19 @@ mod tests {
         assert_eq!(Symbol::Cross.code(), 2);
         assert_eq!(Symbol::Plus.code(), 3);
         assert_eq!(Symbol::Triangle.code(), 4);
+        assert_eq!(Symbol::Diamond.code(), 5);
+        assert_eq!(Symbol::Point.code(), 6);
+        assert_eq!(Symbol::Pixel.code(), 7);
+        assert_eq!(Symbol::VerticalLine.code(), 8);
+        assert_eq!(Symbol::HorizontalLine.code(), 9);
+        assert_eq!(Symbol::TickLeft.code(), 10);
+        assert_eq!(Symbol::TickRight.code(), 11);
+        assert_eq!(Symbol::TickUp.code(), 12);
+        assert_eq!(Symbol::TickDown.code(), 13);
+        assert_eq!(Symbol::CaretLeft.code(), 14);
+        assert_eq!(Symbol::CaretRight.code(), 15);
+        assert_eq!(Symbol::CaretUp.code(), 16);
+        assert_eq!(Symbol::CaretDown.code(), 17);
     }
 
     #[test]

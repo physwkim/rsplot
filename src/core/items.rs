@@ -69,19 +69,48 @@ impl LineStyle {
     }
 }
 
-/// Marker symbol drawn at each curve vertex (silx `addCurve` `symbol`).
+/// Marker symbol drawn at each curve vertex (silx `addCurve` `symbol`). The
+/// catalog mirrors silx's full GL-backend symbol set (`silx.gui.plot.items.core`
+/// `SymbolMixIn._SUPPORTED_SYMBOLS`); [`Symbol::Triangle`] is an egui extra silx
+/// has no code for. The `Heart` glyph (silx `'♥'`) is not implemented.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Symbol {
-    /// Circle marker.
+    /// Circle marker. silx `'o'`.
     Circle,
-    /// Square marker.
+    /// Square marker. silx `'s'`.
     Square,
-    /// Diagonal "x" marker.
+    /// Diagonal "x" marker. silx `'x'`.
     Cross,
-    /// Upright "+" marker.
+    /// Upright "+" marker. silx `'+'`.
     Plus,
-    /// Upward-pointing triangle marker.
+    /// Upward-pointing triangle marker (egui extra; not a silx symbol).
     Triangle,
+    /// Diamond (rotated square) marker. silx `'d'`.
+    Diamond,
+    /// Small filled circle. silx `'.'`.
+    Point,
+    /// Single-pixel square. silx `','`.
+    Pixel,
+    /// Vertical line stroke. silx `'|'`.
+    VerticalLine,
+    /// Horizontal line stroke. silx `'_'`.
+    HorizontalLine,
+    /// Leftward (left half) tick stroke. silx `'tickleft'`.
+    TickLeft,
+    /// Rightward (right half) tick stroke. silx `'tickright'`.
+    TickRight,
+    /// Upward (top half) tick stroke. silx `'tickup'`.
+    TickUp,
+    /// Downward (bottom half) tick stroke. silx `'tickdown'`.
+    TickDown,
+    /// Left-pointing open caret. silx `'caretleft'`.
+    CaretLeft,
+    /// Right-pointing open caret. silx `'caretright'`.
+    CaretRight,
+    /// Up-pointing open caret. silx `'caretup'`.
+    CaretUp,
+    /// Down-pointing open caret. silx `'caretdown'`.
+    CaretDown,
 }
 
 impl Symbol {
@@ -93,6 +122,44 @@ impl Symbol {
             Symbol::Cross => 2,
             Symbol::Plus => 3,
             Symbol::Triangle => 4,
+            Symbol::Diamond => 5,
+            Symbol::Point => 6,
+            Symbol::Pixel => 7,
+            Symbol::VerticalLine => 8,
+            Symbol::HorizontalLine => 9,
+            Symbol::TickLeft => 10,
+            Symbol::TickRight => 11,
+            Symbol::TickUp => 12,
+            Symbol::TickDown => 13,
+            Symbol::CaretLeft => 14,
+            Symbol::CaretRight => 15,
+            Symbol::CaretUp => 16,
+            Symbol::CaretDown => 17,
+        }
+    }
+
+    /// The physical-pixel size (full extent) this symbol is actually drawn at,
+    /// given the curve's requested `marker_size`. Mirrors the size overrides in
+    /// silx `GLPlotCurve.SymbolPoints.render`:
+    ///
+    /// - [`Symbol::Pixel`] is always a single pixel.
+    /// - [`Symbol::Point`] shrinks to `ceil(0.5 * size) + 1`, the small dot
+    ///   matplotlib draws for `'.'`.
+    /// - The 1-pixel strokes ([`Symbol::Plus`], the lines, and the ticks) round to
+    ///   the nearest odd pixel so the stroke straddles a pixel center.
+    /// - Every other symbol keeps `marker_size` unchanged.
+    pub(crate) fn render_size_px(self, marker_size: f32) -> f32 {
+        match self {
+            Symbol::Pixel => 1.0,
+            Symbol::Point => (0.5 * marker_size).ceil() + 1.0,
+            Symbol::Plus
+            | Symbol::VerticalLine
+            | Symbol::HorizontalLine
+            | Symbol::TickLeft
+            | Symbol::TickRight
+            | Symbol::TickUp
+            | Symbol::TickDown => (marker_size / 2.0).floor() * 2.0 + 1.0,
+            _ => marker_size,
         }
     }
 }
@@ -202,6 +269,49 @@ mod tests {
             LineStyle::DashDot.painter_dashes(1.0),
             Some((vec![6.0, 1.5], vec![3.0, 3.0], 0.0))
         );
+    }
+
+    #[test]
+    fn render_size_px_overrides_per_symbol() {
+        // Pixel is always a single pixel regardless of the requested size.
+        assert_eq!(Symbol::Pixel.render_size_px(7.0), 1.0);
+        assert_eq!(Symbol::Pixel.render_size_px(20.0), 1.0);
+
+        // Point shrinks to ceil(0.5 * size) + 1: 7 -> ceil(3.5)+1 = 5;
+        // 8 -> ceil(4)+1 = 5 (the .5 boundary rounds up).
+        assert_eq!(Symbol::Point.render_size_px(7.0), 5.0);
+        assert_eq!(Symbol::Point.render_size_px(8.0), 5.0);
+
+        // The 1px strokes round to the nearest odd pixel: an odd size is kept,
+        // an even size becomes the next odd one up.
+        for s in [
+            Symbol::Plus,
+            Symbol::VerticalLine,
+            Symbol::HorizontalLine,
+            Symbol::TickLeft,
+            Symbol::TickRight,
+            Symbol::TickUp,
+            Symbol::TickDown,
+        ] {
+            assert_eq!(s.render_size_px(7.0), 7.0, "odd stays odd");
+            assert_eq!(s.render_size_px(8.0), 9.0, "even rounds to next odd");
+        }
+
+        // Every other symbol keeps the requested size unchanged.
+        for s in [
+            Symbol::Circle,
+            Symbol::Square,
+            Symbol::Cross,
+            Symbol::Triangle,
+            Symbol::Diamond,
+            Symbol::CaretLeft,
+            Symbol::CaretRight,
+            Symbol::CaretUp,
+            Symbol::CaretDown,
+        ] {
+            assert_eq!(s.render_size_px(7.0), 7.0);
+            assert_eq!(s.render_size_px(8.0), 8.0);
+        }
     }
 
     #[test]

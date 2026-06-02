@@ -12,7 +12,10 @@ struct Params {
     axis_log: vec2<f32>,      // 1.0 if that axis is log10, else 0.0
     viewport_px: vec2<f32>,   // data-area size in physical pixels
     half_size_px: f32,        // half the marker size, in physical pixels
-    symbol: u32,              // 0 circle, 1 square, 2 cross, 3 plus, 4 triangle
+    // 0 circle, 1 square, 2 cross, 3 plus, 4 triangle, 5 diamond, 6 point,
+    // 7 pixel, 8 vertical line, 9 horizontal line, 10..13 tick left/right/up/down,
+    // 14..17 caret left/right/up/down (matches Symbol::code).
+    symbol: u32,
 };
 
 @group(0) @binding(0) var<uniform> params: Params;
@@ -67,6 +70,11 @@ fn edge(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>) -> f32 {
 fn inside(uv: vec2<f32>) -> bool {
     // Bar half-thickness for cross/plus symbols.
     let th = 0.32;
+    // Pixel-space offset from the marker center: silx's symbol shaders test
+    // against fixed-pixel thresholds (`size * (coord - 0.5)` in GLPlotCurve.py),
+    // which equals `half_size_px * uv` here since `marker_size = 2 * half_size_px`
+    // and `coord - 0.5 = uv / 2`. Used by the stroke/caret symbols (8..17).
+    let pix = uv * params.half_size_px;
     switch params.symbol {
         case 0u: { // circle
             return dot(uv, uv) <= 1.0;
@@ -91,6 +99,45 @@ fn inside(uv: vec2<f32>) -> bool {
             let e3 = edge(uv, c, a);
             return (e1 >= 0.0 && e2 >= 0.0 && e3 >= 0.0)
                 || (e1 <= 0.0 && e2 <= 0.0 && e3 <= 0.0);
+        }
+        case 5u: { // diamond (rotated square): silx |cx| + |cy| < 0.5
+            return abs(uv.x) + abs(uv.y) <= 1.0;
+        }
+        case 6u: { // point: a small filled circle (size shrunk on the CPU side)
+            return dot(uv, uv) <= 1.0;
+        }
+        case 7u: { // pixel: a single-pixel square (size set to 1px on the CPU side)
+            return true;
+        }
+        case 8u: { // vertical line: thin vertical stroke (silx |pix.x| <= 1)
+            return abs(pix.x) <= 1.0;
+        }
+        case 9u: { // horizontal line: thin horizontal stroke (silx |pix.y| <= 1)
+            return abs(pix.y) <= 1.0;
+        }
+        case 10u: { // tick left: horizontal stroke on the left half (silx pix.x <= 0.5)
+            return pix.x <= 0.5 && abs(pix.y) <= 1.0;
+        }
+        case 11u: { // tick right: horizontal stroke on the right half (silx pix.x >= -0.5)
+            return pix.x >= -0.5 && abs(pix.y) <= 1.0;
+        }
+        case 12u: { // tick up: vertical stroke on the upper half (silx pix.y <= 0.5)
+            return pix.y <= 0.5 && abs(pix.x) <= 1.0;
+        }
+        case 13u: { // tick down: vertical stroke on the lower half (silx pix.y >= -0.5)
+            return pix.y >= -0.5 && abs(pix.x) <= 1.0;
+        }
+        case 14u: { // caret left: open wedge, silx |pix.x| - |pix.y| >= -0.1, pix.x > 0.5
+            return pix.x > 0.5 && (abs(pix.x) - abs(pix.y)) >= -0.1;
+        }
+        case 15u: { // caret right: silx |pix.x| - |pix.y| >= -0.1, pix.x < 0.5
+            return pix.x < 0.5 && (abs(pix.x) - abs(pix.y)) >= -0.1;
+        }
+        case 16u: { // caret up: silx |pix.y| - |pix.x| >= -0.1, pix.y > 0.5
+            return pix.y > 0.5 && (abs(pix.y) - abs(pix.x)) >= -0.1;
+        }
+        case 17u: { // caret down: silx |pix.y| - |pix.x| >= -0.1, pix.y < 0.5
+            return pix.y < 0.5 && (abs(pix.y) - abs(pix.x)) >= -0.1;
         }
         default: {
             return dot(uv, uv) <= 1.0;
