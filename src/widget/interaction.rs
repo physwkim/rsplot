@@ -16,12 +16,17 @@ use crate::core::transform::{Scale, Transform};
 /// Data limits `(x_min, x_max, y_min, y_max)`.
 pub type Limits = (f64, f64, f64, f64);
 
-// Float32 safe range, mirroring silx `_utils/panzoom.py`. Limits are kept inside
-// these so that span subtractions do not overflow float32 downstream.
-const FLOAT32_SAFE_MIN: f64 = -1e37;
-const FLOAT32_SAFE_MAX: f64 = 1e37;
-// `numpy.finfo(numpy.float32).tiny`: smallest positive normal float32.
-const FLOAT32_MINPOS: f64 = 1.1754943508222875e-38;
+/// Float32 safe lower bound, mirroring silx `_utils/panzoom.py`
+/// `FLOAT32_SAFE_MIN`. Linear-axis limits are kept inside `[FLOAT32_SAFE_MIN,
+/// FLOAT32_SAFE_MAX]` so that span subtractions (`max - min`) do not overflow
+/// float32 downstream in the shaders.
+pub const FLOAT32_SAFE_MIN: f64 = -1e37;
+/// Float32 safe upper bound, mirroring silx `FLOAT32_SAFE_MAX`.
+pub const FLOAT32_SAFE_MAX: f64 = 1e37;
+/// Smallest positive normal float32 (`numpy.finfo(numpy.float32).tiny`),
+/// mirroring silx `FLOAT32_MINPOS`. The lower clamp bound on a log axis (where
+/// the min must stay strictly positive).
+pub const FLOAT32_MINPOS: f64 = 1.1754943508222875e-38;
 
 /// Translate a single axis range by a screen-space drag of `delta_px` pixels
 /// across an axis of `extent_px` pixels, mirroring silx `Pan.drag`
@@ -214,6 +219,68 @@ pub fn wheel_zoom_factor(scroll_y: f32) -> f64 {
 pub fn is_valid(limits: Limits) -> bool {
     let (x_min, x_max, y_min, y_max) = limits;
     x_max > x_min && y_max > y_min
+}
+
+/// Clamp one axis range into the float32-safe window and repair degenerate
+/// ranges, mirroring silx `_utils/panzoom.checkAxisLimits` (panzoom.py:51-77).
+///
+/// Both bounds are clamped to `[lower, FLOAT32_SAFE_MAX]`, where `lower` is
+/// [`FLOAT32_MINPOS`] on a log axis (`is_log == true`) and [`FLOAT32_SAFE_MIN`]
+/// otherwise. If the clamp leaves `max < min` the two are swapped; if it leaves
+/// `max == min` the range is expanded the way silx does:
+/// - `v == 0` → `(-0.1, 0.1)`
+/// - `v < 0`  → `(max(v * 1.1, FLOAT32_SAFE_MIN), v * 0.9)`
+/// - `v > 0`  → `(v * 0.9, min(v * 1.1, FLOAT32_SAFE_MAX))`
+///
+/// A `NaN` bound clamps to `lower` (matching `numpy.clip`'s NaN→bound on the
+/// platforms silx targets), so the result is always finite and ordered.
+pub fn clamp_axis_limits(min: f64, max: f64, is_log: bool) -> (f64, f64) {
+    let lower = if is_log {
+        FLOAT32_MINPOS
+    } else {
+        FLOAT32_SAFE_MIN
+    };
+    let clip = |v: f64| -> f64 {
+        // numpy.clip with a NaN input yields the NaN, but silx's downstream
+        // expects a finite ordered range; map NaN to the lower bound so the
+        // window is always usable.
+        if v.is_nan() {
+            lower
+        } else {
+            v.clamp(lower, FLOAT32_SAFE_MAX)
+        }
+    };
+    let mut vmin = clip(min);
+    let mut vmax = clip(max);
+
+    if vmax < vmin {
+        std::mem::swap(&mut vmin, &mut vmax);
+    } else if vmax == vmin {
+        let v = vmin;
+        if v == 0.0 {
+            vmin = -0.1;
+            vmax = 0.1;
+        } else if v < 0.0 {
+            vmax = v * 0.9;
+            vmin = (v * 1.1).max(FLOAT32_SAFE_MIN);
+        } else {
+            vmax = (v * 1.1).min(FLOAT32_SAFE_MAX);
+            vmin = v * 0.9;
+        }
+    }
+    (vmin, vmax)
+}
+
+/// Clamp both axes of `limits` into the float32-safe window via
+/// [`clamp_axis_limits`], mirroring silx applying `checkAxisLimits` per axis
+/// after pan/zoom (`PlotInteraction.py:241-250`, panzoom.py). `x_log` / `y_log`
+/// select the log lower bound per axis. Applied after every pan and zoom so an
+/// extreme gesture cannot push a bound past the float32-safe range.
+pub fn clamp_limits(limits: Limits, x_log: bool, y_log: bool) -> Limits {
+    let (x_min, x_max, y_min, y_max) = limits;
+    let (nx0, nx1) = clamp_axis_limits(x_min, x_max, x_log);
+    let (ny0, ny1) = clamp_axis_limits(y_min, y_max, y_log);
+    (nx0, nx1, ny0, ny1)
 }
 
 /// A picked polyline vertex: its index and data coordinates, plus the pixel
@@ -482,6 +549,72 @@ mod tests {
         // Nothing within threshold -> None.
         assert!(nearest_point(&pts, &t, pos2(52.0, 47.0), 2.0).is_none());
         assert!(nearest_point(&[], &t, pos2(0.0, 0.0), 100.0).is_none());
+    }
+
+    #[test]
+    fn clamp_axis_leaves_normal_range_untouched() {
+        // A normal in-range linear range is returned unchanged.
+        assert_eq!(clamp_axis_limits(-3.0, 5.0, false), (-3.0, 5.0));
+        // A normal in-range positive log range is returned unchanged.
+        assert_eq!(clamp_axis_limits(1.0, 1000.0, true), (1.0, 1000.0));
+    }
+
+    #[test]
+    fn clamp_axis_clamps_beyond_safe_values() {
+        // Boundary: a max beyond FLOAT32_SAFE_MAX clamps to it.
+        let (lo, hi) = clamp_axis_limits(0.0, 1e40, false);
+        assert_eq!((lo, hi), (0.0, FLOAT32_SAFE_MAX));
+        // Boundary: a min below FLOAT32_SAFE_MIN clamps to it (linear).
+        let (lo, hi) = clamp_axis_limits(-1e40, 5.0, false);
+        assert_eq!((lo, hi), (FLOAT32_SAFE_MIN, 5.0));
+        // Boundary: a non-positive min on a log axis clamps up to FLOAT32_MINPOS.
+        let (lo, hi) = clamp_axis_limits(-10.0, 1000.0, true);
+        assert_eq!((lo, hi), (FLOAT32_MINPOS, 1000.0));
+    }
+
+    #[test]
+    fn clamp_axis_swaps_inverted_bounds() {
+        // Boundary: max < min after clamping is swapped to ordered.
+        let (lo, hi) = clamp_axis_limits(5.0, -3.0, false);
+        assert_eq!((lo, hi), (-3.0, 5.0));
+    }
+
+    #[test]
+    fn clamp_axis_expands_equal_bounds() {
+        // v == 0 -> (-0.1, 0.1).
+        assert_eq!(clamp_axis_limits(0.0, 0.0, false), (-0.1, 0.1));
+        // v > 0 -> (v*0.9, v*1.1).
+        let (lo, hi) = clamp_axis_limits(10.0, 10.0, false);
+        assert!(
+            (lo - 9.0).abs() <= 1e-12 && (hi - 11.0).abs() <= 1e-12,
+            "{lo},{hi}"
+        );
+        // v < 0 -> (v*1.1, v*0.9).
+        let (lo, hi) = clamp_axis_limits(-10.0, -10.0, false);
+        assert!(
+            (lo - -11.0).abs() <= 1e-12 && (hi - -9.0).abs() <= 1e-12,
+            "{lo},{hi}"
+        );
+    }
+
+    #[test]
+    fn clamp_axis_nan_falls_to_lower_bound() {
+        // Boundary: a NaN bound maps to the lower bound, keeping the range finite.
+        let (lo, hi) = clamp_axis_limits(f64::NAN, 5.0, false);
+        assert!(lo.is_finite() && hi.is_finite());
+        assert_eq!((lo, hi), (FLOAT32_SAFE_MIN, 5.0));
+        // Both NaN -> both fall to lower, then equal-expansion kicks in.
+        let (lo, hi) = clamp_axis_limits(f64::NAN, f64::NAN, true);
+        assert!(lo.is_finite() && hi.is_finite() && hi > lo, "{lo},{hi}");
+    }
+
+    #[test]
+    fn clamp_limits_clamps_both_axes() {
+        let out = clamp_limits((-1e40, 1e40, 0.0, 0.0), false, false);
+        assert_eq!(out.0, FLOAT32_SAFE_MIN);
+        assert_eq!(out.1, FLOAT32_SAFE_MAX);
+        // Degenerate y expands.
+        assert_eq!((out.2, out.3), (-0.1, 0.1));
     }
 
     #[test]

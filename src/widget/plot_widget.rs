@@ -469,9 +469,17 @@ fn arrow_pan(plot: &mut Plot, dir: interaction::PanDirection) {
 }
 
 /// Adopt `next` limits only if they are non-degenerate, otherwise keep the
-/// current ones (guards against a collapsed/inverted view). Applies per-axis
-/// constraints after the validity check.
+/// current ones (guards against a collapsed/inverted view). Clamps into the
+/// float32-safe range (silx `checkAxisLimits` after pan/zoom), then applies
+/// per-axis constraints, before the validity check.
 fn commit(plot: &mut Plot, next: interaction::Limits) {
+    // Clamp first so an extreme pan/zoom cannot push a bound past the
+    // float32-safe window (silx `PlotInteraction.py:241-250`).
+    let next = interaction::clamp_limits(
+        next,
+        plot.x_scale == Scale::Log10,
+        plot.y_scale == Scale::Log10,
+    );
     if !interaction::is_valid(next) {
         return;
     }
