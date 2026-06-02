@@ -11,6 +11,7 @@
 
 use egui::{Pos2, Rect, Vec2};
 
+use crate::core::roi::RoiEdge;
 use crate::core::transform::{Scale, Transform};
 
 /// Data limits `(x_min, x_max, y_min, y_max)`.
@@ -281,6 +282,63 @@ pub fn clamp_limits(limits: Limits, x_log: bool, y_log: bool) -> Limits {
     let (nx0, nx1) = clamp_axis_limits(x_min, x_max, x_log);
     let (ny0, ny1) = clamp_axis_limits(y_min, y_max, y_log);
     (nx0, nx1, ny0, ny1)
+}
+
+/// Mouse-cursor shape for a draggable plot handle, mirroring silx's
+/// `CURSOR_SIZE_HOR` / `CURSOR_SIZE_VER` / `CURSOR_SIZE_ALL` / `CURSOR_DEFAULT`
+/// (`backends/BackendBase.py:44-48`, used by `_setCursorForMarker`,
+/// `PlotInteraction.py:1165-1184`). A handle that moves only horizontally shows
+/// `SizeHor`, only vertically `SizeVer`, freely in both `SizeAll`; nothing
+/// grabbable shows `Default`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CursorShape {
+    /// Horizontal resize (silx `CURSOR_SIZE_HOR`, Qt `SizeHorCursor`).
+    SizeHor,
+    /// Vertical resize (silx `CURSOR_SIZE_VER`, Qt `SizeVerCursor`).
+    SizeVer,
+    /// Move in both axes (silx `CURSOR_SIZE_ALL`, Qt `SizeAllCursor`).
+    SizeAll,
+    /// The default arrow cursor (silx `CURSOR_DEFAULT`, Qt `ArrowCursor`).
+    #[default]
+    Default,
+}
+
+impl CursorShape {
+    /// Map to the egui [`egui::CursorIcon`] the widget sets. `SizeHor` →
+    /// `ResizeHorizontal`, `SizeVer` → `ResizeVertical`, `SizeAll` → `Move`,
+    /// `Default` → `Default`, matching silx's Qt cursor mapping
+    /// (`backends/BackendPygfx.py:2354-2358`).
+    pub fn to_egui(self) -> egui::CursorIcon {
+        match self {
+            CursorShape::SizeHor => egui::CursorIcon::ResizeHorizontal,
+            CursorShape::SizeVer => egui::CursorIcon::ResizeVertical,
+            CursorShape::SizeAll => egui::CursorIcon::Move,
+            CursorShape::Default => egui::CursorIcon::Default,
+        }
+    }
+}
+
+/// Cursor shape for a draggable ROI edge handle, mirroring the direction logic
+/// of silx `_setCursorForMarker` (`PlotInteraction.py:1165-1184`): a handle that
+/// constrains motion to one axis shows that axis's resize cursor; a free
+/// (vertex) handle shows the move cursor.
+///
+/// - [`RoiEdge::Left`] / [`RoiEdge::Right`] move only in X → [`CursorShape::SizeHor`].
+/// - [`RoiEdge::Top`] / [`RoiEdge::Bottom`] move only in Y → [`CursorShape::SizeVer`].
+/// - [`RoiEdge::Vertex`] moves in both axes → [`CursorShape::SizeAll`].
+pub fn cursor_for_edge(edge: RoiEdge) -> CursorShape {
+    match edge {
+        RoiEdge::Left | RoiEdge::Right => CursorShape::SizeHor,
+        RoiEdge::Top | RoiEdge::Bottom => CursorShape::SizeVer,
+        RoiEdge::Vertex(_) => CursorShape::SizeAll,
+    }
+}
+
+/// Cursor shape for an optional grabbed edge: the edge's shape when `Some`, the
+/// default arrow when `None` (nothing grabbable under the cursor). This is the
+/// shape the widget passes to egui each hover frame.
+pub fn cursor_for_grab(edge: Option<RoiEdge>) -> CursorShape {
+    edge.map(cursor_for_edge).unwrap_or_default()
 }
 
 /// Which mouse button a [`PlotPointerEvent`] carries, mirroring silx's
@@ -642,6 +700,41 @@ mod tests {
     // 100×100 px area mapping data [0,10]×[0,10]; 1 data unit = 10 px.
     fn pick_transform() -> Transform {
         Transform::new(0.0, 10.0, 0.0, 10.0, area_100())
+    }
+
+    #[test]
+    fn cursor_shape_per_edge() {
+        // Horizontal-only edges -> SizeHor.
+        assert_eq!(cursor_for_edge(RoiEdge::Left), CursorShape::SizeHor);
+        assert_eq!(cursor_for_edge(RoiEdge::Right), CursorShape::SizeHor);
+        // Vertical-only edges -> SizeVer.
+        assert_eq!(cursor_for_edge(RoiEdge::Top), CursorShape::SizeVer);
+        assert_eq!(cursor_for_edge(RoiEdge::Bottom), CursorShape::SizeVer);
+        // Free vertex -> SizeAll.
+        assert_eq!(cursor_for_edge(RoiEdge::Vertex(0)), CursorShape::SizeAll);
+        assert_eq!(cursor_for_edge(RoiEdge::Vertex(7)), CursorShape::SizeAll);
+    }
+
+    #[test]
+    fn cursor_for_grab_defaults_when_nothing_grabbed() {
+        // None -> Default (nothing under the cursor).
+        assert_eq!(cursor_for_grab(None), CursorShape::Default);
+        // Some(edge) -> that edge's shape.
+        assert_eq!(cursor_for_grab(Some(RoiEdge::Left)), CursorShape::SizeHor);
+    }
+
+    #[test]
+    fn cursor_shape_maps_to_egui_icon() {
+        assert_eq!(
+            CursorShape::SizeHor.to_egui(),
+            egui::CursorIcon::ResizeHorizontal
+        );
+        assert_eq!(
+            CursorShape::SizeVer.to_egui(),
+            egui::CursorIcon::ResizeVertical
+        );
+        assert_eq!(CursorShape::SizeAll.to_egui(), egui::CursorIcon::Move);
+        assert_eq!(CursorShape::Default.to_egui(), egui::CursorIcon::Default);
     }
 
     #[test]

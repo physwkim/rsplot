@@ -426,6 +426,27 @@ fn apply_interaction(
         }
     }
 
+    // Cursor shape: while hovering an ROI edge (and not box-zoom dragging), show
+    // the matching resize/move cursor so a grabbable handle is discoverable,
+    // mirroring silx `_setCursorForMarker` (`PlotInteraction.py:1165-1184`). Skip
+    // in pan mode (primary drag pans there) and while an edge drag is active.
+    if mode != PlotInteractionMode::Pan
+        && selection.is_none()
+        && !response.dragged_by(PointerButton::Primary)
+        && let Some(p) = response.hover_pos()
+        && area.contains(p)
+    {
+        let grabbed = plot
+            .rois
+            .iter()
+            .rev()
+            .find_map(|roi| roi.edge_at(view, p, ROI_GRAB_PX));
+        let shape = interaction::cursor_for_grab(grabbed);
+        if shape != interaction::CursorShape::Default {
+            ui.ctx().set_cursor_icon(shape.to_egui());
+        }
+    }
+
     Interaction {
         selection,
         roi_changed,
