@@ -356,6 +356,9 @@ pub struct ToolbarResponse {
     /// The median-filter Apply button replaced the active image this frame
     /// (silx `MedianFilterAction` re-adding the filtered image).
     pub median_filter_applied: bool,
+    /// The pixel-intensity histogram window is open this frame (silx
+    /// `PixelIntensitiesHistoAction` toggling its `HistogramWidget`).
+    pub pixel_histogram_open: bool,
 }
 
 /// Return value of [`PlotWidget::show_with_toolbar`].
@@ -409,6 +412,7 @@ enum ToolbarIcon {
     AutoscaleX,
     AutoscaleY,
     MedianFilter,
+    PixelHistogram,
 }
 
 impl ToolbarIcon {
@@ -523,6 +527,21 @@ fn draw_toolbar_icon(painter: &egui::Painter, rect: egui::Rect, icon: ToolbarIco
         ToolbarIcon::AutoscaleX => draw_autoscale_icon(painter, rect, "X", false, stroke),
         ToolbarIcon::AutoscaleY => draw_autoscale_icon(painter, rect, "Y", true, stroke),
         ToolbarIcon::MedianFilter => draw_median_filter_icon(painter, rect, stroke),
+        ToolbarIcon::PixelHistogram => draw_pixel_histogram_icon(painter, rect, stroke),
+    }
+}
+
+/// Draw three rising histogram bars for the [`ToolbarIcon::PixelHistogram`]
+/// button (silx `pixel-intensities` icon).
+fn draw_pixel_histogram_icon(painter: &egui::Painter, rect: egui::Rect, stroke: egui::Stroke) {
+    let base = rect.bottom();
+    let bar_w = rect.width() / 4.0;
+    let heights = [0.4_f32, 0.75, 1.0];
+    for (i, h) in heights.iter().enumerate() {
+        let x = rect.left() + bar_w * (i as f32 * 1.2 + 0.2);
+        let top = base - rect.height() * h;
+        let bar = egui::Rect::from_min_max(egui::pos2(x, top), egui::pos2(x + bar_w * 0.8, base));
+        painter.rect_stroke(bar, 0.0, stroke, egui::StrokeKind::Inside);
     }
 }
 
@@ -4227,6 +4246,26 @@ impl PlotWidget {
         true
     }
 
+    /// Compute the pixel-intensity histogram of the active image (silx
+    /// `PixelIntensitiesHistoAction`).
+    ///
+    /// Reads the active image's raw scalar pixels and runs
+    /// [`crate::widget::actions::analysis::pixel_intensity_histogram`] with the
+    /// silx defaults (bin count `min(1024, floor(sqrt(finite_count)))`, finite
+    /// range, `last_bin_closed`, non-finite excluded). Pass `n_bins` to override
+    /// the bin count (mirroring the widget's editable bin-count field), or
+    /// `None` for the silx default.
+    ///
+    /// Returns `None` when the active item is not a scalar image with retained
+    /// data, or when the image has no finite pixel.
+    pub fn active_image_histogram(
+        &self,
+        n_bins: Option<usize>,
+    ) -> Option<crate::widget::actions::analysis::PixelHistogram> {
+        let pixels = self.get_image_pixels_raw()?;
+        crate::widget::actions::analysis::pixel_intensity_histogram(&pixels, n_bins)
+    }
+
     pub fn set_graph_cursor(&mut self, on: bool) {
         self.backend.plot_mut().crosshair = on;
     }
@@ -4880,6 +4919,127 @@ impl Plot2D {
 
         ui.data_mut(|d| d.insert_temp(open_id, open));
         applied
+    }
+
+    /// Draw the pixel-intensity histogram of the active image as bars + stats,
+    /// with an editable bin-count control (silx `PixelIntensitiesHistoAction` /
+    /// `HistogramWidget`).
+    ///
+    /// This is a UI shim: it computes the histogram on the CPU via
+    /// [`PlotWidget::active_image_histogram`] and paints the bars with the egui
+    /// painter (no second GPU `Plot1D`). `n_bins` holds the bin count chosen by
+    /// the caller (e.g. egui temp-memory); `None` means "silx default", which is
+    /// resolved to the actual count and written back so the control shows it.
+    /// The bars / stats redraw whenever `*n_bins` changes (recompute on change).
+    ///
+    /// Returns the computed [`PixelHistogram`](crate::widget::actions::analysis::PixelHistogram),
+    /// or `None` when there is no scalar image with finite pixels.
+    pub fn show_pixel_histogram(
+        &mut self,
+        ui: &mut egui::Ui,
+        n_bins: &mut Option<usize>,
+    ) -> Option<crate::widget::actions::analysis::PixelHistogram> {
+        let histogram = self.active_image_histogram(*n_bins);
+        let Some(histo) = histogram else {
+            ui.label("No image with finite pixels.");
+            return None;
+        };
+
+        // Bin-count control: seed from the resolved count so the field shows the
+        // silx default, then recompute when the user changes it.
+        let mut bins = n_bins.unwrap_or(histo.n_bins).max(2);
+        ui.horizontal(|ui| {
+            ui.label("Bins:");
+            if ui
+                .add(egui::DragValue::new(&mut bins).range(2..=1024))
+                .changed()
+            {
+                *n_bins = Some(bins.max(2));
+            }
+        });
+        // Recompute if the control changed the count this frame.
+        let histo = if *n_bins == Some(histo.n_bins) || n_bins.is_none() {
+            histo
+        } else {
+            match self.active_image_histogram(*n_bins) {
+                Some(h) => h,
+                None => return Some(histo),
+            }
+        };
+
+        // Stats line (silx HistogramWidget min/max/mean/std/sum).
+        ui.label(format!(
+            "min {:.4}  max {:.4}  mean {:.4}  std {:.4}  sum {:.4}",
+            histo.min, histo.max, histo.mean, histo.std, histo.sum
+        ));
+
+        // Bar chart drawn with the egui painter.
+        let max_count = histo.counts.iter().copied().max().unwrap_or(0).max(1) as f32;
+        let desired = egui::vec2(ui.available_width().max(120.0), 120.0);
+        let (rect, _resp) = ui.allocate_exact_size(desired, egui::Sense::hover());
+        if ui.is_rect_visible(rect) {
+            let painter = ui.painter_at(rect);
+            painter.rect_filled(rect, 0.0, ui.visuals().extreme_bg_color);
+            let n = histo.counts.len().max(1);
+            let bar_w = rect.width() / n as f32;
+            let fill = Color32::from_rgb(0x66, 0xaa, 0xd7); // silx histogram color.
+            for (i, &count) in histo.counts.iter().enumerate() {
+                let h = (count as f32 / max_count) * rect.height();
+                let x0 = rect.left() + i as f32 * bar_w;
+                let bar = egui::Rect::from_min_max(
+                    egui::pos2(x0, rect.bottom() - h),
+                    egui::pos2(x0 + bar_w, rect.bottom()),
+                );
+                painter.rect_filled(bar.shrink(0.5), 0.0, fill);
+            }
+        }
+
+        Some(histo)
+    }
+
+    /// Draw a pixel-intensity histogram toolbar button that toggles a popup
+    /// window with the bars + stats + bin control (silx
+    /// `PixelIntensitiesHistoAction`, a checkable action opening its
+    /// `HistogramWidget`).
+    ///
+    /// Open-state and the chosen bin count are stored in egui temp-memory keyed
+    /// by this plot's id. Returns `true` while the window is open this frame.
+    pub fn show_pixel_histogram_toolbar(&mut self, ui: &mut egui::Ui) -> bool {
+        let plot_id = self.backend().plot().id;
+        let open_id = egui::Id::new(plot_id).with("pixel_histogram_open");
+        let bins_id = egui::Id::new(plot_id).with("pixel_histogram_bins");
+
+        let mut open = ui.data(|d| d.get_temp::<bool>(open_id)).unwrap_or(false);
+        let has_image = self.get_image_pixels_raw().is_some();
+
+        let button = ui
+            .add_enabled_ui(has_image, |ui| {
+                toolbar_icon_button(ui, ToolbarIcon::PixelHistogram, open, "Pixel intensity")
+            })
+            .inner;
+        if button.clicked() {
+            open = !open;
+        }
+
+        if open {
+            let mut n_bins = ui.data(|d| d.get_temp::<Option<usize>>(bins_id)).flatten();
+            let mut window_open = true;
+            egui::Window::new("Pixel intensity")
+                .id(open_id.with("window"))
+                .open(&mut window_open)
+                .resizable(true)
+                .collapsible(false)
+                .show(ui.ctx(), |ui| {
+                    self.show_pixel_histogram(ui, &mut n_bins);
+                });
+            ui.data_mut(|d| d.insert_temp(bins_id, n_bins));
+            if !window_open {
+                open = false;
+            }
+        }
+
+        ui.data_mut(|d| d.insert_temp(open_id, open));
+        open
     }
 
     /// Unwrap to the underlying [`PlotWidget`].

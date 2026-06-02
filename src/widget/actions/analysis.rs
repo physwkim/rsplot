@@ -187,6 +187,158 @@ pub fn median_filter_1d(
     median_filter_2d(data, width, height, kernel_width, 1, conditional)
 }
 
+/// A pixel-intensity histogram with summary statistics, matching silx
+/// `PixelIntensitiesHistoAction` / `HistogramWidget`.
+///
+/// Built by [`pixel_intensity_histogram`]. `edges` has `n_bins + 1` entries
+/// (the bin boundaries, `edges[0] == min`, `edges[n_bins] == max`), and `counts`
+/// has `n_bins` entries (unweighted pixel counts, silx default — the action's
+/// weight checkbox defaults off). The statistics are computed over the finite
+/// pixels only (silx `numpy.nanmean` / `nanstd` / `nansum`, and finite min/max
+/// from `min_max(..., finite=True)`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct PixelHistogram {
+    /// Bin edges, `n_bins + 1` entries (`edges[0] == min`, last == `max`).
+    pub edges: Vec<f64>,
+    /// Per-bin pixel counts, `n_bins` entries (unweighted).
+    pub counts: Vec<u64>,
+    /// Finite minimum pixel value (histogram range lower bound).
+    pub min: f64,
+    /// Finite maximum pixel value (histogram range upper bound).
+    pub max: f64,
+    /// Mean of the finite pixels (silx `numpy.nanmean`).
+    pub mean: f64,
+    /// Population standard deviation of the finite pixels (silx `numpy.nanstd`).
+    pub std: f64,
+    /// Sum of the finite pixels (silx `numpy.nansum`).
+    pub sum: f64,
+    /// Number of bins (`counts.len()`).
+    pub n_bins: usize,
+}
+
+/// Compute a pixel-intensity histogram with statistics, matching silx
+/// `PixelIntensitiesHistoAction` / `HistogramWidget._updateFromItem`.
+///
+/// silx defaults reproduced here:
+/// - Bin count: `min(1024, floor(sqrt(finite_count)))`, then clamped to a
+///   minimum of 2 (silx `max(2, guessed_nbins)`). When `n_bins` is `Some(n)`
+///   the caller's value is used instead (still floored at 2), mirroring the
+///   widget's editable bin-count field. (silx's integer-dtype `xmax - xmin`
+///   clamp does not apply: these pixels are real-valued.)
+/// - Range: the finite `(min, max)` of the pixels (silx `min_max(finite=True)`).
+///   Non-finite pixels (NaN, ±inf) are excluded from both the range and the
+///   counts. A degenerate range (`min == max`) is enlarged exactly as silx does
+///   (`(-0.01, 0.01)` when the value is 0, else `(v*0.99, v*1.01)` sorted) so
+///   the equal pixels land in a real bin.
+/// - Binning: silx `Histogramnd` with `last_bin_closed=True` — a value equal to
+///   the max lands in the last bin (not discarded), and an interior value `v`
+///   lands in `floor((v - min) * n_bins / (max - min))`.
+/// - Statistics: `min`/`max` are the finite range bounds; `mean`/`std`/`sum`
+///   are over the finite pixels (silx `nanmean`/`nanstd`/`nansum`), `std` being
+///   the population standard deviation.
+///
+/// Returns `None` when there is no finite pixel (silx `HistogramWidget.reset`
+/// on all-not-finite data).
+pub fn pixel_intensity_histogram(pixels: &[f64], n_bins: Option<usize>) -> Option<PixelHistogram> {
+    // Finite pass: range bounds and running stats over finite pixels only.
+    let mut finite_count: usize = 0;
+    let mut min = f64::INFINITY;
+    let mut max = f64::NEG_INFINITY;
+    let mut sum = 0.0_f64;
+    for &v in pixels {
+        if v.is_finite() {
+            finite_count += 1;
+            if v < min {
+                min = v;
+            }
+            if v > max {
+                max = v;
+            }
+            sum += v;
+        }
+    }
+    if finite_count == 0 {
+        // All-not-finite data: silx resets (no histogram).
+        return None;
+    }
+
+    let mean = sum / finite_count as f64;
+    // Population standard deviation (numpy.nanstd default ddof=0).
+    let mut var_acc = 0.0_f64;
+    for &v in pixels {
+        if v.is_finite() {
+            let d = v - mean;
+            var_acc += d * d;
+        }
+    }
+    let std = (var_acc / finite_count as f64).sqrt();
+
+    // Bin count: silx guessed = min(1024, floor(sqrt(size))), then max(2, ...).
+    // Here `size` is the finite-pixel count (the values that actually populate
+    // the histogram). A caller-supplied count overrides the guess.
+    let guessed = (finite_count as f64).sqrt().floor() as usize;
+    let nbins = n_bins.unwrap_or_else(|| guessed.min(1024)).max(2);
+
+    // Histogram range: enlarge a degenerate (min == max) range as silx does.
+    let (g_min, g_max) = if min == max {
+        if min == 0.0 {
+            (-0.01, 0.01)
+        } else {
+            let a = min * 0.99;
+            let b = min * 1.01;
+            if a <= b { (a, b) } else { (b, a) }
+        }
+    } else {
+        (min, max)
+    };
+    let range = g_max - g_min;
+
+    // Bin edges: silx Histogramnd builds edge[k] = g_min + k*(range/n_bins) for
+    // k in 0..n_bins, and sets the final edge exactly to g_max.
+    let mut edges = Vec::with_capacity(nbins + 1);
+    for k in 0..nbins {
+        edges.push(g_min + k as f64 * (range / nbins as f64));
+    }
+    edges.push(g_max);
+
+    // Counts: silx Histogramnd binning with last_bin_closed = True.
+    let mut counts = vec![0_u64; nbins];
+    for &v in pixels {
+        if !v.is_finite() {
+            continue; // NaN/inf excluded from counts.
+        }
+        if v < g_min {
+            continue; // Below range: discarded.
+        }
+        let bin = if v < g_max {
+            // floor((v - g_min) * n_bins / range), truncating a non-negative
+            // value exactly like silx's (long) cast.
+            (((v - g_min) * nbins as f64) / range) as usize
+        } else if v == g_max {
+            // last_bin_closed: the max value lands in the last bin.
+            nbins - 1
+        } else {
+            continue; // Above range: discarded.
+        };
+        // Guard against a floating-point bin index landing exactly at n_bins
+        // (silx's (long) truncation keeps interior v < g_max strictly below
+        // n_bins, but clamp defensively to the last bin).
+        let bin = bin.min(nbins - 1);
+        counts[bin] += 1;
+    }
+
+    Some(PixelHistogram {
+        edges,
+        counts,
+        min,
+        max,
+        mean,
+        std,
+        sum,
+        n_bins: nbins,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -335,5 +487,130 @@ mod tests {
         let data = [3.0, 1.0, 4.0, 1.0, 5.0, 9.0];
         let out = median_filter_2d(&data, 3, 2, 1, 1, false);
         assert_eq!(out, data.to_vec());
+    }
+
+    // ---- pixel_intensity_histogram ----
+
+    /// The default bin formula: 100 finite pixels -> floor(sqrt(100)) = 10 bins.
+    #[test]
+    fn histogram_default_bin_count_is_sqrt_floor() {
+        let pixels: Vec<f64> = (0..100).map(|i| i as f64).collect();
+        let h = pixel_intensity_histogram(&pixels, None).expect("finite pixels");
+        assert_eq!(h.n_bins, 10, "100 pixels -> floor(sqrt(100)) = 10 bins");
+        assert_eq!(h.counts.len(), 10);
+        assert_eq!(h.edges.len(), 11, "edges = n_bins + 1");
+    }
+
+    /// Known pixel array -> exact bin counts, including the last-bin-closed
+    /// boundary value (the max lands in the last bin, not a new one).
+    #[test]
+    fn histogram_exact_counts_last_bin_closed() {
+        // Values 0..=10, n_bins = 5, range [0, 10], bin width 2.
+        // bin = floor(v * 5 / 10) = floor(v / 2) for v < 10; v == 10 -> last bin.
+        //   0,1   -> bin 0    (0 <= v < 2)
+        //   2,3   -> bin 1
+        //   4,5   -> bin 2
+        //   6,7   -> bin 3
+        //   8,9   -> bin 4
+        //   10    -> bin 4 (last_bin_closed)
+        let pixels: Vec<f64> = (0..=10).map(|i| i as f64).collect();
+        let h = pixel_intensity_histogram(&pixels, Some(5)).expect("finite pixels");
+        assert_eq!(h.n_bins, 5);
+        assert_eq!(h.counts, vec![2, 2, 2, 2, 3]);
+        assert_eq!(h.counts.iter().sum::<u64>(), 11, "every pixel is counted");
+        assert_eq!(h.min, 0.0);
+        assert_eq!(h.max, 10.0);
+        assert_eq!(h.edges[0], 0.0);
+        assert_eq!(*h.edges.last().unwrap(), 10.0);
+    }
+
+    /// Statistics: mean / std / sum / min / max over a known array.
+    #[test]
+    fn histogram_statistics_match_known_values() {
+        let pixels = [1.0, 2.0, 3.0, 4.0, 5.0];
+        let h = pixel_intensity_histogram(&pixels, Some(4)).expect("finite pixels");
+        assert_eq!(h.min, 1.0);
+        assert_eq!(h.max, 5.0);
+        assert_eq!(h.sum, 15.0);
+        assert_eq!(h.mean, 3.0);
+        // Population std of {1,2,3,4,5}: sqrt(mean of squared deviations)
+        //   = sqrt((4+1+0+1+4)/5) = sqrt(2).
+        assert!((h.std - 2.0_f64.sqrt()).abs() < 1e-12);
+    }
+
+    /// NaN and inf pixels are excluded from range, counts, and statistics.
+    #[test]
+    fn histogram_excludes_non_finite() {
+        // Finite values {0,1,2,3} plus a NaN and a +inf.
+        let pixels = [0.0, 1.0, f64::NAN, 2.0, f64::INFINITY, 3.0];
+        let h = pixel_intensity_histogram(&pixels, Some(4)).expect("finite pixels");
+        // Range from finite only: min 0, max 3.
+        assert_eq!(h.min, 0.0);
+        assert_eq!(h.max, 3.0);
+        // Stats over the 4 finite pixels only.
+        assert_eq!(h.sum, 6.0);
+        assert_eq!(h.mean, 1.5);
+        // Only the 4 finite pixels are counted.
+        assert_eq!(h.counts.iter().sum::<u64>(), 4);
+        // Default bin formula would use sqrt(4)=2, but we forced 4 bins.
+        assert_eq!(h.n_bins, 4);
+    }
+
+    /// All-equal pixels: degenerate range is enlarged so the pixels land in a
+    /// real bin, and all pixels are counted.
+    #[test]
+    fn histogram_all_equal_degenerate_range() {
+        let pixels = [5.0; 8];
+        let h = pixel_intensity_histogram(&pixels, Some(4)).expect("finite pixels");
+        // Range reported as the true min/max (both 5.0).
+        assert_eq!(h.min, 5.0);
+        assert_eq!(h.max, 5.0);
+        // Enlarged range (5*0.99, 5*1.01) = (4.95, 5.05) used for binning.
+        assert!((h.edges[0] - 4.95).abs() < 1e-12);
+        assert!((h.edges.last().unwrap() - 5.05).abs() < 1e-12);
+        // Every pixel counted (5.0 is interior to (4.95, 5.05)).
+        assert_eq!(h.counts.iter().sum::<u64>(), 8);
+    }
+
+    /// All-zero pixels: degenerate range centered at 0 uses the (-0.01, 0.01)
+    /// enlargement (silx's special case for value == 0).
+    #[test]
+    fn histogram_all_zero_degenerate_range() {
+        let pixels = [0.0; 4];
+        let h = pixel_intensity_histogram(&pixels, Some(2)).expect("finite pixels");
+        assert_eq!(h.min, 0.0);
+        assert_eq!(h.max, 0.0);
+        assert!((h.edges[0] - (-0.01)).abs() < 1e-12);
+        assert!((h.edges.last().unwrap() - 0.01).abs() < 1e-12);
+        assert_eq!(h.counts.iter().sum::<u64>(), 4);
+    }
+
+    /// All-not-finite data returns None (silx HistogramWidget.reset).
+    #[test]
+    fn histogram_all_non_finite_is_none() {
+        let pixels = [f64::NAN, f64::INFINITY, f64::NEG_INFINITY];
+        assert!(pixel_intensity_histogram(&pixels, None).is_none());
+        assert!(pixel_intensity_histogram(&[], None).is_none());
+    }
+
+    /// The bin count is floored at 2 even when sqrt(size) would be smaller.
+    #[test]
+    fn histogram_bin_count_floored_at_two() {
+        // 1 finite pixel -> floor(sqrt(1)) = 1, clamped up to 2.
+        let h = pixel_intensity_histogram(&[3.0, f64::NAN], None).expect("one finite pixel");
+        assert_eq!(h.n_bins, 2);
+    }
+
+    /// A value strictly below the range minimum is discarded (cannot happen for
+    /// the finite-derived range, but the guard must hold for an explicit range
+    /// produced by the degenerate enlargement skipping low outliers — here we
+    /// verify the interior-floor formula on a midrange value directly).
+    #[test]
+    fn histogram_interior_floor_formula() {
+        // range [0, 4], n_bins 4, bin width 1. v = 2.5 -> floor(2.5) = bin 2.
+        let pixels = [0.0, 2.5, 4.0];
+        let h = pixel_intensity_histogram(&pixels, Some(4)).expect("finite pixels");
+        // 0.0 -> bin 0; 2.5 -> bin 2; 4.0 -> last bin (3).
+        assert_eq!(h.counts, vec![1, 0, 1, 1]);
     }
 }
