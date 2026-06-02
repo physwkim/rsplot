@@ -2764,6 +2764,24 @@ impl PlotWidget {
         Ok(self.add_image_spec_as_kind(spec, PlotItemKind::Mask))
     }
 
+    /// Add raw per-pixel RGBA pixels as a mask-kind overlay item.
+    ///
+    /// Unlike [`add_mask`](Self::add_mask) (a boolean stencil painted in one
+    /// color), this carries fully resolved per-pixel RGBA, so a multi-level
+    /// mask can map each level through its own LUT entry (silx
+    /// `_BaseMaskToolsWidget` discrete mask colormap). `pixels` is row-major,
+    /// `width * height` long.
+    pub fn add_rgba_mask(
+        &mut self,
+        width: u32,
+        height: u32,
+        pixels: &[[u8; 4]],
+    ) -> Result<ItemHandle, PlotDataError> {
+        validate_image_len(width, height, pixels.len())?;
+        let spec = ImageSpec::rgba(width, height, pixels);
+        Ok(self.add_image_spec_as_kind(spec, PlotItemKind::Mask))
+    }
+
     /// Add a boolean mask overlay and assign a legend label.
     pub fn add_mask_with_legend(
         &mut self,

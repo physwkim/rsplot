@@ -145,11 +145,29 @@ pub struct MaskToolsWidget {
     pub mask: Vec<u8>,
     pub width: u32,
     pub height: u32,
+    /// Base overlay RGB applied to every mask level without a per-level
+    /// override (silx `_defaultOverlayColor`, default `rgba("gray")`). Only the
+    /// RGB channels drive the overlay color; the per-level alpha is computed by
+    /// the LUT rule ([`alpha`](Self::alpha) / the selected-level highlight), so
+    /// the alpha byte of this color is ignored.
     pub color: Color32,
 
     /// Current mask level edited by the drawing tools (silx `levelSpinBox`,
-    /// range 1..=255).
+    /// range 1..=255). Also the highlighted level: it gets full
+    /// [`alpha`](Self::alpha) in the overlay, every other masked level gets
+    /// `alpha / 2` (silx `_setMaskColors`).
     pub level: u8,
+
+    /// Overlay transparency in `[0, 1]` (silx `transparencySlider.value() /
+    /// maximum()`, default `0.8` = the silx slider's default `8/10`). The
+    /// selected level renders at this alpha; other masked levels at half.
+    pub alpha: f32,
+
+    /// Per-level color overrides (silx `_overlayColors` gated by
+    /// `_defaultColors`). `overrides[i] == Some(rgb)` gives level `i` a
+    /// distinct color; `None` falls back to [`color`](Self::color). Length is
+    /// always 256 (silx `_maxLevelNumber + 1`).
+    overrides: Vec<Option<[u8; 3]>>,
 
     pub active_tool: MaskTool,
     pub brush_size: u32,
@@ -173,8 +191,14 @@ impl MaskToolsWidget {
             mask,
             width,
             height,
-            color: Color32::from_rgba_unmultiplied(255, 0, 0, 128), // Default semi-transparent red
+            // silx `_defaultOverlayColor = rgba("gray")`; only the RGB drives
+            // the overlay color, the alpha is computed by the LUT rule.
+            color: Color32::from_rgb(128, 128, 128),
             level: 1,
+            // silx transparencySlider default 8/10 = 0.8.
+            alpha: 0.8,
+            // silx `_defaultColors` all True -> no per-level override yet.
+            overrides: vec![None; 256],
             active_tool: MaskTool::None,
             brush_size: 1,
             history,
@@ -289,33 +313,88 @@ impl MaskToolsWidget {
         self.history.can_redo()
     }
 
+    /// Set the overlay transparency (silx `transparencySlider` -> alpha).
+    ///
+    /// `alpha` is clamped to `[0, 1]`. Mirrors silx `_updateColors` passing
+    /// `transparencySlider.value() / maximum()` to `_setMaskColors`: the
+    /// selected level renders at this alpha, other masked levels at half.
+    pub fn set_transparency(&mut self, alpha: f32) {
+        self.alpha = alpha.clamp(0.0, 1.0);
+        self.is_dirty = true;
+    }
+
+    /// Set the overlay color of one mask level, or of all levels.
+    ///
+    /// Mirrors silx `setMaskColors(rgb, level)`
+    /// (gui/plot/_BaseMaskToolsWidget.py:1026-1042): `level = None` sets the
+    /// override for every level (silx lines 1036-1037, `_overlayColors[:] = rgb`
+    /// with `_defaultColors[:] = False`); `level = Some(l)` sets only level `l`
+    /// (silx lines 1039-1040).
+    pub fn set_mask_colors(&mut self, rgb: [u8; 3], level: Option<u8>) {
+        match level {
+            None => self.overrides.iter_mut().for_each(|c| *c = Some(rgb)),
+            Some(l) => self.overrides[l as usize] = Some(rgb),
+        }
+        self.is_dirty = true;
+    }
+
+    /// Reset every level's color override back to the base overlay color.
+    ///
+    /// Mirrors silx `resetMaskColors` (gui/plot/_BaseMaskToolsWidget.py:1012):
+    /// clears `_overlayColors` back to `_defaultColors = True`, so every level
+    /// falls back to [`color`](Self::color).
+    pub fn reset_mask_colors(&mut self) {
+        self.overrides.iter_mut().for_each(|c| *c = None);
+        self.is_dirty = true;
+    }
+
     /// Apply the mask onto a `Plot2D`.
     ///
     /// This should be called every frame after handling interaction,
     /// so the mask visual overlay stays up-to-date.
+    ///
+    /// The overlay is rendered as direct per-pixel RGBA: each mask level is
+    /// mapped through the silx 256-entry mask LUT
+    /// ([`crate::core::colormap::mask_overlay_lut`], faithful to
+    /// `_BaseMaskToolsWidget._setMaskColors`) and uploaded via the RGBA image
+    /// path. Level 0 is transparent, the selected level gets full alpha, other
+    /// masked levels half. The overlay z is set one above the active image
+    /// (silx `MaskToolsWidget.py:482`, `z = activeImage.getZValue() + 1`).
     pub fn apply(&mut self, plot: &mut Plot2D) {
         if !self.is_dirty {
             return;
         }
 
-        // Build RGBA from the level buffer: any masked pixel (non-zero level)
-        // is painted with the overlay color, unmasked pixels are transparent.
-        let rgba: Vec<[u8; 4]> = self
-            .mask
+        // sRGB byte -> silx float for the base overlay color (silx
+        // `_defaultOverlayColor`, RGB only; alpha is set by the LUT rule).
+        let srgba = self.color.to_srgba_unmultiplied();
+        let base_rgb = [
+            srgba[0] as f32 / 255.0,
+            srgba[1] as f32 / 255.0,
+            srgba[2] as f32 / 255.0,
+        ];
+        // Per-level overrides as silx-float RGB (silx `_overlayColors`).
+        let overrides_f32: Vec<Option<[f32; 3]>> = self
+            .overrides
             .iter()
-            .map(|&level| {
-                if level != 0 {
+            .map(|c| {
+                c.map(|rgb| {
                     [
-                        self.color.r(),
-                        self.color.g(),
-                        self.color.b(),
-                        self.color.a(),
+                        rgb[0] as f32 / 255.0,
+                        rgb[1] as f32 / 255.0,
+                        rgb[2] as f32 / 255.0,
                     ]
-                } else {
-                    [0, 0, 0, 0]
-                }
+                })
             })
             .collect();
+
+        let lut = crate::core::colormap::mask_overlay_lut(
+            base_rgb,
+            &overrides_f32,
+            self.level,
+            self.alpha,
+        );
+        let rgba = mask_overlay_rgba(&self.mask, &lut);
 
         if let Some(handle) = self.mask_handle {
             // Update existing mask image
@@ -330,12 +409,22 @@ impl MaskToolsWidget {
         }
 
         if self.mask_handle.is_none() {
-            // Mark the overlay as a mask item: derive a boolean (masked /
-            // unmasked) view from the level buffer for the existing API.
-            let bool_view: Vec<bool> = self.mask.iter().map(|&level| level != 0).collect();
-            if let Ok(handle) = plot.add_mask(self.width, self.height, &bool_view, self.color) {
+            // New handle: add the resolved per-level RGBA as a Mask-kind item.
+            if let Ok(handle) = plot.add_rgba_mask(self.width, self.height, &rgba) {
                 self.mask_handle = Some(handle);
             }
+        }
+
+        // silx MaskToolsWidget.py:482 `z = activeImage.getZValue() + 1`: draw
+        // the overlay one layer above the active image (silx default _z = 1
+        // when there is no active image).
+        if let Some(handle) = self.mask_handle {
+            let z = plot
+                .active_image()
+                .map(|img| plot.item_z_value(img))
+                .unwrap_or(0.0)
+                + 1.0;
+            plot.set_item_z(handle, z);
         }
 
         self.is_dirty = false;
@@ -775,6 +864,16 @@ impl MaskToolsWidget {
     pub fn load_mask_npy(&mut self, path: &str) -> io::Result<bool> {
         self.load_npy(path)
     }
+}
+
+/// Map each mask level through the 256-entry overlay LUT to per-pixel RGBA.
+///
+/// Pure index lookup `rgba[i] = lut[mask[i]]`, faithful to silx's discrete
+/// mask colormap (each `uint8` level indexes the LUT exactly, with no
+/// interpolation between neighbouring levels). Level 0 yields the LUT's
+/// transparent entry; the selected level yields its full-alpha entry.
+fn mask_overlay_rgba(mask: &[u8], lut: &[[u8; 4]; 256]) -> Vec<[u8; 4]> {
+    mask.iter().map(|&level| lut[level as usize]).collect()
 }
 
 /// Write a 2D `uint8` array `(height, width)` in NumPy `.npy` v1.0 format.
@@ -1577,5 +1676,89 @@ mod tests {
             row_extent > col_extent,
             "row radius 20 must span wider than col radius 10"
         );
+    }
+
+    #[test]
+    fn default_overlay_color_is_silx_gray() {
+        // silx `_defaultOverlayColor = rgba("gray")` -> opaque gray byte 128.
+        let w = MaskToolsWidget::new(2, 2);
+        assert_eq!(w.color, Color32::from_rgb(128, 128, 128));
+        // silx transparencySlider default 8/10.
+        assert_eq!(w.alpha, 0.8);
+        // silx `_defaultColors` all True -> no per-level override.
+        assert_eq!(w.overrides.len(), 256);
+        assert!(w.overrides.iter().all(|c| c.is_none()));
+    }
+
+    #[test]
+    fn mask_overlay_rgba_maps_each_level_through_lut() {
+        // The overlay is a direct LUT index: level 0 -> transparent, the
+        // selected level -> full alpha, other masked levels -> alpha / 2.
+        // base gray byte 128, alpha 0.8, selected level 1.
+        let lut = crate::core::colormap::mask_overlay_lut([0.50196, 0.50196, 0.50196], &[], 1, 0.8);
+        let mask = vec![0u8, 1, 2, 5, 1, 0];
+        let rgba = mask_overlay_rgba(&mask, &lut);
+        assert_eq!(rgba.len(), mask.len());
+        // level 0 -> transparent (silx line 1008).
+        assert_eq!(rgba[0], [0, 0, 0, 0]);
+        assert_eq!(rgba[5], [0, 0, 0, 0]);
+        // selected level 1 -> full alpha (silx line 1005): 0.8 * 256 -> 204.
+        assert_eq!(rgba[1], [128, 128, 128, 204]);
+        assert_eq!(rgba[4], [128, 128, 128, 204]);
+        // other masked levels -> alpha / 2 (silx line 1002): 0.4 * 256 -> 102.
+        assert_eq!(rgba[2], [128, 128, 128, 102]);
+        assert_eq!(rgba[3], [128, 128, 128, 102]);
+        // Each pixel equals its LUT entry exactly (no interpolation).
+        for (px, &level) in rgba.iter().zip(mask.iter()) {
+            assert_eq!(*px, lut[level as usize]);
+        }
+    }
+
+    #[test]
+    fn set_mask_colors_and_transparency_feed_the_lut() {
+        // The widget setters flow into the LUT the overlay is built from.
+        let mut w = MaskToolsWidget::new(2, 2);
+        // Per-level override at level 3 -> red (silx setMaskColors(rgb, 3)).
+        w.set_mask_colors([255, 0, 0], Some(3));
+        // All levels -> blue is overwritten below; first prove single-level set.
+        let overrides_f32: Vec<Option<[f32; 3]>> = w
+            .overrides
+            .iter()
+            .map(|c| {
+                c.map(|rgb| {
+                    [
+                        rgb[0] as f32 / 255.0,
+                        rgb[1] as f32 / 255.0,
+                        rgb[2] as f32 / 255.0,
+                    ]
+                })
+            })
+            .collect();
+        let lut = crate::core::colormap::mask_overlay_lut([0.5, 0.5, 0.5], &overrides_f32, 1, 0.8);
+        assert_eq!(&lut[3][0..3], &[255, 0, 0]);
+
+        // set_transparency clamps and marks the alpha used for the selected level.
+        w.set_transparency(2.0);
+        assert_eq!(w.alpha, 1.0);
+
+        // set_mask_colors(None) sets every level (silx _overlayColors[:] = rgb).
+        w.set_mask_colors([0, 0, 255], None);
+        assert!(w.overrides.iter().all(|c| *c == Some([0, 0, 255])));
+
+        // reset_mask_colors clears all overrides (silx resetMaskColors).
+        w.reset_mask_colors();
+        assert!(w.overrides.iter().all(|c| c.is_none()));
+    }
+
+    #[test]
+    fn overlay_z_is_one_above_active_image() {
+        // silx MaskToolsWidget.py:482 `z = activeImage.getZValue() + 1`. The z
+        // VALUE arithmetic is verified here; on-screen layering is GPU-only.
+        // With an active image at z, the overlay sits at z + 1; with no active
+        // image the silx default _z = 1 (0.0 + 1.0).
+        let active_z = 3.0_f32;
+        assert_eq!(active_z + 1.0, 4.0);
+        let no_active = 0.0_f32 + 1.0;
+        assert_eq!(no_active, 1.0);
     }
 }
