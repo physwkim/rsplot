@@ -643,4 +643,28 @@ mod tests {
         assert_eq!(hsv[0], [255, 0, 0, 255]);
         assert_eq!(hsv[255], [255, 0, 16, 255]); // blue 0.0625 -> 16
     }
+
+    // --- Reversed LUT ----------------------------------------------------
+
+    #[test]
+    fn reversed_lut_equals_base_lut_reversed() {
+        // The reversed builder yields the base LUT in reverse order (silx
+        // "reversed gray" / "_r"), one entry-for-entry mirror.
+        for name in ColormapName::ALL {
+            let base = Colormap::new(name, 0.0, 1.0);
+            let rev = base.clone().reversed();
+            for i in 0..256 {
+                assert_eq!(rev.lut[i], base.lut[255 - i], "{} entry {i}", name.label());
+            }
+        }
+    }
+
+    #[test]
+    fn reversed_gray_matches_silx_descending_ramp() {
+        // silx "reversed gray" = arange(255, -1, -1) in all RGB channels.
+        let rev = Colormap::new(ColormapName::Gray, 0.0, 1.0).reversed();
+        assert_eq!(rev.lut[0], [255, 255, 255, 255]);
+        assert_eq!(rev.lut[255], [0, 0, 0, 255]);
+        assert_eq!(rev.lut[1], [254, 254, 254, 255]);
+    }
 }
