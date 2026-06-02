@@ -57,7 +57,10 @@ impl Normalization {
     }
 }
 
-/// A named colormap in the built-in catalog. Backed by `colorous` gradients.
+/// A named colormap in the built-in catalog. The perceptual maps are backed by
+/// `colorous` gradients; silx's analytic maps (`gray`, `red`, `green`, `blue`,
+/// `temperature`) and the matplotlib-derived `jet`/`hsv` are built by
+/// [`ColormapName::build_lut`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ColormapName {
     /// Perceptually-uniform default (matplotlib's viridis).
@@ -68,36 +71,92 @@ pub enum ColormapName {
     Cividis,
     /// Modern rainbow-like, perceptually improved (Google's turbo).
     Turbo,
-    /// Single-hue grayscale.
+    /// Single-hue grayscale (colorous greys; an alias of [`Gray`](Self::Gray)).
     Greys,
     /// Diverging blue–red (matplotlib's spectral).
     Spectral,
+    /// Black-to-white linear ramp (silx `gray`).
+    Gray,
+    /// Black-to-red linear ramp (silx `red`).
+    Red,
+    /// Black-to-green linear ramp (silx `green`).
+    Green,
+    /// Black-to-blue linear ramp (silx `blue`).
+    Blue,
+    /// silx `temperature`: blue → cyan → green → red.
+    Temperature,
+    /// Classic blue-cyan-yellow-red rainbow (matplotlib's jet).
+    Jet,
+    /// Full-saturation hue wheel (matplotlib's hsv).
+    Hsv,
 }
 
 impl ColormapName {
-    /// All catalog entries, for building a picker.
-    pub const ALL: [ColormapName; 8] = [
+    /// All catalog entries, for building a picker. Ordered to match silx's
+    /// preferred-colormap list (`colors.py:1086`) where the entries overlap.
+    pub const ALL: [ColormapName; 15] = [
+        ColormapName::Gray,
+        ColormapName::Red,
+        ColormapName::Green,
+        ColormapName::Blue,
         ColormapName::Viridis,
-        ColormapName::Inferno,
-        ColormapName::Magma,
-        ColormapName::Plasma,
         ColormapName::Cividis,
+        ColormapName::Magma,
+        ColormapName::Inferno,
+        ColormapName::Plasma,
+        ColormapName::Temperature,
+        ColormapName::Jet,
+        ColormapName::Hsv,
         ColormapName::Turbo,
         ColormapName::Greys,
         ColormapName::Spectral,
     ];
 
-    /// The `colorous` gradient backing this name.
-    fn gradient(self) -> Gradient {
+    /// The `colorous` gradient backing a perceptual name, or `None` for the
+    /// analytic maps built by [`Self::build_lut`].
+    fn gradient(self) -> Option<Gradient> {
         match self {
-            ColormapName::Viridis => colorous::VIRIDIS,
-            ColormapName::Inferno => colorous::INFERNO,
-            ColormapName::Magma => colorous::MAGMA,
-            ColormapName::Plasma => colorous::PLASMA,
-            ColormapName::Cividis => colorous::CIVIDIS,
-            ColormapName::Turbo => colorous::TURBO,
-            ColormapName::Greys => colorous::GREYS,
-            ColormapName::Spectral => colorous::SPECTRAL,
+            ColormapName::Viridis => Some(colorous::VIRIDIS),
+            ColormapName::Inferno => Some(colorous::INFERNO),
+            ColormapName::Magma => Some(colorous::MAGMA),
+            ColormapName::Plasma => Some(colorous::PLASMA),
+            ColormapName::Cividis => Some(colorous::CIVIDIS),
+            ColormapName::Turbo => Some(colorous::TURBO),
+            ColormapName::Greys => Some(colorous::GREYS),
+            ColormapName::Spectral => Some(colorous::SPECTRAL),
+            ColormapName::Gray
+            | ColormapName::Red
+            | ColormapName::Green
+            | ColormapName::Blue
+            | ColormapName::Temperature
+            | ColormapName::Jet
+            | ColormapName::Hsv => None,
+        }
+    }
+
+    /// Build the 256-entry sRGB LUT for this name. `colorous`-backed names are
+    /// sampled regularly over `[0, 1]`; the analytic names mirror silx
+    /// `_create_colormap_lut` (gray/red/green/blue/temperature) and the
+    /// matplotlib segment data loaded by silx for `jet`/`hsv`.
+    fn build_lut(self) -> [[u8; 4]; 256] {
+        if let Some(gradient) = self.gradient() {
+            let mut lut = [[0u8; 4]; 256];
+            for (i, entry) in lut.iter_mut().enumerate() {
+                let c = gradient.eval_continuous(i as f64 / 255.0);
+                *entry = [c.r, c.g, c.b, 255];
+            }
+            return lut;
+        }
+        match self {
+            ColormapName::Gray => single_channel_ramp(0b111),
+            ColormapName::Red => single_channel_ramp(0b001),
+            ColormapName::Green => single_channel_ramp(0b010),
+            ColormapName::Blue => single_channel_ramp(0b100),
+            ColormapName::Temperature => temperature_lut(),
+            ColormapName::Jet => segmented_lut(&JET_SEGMENTS),
+            ColormapName::Hsv => segmented_lut(&HSV_SEGMENTS),
+            // colorous-backed names handled above.
+            _ => unreachable!("colorous-backed name reaches analytic builder"),
         }
     }
 
@@ -112,8 +171,201 @@ impl ColormapName {
             ColormapName::Turbo => "Turbo",
             ColormapName::Greys => "Greys",
             ColormapName::Spectral => "Spectral",
+            ColormapName::Gray => "Gray",
+            ColormapName::Red => "Red",
+            ColormapName::Green => "Green",
+            ColormapName::Blue => "Blue",
+            ColormapName::Temperature => "Temperature",
+            ColormapName::Jet => "Jet",
+            ColormapName::Hsv => "HSV",
         }
     }
+}
+
+/// silx single-channel ramp builder: each selected channel (bit 0 = red, bit 1
+/// = green, bit 2 = blue) carries `arange(256)`, others stay 0. Bit mask `0b111`
+/// yields `gray` (silx `_create_colormap_lut` `lut[:, :3] = arange(256)`).
+fn single_channel_ramp(channels: u8) -> [[u8; 4]; 256] {
+    let mut lut = [[0u8, 0, 0, 255]; 256];
+    for (i, entry) in lut.iter_mut().enumerate() {
+        let v = i as u8;
+        if channels & 0b001 != 0 {
+            entry[0] = v;
+        }
+        if channels & 0b010 != 0 {
+            entry[1] = v;
+        }
+        if channels & 0b100 != 0 {
+            entry[2] = v;
+        }
+    }
+    lut
+}
+
+/// silx `temperature` LUT, transcribed channel-by-channel from
+/// `silx.math.colormap._create_colormap_lut` (the `numpy.arange` slice fills).
+fn temperature_lut() -> [[u8; 4]; 256] {
+    let mut lut = [[0u8, 0, 0, 255]; 256];
+
+    // Red: lut[128:192, 0] = arange(2, 255, 4); lut[192:, 0] = 255.
+    for (k, i) in (128..192).enumerate() {
+        lut[i][0] = (2 + 4 * k) as u8;
+    }
+    for entry in lut.iter_mut().take(256).skip(192) {
+        entry[0] = 255;
+    }
+
+    // Green: lut[:64, 1] = arange(0, 255, 4); lut[64:192, 1] = 255;
+    //        lut[192:, 1] = arange(252, -1, -4).
+    for (k, entry) in lut.iter_mut().take(64).enumerate() {
+        entry[1] = (4 * k) as u8;
+    }
+    for entry in lut.iter_mut().take(192).skip(64) {
+        entry[1] = 255;
+    }
+    for (k, i) in (192..256).enumerate() {
+        lut[i][1] = (252 - 4 * k) as u8;
+    }
+
+    // Blue: lut[:64, 2] = 255; lut[64:128, 2] = arange(254, 0, -4).
+    for entry in lut.iter_mut().take(64) {
+        entry[2] = 255;
+    }
+    for (k, i) in (64..128).enumerate() {
+        lut[i][2] = (254 - 4 * k) as u8;
+    }
+
+    lut
+}
+
+/// A piecewise-linear colormap segment: at LUT coordinate `x` in `[0, 1]` the
+/// channel value is `y` in `[0, 1]`. Matches the per-channel anchor lists of a
+/// matplotlib `LinearSegmentedColormap` (left/right discontinuity values are
+/// equal for these maps, so a single `y` per anchor suffices).
+struct Segment {
+    x: f64,
+    y: f64,
+}
+
+const fn seg(x: f64, y: f64) -> Segment {
+    Segment { x, y }
+}
+
+/// Per-channel anchor lists for one colormap (red, green, blue).
+struct Segments {
+    red: &'static [Segment],
+    green: &'static [Segment],
+    blue: &'static [Segment],
+}
+
+/// matplotlib `jet` segment data (`matplotlib._cm._jet_data`).
+static JET_SEGMENTS: Segments = Segments {
+    red: &[
+        seg(0.00, 0.0),
+        seg(0.35, 0.0),
+        seg(0.66, 1.0),
+        seg(0.89, 1.0),
+        seg(1.00, 0.5),
+    ],
+    green: &[
+        seg(0.000, 0.0),
+        seg(0.125, 0.0),
+        seg(0.375, 1.0),
+        seg(0.640, 1.0),
+        seg(0.910, 0.0),
+        seg(1.000, 0.0),
+    ],
+    blue: &[
+        seg(0.00, 0.5),
+        seg(0.11, 1.0),
+        seg(0.34, 1.0),
+        seg(0.65, 0.0),
+        seg(1.00, 0.0),
+    ],
+};
+
+/// matplotlib `hsv` segment data (`matplotlib._cm._hsv_data`): the full-saturation
+/// hue wheel, red → yellow → green → cyan → blue → magenta → red.
+static HSV_SEGMENTS: Segments = Segments {
+    red: &[
+        seg(0.0, 1.0),
+        seg(0.158730, 1.0),
+        seg(0.174603, 0.968750),
+        seg(0.333333, 0.031250),
+        seg(0.349206, 0.0),
+        seg(0.666667, 0.0),
+        seg(0.682540, 0.031250),
+        seg(0.841270, 0.968750),
+        seg(0.857143, 1.0),
+        seg(1.0, 1.0),
+    ],
+    green: &[
+        seg(0.0, 0.0),
+        seg(0.158730, 0.937500),
+        seg(0.174603, 1.0),
+        seg(0.682540, 1.0),
+        seg(0.698413, 0.937500),
+        seg(0.841270, 0.031250),
+        seg(0.857143, 0.0),
+        seg(1.0, 0.0),
+    ],
+    blue: &[
+        seg(0.0, 0.0),
+        seg(0.333333, 0.0),
+        seg(0.349206, 0.031250),
+        seg(0.507937, 0.968750),
+        seg(0.523810, 1.0),
+        seg(0.841270, 1.0),
+        seg(0.857143, 0.968750),
+        seg(1.0, 0.062500),
+    ],
+};
+
+/// Interpolate a single channel's segment list at coordinate `x` in `[0, 1]`,
+/// returning the value in `[0, 1]` (matplotlib `LinearSegmentedColormap` lookup,
+/// clamped at the endpoints).
+fn interp_segment(segments: &[Segment], x: f64) -> f64 {
+    if x <= segments[0].x {
+        return segments[0].y;
+    }
+    let last = &segments[segments.len() - 1];
+    if x >= last.x {
+        return last.y;
+    }
+    for pair in segments.windows(2) {
+        let (lo, hi) = (&pair[0], &pair[1]);
+        if x <= hi.x {
+            // Coincident anchors (a discontinuity) take the right value.
+            if hi.x == lo.x {
+                return hi.y;
+            }
+            let t = (x - lo.x) / (hi.x - lo.x);
+            return lo.y + t * (hi.y - lo.y);
+        }
+    }
+    last.y
+}
+
+/// Sample a segmented colormap into a 256-entry sRGB LUT. Coordinate `i / 255`
+/// (matplotlib's regular 256-sample grid) is evaluated per channel, then the
+/// float `[0, 1]` value is quantized exactly as silx's `array_to_rgba8888`:
+/// `clip(value * 256, 0, 255)` truncated to `u8` (each bin `[N, N+1)`, with the
+/// top bin `[255, 256]`). This matches how silx loads these maps from `.npy`.
+fn segmented_lut(segments: &Segments) -> [[u8; 4]; 256] {
+    let mut lut = [[0u8, 0, 0, 255]; 256];
+    for (i, entry) in lut.iter_mut().enumerate() {
+        let x = i as f64 / 255.0;
+        entry[0] = quantize_float_channel(interp_segment(segments.red, x));
+        entry[1] = quantize_float_channel(interp_segment(segments.green, x));
+        entry[2] = quantize_float_channel(interp_segment(segments.blue, x));
+    }
+    lut
+}
+
+/// Convert a float channel value in `[0, 1]` to a `u8`, mirroring silx
+/// `array_to_rgba8888`: `clip(value * 256, 0, 255)` truncated toward zero.
+fn quantize_float_channel(value: f64) -> u8 {
+    (value * 256.0).clamp(0.0, 255.0) as u8
 }
 
 /// silx's default gamma-normalization exponent (`Colormap.__gamma`).
@@ -140,14 +392,8 @@ impl Colormap {
     /// Build a colormap from a catalog `name` over `[vmin, vmax]` with linear
     /// normalization and the default gamma.
     pub fn new(name: ColormapName, vmin: f64, vmax: f64) -> Self {
-        let gradient = name.gradient();
-        let mut lut = [[0u8; 4]; 256];
-        for (i, entry) in lut.iter_mut().enumerate() {
-            let c = gradient.eval_continuous(i as f64 / 255.0);
-            *entry = [c.r, c.g, c.b, 255];
-        }
         Self {
-            lut,
+            lut: name.build_lut(),
             vmin,
             vmax,
             normalization: Normalization::Linear,
@@ -333,5 +579,68 @@ mod tests {
         let (cmin, oor) = sqrt.norm_bounds();
         assert_eq!(cmin, 0.0); // sqrt(0)
         assert!((oor - 0.5).abs() < 1e-6); // 1 / (sqrt(4) - sqrt(0)) = 1/2
+    }
+
+    // --- Catalog LUTs ----------------------------------------------------
+
+    #[test]
+    fn every_name_yields_a_256_entry_lut() {
+        for name in ColormapName::ALL {
+            let lut = name.build_lut();
+            assert_eq!(lut.len(), 256, "{} LUT length", name.label());
+            assert!(
+                lut.iter().all(|c| c[3] == 255),
+                "{} should be fully opaque",
+                name.label()
+            );
+        }
+    }
+
+    #[test]
+    fn gray_red_green_blue_are_silx_linear_ramps() {
+        // silx _create_colormap_lut: gray -> arange(256) in all RGB channels,
+        // single-channel maps -> arange(256) in their channel only.
+        let gray = Colormap::new(ColormapName::Gray, 0.0, 1.0).lut;
+        assert_eq!(gray[0], [0, 0, 0, 255]);
+        assert_eq!(gray[128], [128, 128, 128, 255]);
+        assert_eq!(gray[255], [255, 255, 255, 255]);
+
+        let red = Colormap::new(ColormapName::Red, 0.0, 1.0).lut;
+        assert_eq!(red[200], [200, 0, 0, 255]);
+        let green = Colormap::new(ColormapName::Green, 0.0, 1.0).lut;
+        assert_eq!(green[200], [0, 200, 0, 255]);
+        let blue = Colormap::new(ColormapName::Blue, 0.0, 1.0).lut;
+        assert_eq!(blue[200], [0, 0, 200, 255]);
+    }
+
+    #[test]
+    fn temperature_matches_silx_channel_stops() {
+        // Boundary samples of silx's _create_colormap_lut "temperature" fills.
+        let lut = Colormap::new(ColormapName::Temperature, 0.0, 1.0).lut;
+        // Blue: [:64] = 255; index 64 starts arange(254, 0, -4).
+        assert_eq!(lut[0][2], 255);
+        assert_eq!(lut[63][2], 255);
+        assert_eq!(lut[64][2], 254);
+        // Green: [:64] = arange(0, 255, 4); [64:192] = 255.
+        assert_eq!(lut[0][1], 0);
+        assert_eq!(lut[63][1], 252); // 4 * 63
+        assert_eq!(lut[64][1], 255);
+        // Red: [128:192] = arange(2, 255, 4); [192:] = 255.
+        assert_eq!(lut[127][0], 0);
+        assert_eq!(lut[128][0], 2);
+        assert_eq!(lut[192][0], 255);
+        assert_eq!(lut[255][0], 255);
+    }
+
+    #[test]
+    fn jet_and_hsv_endpoints_match_matplotlib_segments() {
+        // matplotlib jet: red 0->0.5 (->128) blue, ends at red 0.5 (->128).
+        let jet = Colormap::new(ColormapName::Jet, 0.0, 1.0).lut;
+        assert_eq!(jet[0], [0, 0, 128, 255]); // low: blue 0.5
+        assert_eq!(jet[255], [128, 0, 0, 255]); // high: red 0.5
+        // matplotlib hsv starts pure red, ends near pure red (wraps the wheel).
+        let hsv = Colormap::new(ColormapName::Hsv, 0.0, 1.0).lut;
+        assert_eq!(hsv[0], [255, 0, 0, 255]);
+        assert_eq!(hsv[255], [255, 0, 16, 255]); // blue 0.0625 -> 16
     }
 }
