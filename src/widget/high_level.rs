@@ -20,7 +20,7 @@ use crate::core::backend::{
 use crate::core::colormap::{AutoscaleMode, Colormap};
 use crate::core::items::{Baseline, LineStyle, ScalarMask, Symbol};
 use crate::core::marker::{Marker, MarkerKind, MarkerSymbol};
-use crate::core::plot::{GraphGrid, Plot, PlotId};
+use crate::core::plot::{DataRange, GraphGrid, Plot, PlotId};
 use crate::core::roi::Roi;
 use crate::core::scatter_viz::GridImage;
 use crate::core::shape::{Shape, ShapeKind};
@@ -1125,6 +1125,20 @@ fn include_axis(slot: &mut Option<Bounds1D>, bounds: Bounds1D) {
     match slot {
         Some(existing) => existing.include(bounds),
         None => *slot = Some(bounds),
+    }
+}
+
+/// Map accumulated widget [`DataBounds`] to the model [`DataRange`] consumed by
+/// [`Plot::reset_zoom_to_data_range`], padding degenerate (single-point) bounds
+/// via [`Bounds1D::as_non_degenerate`] so each refit axis gets a non-degenerate
+/// span. An axis with no data maps to `None`, leaving it pinned by the model's
+/// per-axis autoscale logic (silx `PlotWidget.resetZoom` restores axes without
+/// data). Pure (no `RenderState`/GPU) so the reset path is unit-testable.
+fn data_range_from_bounds(bounds: DataBounds) -> DataRange {
+    DataRange {
+        x: bounds.x.map(Bounds1D::as_non_degenerate),
+        y: bounds.y_left.map(Bounds1D::as_non_degenerate),
+        y2: bounds.y_right.map(Bounds1D::as_non_degenerate),
     }
 }
 
@@ -4272,16 +4286,22 @@ impl PlotWidget {
     }
 
     fn apply_limits_from_data_bounds(&mut self) {
-        let Some(x) = self.data_bounds.x else {
+        // Preserve the original guard: a reset-to-data needs both X and left-Y
+        // data accumulated before it does anything.
+        if self.data_bounds.x.is_none() || self.data_bounds.y_left.is_none() {
             return;
-        };
-        let Some(y_left) = self.data_bounds.y_left else {
-            return;
-        };
-        let (xmin, xmax) = x.as_non_degenerate();
-        let (ymin, ymax) = y_left.as_non_degenerate();
-        let y2 = self.data_bounds.y_right.map(Bounds1D::as_non_degenerate);
-        self.set_limits_internal(xmin, xmax, ymin, ymax, y2);
+        }
+        // Delegate the per-axis refit decision to the single flag-aware owner
+        // (`Plot::reset_zoom_to_data_range`): only autoscale-on axes refit from
+        // data, off axes keep their current limits, and log axes force a refit
+        // when their lower limit is <= 0. `WgpuBackend::set_limits` (the prior
+        // path) only assigned `plot.limits`/`plot.y2` — the same two fields the
+        // model owner writes — so delegating regresses no widget-side
+        // bookkeeping; the `LimitsChanged` event is still raised here.
+        let range = data_range_from_bounds(self.data_bounds);
+        let before = self.limits_snapshot();
+        self.backend.plot_mut().reset_zoom_to_data_range(range);
+        self.push_limits_changed_if(before);
     }
 }
 
@@ -6597,6 +6617,79 @@ fn roi_description(roi: &Roi) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Build the `DataBounds` the widget would accumulate, with non-degenerate
+    /// spans on every axis so `as_non_degenerate` does not pad.
+    fn data_bounds(x: (f64, f64), y_left: (f64, f64), y_right: Option<(f64, f64)>) -> DataBounds {
+        DataBounds {
+            x: Some(Bounds1D::new(x.0, x.1).unwrap()),
+            y_left: Some(Bounds1D::new(y_left.0, y_left.1).unwrap()),
+            y_right: y_right.map(|(lo, hi)| Bounds1D::new(lo, hi).unwrap()),
+        }
+    }
+
+    /// Reproduce the exact composition `apply_limits_from_data_bounds` now
+    /// performs on its model owner: map widget `DataBounds` -> `DataRange`, then
+    /// apply through `Plot::reset_zoom_to_data_range`. `PlotWidget` itself needs
+    /// a GPU `RenderState`, so this asserts the flag-aware behavior via the
+    /// model owner the widget routes through.
+    fn apply_widget_reset(plot: &mut Plot, bounds: DataBounds) {
+        plot.reset_zoom_to_data_range(data_range_from_bounds(bounds));
+    }
+
+    #[test]
+    fn widget_reset_keeps_x_and_refits_y_when_only_y_autoscale_on() {
+        // x_autoscale OFF + y_autoscale ON: current X limits preserved, Y refit.
+        let mut plot = Plot::new(0);
+        plot.limits = (0.0, 1.0, 0.0, 1.0);
+        plot.set_x_autoscale(false);
+        plot.set_y_autoscale(true);
+        apply_widget_reset(&mut plot, data_bounds((10.0, 20.0), (-5.0, 5.0), None));
+        assert_eq!(plot.limits, (0.0, 1.0, -5.0, 5.0));
+    }
+
+    #[test]
+    fn widget_reset_keeps_y_and_refits_x_when_only_x_autoscale_on() {
+        // x_autoscale ON + y_autoscale OFF: X refit, current Y limits preserved.
+        let mut plot = Plot::new(0);
+        plot.limits = (0.0, 1.0, 0.0, 1.0);
+        plot.set_x_autoscale(true);
+        plot.set_y_autoscale(false);
+        apply_widget_reset(&mut plot, data_bounds((10.0, 20.0), (-5.0, 5.0), None));
+        assert_eq!(plot.limits, (10.0, 20.0, 0.0, 1.0));
+    }
+
+    #[test]
+    fn widget_reset_with_all_autoscale_off_is_noop() {
+        let mut plot = Plot::new(0);
+        plot.limits = (0.0, 1.0, 0.0, 1.0);
+        plot.y2 = Some((0.0, 2.0));
+        plot.set_x_autoscale(false);
+        plot.set_y_autoscale(false);
+        plot.set_y2_autoscale(false);
+        apply_widget_reset(
+            &mut plot,
+            data_bounds((10.0, 20.0), (-5.0, 5.0), Some((-1.0, 1.0))),
+        );
+        assert_eq!(plot.limits, (0.0, 1.0, 0.0, 1.0));
+        assert_eq!(plot.y2, Some((0.0, 2.0)));
+    }
+
+    #[test]
+    fn data_range_from_bounds_pads_degenerate_axis() {
+        // A single-point X span pads via as_non_degenerate before reaching the
+        // model, so a refit axis never gets a zero-width range.
+        let bounds = DataBounds {
+            x: Some(Bounds1D::new(4.0, 4.0).unwrap()),
+            y_left: Some(Bounds1D::new(-1.0, 1.0).unwrap()),
+            y_right: None,
+        };
+        let range = data_range_from_bounds(bounds);
+        let (xmin, xmax) = range.x.unwrap();
+        assert!(xmax > xmin, "degenerate X must be padded: {xmin}..{xmax}");
+        assert_eq!(range.y, Some((-1.0, 1.0)));
+        assert_eq!(range.y2, None);
+    }
 
     #[test]
     fn save_to_path_dispatch_resolves_format_per_extension() {
