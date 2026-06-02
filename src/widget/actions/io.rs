@@ -11,9 +11,9 @@ use std::path::Path;
 
 use crate::render::save::SaveFormat;
 
-/// silx default CSV `%.18e`-style float format width: 18 significant digits in
-/// scientific notation (silx `SaveAction` `CURVE_FILTERS_TXT` `","`-CSV filter
-/// uses `fmt="%.18e"`).
+/// Digits after the decimal point in the CSV float format: 18, matching silx
+/// `SaveAction`'s `","`-CSV filter `fmt="%.18e"` (itself `numpy.savetxt`'s
+/// default). See [`format_csv_float`].
 const CSV_FLOAT_PRECISION: usize = 18;
 
 /// What a chosen save path resolves to, mirroring silx `SaveAction` splitting
@@ -48,10 +48,24 @@ impl SaveTarget {
     }
 }
 
-/// Format a single `f64` as silx `%.18e` does: lowercase scientific notation
-/// with [`CSV_FLOAT_PRECISION`] digits after the decimal point.
+/// Format a single `f64` byte-for-byte as C/Python `%.18e` (what
+/// `numpy.savetxt`, and therefore silx `SaveAction`, writes):
+/// [`CSV_FLOAT_PRECISION`] digits after the decimal point and a signed,
+/// at-least-two-digit exponent (e.g. `1.500000000000000000e+00`).
+///
+/// Rust's `{:.18e}` produces the right mantissa but a sign-less, zero-pad-less
+/// exponent (`...e0`, `...e-3`), so the exponent is reformatted to match.
 fn format_csv_float(v: f64) -> String {
-    format!("{v:.*e}", CSV_FLOAT_PRECISION)
+    let s = format!("{v:.*e}", CSV_FLOAT_PRECISION);
+    match s.split_once('e') {
+        Some((mantissa, exp)) => {
+            let exp: i32 = exp.parse().unwrap_or(0);
+            let sign = if exp < 0 { '-' } else { '+' };
+            format!("{mantissa}e{sign}{:02}", exp.unsigned_abs())
+        }
+        // `{:e}` always yields an exponent; this is just a defensive fallback.
+        None => s,
+    }
 }
 
 /// Serialize a curve's `(x, y)` to silx-style `,`-separated CSV: a header line
@@ -179,10 +193,25 @@ mod tests {
         let x = [0.0, 1.5];
         let y = [-2.0, 3.25];
         let csv = curve_to_csv(&x, &y);
+        // These rows are byte-for-byte what silx writes: numpy.savetxt with
+        // fmt="%.18e", which is C/Python `'%.18e' % v` — signed, two-digit
+        // exponent (`e+00`), 18 fractional digits. (Cross-checked against
+        // `python3 -c "print('%.18e' % 1.5)"` → 1.500000000000000000e+00.)
         let expected = "x,y\n\
-             0.000000000000000000e0,-2.000000000000000000e0\n\
-             1.500000000000000000e0,3.250000000000000000e0\n";
+             0.000000000000000000e+00,-2.000000000000000000e+00\n\
+             1.500000000000000000e+00,3.250000000000000000e+00\n";
         assert_eq!(csv, expected);
+    }
+
+    #[test]
+    fn format_csv_float_matches_c_printf_exponent() {
+        // Byte-for-byte equal to `python3 -c "print('%.18e' % v)"` (verified),
+        // including the f64 representation tail of 0.001 (...021e-03) — proving
+        // the format is faithful to numpy.savetxt's `%.18e`, not Rust's `{:e}`.
+        assert_eq!(format_csv_float(0.0), "0.000000000000000000e+00");
+        assert_eq!(format_csv_float(1000.0), "1.000000000000000000e+03");
+        assert_eq!(format_csv_float(0.001), "1.000000000000000021e-03");
+        assert_eq!(format_csv_float(-3.25), "-3.250000000000000000e+00");
     }
 
     #[test]
