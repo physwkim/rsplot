@@ -4019,6 +4019,22 @@ fn image_view_colorbar(colormap: &Colormap) -> crate::widget::colorbar::ColorBar
     crate::widget::colorbar::ColorBarWidget::new(colormap.clone())
 }
 
+/// Build the [`ImageSpec`] for an [`ImageView`]'s active image from its retained
+/// colormap and `alpha` (silx `ActiveImageAlphaSlider` propagation,
+/// ImageView.py:513-517). Split out from [`ImageView::upload_image`] so the
+/// alpha→spec propagation is unit-testable without a GPU backend.
+fn image_view_image_spec<'a>(
+    width: u32,
+    height: u32,
+    pixels: &'a [f32],
+    colormap: &Colormap,
+    alpha: f32,
+) -> ImageSpec<'a> {
+    let mut spec = ImageSpec::scalar(width, height, pixels, colormap.clone());
+    spec.alpha = alpha;
+    spec
+}
+
 pub struct ImageView {
     image_plot: Plot2D,
     histo_h: Plot1D,
@@ -4035,6 +4051,9 @@ pub struct ImageView {
     /// (silx `ImageView` `getColorBarWidget`, ImageView.py:501) reflects the
     /// current value limits.
     colormap: Colormap,
+    /// Active-image opacity slider (silx `ImageView` `ActiveImageAlphaSlider`,
+    /// ImageView.py:513-517). Its value propagates to the displayed image.
+    alpha: crate::widget::alpha_slider::AlphaSlider,
 }
 
 impl ImageView {
@@ -4071,6 +4090,7 @@ impl ImageView {
             height: 0,
             pixels: Vec::new(),
             colormap: Colormap::viridis(0.0, 1.0),
+            alpha: crate::widget::alpha_slider::AlphaSlider::default(),
         }
     }
 
@@ -4093,22 +4113,58 @@ impl ImageView {
         self.height = height;
         self.pixels = pixels.to_vec();
         self.colormap = colormap.clone();
+        self.image_plot.set_default_colormap(colormap);
 
-        if let Some(handle) = self.image_handle {
-            self.image_plot
-                .try_update_image(handle, width, height, pixels, colormap)
-                .ok();
-        } else {
-            // Seed the plot's default colormap so the add path uses the same
-            // colormap as the colorbar (and as a subsequent update).
-            self.image_plot.set_default_colormap(colormap);
-            let h = self
-                .image_plot
-                .try_add_default_image(width, height, pixels)?;
-            self.image_handle = Some(h);
-        }
+        self.upload_image();
         self.rebuild_histograms();
         Ok(())
+    }
+
+    /// Build the active image's [`ImageSpec`] from the retained colormap and
+    /// alpha, then add or update it on the image plot. Routing every upload
+    /// through one spec keeps the alpha (silx `ActiveImageAlphaSlider`) in sync
+    /// with the displayed image.
+    fn upload_image(&mut self) {
+        if self.width == 0 || self.pixels.is_empty() {
+            return;
+        }
+        let spec = image_view_image_spec(
+            self.width,
+            self.height,
+            &self.pixels,
+            &self.colormap,
+            self.alpha.alpha(),
+        );
+        if let Some(handle) = self.image_handle {
+            self.image_plot.update_image_spec(handle, spec);
+        } else {
+            let h = self.image_plot.add_image_spec(spec);
+            self.image_handle = Some(h);
+        }
+    }
+
+    /// The current active-image opacity in `[0.0, 1.0]` (silx
+    /// `ActiveImageAlphaSlider`, ImageView.py:513-517).
+    pub fn alpha(&self) -> f32 {
+        self.alpha.alpha()
+    }
+
+    /// Set the active-image opacity in `[0.0, 1.0]` and re-upload the image so
+    /// the change takes effect (silx `ActiveImageAlphaSlider.valueChanged`
+    /// → `image.setAlpha`).
+    pub fn set_alpha(&mut self, alpha: f32) {
+        self.alpha.set_alpha(alpha);
+        self.upload_image();
+    }
+
+    /// Show the ImageView toolbar: the active-image alpha slider (silx
+    /// `ActiveImageAlphaSlider`, ImageView.py:513-517). When the slider value
+    /// changes the new opacity is propagated to the displayed image.
+    pub fn show_toolbar(&mut self, ui: &mut egui::Ui) {
+        let response = self.alpha.ui(ui);
+        if response.changed() {
+            self.upload_image();
+        }
     }
 
     /// The active image's colormap (silx `ImageView.getColormap`).
@@ -4639,6 +4695,20 @@ mod tests {
         assert_eq!(stats.min, Some(1.0));
         assert_eq!(stats.max, Some(4.0));
         assert_eq!(stats.mean, Some(2.5));
+    }
+
+    #[test]
+    fn image_view_alpha_propagates_to_image_spec() {
+        // Item 2: the alpha slider value propagates to the active image's spec
+        // alpha (silx ActiveImageAlphaSlider -> image.setAlpha).
+        let pixels = [1.0_f32, 2.0, 3.0, 4.0];
+        let cmap = Colormap::viridis(0.0, 4.0);
+        let mut slider = crate::widget::alpha_slider::AlphaSlider::default();
+        slider.set_alpha(0.25);
+        let spec = image_view_image_spec(2, 2, &pixels, &cmap, slider.alpha());
+        // 0.25 -> round(255*0.25)=64 -> 64/255 == slider.alpha().
+        assert_eq!(spec.alpha, slider.alpha());
+        assert!((spec.alpha - 64.0 / 255.0).abs() < 1e-6);
     }
 
     #[test]
