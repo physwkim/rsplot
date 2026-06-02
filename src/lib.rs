@@ -61,7 +61,8 @@ pub use crate::render::gpu_image::{
     AggregationMode, ImageData, ImagePixels, InterpolationMode, aggregate_blocks,
 };
 pub use crate::render::save::{
-    SaveError, encode_png, encode_ppm, encode_svg, encode_tiff, rgba_to_rgb, save_graph,
+    SaveError, SaveFormat, encode_png, encode_ppm, encode_svg, encode_tiff, rgba_to_rgb,
+    save_graph, save_graph_with_format,
 };
 pub use crate::widget::alpha_slider::{AlphaSlider, AlphaSliderOrientation};
 pub use crate::widget::colorbar::{ColorBarOrientation, ColorBarWidget};

@@ -14,9 +14,9 @@
 //! Beyond PNG, the raster snapshot can also be exported as PPM (P6), SVG (a
 //! base64 PNG `<image>`), and uncompressed baseline TIFF (with DPI resolution
 //! tags), mirroring silx `PlotImageFile.saveImageToFile` /
-//! `BackendBase.saveGraph(fileName, fileFormat, dpi)`. The `encode_*` helpers
-//! are pure functions over the RGBA pixels so they are testable without a GPU
-//! or the filesystem.
+//! `BackendBase.saveGraph(fileName, fileFormat, dpi)`. [`save_graph_with_format`]
+//! dispatches by [`SaveFormat`], and each `encode_*` helper is a pure function
+//! over the RGBA pixels so it is testable without a GPU or the filesystem.
 //!
 //! DEFERRED (not implemented here): true *vector* export of plot primitives
 //! (the SVG embeds the rendered raster rather than re-emitting geometry, which
@@ -355,15 +355,59 @@ fn axis_log_flags(t: &crate::core::transform::Transform) -> [f32; 2] {
     ]
 }
 
-/// Render the plot's current view to a `size = (width, height)` pixel PNG at
-/// `path`. Captures the data layer (clear + image + curves); chrome is not
-/// included. Requires [`crate::install`] to have run on `render_state`.
-pub fn save_graph(
+/// An output image format for [`save_graph_with_format`].
+///
+/// Faithful to silx `PlotWidget.saveGraph` / `PlotImageFile.saveImageToFile`,
+/// which support PNG, PPM, SVG, and TIFF over a raster snapshot. JPEG, EPS,
+/// PDF, PS (matplotlib-only) and true vector export are not implemented (see
+/// the module-level Defer note).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SaveFormat {
+    /// PNG (RGBA), via [`encode_png`].
+    Png,
+    /// Binary (P6) PPM (RGB), via [`encode_ppm`].
+    Ppm,
+    /// SVG wrapping a base64 PNG `<image>` (RGB), via [`encode_svg`].
+    Svg,
+    /// Uncompressed baseline TIFF (RGB) with resolution tags, via
+    /// [`encode_tiff`].
+    Tiff,
+}
+
+impl SaveFormat {
+    /// Map a file extension (case-insensitive, no leading dot) to a format.
+    ///
+    /// Recognizes silx's raster extensions: `png`, `ppm`, `svg`, `tif`/`tiff`.
+    /// Returns `None` for unknown or matplotlib-only extensions (`pdf`, `ps`,
+    /// `eps`, `jpeg`, `jpg`), matching silx rejecting unsupported formats in
+    /// the raster backend.
+    pub fn from_extension(ext: &str) -> Option<Self> {
+        match ext.to_ascii_lowercase().as_str() {
+            "png" => Some(SaveFormat::Png),
+            "ppm" => Some(SaveFormat::Ppm),
+            "svg" => Some(SaveFormat::Svg),
+            "tif" | "tiff" => Some(SaveFormat::Tiff),
+            _ => None,
+        }
+    }
+
+    /// Infer the format from a path's extension via [`Self::from_extension`].
+    pub fn from_path(path: &Path) -> Option<Self> {
+        path.extension()
+            .and_then(|e| e.to_str())
+            .and_then(Self::from_extension)
+    }
+}
+
+/// Render the plot's current view to a `size = (width, height)` pixel image and
+/// return the readback as tightly packed RGBA8. Captures the data layer (clear,
+/// image, curves); chrome is not included. Requires [`crate::install`] to have
+/// run on `render_state`.
+fn render_plot_rgba(
     render_state: &RenderState,
     plot: &Plot,
     size: (u32, u32),
-    path: impl AsRef<Path>,
-) -> Result<(), SaveError> {
+) -> Result<Vec<u8>, SaveError> {
     let (w, h) = size;
     if w == 0 || h == 0 {
         return Err(SaveError::Readback("zero-size target".into()));
@@ -382,28 +426,78 @@ pub fn save_graph(
     };
     let bg = egui::Rgba::from(plot.data_background).to_array();
 
-    let rgba = {
-        let renderer = render_state.renderer.read();
-        let res: &WgpuResources = renderer
-            .callback_resources
-            .get()
-            .expect("WgpuResources not installed — call egui_silx::install() first");
-        res.render_to_rgba(
-            &render_state.device,
-            &render_state.queue,
-            render_state.target_format,
-            plot.id,
-            size,
-            bg,
-            ortho_left,
-            axis_log_left,
-            ortho_right,
-            axis_log_right,
-        )?
-    };
+    let renderer = render_state.renderer.read();
+    let res: &WgpuResources = renderer
+        .callback_resources
+        .get()
+        .expect("WgpuResources not installed — call egui_silx::install() first");
+    res.render_to_rgba(
+        &render_state.device,
+        &render_state.queue,
+        render_state.target_format,
+        plot.id,
+        size,
+        bg,
+        ortho_left,
+        axis_log_left,
+        ortho_right,
+        axis_log_right,
+    )
+}
 
+/// Render the plot's current view to a `size = (width, height)` pixel PNG at
+/// `path`. Captures the data layer (clear + image + curves); chrome is not
+/// included. Requires [`crate::install`] to have run on `render_state`.
+pub fn save_graph(
+    render_state: &RenderState,
+    plot: &Plot,
+    size: (u32, u32),
+    path: impl AsRef<Path>,
+) -> Result<(), SaveError> {
+    let (w, h) = size;
+    let rgba = render_plot_rgba(render_state, plot, size)?;
     let png = encode_png(&rgba, w, h)?;
     std::fs::write(path, png)?;
+    Ok(())
+}
+
+/// Render the plot's current view and save it to `path` in the given
+/// [`SaveFormat`], at the requested `dpi` (used where the format carries
+/// resolution — currently TIFF). Captures the data layer only; chrome is not
+/// included.
+///
+/// Faithful to silx `BackendBase.saveGraph(fileName, fileFormat, dpi)`: the
+/// caller chooses the format explicitly and threads DPI through. For raster
+/// formats (PNG/PPM/SVG) `dpi` is recorded only where the container supports it
+/// (SVG width/height stay in px); TIFF writes `XResolution`/`YResolution`.
+pub fn save_graph_with_format(
+    render_state: &RenderState,
+    plot: &Plot,
+    size: (u32, u32),
+    path: impl AsRef<Path>,
+    format: SaveFormat,
+    dpi: u32,
+) -> Result<(), SaveError> {
+    let (w, h) = size;
+    let rgba = render_plot_rgba(render_state, plot, size)?;
+    match format {
+        SaveFormat::Png => {
+            let bytes = encode_png(&rgba, w, h)?;
+            std::fs::write(path, bytes)?;
+        }
+        SaveFormat::Ppm => {
+            let bytes = encode_ppm(&rgba, w, h);
+            std::fs::write(path, bytes)?;
+        }
+        SaveFormat::Svg => {
+            let svg = encode_svg(&rgba, w, h)?;
+            std::fs::write(path, svg)?;
+        }
+        SaveFormat::Tiff => {
+            let bytes = encode_tiff(&rgba, w, h, dpi);
+            std::fs::write(path, bytes)?;
+        }
+    }
     Ok(())
 }
 
@@ -460,6 +554,38 @@ mod tests {
         assert_eq!(info.height, 2);
         assert_eq!(info.color_type, png::ColorType::Rgba);
         assert_eq!(&buf[..rgba.len()], rgba.as_slice());
+    }
+
+    #[test]
+    fn save_format_from_extension_maps_silx_raster_formats() {
+        assert_eq!(SaveFormat::from_extension("png"), Some(SaveFormat::Png));
+        assert_eq!(SaveFormat::from_extension("PNG"), Some(SaveFormat::Png));
+        assert_eq!(SaveFormat::from_extension("ppm"), Some(SaveFormat::Ppm));
+        assert_eq!(SaveFormat::from_extension("svg"), Some(SaveFormat::Svg));
+        assert_eq!(SaveFormat::from_extension("tif"), Some(SaveFormat::Tiff));
+        assert_eq!(SaveFormat::from_extension("TIFF"), Some(SaveFormat::Tiff));
+    }
+
+    #[test]
+    fn save_format_rejects_matplotlib_only_and_unknown_extensions() {
+        // matplotlib-only formats are deferred → unsupported in the raster path.
+        assert_eq!(SaveFormat::from_extension("pdf"), None);
+        assert_eq!(SaveFormat::from_extension("ps"), None);
+        assert_eq!(SaveFormat::from_extension("eps"), None);
+        assert_eq!(SaveFormat::from_extension("jpeg"), None);
+        assert_eq!(SaveFormat::from_extension("jpg"), None);
+        assert_eq!(SaveFormat::from_extension("bmp"), None);
+        assert_eq!(SaveFormat::from_extension(""), None);
+    }
+
+    #[test]
+    fn save_format_from_path_uses_extension() {
+        use std::path::Path;
+        assert_eq!(
+            SaveFormat::from_path(Path::new("/tmp/out.tiff")),
+            Some(SaveFormat::Tiff)
+        );
+        assert_eq!(SaveFormat::from_path(Path::new("/tmp/noext")), None);
     }
 
     #[test]
