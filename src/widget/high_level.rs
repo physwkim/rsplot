@@ -4040,6 +4040,103 @@ fn cursor_from_pointer_event(
     }
 }
 
+/// Extract a 1D profile for an [`ImageView`]'s profile tool from a drag between
+/// data-space `(col, row)` endpoints `start` and `end` (silx
+/// `ImageView._ProfileToolBar`, ImageView.py:692-697), dispatching to the
+/// existing profile functions per `mode`:
+///
+/// - [`ProfileMode::Line`] → [`line_profile_values`] along `start`→`end`;
+/// - [`ProfileMode::Horizontal`] → [`horizontal_profile_values`] at the row of
+///   `end`, with the column index as the x axis;
+/// - [`ProfileMode::Vertical`] → [`vertical_profile_values`] at the column of
+///   `end`, with the row index as the x axis;
+/// - [`ProfileMode::Rectangle`] → [`rect_profile_values`] over the `start`→`end`
+///   bounding box, averaged along rows (a row profile);
+/// - [`ProfileMode::None`] → `None`.
+///
+/// Returns `None` when the mode is disabled or the index is out of range.
+/// Split out so the drag→profile mapping is unit-testable without a GPU backend.
+fn image_view_profile_values(
+    mode: ProfileMode,
+    width: u32,
+    height: u32,
+    pixels: &[f32],
+    start: (f64, f64),
+    end: (f64, f64),
+) -> Option<(Vec<f64>, Vec<f64>)> {
+    match mode {
+        ProfileMode::None => None,
+        ProfileMode::Line => line_profile_values(width, height, pixels, start, end).ok(),
+        ProfileMode::Horizontal => {
+            let row = end.1.floor();
+            if row < 0.0 || row >= height as f64 {
+                return None;
+            }
+            horizontal_profile_values(width, height, pixels, row as u32)
+                .ok()
+                .map(|y| {
+                    let x: Vec<f64> = (0..width as usize).map(|i| i as f64).collect();
+                    (x, y)
+                })
+        }
+        ProfileMode::Vertical => {
+            let col = end.0.floor();
+            if col < 0.0 || col >= width as f64 {
+                return None;
+            }
+            vertical_profile_values(width, height, pixels, col as u32)
+                .ok()
+                .map(|y| {
+                    let x: Vec<f64> = (0..height as usize).map(|i| i as f64).collect();
+                    (x, y)
+                })
+        }
+        ProfileMode::Rectangle => {
+            let rect = (
+                start.0.min(end.0),
+                start.0.max(end.0),
+                start.1.min(end.1),
+                start.1.max(end.1),
+            );
+            rect_profile_values(width, height, pixels, rect, true).ok()
+        }
+    }
+}
+
+/// Build the profile-tool [`Roi`] from a drag between data-space `(col, row)`
+/// endpoints for `mode` (silx `_ProfileToolBar` ROI shape per mode):
+///
+/// - [`ProfileMode::Line`] → [`Roi::Line`] `start`→`end`;
+/// - [`ProfileMode::Horizontal`] → [`Roi::HRange`] at the row of `end`
+///   (a degenerate range `(row, row)`, so the window's midpoint is that row);
+/// - [`ProfileMode::Vertical`] → [`Roi::VRange`] at the column of `end`;
+/// - [`ProfileMode::Rectangle`] → [`Roi::Rect`] over the `start`→`end` box;
+/// - [`ProfileMode::None`] → `None`.
+///
+/// The returned ROI is handed to [`ProfileWindow::update_profile`], which
+/// re-derives the samples with the same profile helpers as
+/// [`image_view_profile_values`].
+///
+/// [`ProfileWindow::update_profile`]: crate::widget::profile_window::ProfileWindow::update_profile
+fn profile_roi_from_drag(mode: ProfileMode, start: (f64, f64), end: (f64, f64)) -> Option<Roi> {
+    match mode {
+        ProfileMode::None => None,
+        ProfileMode::Line => Some(Roi::Line { start, end }),
+        ProfileMode::Horizontal => {
+            let row = end.1.floor();
+            Some(Roi::HRange { y: (row, row) })
+        }
+        ProfileMode::Vertical => {
+            let col = end.0.floor();
+            Some(Roi::VRange { x: (col, col) })
+        }
+        ProfileMode::Rectangle => Some(Roi::Rect {
+            x: (start.0.min(end.0), start.0.max(end.0)),
+            y: (start.1.min(end.1), start.1.max(end.1)),
+        }),
+    }
+}
+
 /// Build the [`ImageSpec`] for an [`ImageView`]'s active image from its retained
 /// colormap and `alpha` (silx `ActiveImageAlphaSlider` propagation,
 /// ImageView.py:513-517). Split out from [`ImageView::upload_image`] so the
@@ -4103,6 +4200,15 @@ pub struct ImageView {
     /// rectangle (silx `ImageView._radarView`, ImageView.py:486-490). Dragging
     /// it pans the image plot.
     radar: crate::widget::radar_view::RadarView,
+    /// Active profile-extraction mode of the profile tool (silx
+    /// `ImageView._ProfileToolBar`, ImageView.py:692-697). [`ProfileMode::None`]
+    /// disables the tool.
+    profile_mode: ProfileMode,
+    /// Popup window showing the extracted 1D profile (silx profile window).
+    profile_window: crate::widget::profile_window::ProfileWindow,
+    /// Data-space `(col, row)` where the current profile drag began, or `None`
+    /// when no drag is in progress.
+    profile_drag_start: Option<(f64, f64)>,
 }
 
 impl ImageView {
@@ -4146,6 +4252,12 @@ impl ImageView {
             position_info: crate::widget::position_info::PositionInfo::with_xy(),
             cursor: None,
             radar: crate::widget::radar_view::RadarView::default(),
+            profile_mode: ProfileMode::None,
+            profile_window: crate::widget::profile_window::ProfileWindow::new(
+                render_state,
+                image_id + 3,
+            ),
+            profile_drag_start: None,
         }
     }
 
@@ -4318,6 +4430,32 @@ impl ImageView {
         if response.changed() {
             self.upload_image();
         }
+
+        // Profile-tool toggles (silx _ProfileToolBar action group,
+        // ImageView.py:692-697). Clicking the active mode again disables it.
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            ui.label("profile:");
+            for (label, tooltip, mode) in [
+                ("—", "Row profile (horizontal)", ProfileMode::Horizontal),
+                ("|", "Column profile (vertical)", ProfileMode::Vertical),
+                ("/", "Line profile (drag)", ProfileMode::Line),
+                ("□", "Rectangle profile (drag)", ProfileMode::Rectangle),
+            ] {
+                if ui
+                    .selectable_label(self.profile_mode == mode, label)
+                    .on_hover_text(tooltip)
+                    .clicked()
+                {
+                    let next = if self.profile_mode == mode {
+                        ProfileMode::None
+                    } else {
+                        mode
+                    };
+                    self.set_profile_mode(next);
+                }
+            }
+        });
     }
 
     /// The active image's colormap (silx `ImageView.getColormap`).
@@ -4396,12 +4534,85 @@ impl ImageView {
             response
         });
 
+        let plot_response = response.inner;
+
         // Feed the live cursor (silx sigMouseMoved) into the PositionInfo
         // readout, then render it below the image.
-        if let Some(cursor) = cursor_from_pointer_event(response.inner.pointer_event.as_ref()) {
+        if let Some(cursor) = cursor_from_pointer_event(plot_response.pointer_event.as_ref()) {
             self.cursor = Some(cursor);
         }
         self.position_info.ui(ui, self.cursor);
+
+        // Profile tool: a drag on the image plot extracts a profile via the
+        // existing helpers and shows it in the profile window (silx
+        // _ProfileToolBar, ImageView.py:692-697).
+        self.handle_profile_drag(&plot_response);
+        self.profile_window.show(ui.ctx());
+    }
+
+    /// Track a profile drag on the image plot and extract the profile on
+    /// release. The drag start/current pixels are mapped to data-space
+    /// `(col, row)` via the plot transform, then routed through
+    /// [`image_view_profile_values`]; the result feeds the profile window.
+    fn handle_profile_drag(&mut self, plot_response: &PlotResponse) {
+        if self.profile_mode == ProfileMode::None || self.pixels.is_empty() {
+            self.profile_drag_start = None;
+            return;
+        }
+        let response = &plot_response.response;
+        let transform = &plot_response.transform;
+
+        if response.drag_started()
+            && let Some(p) = response.interact_pointer_pos()
+        {
+            self.profile_drag_start = Some(transform.pixel_to_data(p));
+        }
+
+        if response.dragged()
+            && let (Some(start), Some(p)) =
+                (self.profile_drag_start, response.interact_pointer_pos())
+        {
+            let end = transform.pixel_to_data(p);
+            if let Some(roi) = profile_roi_from_drag(self.profile_mode, start, end) {
+                // ProfileWindow re-derives the profile from the ROI using the
+                // same line/row/column helpers (single source of truth).
+                self.profile_window
+                    .update_profile(self.width, self.height, &self.pixels, &roi);
+                self.profile_window.set_open(true);
+            }
+        }
+
+        if response.drag_stopped() {
+            self.profile_drag_start = None;
+        }
+    }
+
+    /// The active profile-extraction mode of the profile tool (silx
+    /// `_ProfileToolBar`, ImageView.py:692-697).
+    pub fn profile_mode(&self) -> ProfileMode {
+        self.profile_mode
+    }
+
+    /// Set the active profile-extraction mode (silx `_ProfileToolBar` action
+    /// toggle). [`ProfileMode::None`] disables the tool and closes the window.
+    pub fn set_profile_mode(&mut self, mode: ProfileMode) {
+        self.profile_mode = mode;
+        if mode == ProfileMode::None {
+            self.profile_drag_start = None;
+            self.profile_window.set_open(false);
+        }
+    }
+
+    /// Extract the profile for `mode` directly from a drag between data-space
+    /// `(col, row)` endpoints, without UI (silx `_ProfileToolBar` profile
+    /// extraction). Returns `(x_axis, y_values)` or `None`.
+    pub fn profile_values(
+        &self,
+        mode: ProfileMode,
+        start: (f64, f64),
+        end: (f64, f64),
+    ) -> Option<(Vec<f64>, Vec<f64>)> {
+        image_view_profile_values(mode, self.width, self.height, &self.pixels, start, end)
     }
 
     /// The radar overview of the full image extent with its draggable viewport
@@ -4951,6 +5162,79 @@ mod tests {
         assert_eq!(spec.interpolation, InterpolationMode::Linear);
         assert_eq!(spec.aggregation, AggregationMode::Mean);
         assert_eq!(spec.aggregation_block, (2, 3));
+    }
+
+    #[test]
+    fn image_view_profile_drag_samples_expected_values() {
+        // Item 7: a profile drag extracts the expected sampled values via the
+        // existing profile helpers (silx _ProfileToolBar).
+        // 3x2 image, row-major:
+        //   row 0: [1, 2, 3]
+        //   row 1: [4, 5, 6]
+        let pixels = [1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0];
+
+        // Horizontal profile at row 1 -> [4, 5, 6], x = column indices.
+        let (hx, hy) = image_view_profile_values(
+            ProfileMode::Horizontal,
+            3,
+            2,
+            &pixels,
+            (0.0, 1.0),
+            (2.0, 1.0),
+        )
+        .unwrap();
+        assert_eq!(hx, vec![0.0, 1.0, 2.0]);
+        assert_eq!(hy, vec![4.0, 5.0, 6.0]);
+
+        // Vertical profile at column 2 -> [3, 6], x = row indices.
+        let (vx, vy) =
+            image_view_profile_values(ProfileMode::Vertical, 3, 2, &pixels, (2.0, 0.0), (2.0, 1.0))
+                .unwrap();
+        assert_eq!(vx, vec![0.0, 1.0]);
+        assert_eq!(vy, vec![3.0, 6.0]);
+
+        // Line profile from (0,0) to (2,0) samples row 0: [1, 2, 3].
+        let (_, ly) =
+            image_view_profile_values(ProfileMode::Line, 3, 2, &pixels, (0.0, 0.0), (2.0, 0.0))
+                .unwrap();
+        assert_eq!(ly, vec![1.0, 2.0, 3.0]);
+
+        // None mode yields nothing.
+        assert!(
+            image_view_profile_values(ProfileMode::None, 3, 2, &pixels, (0.0, 0.0), (2.0, 0.0))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn profile_roi_from_drag_matches_mode() {
+        // The ROI handed to the profile window encodes the drag per mode.
+        assert_eq!(
+            profile_roi_from_drag(ProfileMode::Line, (1.0, 2.0), (3.0, 4.0)),
+            Some(Roi::Line {
+                start: (1.0, 2.0),
+                end: (3.0, 4.0)
+            })
+        );
+        assert_eq!(
+            profile_roi_from_drag(ProfileMode::Horizontal, (0.0, 1.7), (5.0, 1.7)),
+            Some(Roi::HRange { y: (1.0, 1.0) })
+        );
+        assert_eq!(
+            profile_roi_from_drag(ProfileMode::Vertical, (2.9, 0.0), (2.9, 4.0)),
+            Some(Roi::VRange { x: (2.0, 2.0) })
+        );
+        assert_eq!(
+            profile_roi_from_drag(ProfileMode::Rectangle, (4.0, 5.0), (1.0, 2.0)),
+            Some(Roi::Rect {
+                x: (1.0, 4.0),
+                y: (2.0, 5.0)
+            })
+        );
+        assert_eq!(
+            profile_roi_from_drag(ProfileMode::None, (0.0, 0.0), (1.0, 1.0)),
+            None
+        );
     }
 
     #[test]
