@@ -85,13 +85,17 @@ pub fn scale_1d_range_about_midpoint(min: f64, max: f64, scale: f64) -> (f64, f6
 }
 
 /// Apply a zoom `scale` to the plot's X and Y limits about their midpoints,
-/// pushing the pre-zoom view onto the limits history first (so [`zoom_back`]
-/// can restore it), mirroring silx `applyZoomToPlot`. `scale > 1` zooms in
+/// mirroring silx `applyZoomToPlot` (`_utils/panzoom.py`). `scale > 1` zooms in
 /// (shrinks the range); `scale < 1` zooms out.
+///
+/// Does NOT push the limits history: silx's `ZoomInAction`/`ZoomOutAction` call
+/// `applyZoomToPlot` → `plot.setLimits(...)`, which never touches
+/// `LimitsHistory`; only the drag-zoom *interaction* pushes (`getLimitsHistory()
+/// .push()` in `PlotInteraction`, mirrored by `plot_widget.rs`). So [`zoom_back`]
+/// restores the last interactive zoom, not a toolbar zoom — matching silx.
 ///
 /// [`zoom_back`]: zoom_back
 fn apply_zoom(plot: &mut PlotWidget, scale: f64) {
-    plot.plot_mut().push_limits();
     let (xmin, xmax) = plot.x_limits();
     let (nxmin, nxmax) = scale_1d_range_about_midpoint(xmin, xmax, scale);
     let y = plot.y_limits(crate::core::transform::YAxis::Left);
