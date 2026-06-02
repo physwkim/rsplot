@@ -19,7 +19,9 @@ pub use crate::core::backend::{
     Backend, CurveColor, CurveSpec, ImagePixelsSpec, ImageSpec, ItemHandle, MarkerSpec, PickResult,
     ShapeSpec, TriangleSpec,
 };
-pub use crate::core::colormap::{Colormap, ColormapName, Normalization};
+pub use crate::core::colormap::{
+    AutoscaleMode, Colormap, ColormapName, DEFAULT_PERCENTILES, Normalization,
+};
 pub use crate::core::decimate::min_max_decimate;
 pub use crate::core::items::{Baseline, ErrorBars, LineStyle, Symbol};
 pub use crate::core::marker::{DEFAULT_MARKER_SIZE, Marker, MarkerKind, MarkerSymbol};

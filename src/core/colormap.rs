@@ -467,6 +467,143 @@ impl Colormap {
     }
 }
 
+/// silx's default `(low, high)` percentiles for [`AutoscaleMode::Percentile`]
+/// (`Colormap._DEFAULT_PERCENTILES`).
+pub const DEFAULT_PERCENTILES: (f64, f64) = (1.0, 99.0);
+
+/// silx's default `(vmin, vmax)` when autoscale has no finite data to work with
+/// (the linear-normalization `_NormalizationMixIn.DEFAULT_RANGE`).
+const DEFAULT_RANGE: (f64, f64) = (0.0, 1.0);
+
+/// How autoscale derives `(vmin, vmax)` from data (silx `Colormap.AUTOSCALE_MODES`).
+///
+/// These mirror the *linear-normalization* autoscale of `silx.math.colormap`
+/// (`_LinearNormalizationMixIn`): the data range is used directly, not the
+/// normalized data.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum AutoscaleMode {
+    /// Finite data min/max (silx `MINMAX`).
+    #[default]
+    MinMax,
+    /// `mean ± 3·stddev`, each bound clamped into the data min/max range
+    /// (silx `STDDEV3`). The standard deviation is the population (ddof = 0)
+    /// std, matching numpy `nanstd`.
+    Stddev3,
+    /// The `(low, high)` percentiles of the finite data (silx `PERCENTILE`),
+    /// defaulting to [`DEFAULT_PERCENTILES`].
+    Percentile,
+}
+
+impl AutoscaleMode {
+    /// All modes, for building a picker.
+    pub const ALL: [AutoscaleMode; 3] = [
+        AutoscaleMode::MinMax,
+        AutoscaleMode::Stddev3,
+        AutoscaleMode::Percentile,
+    ];
+
+    /// Human-readable label.
+    pub fn label(self) -> &'static str {
+        match self {
+            AutoscaleMode::MinMax => "Min/Max",
+            AutoscaleMode::Stddev3 => "Mean ± 3·std",
+            AutoscaleMode::Percentile => "Percentile",
+        }
+    }
+
+    /// Compute the `(vmin, vmax)` autoscale range over `data` for this mode.
+    ///
+    /// `percentiles` is the `(low, high)` pair used by
+    /// [`Percentile`](Self::Percentile) (ignored by the other modes); pass
+    /// [`DEFAULT_PERCENTILES`] for silx's default. Non-finite samples are
+    /// dropped first. Mirrors `silx.math.colormap` linear-normalization
+    /// autoscale, including its fallbacks: empty / non-finite results collapse
+    /// to [`DEFAULT_RANGE`], and an inverted range is clamped so `vmax >= vmin`.
+    pub fn range(self, data: &[f64], percentiles: (f64, f64)) -> (f64, f64) {
+        let finite: Vec<f64> = data.iter().copied().filter(|v| v.is_finite()).collect();
+
+        let (raw_min, raw_max) = match self {
+            AutoscaleMode::MinMax => minmax(&finite),
+            AutoscaleMode::Stddev3 => {
+                let (dmin, dmax) = minmax(&finite);
+                let (stdmin, stdmax) = mean3std(&finite);
+                // silx: vmin = max(dmin, stdmin), vmax = min(dmax, stdmax),
+                // each falling back to the other when one side is absent.
+                let vmin = match (dmin, stdmin) {
+                    (Some(d), Some(s)) => Some(d.max(s)),
+                    (d, s) => d.or(s),
+                };
+                let vmax = match (dmax, stdmax) {
+                    (Some(d), Some(s)) => Some(d.min(s)),
+                    (d, s) => d.or(s),
+                };
+                (vmin, vmax)
+            }
+            AutoscaleMode::Percentile => {
+                let lo = nanpercentile(&finite, percentiles.0);
+                let hi = nanpercentile(&finite, percentiles.1);
+                (lo, hi)
+            }
+        };
+
+        // silx fallback handling (_NormalizationMixIn.autoscale tail).
+        let vmin = raw_min.filter(|v| v.is_finite()).unwrap_or(DEFAULT_RANGE.0);
+        let mut vmax = raw_max.filter(|v| v.is_finite()).unwrap_or(DEFAULT_RANGE.1);
+        if vmax < vmin {
+            vmax = vmin;
+        }
+        (vmin, vmax)
+    }
+}
+
+/// Finite min/max of `data`, or `(None, None)` when empty.
+fn minmax(data: &[f64]) -> (Option<f64>, Option<f64>) {
+    if data.is_empty() {
+        return (None, None);
+    }
+    let mut min = data[0];
+    let mut max = data[0];
+    for &v in &data[1..] {
+        min = min.min(v);
+        max = max.max(v);
+    }
+    (Some(min), Some(max))
+}
+
+/// `(mean - 3·std, mean + 3·std)` of `data`, or `(None, None)` when empty.
+/// The standard deviation is the population (ddof = 0) std, matching numpy
+/// `nanstd` as used by silx's linear-normalization `autoscale_mean3std`.
+fn mean3std(data: &[f64]) -> (Option<f64>, Option<f64>) {
+    if data.is_empty() {
+        return (None, None);
+    }
+    let n = data.len() as f64;
+    let mean = data.iter().sum::<f64>() / n;
+    let variance = data.iter().map(|v| (v - mean) * (v - mean)).sum::<f64>() / n;
+    let std = variance.sqrt();
+    (Some(mean - 3.0 * std), Some(mean + 3.0 * std))
+}
+
+/// The `percentile`-th percentile of `data` (a value in `[0, 100]`), using
+/// numpy's default linear interpolation between ranks. Returns `None` for empty
+/// input.
+fn nanpercentile(data: &[f64], percentile: f64) -> Option<f64> {
+    if data.is_empty() {
+        return None;
+    }
+    let mut sorted = data.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).expect("finite values are total-ordered"));
+    if sorted.len() == 1 {
+        return Some(sorted[0]);
+    }
+    // numpy 'linear': rank = q/100 * (n - 1), interpolate between floor/ceil.
+    let rank = (percentile / 100.0) * (sorted.len() - 1) as f64;
+    let lo = rank.floor() as usize;
+    let hi = rank.ceil() as usize;
+    let frac = rank - lo as f64;
+    Some(sorted[lo] + frac * (sorted[hi] - sorted[lo]))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -707,5 +844,74 @@ mod tests {
         assert_eq!(rev.lut[0], [255, 255, 255, 255]);
         assert_eq!(rev.lut[255], [0, 0, 0, 255]);
         assert_eq!(rev.lut[1], [254, 254, 254, 255]);
+    }
+
+    // --- Autoscale modes -------------------------------------------------
+
+    #[test]
+    fn autoscale_minmax_is_exact_finite_range() {
+        let data = [3.0, -1.0, 5.0, 2.0];
+        assert_eq!(
+            AutoscaleMode::MinMax.range(&data, DEFAULT_PERCENTILES),
+            (-1.0, 5.0)
+        );
+    }
+
+    #[test]
+    fn autoscale_stddev3_is_mean_plus_minus_3std_clamped_to_data() {
+        // [0, 0, 0, 0, 10]: mean = 2, population std = 4, so mean±3·std =
+        // [-10, 14]; clamped into the data range [0, 10] -> [0, 10].
+        let data = [0.0, 0.0, 0.0, 0.0, 10.0];
+        let (vmin, vmax) = AutoscaleMode::Stddev3.range(&data, DEFAULT_PERCENTILES);
+        assert!((vmin - 0.0).abs() < 1e-9, "vmin {vmin}");
+        assert!((vmax - 10.0).abs() < 1e-9, "vmax {vmax}");
+
+        // A tight cluster keeps mean±3·std inside the data range: data
+        // [1, 2, 3, 4, 5] has mean 3, std sqrt(2); mean±3·std = 3 ± 3·sqrt(2)
+        // = [-1.2426, 7.2426] -> clamped to data range [1, 5].
+        let data2 = [1.0, 2.0, 3.0, 4.0, 5.0];
+        let (vmin2, vmax2) = AutoscaleMode::Stddev3.range(&data2, DEFAULT_PERCENTILES);
+        assert!((vmin2 - 1.0).abs() < 1e-9, "vmin2 {vmin2}");
+        assert!((vmax2 - 5.0).abs() < 1e-9, "vmax2 {vmax2}");
+    }
+
+    #[test]
+    fn autoscale_percentile_default_1_99_bounds() {
+        // 0..=100 (101 samples). numpy linear interpolation:
+        // rank(1%)  = 0.01 * 100 = 1.0  -> data[1]  = 1.0
+        // rank(99%) = 0.99 * 100 = 99.0 -> data[99] = 99.0
+        let data: Vec<f64> = (0..=100).map(|i| i as f64).collect();
+        let (vmin, vmax) = AutoscaleMode::Percentile.range(&data, DEFAULT_PERCENTILES);
+        assert!((vmin - 1.0).abs() < 1e-9, "vmin {vmin}");
+        assert!((vmax - 99.0).abs() < 1e-9, "vmax {vmax}");
+    }
+
+    #[test]
+    fn autoscale_percentile_interpolates_between_ranks() {
+        // [10, 20, 30, 40]: rank(50%) = 0.5 * 3 = 1.5 -> halfway between
+        // data[1]=20 and data[2]=30 -> 25.
+        let data = [10.0, 20.0, 30.0, 40.0];
+        assert_eq!(nanpercentile(&data, 50.0), Some(25.0));
+    }
+
+    #[test]
+    fn autoscale_drops_nonfinite_and_falls_back_when_empty() {
+        // NaN/inf are stripped before computing the range.
+        let data = [f64::NAN, 4.0, f64::INFINITY, 2.0];
+        assert_eq!(
+            AutoscaleMode::MinMax.range(&data, DEFAULT_PERCENTILES),
+            (2.0, 4.0)
+        );
+        // No finite samples -> silx DEFAULT_RANGE (0, 1).
+        let empty: [f64; 0] = [];
+        assert_eq!(
+            AutoscaleMode::MinMax.range(&empty, DEFAULT_PERCENTILES),
+            (0.0, 1.0)
+        );
+        let all_nan = [f64::NAN, f64::NAN];
+        assert_eq!(
+            AutoscaleMode::Stddev3.range(&all_nan, DEFAULT_PERCENTILES),
+            (0.0, 1.0)
+        );
     }
 }
