@@ -350,6 +350,50 @@ review-fix commits); per-item adversarial verify.
   median-filter + pixel-histogram actions, SVG/PPM/TIFF figure save (needs a public RenderState/format
   save path), per-axis X-only/Y-only autoscale toggles.
 
+### Wave 6C-2 — Mask draw mode + on-plot pencil routing (final Wave-6 sub-wave)
+Single worktree-isolated cluster owning `plot_widget.rs` + `actions/mode.rs` (NEW) + `high_level.rs`
+(3 commits); per-item adversarial verify. BASE `79583e3`.
+- `PlotInteractionMode::MaskDraw` variant — silx's dedicated pencil draw interaction, distinct from
+  pan/zoom: primary-drag is reserved for mask painting. `apply_interaction`'s `== Pan`/`== Zoom`
+  comparisons already suppress primary-pan and box-zoom for the new variant; the one primary-drag path
+  NOT gated by an `== mode` check (ROI-edge grab, was `mode != Pan`) became `mode_grabs_roi_edge(mode)`
+  excluding Pan AND MaskDraw, applied at the grab site and the hover resize-cursor site. Secondary-drag
+  pan + wheel zoom intentionally left intact (matches silx draw interaction). NO enum-leak: every
+  `PlotInteractionMode` use is an `== Variant` comparison (no exhaustive match anywhere), so the variant
+  forced zero match-arm edits — clippy `--all-targets` (compiles examples) confirms.
+- `actions/mode.rs` (NEW): `zoom_mode`/`pan_mode`/`mask_draw_mode`/`select_mode` — thin one-transition
+  setters over `PlotWidget::set_interaction_mode`, mirroring silx `actions/mode.py` `ZoomModeAction`
+  (`mode.py:45`) / `PanModeAction` (`mode.py:108`). silx has no `MaskModeAction` (`MaskToolsWidget` owns
+  its pencil draw mode), so `mask_draw_mode` is a port-specific setter grouped with the others. `lib.rs`
+  re-exports the four; `actions/mod.rs` gains `pub mod mode`.
+- ImageView mask painting: embedded a `MaskToolsWidget` (resized to the active image on `set_image`; a
+  shape change resets undo history = silx `reset(shape)`). `ImageView::show` routes the captured
+  `PlotResponse` to the EXISTING Wave-4 `handle_interaction` strictly gated on `MaskDraw`
+  (`image_view_should_paint_mask` — pan/zoom/select never paint); on change `upload_image` re-uploads with
+  the painted level buffer → `ScalarMask` (`scalar_mask_from_level_buffer`, oversize lazily clipped to the
+  image shape) applied as NaN-holes — the identical 6B-1 pre-upload representation (silx `getValueData`,
+  `items/image.py`). Toolbar `set_mask_draw` toggle enters/leaves `MaskDraw` via `actions::mode` (Pencil
+  tool on entry, None+Zoom on exit) with pencil/eraser/brush-size/clear controls while active.
+- Adversarial review found 1 fix-needed, fixed at source on `main` as one commit (`31815f7`): the reused
+  Wave-4 `handle_interaction` painted an inline circular brush at the current cell each frame with no
+  inter-frame memory, so a fast pencil/eraser drag left gaps — unlike silx (`MaskToolsWidget.py:848-876`)
+  tracking `_lastPencilPos` + `updateLine`. **Structural fix** (remove the dual painting impl): route
+  on-plot pencil/eraser through the existing faithful `update_line`/`update_disk` primitives with a
+  `last_pencil_pos` anchor — `paint_pencil_point` interpolates a thick Bresenham line from the previous
+  sample (silx `updateLine`, width = brush size) then stamps a disk of radius `brush_size/2` (silx
+  `updateDisk`); `end_pencil_stroke` clears the anchor on release / new click (silx resets `_lastPencilPos`
+  on `drawingFinished`); `reset_geometry` clears it so a stroke never interpolates across a geometry
+  change. Two silx-matching side-effects of using the shared primitives: the brush is now radius
+  `brush_size/2` (dots match the line thickness, was 2×), and the eraser clears only the current mask
+  level (was any level), matching `updatePoints(mask=False)`.
+- Gate: clippy `-p egui-silx --all-targets` clean (== `--workspace`, sole member), **672 tests pass** (+7:
+  5 feature tests + 2 fix regression tests), doctests ok.
+- **Deferred (shader, unverifiable without GPU):** mask colormap GPU overlay — the port renders masked
+  pixels as NaN-holes (scalar pipeline `nan_color`) instead. Per-point scatter on-plot pencil draw (needs
+  `scatter_mask.rs`, a non-owned file; `ScatterView::show_mask_tools` already covers whole-mask + threshold
+  ops). **Wave 6 complete.** **Deferred to Wave 7:** Print action, median-filter + pixel-histogram actions,
+  SVG/PPM/TIFF figure save (needs a public RenderState/format save path), per-axis X/Y-only autoscale.
+
 
 ## PlotWidget core, axes, frame, ticks  — 25✅ 2◐ 7☐
 
