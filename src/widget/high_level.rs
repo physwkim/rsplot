@@ -2738,6 +2738,14 @@ impl PlotWidget {
             self.update_item_record(handle, kind, bounds, stats, visual);
             self.set_retained_data(handle, Some(data));
             self.set_record_curve_data(handle, Some(curve_data));
+            // The base push above renders the new BASE style. If this is the
+            // active (highlighted) curve, re-overlay the highlight through the
+            // single owner so updating it does not silently drop the highlight
+            // (silx re-applies the current style on data/style change). For
+            // non-active curves the base push is already correct, so skip.
+            if self.is_highlighted_curve(handle) {
+                self.sync_curve_highlight(handle);
+            }
             true
         } else {
             false
@@ -3505,6 +3513,17 @@ impl PlotWidget {
         }
         let previous = self.active_item;
         self.active_item = item;
+        // Re-apply the highlight through the single owner now that the active
+        // item changed: revert the old curve to its base, apply the highlight
+        // to the new one (silx `_setActiveItem`: setHighlighted(False) on the
+        // old curve, setHighlighted(True) on the new). `sync_curve_highlight`
+        // no-ops on non-curve handles, so images/scatter are unaffected.
+        if let Some(previous) = previous {
+            self.sync_curve_highlight(previous);
+        }
+        if let Some(current) = item {
+            self.sync_curve_highlight(current);
+        }
         self.events.push(PlotEvent::ActiveItemChanged {
             previous,
             current: item,
