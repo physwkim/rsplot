@@ -80,8 +80,7 @@ hookup. Grouped by where the wiring lands.
 - **Event signals (6):** hover / markerClicked / markerMoving / curveClicked /
   imageClicked / doubleClicked structured callbacks (types partly stubbed in
   `interaction.rs`, not emitted).
-- **Curve/Hist/Scatter polish (4):** curve highlight style, plot-item selection state,
-  histogram bin alignment, histogram filled-region picking.
+- **Curve/Hist/Scatter polish (2):** histogram bin alignment, histogram filled-region picking.
 - **Stats/Profile/Print/Selection (4):** profile line-width/method,
   profile-over-stack, print preview, ItemsSelectionDialog.
 - **Backend render (3):** time-series X-axis render, GPU async stats/histogram,
@@ -589,6 +588,48 @@ on this machine; the testable core — the pure style transforms — is fully un
 - **Wave 9 complete**, `main` @ `71f5653`, 730 tests, full-workspace gate green (`-p egui-silx` == sole
   workspace member). The on-screen menu/rename/toggle render is GPU/UI-UNVERIFIED (see boundary above).
 
+### Wave 10 — Active-curve highlight styling (silx `HighlightedMixIn` / `getCurrentStyle`)
+Single cluster, all in `high_level.rs`; one worktree-isolated implement + two parallel adversarial reviews
+(both **accept**), ff-merged preserving verified SHAs. **No review-fix commit was owed** — the two findings
+were a verified harmless no-op and a GPU-blocked test gap (below). Recon confirmed no backend/render/shader
+change: `CurveData`'s `color`/`width`/`line_style`/`symbol`/`marker_size`/`gap_color` are all normal per-curve
+fields already pushed by the existing `backend.update_curve`, so the highlight is expressible purely as a
+render-time style overlay. Verification boundary: PlotWidget needs a wgpu `RenderState` no crate test builds,
+so the GPU push, the `set_active_item` revert/apply wiring, the public setters, and the on-screen thicker line
+are **GPU/PlotWidget-UNVERIFIED**; the testable core (the pure merge) is unit-tested.
+- **`d852b04` — highlight machinery + pure merge + state + setters + tests** (734 tests; 4 new pure-fn tests).
+  `pub struct CurveStyle` (override style: `Option` color/line_width/line_style/symbol/symbol_size/gap_color,
+  each `None` = inherit; re-exported in `lib.rs`). Pure free fn `current_curve_style(base, highlight,
+  highlighted) -> CurveData` = silx `getCurrentStyle`'s per-field merge exactly (when highlighted, each style
+  field = highlight's value if `Some` else base's; when not, base unchanged; data fields x/y/colors/fill/
+  baseline/errors/y_axis pass through). State: `active_curve_style` default `{ line_width: Some(2.0), ..None }`
+  (silx `DEFAULT_PLOT_ACTIVE_CURVE_LINEWIDTH=2` / `DEFAULT_PLOT_ACTIVE_CURVE_COLOR=None`) + `active_curve_handling`
+  default `true`; getters `active_curve_style()`/`is_active_curve_handling()`; single-owner helper
+  `sync_curve_highlight`; public setters `set_active_curve_style`/`set_active_curve_handling`. Tests assert
+  exact per-field values (not-highlighted→base verbatim; default→only width 2.0 with all else inheriting;
+  multi-field override with width inheriting). *(Commit-split note: the owner + public setters landed in this
+  commit, not commit 2, because commit 1 would otherwise carry a private `current_curve_style` with no
+  non-test caller → `clippy -D warnings` dead-code failure; `#[allow]` is banned. Net diff unchanged.)*
+- **`d676c00` — wire the overlay into the automatic transitions**. **Invariant:** GPU render style of a curve
+  == `current_curve_style(retained_base, active_curve_style, is-active-curve)`; the retained `record.curve_data`
+  is ALWAYS the base (the owner pushes the resolved style to `backend.update_curve` only, never
+  `set_record_curve_data`) — single source of truth, no dual meaning (both reviewers traced
+  activate→update→deactivate: the base width is never corrupted). `set_active_item` reverts the previous curve
+  to base + applies the highlight to the new one through the owner; `update_curve_spec` re-overlays when the
+  updated handle is the active curve (so an update keeps the highlight), leaving non-active curves' base push
+  unchanged. Gated strictly on `PlotItemKind::Curve` (silx highlights only `kind=='curve'`; Scatter/Histogram,
+  though `is_curve_like`, are never highlighted).
+- **Reviewer findings, no fix owed:** (1) MINOR — the setters resolve the target via `active_curve()`
+  (`is_curve_like`) which is broader than the strict `==Curve` highlight gate; both reviewers confirmed
+  harmless (the owner re-derives the strict gate and pushes an idempotent base for non-Curve handles, never a
+  dual-meaning record write). (2) GAP — the "retained base never corrupted" invariant is verified by code
+  tracing, not a headless test; reviewer 2 suggested it "could be tested without a GPU" but that is mistaken —
+  `record_curve_data`/`set_active_item`/`update_curve_spec` are all PlotWidget methods and `PlotWidget::new`
+  requires a `&RenderState` (live wgpu device) with no headless constructor, so the regression test is
+  GPU-blocked like the whole widget layer. Recorded honestly rather than faked with a GPU-requiring test.
+- **Wave 10 complete**, `main` @ `d676c00`, 734 tests, full-workspace gate green. The on-screen highlight
+  render is GPU/PlotWidget-UNVERIFIED (see boundary above).
+
 
 ## PlotWidget core, axes, frame, ticks  — 25✅ 2◐ 7☐
 
@@ -642,21 +683,21 @@ egui-silx implements core panning and zooming, including wheel zoom anchored at 
 | ☐ | L | S | Horizontal line drawing (select mode) | `PlotInteraction.py:885-918` | No hline draw mode. silx SelectHLine draws horizontal line across data area. |
 | ☐ | L | S | Vertical line drawing (select mode) | `PlotInteraction.py:920-953` | No vline draw mode. silx SelectVLine draws vertical line across data area. |
 
-## Items: Curve, Histogram, Scatter  — 21✅ 5◐ 9☐
+## Items: Curve, Histogram, Scatter  — 23✅ 3◐ 9☐
 
-egui-silx covers basic curve rendering (solid/dashed lines, single symbols, error bars, fill + baseline) and per-vertex colors, with correct line-style scaling and custom dash patterns implemented. Histograms are rendered as filled step curves but lack alignment/orientation tracking (center/left/right modes). Scatter has only marker-only point cloud visualization (no Delaunay solid/grid/binned modes), no per-point alpha, and supports only 5 symbol types vs silx's 19. Symbol support is severely limited (Circle, Square, Cross, Plus, Triangle only; missing Diamond, Point, Pixel, and all caret/tick variants). Picking is implemented for nearest-point queries but histogram picking for filled regions is unimplemented. Per-point symbol sizes are not supported (curves/scatter only single size). Highlight/selection state machine exists in Plot but visual highlight styling for curves is not implemented in the renderer.
+egui-silx covers basic curve rendering (solid/dashed lines, single symbols, error bars, fill + baseline) and per-vertex colors, with correct line-style scaling and custom dash patterns implemented. Histograms are rendered as filled step curves but lack alignment/orientation tracking (center/left/right modes). Scatter has only marker-only point cloud visualization (no Delaunay solid/grid/binned modes), no per-point alpha, and supports only 5 symbol types vs silx's 19. Symbol support is severely limited (Circle, Square, Cross, Plus, Triangle only; missing Diamond, Point, Pixel, and all caret/tick variants). Picking is implemented for nearest-point queries but histogram picking for filled regions is unimplemented. Per-point symbol sizes are not supported (curves/scatter only single size). Active-curve highlight styling is now applied at render (Wave 10): the active curve gets a distinct style (default line width 2) via silx's `getCurrentStyle` per-field merge as a render-time overlay.
 
 | | P | E | Feature | silx | gap |
 |---|---|---|---|---|---|
 | ◐ | H | M | Curve symbols (circle, square, cross, plus, triangle) | `core.py:722-820 (SymbolMixIn), supported list includes o,d,s,+,x,.,etc.` | Only 5 symbols implemented (Circle, Square, Cross, Plus, Triangle). Missing: Diamond (d), Point (.), Pixel (,), VerticalLine (\|), HorizontalLine (_), all 4 Tick variants, all 4 Caret variants, Heart. |
 | ☐ | M | L | Scatter visualization mode: Solid (Delaunay triangulation) | `scatter.py:283-296, core.py:1271-1275 (Visualization.SOLID)` | silx computes Delaunay triangulation in background thread and renders as filled triangles. egui-silx has no Delaunay support or triangle visualization. |
 | ☐ | M | L | Scatter visualization mode: IrregularGrid (image from unstructured points) | `scatter.py:283-296, core.py:1286-1293 (Visualization.IRREGULAR_GRID)` | silx uses Delaunay triangulation + linear interpolation to create image from scattered points. egui-silx has no support. |
-| ◐ | M | M | Curve highlight/selection state with different style | `curve.py:196,280-311 (getCurrentStyle), core.py:1875-1905 (HighlightedMixIn)` | Selection state exists in PlotWidget (set_active_item/selected field) for legend interaction, but no visual highlight styling is applied to the rendered curve when highlighted. silx composes highlight |
+| ✅ | M | M | Curve highlight/selection state with different style | `curve.py:196,280-311 (getCurrentStyle), core.py:1875-1905 (HighlightedMixIn)` | Wave 10: the active curve renders with a distinct highlight style. `current_curve_style` is silx `getCurrentStyle`'s per-field merge (highlight field if Some, else the curve's own); default active style = line width 2 (silx `DEFAULT_PLOT_ACTIVE_CURVE_LINEWIDTH`), color unchanged. Applied as a render-time overlay (retained base stays the single source of truth), gated to `PlotItemKind::Curve`. **GPU-UNVERIFIED:** the on-screen thicker line needs a GPU `RenderState` no crate test constructs; only the pure merge is unit-tested. |
 | ◐ | M | M | Histogram bin alignment (left, center, right) | `histogram.py:53-85 (_computeEdges), setData(align='center'/'left'/'right'), getAlignment` | histogram_step_values does not accept or track alignment parameter. egui-silx always produces center-aligned step values, but silx supports 'left', 'center', 'right'. No alignment parameter in public  |
 | ☐ | M | M | Scatter visualization mode: RegularGrid (image-like grid rendering) | `scatter.py:283-296, core.py:1277-1282 (Visualization.REGULAR_GRID)` | silx auto-detects regular grid from point coordinates and renders as image. egui-silx has no grid detection or grid rendering mode. |
 | ☐ | M | M | Scatter per-point alpha transparency | `scatter.py:1009,1024,1051-1060 (setData with alpha parameter, __alpha field)` | silx Scatter supports per-point alpha values. egui-silx ScatterView only has global alpha from CurveSpec (scalar). |
 | ◐ | M | M | Scatter picking with mode-specific logic | `scatter.py:804-860 (pick with special handling per Visualization mode)` | Points mode picking works (nearest_point). No picking support for Solid/RegularGrid/IrregularGrid/BinnedStatistic modes because those visualizations are not implemented. silx has triangulation-based p |
-| ◐ | M | M | Plot item selection/highlight state tracking | `core.py:1875-1905 (HighlightedMixIn with setHighlighted/isHighlighted)` | Selection state is tracked at PlotWidget level (active_item) and used for legend highlighting, but not propagated to renderer for curve visual styling. silx applies highlight style to the item itself, |
+| ✅ | M | M | Plot item selection/highlight state tracking | `core.py:1875-1905 (HighlightedMixIn with setHighlighted/isHighlighted)` | Wave 10: the active-item selection is now propagated to the renderer for curves. `set_active_item` reverts the previous active curve to its base style and applies the highlight overlay to the new one (silx `setHighlighted(False)`/`(True)` in `_setActiveItem`), through a single owner `sync_curve_highlight`; `set_active_curve_style`/`set_active_curve_handling` mirror silx. Image/scatter selection still has no highlight style (silx highlights only `kind=='curve'`). |
 | ☐ | L | L | Histogram picking (filled region sensitivity) | `histogram.py:244-290 (pick, __pickFilledHistogram with bounds check)` | No histogram-specific picking. silx histogram.pick() has special logic for filled histograms: bounds check in data space, searchsorted to find bin index, then y-range check (baseline <= yData <= value |
 | ☐ | L | L | Scatter visualization mode: BinnedStatistic (2D histogram with statistics) | `scatter.py:283-296, core.py:1295-1301 (Visualization.BINNED_STATISTIC)` | silx bins scattered points into 2D grid and computes per-bin statistics (mean/count/sum). Rendered as colormapped image. egui-silx has no binning support. |
 | ☐ | L | S | Scatter visualization parameter: grid_major_order (row/column) | `core.py:1303-1308, 1346 (VisualizationParameter.GRID_MAJOR_ORDER)` | Parameter exists in silx for regular/irregular grid modes. egui-silx has no grid visualization, so parameter not applicable. |
