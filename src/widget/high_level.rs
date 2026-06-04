@@ -297,6 +297,11 @@ pub enum PlotEvent {
     RoiChanged { index: usize },
     /// All ROIs were cleared.
     RoisCleared,
+    /// A draggable marker was moved, either by an on-screen drag or by
+    /// [`PlotWidget::set_marker_position`] (silx `markerMoving` /
+    /// `markerMoved`). `handle` identifies the moved marker; read its new
+    /// position with [`PlotWidget::marker_position`].
+    MarkerMoved { handle: ItemHandle },
 }
 
 /// A legend right-click context-menu action (silx `LegendListContextMenu`).
@@ -3251,6 +3256,35 @@ impl PlotWidget {
             y_axis: axis,
             bg_color: None,
         })
+    }
+
+    /// The current data position `(x, y)` of the marker `handle` (silx
+    /// `MarkerBase.getPosition`), or `None` if no marker with that handle
+    /// exists. For a line marker the off-axis coordinate is reported as `0.0`
+    /// (see [`Marker::position`]).
+    pub fn marker_position(&self, handle: ItemHandle) -> Option<(f64, f64)> {
+        self.backend.marker(handle).map(Marker::position)
+    }
+
+    /// Move the marker `handle` to data position `(x, y)`, applying the marker's
+    /// drag constraint (silx `MarkerBase.setPosition`), and emit
+    /// [`PlotEvent::MarkerMoved`]. Returns `false` if no marker with that handle
+    /// exists (no event is emitted in that case).
+    ///
+    /// The constraint is applied via [`Marker::drag`] anchored at the marker's
+    /// current position, so a `'horizontal'` / `'vertical'` preset pins the
+    /// constrained coordinate exactly as an on-screen drag would. A
+    /// non-draggable marker does not move (`Marker::drag` is a no-op when
+    /// `is_draggable` is `false`), matching silx, but the call still returns
+    /// `true` and emits the event because the marker exists.
+    pub fn set_marker_position(&mut self, handle: ItemHandle, x: f64, y: f64) -> bool {
+        let Some(mut marker) = self.backend.marker(handle).cloned() else {
+            return false;
+        };
+        marker.drag(marker.position(), (x, y));
+        self.backend.update_marker(handle, marker);
+        self.events.push(PlotEvent::MarkerMoved { handle });
+        true
     }
 
     /// Remove an item by handle.

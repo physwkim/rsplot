@@ -16,6 +16,11 @@ use crate::core::transform::{Transform, YAxis};
 /// Default point-marker symbol size (full extent) in logical points.
 pub const DEFAULT_MARKER_SIZE: f32 = 8.0;
 
+/// Pixel slop added to a marker's geometry when hit-testing the cursor against
+/// it (silx's draggable-marker pick tolerance). A point's pick radius is
+/// `size / 2 + this`; a line's pick half-width is `this + line_width / 2`.
+pub const MARKER_PICK_TOLERANCE_PX: f32 = 5.0;
+
 /// Symbol drawn at a point marker (silx `addMarker` `symbol`). The catalog
 /// matches silx's marker symbols, which differ from the GPU curve's scatter
 /// symbols ([`crate::Symbol`]) — markers add the diamond, point, and pixel
@@ -338,6 +343,42 @@ impl Marker {
         }
     }
 
+    /// Whether the cursor (screen pixels) hits this marker under `transform`,
+    /// mirroring silx's per-kind marker pick test (`backends/BackendBase.py`
+    /// `pickItems`). The geometry is projected to pixels and compared against the
+    /// cursor with a [`MARKER_PICK_TOLERANCE_PX`] slop:
+    ///
+    /// - [`MarkerKind::Point`]: the cursor is within `size / 2 + tolerance` pixels
+    ///   of the projected point.
+    /// - [`MarkerKind::VLine`]: the cursor's X is within `tolerance + line_width / 2`
+    ///   of the projected line X *and* its Y lies within the data-area Y span.
+    /// - [`MarkerKind::HLine`]: the symmetric test on the projected line Y.
+    ///
+    /// Pure (no egui input beyond the cursor position and the transform), so it is
+    /// unit-testable and shared by the backend's `pick_marker` and the
+    /// interaction layer's drag hit-test.
+    pub fn pick(&self, transform: &Transform, cursor: Pos2) -> bool {
+        let tolerance = MARKER_PICK_TOLERANCE_PX + self.line_width.max(1.0) * 0.5;
+        match self.kind {
+            MarkerKind::Point { x, y, size, .. } => {
+                let radius = size.max(1.0) * 0.5 + MARKER_PICK_TOLERANCE_PX;
+                transform.data_to_pixel(x, y).distance(cursor) <= radius
+            }
+            MarkerKind::VLine { x } => {
+                let px = transform.data_to_pixel(x, transform.y.min).x;
+                (cursor.x - px).abs() <= tolerance
+                    && cursor.y >= transform.area.top() - tolerance
+                    && cursor.y <= transform.area.bottom() + tolerance
+            }
+            MarkerKind::HLine { y } => {
+                let py = transform.data_to_pixel(transform.x.min, y).y;
+                (cursor.y - py).abs() <= tolerance
+                    && cursor.x >= transform.area.left() - tolerance
+                    && cursor.x <= transform.area.right() + tolerance
+            }
+        }
+    }
+
     /// Drag the marker to data position `to`, applying its [`constraint`] anchored
     /// at `from` (silx `DraggableMixIn.drag` → `setPosition`, `marker.py:113-114`
     /// and the per-kind `setPosition` overrides `marker.py:177-206`, `296-352`).
@@ -584,6 +625,40 @@ mod tests {
         assert_eq!(TextAnchor::Right.rect_offset(size), (-40.0, -5.0));
         // Center.
         assert_eq!(TextAnchor::Center.rect_offset(size), (-20.0, -5.0));
+    }
+
+    #[test]
+    fn pick_point_inside_radius_hits_outside_misses() {
+        // Point at data (5, 5) -> pixel (50, 50); size 10 -> radius 5+5 = 10px.
+        let m = Marker::point(5.0, 5.0).with_symbol_size(10.0);
+        // 9px away (just inside the 10px radius): hit.
+        assert!(m.pick(&t(), pos2(50.0 + 9.0, 50.0)));
+        // 12px away (outside the radius): miss.
+        assert!(!m.pick(&t(), pos2(50.0 + 12.0, 50.0)));
+    }
+
+    #[test]
+    fn pick_vline_near_x_within_span_hits_off_span_misses() {
+        // VLine at x=4 -> pixel x=40; line_width 1 -> tolerance 5+0.5 = 5.5px.
+        let v = Marker::vline(4.0);
+        // Within tolerance in X and inside the [0,100] y-span: hit.
+        assert!(v.pick(&t(), pos2(43.0, 50.0)));
+        // X too far from the line: miss even on-span.
+        assert!(!v.pick(&t(), pos2(60.0, 50.0)));
+        // On the line X but well outside the y-span (above the area): miss.
+        assert!(!v.pick(&t(), pos2(40.0, -50.0)));
+    }
+
+    #[test]
+    fn pick_hline_near_y_within_span_hits_off_span_misses() {
+        // HLine at y=8 -> pixel y=20 (y flipped); tolerance 5.5px.
+        let h = Marker::hline(8.0);
+        // Within tolerance in Y and inside the [0,100] x-span: hit.
+        assert!(h.pick(&t(), pos2(50.0, 23.0)));
+        // Y too far from the line: miss even on-span.
+        assert!(!h.pick(&t(), pos2(50.0, 60.0)));
+        // On the line Y but well outside the x-span (left of the area): miss.
+        assert!(!h.pick(&t(), pos2(-50.0, 20.0)));
     }
 
     #[test]

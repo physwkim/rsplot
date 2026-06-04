@@ -11,6 +11,7 @@
 
 use egui::{Pos2, Rect, Vec2};
 
+use crate::core::marker::{Marker, MarkerConstraint, MarkerKind};
 use crate::core::roi::RoiEdge;
 use crate::core::transform::{Scale, Transform};
 
@@ -960,6 +961,47 @@ pub fn cursor_for_grab(edge: Option<RoiEdge>) -> CursorShape {
     edge.map(cursor_for_edge).unwrap_or_default()
 }
 
+/// Cursor shape for a draggable marker, reflecting its drag degrees of freedom,
+/// mirroring silx's per-marker size cursor (`PlotInteraction.py`
+/// `_handleMarkerCursor`, `CURSOR_SIZE_*`):
+///
+/// - [`MarkerKind::VLine`] moves only in X → [`CursorShape::SizeHor`].
+/// - [`MarkerKind::HLine`] moves only in Y → [`CursorShape::SizeVer`].
+/// - [`MarkerKind::Point`] with [`MarkerConstraint::None`] moves freely →
+///   [`CursorShape::SizeAll`]; with [`MarkerConstraint::Horizontal`] (pins X,
+///   leaves Y free) it moves only in Y → [`CursorShape::SizeVer`]; with
+///   [`MarkerConstraint::Vertical`] (pins Y, leaves X free) only in X →
+///   [`CursorShape::SizeHor`].
+///
+/// Pure, so the mapping is unit-testable without a `Ui`.
+pub fn marker_cursor(marker: &Marker) -> CursorShape {
+    match marker.kind {
+        MarkerKind::VLine { .. } => CursorShape::SizeHor,
+        MarkerKind::HLine { .. } => CursorShape::SizeVer,
+        MarkerKind::Point { .. } => match marker.constraint {
+            MarkerConstraint::None => CursorShape::SizeAll,
+            // Horizontal pins X, leaving Y free: vertical motion only.
+            MarkerConstraint::Horizontal => CursorShape::SizeVer,
+            // Vertical pins Y, leaving X free: horizontal motion only.
+            MarkerConstraint::Vertical => CursorShape::SizeHor,
+        },
+    }
+}
+
+/// Index of the topmost *draggable* marker hit by `cursor` (screen pixels) under
+/// `transform`, or `None` when no draggable marker is hit. Iterates in reverse
+/// (the last-drawn marker has the highest z, so it wins the pick), skipping any
+/// marker whose [`Marker::is_draggable`] is `false` even if the cursor is over
+/// it. Pure ([`Marker::pick`] is the per-kind hit-test), so it is unit-testable.
+pub fn marker_at(markers: &[Marker], transform: &Transform, cursor: Pos2) -> Option<usize> {
+    markers
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, m)| m.is_draggable && m.pick(transform, cursor))
+        .map(|(i, _)| i)
+}
+
 /// Which mouse button a [`PlotPointerEvent`] carries, mirroring silx's
 /// `"left" | "middle" | "right"` button strings (`PlotEvents.py:58-71`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1854,5 +1896,56 @@ mod tests {
         );
         // Outside the data area maps outside the image.
         assert!(image_index(&t, (0.0, 0.0), (1.0, 1.0), (10, 10), pos2(-5.0, 50.0)).is_none());
+    }
+
+    #[test]
+    fn marker_cursor_reflects_drag_dof() {
+        // VLine moves in X only -> SizeHor.
+        assert_eq!(marker_cursor(&Marker::vline(3.0)), CursorShape::SizeHor);
+        // HLine moves in Y only -> SizeVer.
+        assert_eq!(marker_cursor(&Marker::hline(3.0)), CursorShape::SizeVer);
+        // Free point moves in both -> SizeAll.
+        let p = Marker::point(1.0, 2.0);
+        assert_eq!(marker_cursor(&p), CursorShape::SizeAll);
+        // Point + Horizontal constraint pins X, leaving Y free -> SizeVer.
+        let ph = Marker::point(1.0, 2.0).with_constraint(MarkerConstraint::Horizontal);
+        assert_eq!(marker_cursor(&ph), CursorShape::SizeVer);
+        // Point + Vertical constraint pins Y, leaving X free -> SizeHor.
+        let pv = Marker::point(1.0, 2.0).with_constraint(MarkerConstraint::Vertical);
+        assert_eq!(marker_cursor(&pv), CursorShape::SizeHor);
+    }
+
+    #[test]
+    fn marker_at_returns_topmost_draggable_index() {
+        let t = pick_transform();
+        // Two draggable points stacked at the same spot (data (5,5) -> pixel
+        // (50,50)); the later one (higher z, drawn last) wins.
+        let markers = vec![
+            Marker::point(5.0, 5.0).with_draggable(true),
+            Marker::point(5.0, 5.0).with_draggable(true),
+        ];
+        assert_eq!(marker_at(&markers, &t, pos2(50.0, 50.0)), Some(1));
+    }
+
+    #[test]
+    fn marker_at_skips_non_draggable_even_when_hit() {
+        let t = pick_transform();
+        // The topmost marker is hit but not draggable; it is skipped and the
+        // draggable one below it is returned.
+        let markers = vec![
+            Marker::point(5.0, 5.0).with_draggable(true),
+            Marker::point(5.0, 5.0), // is_draggable == false
+        ];
+        assert_eq!(marker_at(&markers, &t, pos2(50.0, 50.0)), Some(0));
+    }
+
+    #[test]
+    fn marker_at_none_when_nothing_hit() {
+        let t = pick_transform();
+        let markers = vec![Marker::point(5.0, 5.0).with_draggable(true)];
+        // Cursor far from the marker: no hit.
+        assert_eq!(marker_at(&markers, &t, pos2(90.0, 10.0)), None);
+        // Empty list: no hit.
+        assert_eq!(marker_at(&[], &t, pos2(50.0, 50.0)), None);
     }
 }

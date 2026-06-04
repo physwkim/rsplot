@@ -7,6 +7,7 @@
 
 use egui::{Color32, Rect};
 
+use crate::core::backend::ItemHandle;
 use crate::core::colormap::Colormap;
 use crate::core::marker::Marker;
 use crate::core::roi::Roi;
@@ -279,6 +280,15 @@ pub struct Plot {
     /// Point / line markers drawn over the data area (silx `addMarker`). Each is
     /// a static overlay; the widget draws the list every frame.
     pub markers: Vec<Marker>,
+    /// Backend item handles parallel to [`Self::markers`]: `marker_handles[i]` is
+    /// the [`ItemHandle`] of `markers[i]`. Both vectors are rebuilt together by
+    /// the backend's `sync_plot_items` (same length and order), so a marker drag
+    /// can map the dragged mirror index back to the owning backend item for
+    /// persistence. Empty until the first sync.
+    ///
+    /// INVARIANT: `marker_handles.len() == markers.len()` and
+    /// `marker_handles[i]` identifies `markers[i]`.
+    pub marker_handles: Vec<ItemHandle>,
     /// Polygon / rectangle / polyline / line shapes drawn over the data area
     /// (silx `addShape`). Static overlays drawn every frame.
     pub shapes: Vec<Shape>,
@@ -386,6 +396,7 @@ impl Plot {
             crosshair: false,
             rois: Vec::new(),
             markers: Vec::new(),
+            marker_handles: Vec::new(),
             shapes: Vec::new(),
             triangles: Vec::new(),
             title: None,

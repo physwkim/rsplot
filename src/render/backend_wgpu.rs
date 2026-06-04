@@ -16,7 +16,7 @@ use crate::core::backend::{
     Backend, CurveColor, CurveSpec, ImagePixelsSpec, ImageSpec, ItemHandle, MarkerSpec, PickResult,
     ShapeSpec, TriangleSpec,
 };
-use crate::core::marker::{Marker, MarkerKind};
+use crate::core::marker::Marker;
 use crate::core::plot::{Plot, PlotId};
 use crate::core::shape::{Shape, ShapeKind};
 use crate::core::transform::{Margins, Scale, Transform, YAxis};
@@ -474,6 +474,10 @@ impl WgpuBackend {
         let mut triangles: Vec<Triangles> = Vec::new();
         let mut shapes: Vec<Shape> = Vec::new();
         let mut markers: Vec<Marker> = Vec::new();
+        // Parallel to `markers`: marker_handles[i] is the handle of markers[i],
+        // pushed in lockstep below so the mirror index maps back to the backend
+        // item for drag persistence.
+        let mut marker_handles: Vec<ItemHandle> = Vec::new();
         let mut colormap = None;
 
         let mut items_with_z: Vec<(f32, &BackendItem)> = self
@@ -495,7 +499,10 @@ impl WgpuBackend {
             match item {
                 BackendItem::Triangles { data, .. } => triangles.push(data.clone()),
                 BackendItem::Shape { data, .. } => shapes.push(data.clone()),
-                BackendItem::Marker { data, .. } => markers.push(data.clone()),
+                BackendItem::Marker { handle, data } => {
+                    markers.push(data.clone());
+                    marker_handles.push(*handle);
+                }
                 _ => {}
             }
         }
@@ -511,6 +518,7 @@ impl WgpuBackend {
         self.plot.triangles = triangles;
         self.plot.shapes = shapes;
         self.plot.markers = markers;
+        self.plot.marker_handles = marker_handles;
         self.plot.colormap = colormap;
     }
 
@@ -559,6 +567,42 @@ impl WgpuBackend {
         self.sync_plot_items();
         self.sync_gpu_items();
         true
+    }
+
+    /// Replace the [`Marker`] data for an existing marker handle, returning
+    /// `false` if no marker with that handle exists.
+    ///
+    /// Markers are the per-frame mirror `plot.markers` (rebuilt from the backend
+    /// items on every sync), so a live drag that mutates the mirror does not
+    /// persist on its own — the next sync clobbers it. This writes the new data
+    /// back to the owning [`BackendItem::Marker`] so subsequent syncs stay
+    /// consistent. Markers are painter-drawn from `plot.markers`, not part of the
+    /// GPU item set, so only `sync_plot_items` is needed (no `sync_gpu_items`).
+    pub fn update_marker(&mut self, handle: ItemHandle, marker: Marker) -> bool {
+        let Some(item) = self
+            .items
+            .iter_mut()
+            .find(|item| matches!(item, BackendItem::Marker { handle: h, .. } if *h == handle))
+        else {
+            return false;
+        };
+        *item = BackendItem::Marker {
+            handle,
+            data: marker,
+        };
+        self.sync_plot_items();
+        true
+    }
+
+    /// The [`Marker`] data of an existing marker handle (the persisted backend
+    /// item, the source of truth), or `None` if no marker with that handle
+    /// exists. Reads the backend item rather than the per-frame `plot.markers`
+    /// mirror so it is correct even between syncs.
+    pub fn marker(&self, handle: ItemHandle) -> Option<&Marker> {
+        match self.find_item(handle) {
+            Some(BackendItem::Marker { data, .. }) => Some(data),
+            _ => None,
+        }
     }
 
     /// Remove every backend item and synchronize GPU/plot state.
@@ -1021,25 +1065,9 @@ fn pick_shape(shape: &Shape, transform: &Transform, cursor: Pos2) -> bool {
 }
 
 fn pick_marker(marker: &Marker, transform: &Transform, cursor: Pos2) -> bool {
-    let tolerance = OVERLAY_PICK_TOLERANCE_PX + marker.line_width.max(1.0) * 0.5;
-    match marker.kind {
-        MarkerKind::Point { x, y, size, .. } => {
-            let radius = size.max(1.0) * 0.5 + OVERLAY_PICK_TOLERANCE_PX;
-            transform.data_to_pixel(x, y).distance(cursor) <= radius
-        }
-        MarkerKind::VLine { x } => {
-            let px = transform.data_to_pixel(x, transform.y.min).x;
-            (cursor.x - px).abs() <= tolerance
-                && cursor.y >= transform.area.top() - tolerance
-                && cursor.y <= transform.area.bottom() + tolerance
-        }
-        MarkerKind::HLine { y } => {
-            let py = transform.data_to_pixel(transform.x.min, y).y;
-            (cursor.y - py).abs() <= tolerance
-                && cursor.x >= transform.area.left() - tolerance
-                && cursor.x <= transform.area.right() + tolerance
-        }
-    }
+    // Delegates to the pure per-kind hit-test on the marker model so the
+    // geometry lives in one place (shared with the interaction-layer drag pick).
+    marker.pick(transform, cursor)
 }
 
 fn point_in_triangle(p: Pos2, a: Pos2, b: Pos2, c: Pos2) -> bool {
