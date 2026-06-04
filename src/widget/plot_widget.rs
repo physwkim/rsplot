@@ -9,8 +9,9 @@
 //!
 //! Mouse mapping follows the active interaction mode: select mode uses primary
 //! drag for ROI handles, zoom mode uses primary drag for box zoom, pan mode uses
-//! primary drag for panning. Secondary drag pans in every mode; wheel zoom and
-//! double-click reset remain available.
+//! primary drag for panning. Secondary drag pans in every mode; a secondary
+//! *click* opens a zoom context menu (Zoom Back / Reset Zoom). Wheel zoom
+//! remains available.
 
 use egui::{PointerButton, Pos2, Rect, Sense, Stroke, Ui};
 
@@ -198,7 +199,8 @@ impl PlotView {
     ) -> PlotResponse {
         let (rect, response) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
 
-        // Capture the initial view once, for double-click reset.
+        // Capture the initial view once; the Reset Zoom context-menu item
+        // restores it.
         let current = plot.limits;
         plot.home_limits.get_or_insert(current);
 
@@ -614,15 +616,6 @@ fn apply_interaction(
     // aspect-ratio expansion), so pan/zoom act on exactly what is on screen.
     let base = (view.x.min, view.x.max, view.y.min, view.y.max);
 
-    // Reset: double-click restores the home view (silx `resetZoom`) and clears
-    // the limits history.
-    if response.double_clicked()
-        && let Some(home) = plot.home_limits
-    {
-        plot.limits = home;
-        plot.clear_limits_history();
-    }
-
     // Arrow-key pan: when the plot area has keyboard focus, arrow keys pan by a
     // fraction of the view (silx `PanWithArrowKeysAction` -> `PlotWidget.pan`
     // with factor 0.1). One press is one pan step.
@@ -901,6 +894,34 @@ fn apply_interaction(
             ui.ctx().set_cursor_icon(shape.to_egui());
         }
     }
+
+    // Right-click context menu (silx `PlotWidget.contextMenuEvent`): a secondary
+    // *click* opens a zoom menu. silx's default menu carries `Zoom Back`;
+    // egui-silx adds `Reset Zoom` to absorb the view reset (silx binds reset to
+    // the toolbar/home, never to a double-click, so the former double-click reset
+    // is relocated here). A secondary *drag* still pans — egui opens the menu on a
+    // click, not a drag — and the `mouseClicked "right"` event still fires
+    // alongside, matching silx emitting the click signal while showing the menu.
+    response.context_menu(|ui| {
+        // Zoom Back: pop the last pushed view, falling back to a reset-zoom on an
+        // empty history (silx `ZoomBackAction` -> `LimitsHistory.pop`, which
+        // `resetZoom`s when empty; mirrors `actions::control::zoom_back`).
+        if ui.button("Zoom Back").clicked() {
+            if !plot.zoom_back() {
+                plot.reset_zoom();
+            }
+            ui.close();
+        }
+        // Reset Zoom: restore the home view captured on first show and clear the
+        // limits history (the behavior the double-click reset used to provide).
+        if ui.button("Reset Zoom").clicked() {
+            if let Some(home) = plot.home_limits {
+                plot.limits = home;
+            }
+            plot.clear_limits_history();
+            ui.close();
+        }
+    });
 
     // Low-level pointer event over the data area (silx prepareMouseSignal). A
     // click/double-click is reported at the interaction pointer position; a bare
@@ -1238,12 +1259,7 @@ mod tests {
         // silx's prepareMouseSignal reports the actual button; detect_pointer_event
         // maps Secondary/Middle through MouseButton::from_egui. Both paths are
         // exercised here (the click test above only covers the left button).
-        let ctx = egui::Context::default();
-        let mut plot = Plot::new(0);
-        plot.limits = (0.0, 10.0, 0.0, 10.0);
         let screen = egui::vec2(200.0, 200.0);
-        let (_r0, area) = run_frame(&ctx, &mut plot, screen_input(screen));
-        let px = area.center();
 
         for (button, expected) in [
             (
@@ -1255,6 +1271,18 @@ mod tests {
                 interaction::MouseButton::Middle,
             ),
         ] {
+            // A fresh context per button: the Secondary click opens the right-click
+            // context menu (silx `contextMenuEvent`), which would otherwise stay
+            // open and swallow the next iteration's click. silx emits the
+            // `mouseClicked` event AND shows the menu, so the Right click still
+            // reports its event here; isolating the contexts only prevents the
+            // open menu from leaking across the two independent button cases.
+            let ctx = egui::Context::default();
+            let mut plot = Plot::new(0);
+            plot.limits = (0.0, 10.0, 0.0, 10.0);
+            let (_r0, area) = run_frame(&ctx, &mut plot, screen_input(screen));
+            let px = area.center();
+
             let resp = click_cycle(&ctx, &mut plot, screen, px, button);
             match resp.pointer_event {
                 Some(interaction::PlotPointerEvent::Clicked {
@@ -1310,6 +1338,49 @@ mod tests {
             }
             other => panic!("expected DoubleClicked, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn double_click_no_longer_resets_view() {
+        // silx binds the view reset to the right-click context menu (Zoom Back /
+        // Reset Zoom), not to a double-click. A double-click must therefore leave
+        // the limits untouched; the reset is reachable only through the menu.
+        let ctx = egui::Context::default();
+        let mut plot = Plot::new(0);
+        plot.limits = (0.0, 10.0, 0.0, 10.0);
+        let screen = egui::vec2(200.0, 200.0);
+        // Frame 1 captures home_limits = (0, 10, 0, 10) and the data area.
+        let (_r0, area) = run_frame(&ctx, &mut plot, screen_input(screen));
+        let px = area.center();
+        // Move the view away from home, as a pan/zoom would.
+        plot.limits = (5.0, 15.0, 5.0, 15.0);
+
+        let button_frame = |pressed: bool, time: f64| {
+            let mut raw = screen_input(screen);
+            raw.time = Some(time);
+            raw.events.push(egui::Event::PointerMoved(px));
+            raw.events.push(egui::Event::PointerButton {
+                pos: px,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::default(),
+            });
+            raw
+        };
+
+        // Two rapid clicks within egui's default double-click delay.
+        let _ = run_frame(&ctx, &mut plot, button_frame(true, 0.10));
+        let _ = run_frame(&ctx, &mut plot, button_frame(false, 0.12));
+        let _ = run_frame(&ctx, &mut plot, button_frame(true, 0.18));
+        let (resp, _) = run_frame(&ctx, &mut plot, button_frame(false, 0.20));
+
+        // The double-click still fires its event (silx mouseDoubleClicked)...
+        assert!(matches!(
+            resp.pointer_event,
+            Some(interaction::PlotPointerEvent::DoubleClicked { .. })
+        ));
+        // ...but no longer reverts the view to home_limits.
+        assert_eq!(plot.limits, (5.0, 15.0, 5.0, 15.0));
     }
 
     #[test]

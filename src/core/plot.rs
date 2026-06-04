@@ -250,9 +250,9 @@ pub struct Plot {
     /// Colormap drawn as the colorbar (mirrors the displayed image's colormap).
     /// `None` hides the colorbar (`doc/design.md` §5·§8).
     pub colormap: Option<Colormap>,
-    /// Limits to restore on a double-click "reset". The widget captures the
-    /// first observed `limits` here so the home view survives pan/zoom
-    /// (`doc/design.md` §8·§11.6). `None` until the first frame.
+    /// Limits to restore via the Reset Zoom context-menu item. The widget
+    /// captures the first observed `limits` here so the home view survives
+    /// pan/zoom (`doc/design.md` §8·§11.6). `None` until the first frame.
     pub home_limits: Option<(f64, f64, f64, f64)>,
     /// X-axis scale (linear or log10) (`doc/design.md` §13 A3).
     pub x_scale: Scale,
