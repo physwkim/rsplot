@@ -7333,6 +7333,10 @@ impl ImageView {
         // strictly on MaskDraw so pan/zoom/select never paint.
         self.handle_mask_paint(&plot_response);
 
+        // Brush footprint preview at the cursor (silx pencil shape circle),
+        // drawn on top of the just-painted mask.
+        self.draw_brush_preview(ui, &plot_response);
+
         // Profile tool: a drag on the image plot extracts a profile via the
         // existing helpers and shows it in the profile window (silx
         // _ProfileToolBar, ImageView.py:692-697).
@@ -7360,6 +7364,64 @@ impl ImageView {
             // applied (masked pixels → NaN).
             self.upload_image();
         }
+    }
+
+    /// In [`PlotInteractionMode::MaskDraw`] with a brush tool active, draw the
+    /// pencil footprint at the cursor: an unfilled circle of radius
+    /// `brush_size / 2` (data coords). Mirrors silx
+    /// `DrawFreeHand.updatePencilShape` (`PlotInteraction.py:1011-1017`,
+    /// `fill="none"`), shown both while hovering and while painting (silx draws
+    /// it from `Idle.onMove` and `Select.onMove`). The mask brush paints a disk
+    /// of `brush_size / 2` cells (egui-silx masks in data==cell space), so the
+    /// circle marks the exact footprint. Painted on a foreground layer clipped
+    /// to the image area.
+    fn draw_brush_preview(&self, ui: &egui::Ui, plot_response: &PlotResponse) {
+        use crate::widget::mask_tools::MaskTool;
+        let mode = self.image_plot.interaction_mode();
+        let mask_enabled =
+            self.mask.width == self.width && self.mask.height == self.height && self.width != 0;
+        if !image_view_should_paint_mask(mode, mask_enabled)
+            || !matches!(self.mask.active_tool, MaskTool::Pencil | MaskTool::Eraser)
+        {
+            return;
+        }
+        let area = plot_response.transform.area;
+        // Current pointer: hover_pos while idle, interact_pointer_pos while
+        // painting (the pointer is captured by the drag).
+        let Some(cursor) = plot_response
+            .response
+            .hover_pos()
+            .or_else(|| plot_response.response.interact_pointer_pos())
+        else {
+            return;
+        };
+        if !area.contains(cursor) {
+            return;
+        }
+        let center = plot_response.transform.pixel_to_data(cursor);
+        let radius = self.mask.brush_size as f64 / 2.0;
+        let circle = crate::widget::mask_tools::pencil_preview_circle(
+            center,
+            radius,
+            crate::widget::mask_tools::PENCIL_PREVIEW_SEGMENTS,
+        );
+        let mut outline: Vec<egui::Pos2> = circle
+            .iter()
+            .map(|&(x, y)| plot_response.transform.data_to_pixel(x, y))
+            .collect();
+        if let Some(&first) = outline.first() {
+            outline.push(first); // close the ring (silx polygon, fill="none")
+        }
+        let painter = ui.ctx().layer_painter(egui::LayerId::new(
+            egui::Order::Foreground,
+            egui::Id::new("mask-brush-preview"),
+        ));
+        painter.with_clip_rect(area).add(egui::Shape::dashed_line(
+            &outline,
+            egui::Stroke::new(1.5, self.mask.color),
+            6.0,
+            4.0,
+        ));
     }
 
     /// Track a profile drag on the image plot and extract the profile on

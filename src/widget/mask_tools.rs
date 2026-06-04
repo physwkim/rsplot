@@ -18,6 +18,30 @@ pub enum MaskTool {
     Ellipse,
 }
 
+/// Number of vertices on the pencil brush preview circle, mirroring silx
+/// `DrawFreeHand._circle` (`PlotInteraction.py:996`, `numpy.arange(13.0)`).
+pub(crate) const PENCIL_PREVIEW_SEGMENTS: usize = 13;
+
+/// The data-space vertices of the pencil brush footprint preview: `segments`
+/// points on a circle of `radius` around `center`. Mirrors silx
+/// `DrawFreeHand`'s `_circle` (`PlotInteraction.py:996-998`): 13 points on a
+/// circle of radius `pencil width * 0.5`, painted unfilled at the cursor. The
+/// mask brush paints a disk of `brush_size / 2` cells, so a `radius` of
+/// `brush_size / 2` (egui-silx masks in data==cell space) matches the
+/// footprint.
+pub(crate) fn pencil_preview_circle(
+    center: (f64, f64),
+    radius: f64,
+    segments: usize,
+) -> Vec<(f64, f64)> {
+    (0..segments)
+        .map(|i| {
+            let a = i as f64 * std::f64::consts::TAU / segments as f64;
+            (center.0 + radius * a.cos(), center.1 + radius * a.sin())
+        })
+        .collect()
+}
+
 /// Threshold masking mode, mirroring the silx threshold action group
 /// (`belowThresholdAction` / `betweenThresholdAction` / `aboveThresholdAction`
 /// in `_BaseMaskToolsWidget._initThresholdGroupBox`).
@@ -1139,6 +1163,23 @@ pub fn line_coords(row0: i64, col0: i64, row1: i64, col1: i64, width: i64) -> (V
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pencil_preview_circle_lies_on_radius_around_center() {
+        // silx DrawFreeHand._circle: `segments` points on a circle of `radius`
+        // around the cursor, first vertex at angle 0 (PlotInteraction.py:996-998).
+        let c = (3.0, -2.0);
+        let r = 2.5;
+        let pts = pencil_preview_circle(c, r, PENCIL_PREVIEW_SEGMENTS);
+        assert_eq!(pts.len(), PENCIL_PREVIEW_SEGMENTS);
+        for (x, y) in &pts {
+            let d = ((x - c.0).powi(2) + (y - c.1).powi(2)).sqrt();
+            assert!((d - r).abs() < 1e-9, "point ({x},{y}) dist {d}");
+        }
+        // First point at angle 0 is (center.x + r, center.y).
+        assert!((pts[0].0 - (c.0 + r)).abs() < 1e-9, "first.x {}", pts[0].0);
+        assert!((pts[0].1 - c.1).abs() < 1e-9, "first.y {}", pts[0].1);
+    }
 
     #[test]
     fn clear_only_affects_current_level() {
