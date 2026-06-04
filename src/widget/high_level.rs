@@ -7333,6 +7333,10 @@ impl ImageView {
         // strictly on MaskDraw so pan/zoom/select never paint.
         self.handle_mask_paint(&plot_response);
 
+        // Shape mask tools (rectangle / ellipse / polygon): drive the on-plot
+        // shape draw and paint its rubber-band preview (silx mask draw modes).
+        self.handle_mask_shape_draw(ui, &plot_response);
+
         // Brush footprint preview at the cursor (silx pencil shape circle),
         // drawn on top of the just-painted mask.
         self.draw_brush_preview(ui, &plot_response);
@@ -7363,6 +7367,57 @@ impl ImageView {
             // Painted this frame: re-upload the active image with the new mask
             // applied (masked pixels → NaN).
             self.upload_image();
+        }
+    }
+
+    /// In [`PlotInteractionMode::MaskDraw`] with a shape tool (rectangle /
+    /// ellipse / polygon) active, drive the on-plot shape draw and paint its
+    /// rubber-band preview, mirroring silx `MaskToolsWidget._plotDrawEvent` for
+    /// the shape draw modes. The mask widget owns the draw state machine and the
+    /// fill; a finished shape masks the current level, after which the active
+    /// image is re-uploaded with the new mask. The in-progress preview is drawn
+    /// in the mask overlay color on a foreground layer clipped to the image
+    /// area (silx draws the mask shape in the overlay color). Gated strictly on
+    /// [`image_view_should_paint_mask`] so pan / zoom / select never draw.
+    fn handle_mask_shape_draw(&mut self, ui: &egui::Ui, plot_response: &PlotResponse) {
+        let mode = self.image_plot.interaction_mode();
+        let mask_enabled =
+            self.mask.width == self.width && self.mask.height == self.height && self.width != 0;
+        if !image_view_should_paint_mask(mode, mask_enabled)
+            || self.mask.active_tool.draw_mode().is_none()
+        {
+            // Not a shape draw: drop any in-progress shape so re-entering a
+            // shape tool starts fresh.
+            self.mask.cancel_shape_draw();
+            return;
+        }
+        let before = self.mask.mask.clone();
+        let event = self.mask.handle_shape_draw(plot_response);
+        if self.mask.mask != before {
+            // Shape finished and masked this frame: re-upload the active image
+            // with the new mask applied (masked pixels → NaN).
+            self.upload_image();
+        }
+        // Paint the in-progress preview (rubber band) on top of the image.
+        if let Some(draw) = self.mask.shape_draw() {
+            let style = crate::widget::interaction::SelectionStyle::new(
+                crate::widget::interaction::FillMode::Hatch,
+                self.mask.color,
+            );
+            let painter = ui
+                .ctx()
+                .layer_painter(egui::LayerId::new(
+                    egui::Order::Foreground,
+                    egui::Id::new("mask-shape-preview"),
+                ))
+                .with_clip_rect(plot_response.transform.area);
+            crate::widget::plot_widget::paint_draw_preview(
+                &painter,
+                &plot_response.transform,
+                draw,
+                event.as_ref(),
+                style,
+            );
         }
     }
 

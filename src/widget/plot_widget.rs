@@ -494,23 +494,7 @@ impl PlotView {
         let event = feed_draw_state(draw, response, &transform);
 
         // Paint the in-progress preview overlay (the rubber band).
-        if let Some(points) = draw.preview() {
-            draw_overlay(ui.painter(), &transform, draw.mode(), &points, style);
-            // Polygon close target around the first vertex (silx updateFirstPoint).
-            if draw.mode() == interaction::DrawMode::Polygon
-                && let Some(&first) = points.first()
-            {
-                draw_polygon_first_point(
-                    ui.painter(),
-                    &transform,
-                    first,
-                    draw.close_threshold_px(),
-                    style.color,
-                );
-            }
-        } else if let Some(interaction::DrawEvent::InProgress { mode, points }) = &event {
-            draw_overlay(ui.painter(), &transform, *mode, points, style);
-        }
+        paint_draw_preview(ui.painter(), &transform, draw, event.as_ref(), style);
 
         // Surface this frame's draw event through PlotResponse too, so consumers
         // reading the embedded plot response (not only DrawResponse.event) see
@@ -639,13 +623,46 @@ fn polygon_first_point_box(
     ]
 }
 
+/// Paint the in-progress draw preview (rubber band) for a [`DrawState`]: the
+/// committed polygon/freehand ring from `draw.preview()` (plus the polygon
+/// close target around the first vertex, silx `updateFirstPoint`), or — for the
+/// two-/one-point modes whose preview lives only in this frame's event — the
+/// rubber band from `event`'s [`DrawEvent::InProgress`](interaction::DrawEvent).
+/// Shared by [`PlotView::show_with_draw`] and the high-level mask shape-draw
+/// path so every draw preview renders identically (silx `setSelectionArea`).
+pub(crate) fn paint_draw_preview(
+    painter: &egui::Painter,
+    transform: &Transform,
+    draw: &interaction::DrawState,
+    event: Option<&interaction::DrawEvent>,
+    style: interaction::SelectionStyle,
+) {
+    if let Some(points) = draw.preview() {
+        draw_overlay(painter, transform, draw.mode(), &points, style);
+        // Polygon close target around the first vertex (silx updateFirstPoint).
+        if draw.mode() == interaction::DrawMode::Polygon
+            && let Some(&first) = points.first()
+        {
+            draw_polygon_first_point(
+                painter,
+                transform,
+                first,
+                draw.close_threshold_px(),
+                style.color,
+            );
+        }
+    } else if let Some(interaction::DrawEvent::InProgress { mode, points }) = event {
+        draw_overlay(painter, transform, *mode, points, style);
+    }
+}
+
 /// Feed this frame's primary-pointer press / move / release / bare-hover from
 /// `response` into the draw state machine `draw`, projecting each cursor pixel to
 /// data through `transform`, and return the latest [`DrawEvent`](interaction::DrawEvent)
 /// it produced (silx `Select*` `onPress` / `onMove` / `onRelease`). Shared by
 /// [`PlotView::show_with_draw`] and the [`PlotInteractionMode::RoiCreate`] block
 /// in [`apply_interaction`] so both drive the state machine identically.
-fn feed_draw_state(
+pub(crate) fn feed_draw_state(
     draw: &mut interaction::DrawState,
     response: &egui::Response,
     transform: &Transform,

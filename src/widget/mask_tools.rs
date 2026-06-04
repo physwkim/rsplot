@@ -4,7 +4,8 @@ use egui::Color32;
 
 use crate::core::backend::ItemHandle;
 use crate::widget::high_level::Plot2D;
-use crate::widget::plot_widget::PlotResponse;
+use crate::widget::interaction::{DrawEvent, DrawMode, DrawParams, DrawState};
+use crate::widget::plot_widget::{PlotResponse, feed_draw_state};
 
 /// Drawing tools mirroring silx `_BaseMaskToolsWidget` draw modes
 /// (rectangle, ellipse, polygon, pencil/eraser).
@@ -16,6 +17,23 @@ pub enum MaskTool {
     Rectangle,
     Polygon,
     Ellipse,
+}
+
+impl MaskTool {
+    /// The on-plot [`DrawMode`] this tool draws as a shape, or `None` for the
+    /// brush / disabled tools (which paint per-pointer, not as a closed shape).
+    /// Mirrors silx `MaskToolsWidget._drawingMode` for the rectangle / ellipse /
+    /// polygon draw shapes. This is the single source of truth for *which* tools
+    /// are shape draws: both the on-plot wiring
+    /// ([`MaskToolsWidget::handle_shape_draw`]) and the caller's gate read it,
+    /// so a tool becomes a shape draw by adding exactly one arm here.
+    pub(crate) fn draw_mode(self) -> Option<DrawMode> {
+        match self {
+            MaskTool::Rectangle => Some(DrawMode::Rectangle),
+            // Ellipse / Polygon shape draws are wired in later waves.
+            _ => None,
+        }
+    }
 }
 
 /// Number of vertices on the pencil brush preview circle, mirroring silx
@@ -204,6 +222,13 @@ pub struct MaskToolsWidget {
     /// anchors the interpolating line so a fast drag leaves no gap, and is
     /// cleared when the stroke finishes or the image geometry changes.
     last_pencil_pos: Option<(i64, i64)>,
+
+    /// In-progress on-plot shape draw (rectangle / ellipse / polygon), or `None`
+    /// when no shape tool is mid-draw. Mirrors the draw state silx keeps while a
+    /// `MaskToolsWidget` draw mode is active; the finished shape masks the
+    /// current level via [`Self::fill_from_draw`]. Cleared on a geometry change
+    /// (the old draw refers to stale coordinates) and when leaving a shape tool.
+    shape_draw: Option<DrawState>,
 }
 
 impl MaskToolsWidget {
@@ -231,6 +256,7 @@ impl MaskToolsWidget {
             mask_handle: None,
             is_dirty: true, // Force initial upload
             last_pencil_pos: None,
+            shape_draw: None,
         }
     }
 
@@ -246,6 +272,8 @@ impl MaskToolsWidget {
         // The previous stroke anchor refers to the old geometry; drop it so the
         // next stroke does not interpolate from a stale cell.
         self.last_pencil_pos = None;
+        // An in-progress shape draw refers to the old geometry too; drop it.
+        self.shape_draw = None;
     }
 
     /// Set all pixels of the current level back to `0`.
@@ -585,6 +613,75 @@ impl MaskToolsWidget {
     /// `drawingFinished`.
     fn end_pencil_stroke(&mut self) {
         self.last_pencil_pos = None;
+    }
+
+    /// Drop any in-progress on-plot shape draw, so re-entering a shape tool
+    /// starts a fresh shape (silx resets the draw when the mode changes). Called
+    /// by the caller when the active tool is not a shape draw.
+    pub(crate) fn cancel_shape_draw(&mut self) {
+        self.shape_draw = None;
+    }
+
+    /// The in-progress shape-draw state machine, for rubber-band preview
+    /// rendering by the caller, or `None` when no shape draw is armed.
+    pub(crate) fn shape_draw(&self) -> Option<&DrawState> {
+        self.shape_draw.as_ref()
+    }
+
+    /// Drive the on-plot shape draw (rectangle / ellipse / polygon) from the
+    /// plot pointer, mirroring silx `MaskToolsWidget._plotDrawEvent` for the
+    /// shape draw modes: feed the draw state machine with this frame's pointer,
+    /// and on `drawingFinished` convert the data-space shape to array cells and
+    /// mask the current level ([`Self::fill_from_draw`]), then re-arm a fresh
+    /// machine for the next shape (silx's continuous draw). Returns this frame's
+    /// [`DrawEvent`] so the caller can paint the rubber-band preview. A no-op
+    /// returning `None` when the active tool is not a shape draw
+    /// ([`MaskTool::draw_mode`]).
+    pub(crate) fn handle_shape_draw(&mut self, plot_response: &PlotResponse) -> Option<DrawEvent> {
+        let Some(mode) = self.active_tool.draw_mode() else {
+            self.shape_draw = None;
+            return None;
+        };
+        // (Re)arm the machine for the active shape; reset if the tool changed
+        // mode mid-draw so the preview/finish matches the current tool.
+        if !matches!(&self.shape_draw, Some(d) if d.mode() == mode) {
+            self.shape_draw = Some(DrawState::new(mode));
+        }
+        let draw = self.shape_draw.as_mut().expect("armed above");
+        let event = feed_draw_state(draw, &plot_response.response, &plot_response.transform);
+        if let Some(DrawEvent::Finished { params, .. }) = &event {
+            self.fill_from_draw(params);
+            // Re-arm for the next shape (silx draws continuously until the mode
+            // is left).
+            self.shape_draw = Some(DrawState::new(mode));
+        }
+        event
+    }
+
+    /// Mask the current level over a finished draw shape, converting its
+    /// data-space parameters to array cells exactly as silx
+    /// `MaskToolsWidget._plotDrawEvent` does with origin 0 / scale 1 (data ==
+    /// cell; silx `int()` / `astype(int64)` truncate toward zero), then commit
+    /// the result to the undo history. Shape tools always mask the current
+    /// level (silx's mask/unmask toggle is the separate pencil/eraser choice in
+    /// this port).
+    fn fill_from_draw(&mut self, params: &DrawParams) {
+        let level = self.level;
+        match params {
+            DrawParams::Rectangle {
+                x,
+                y,
+                width,
+                height,
+            } => {
+                let (row, col, h, w) = rect_params_to_cells(*x, *y, *width, *height);
+                self.update_rectangle(level, row, col, h, w, true);
+            }
+            // Ellipse / Polygon fills are wired in later waves (gated by
+            // `MaskTool::draw_mode`, so only the wired shapes can reach here).
+            _ => return,
+        }
+        self.commit();
     }
 
     // Drawing operations on the level buffer, mirroring silx ImageMask.
@@ -935,6 +1032,24 @@ fn read_npy_u8(mut r: impl Read) -> io::Result<(u32, u32, Vec<u8>)> {
     let mut bytes = Vec::new();
     r.read_to_end(&mut bytes)?;
     crate::render::save::decode_mask_npy(&bytes)
+}
+
+/// Convert a finished rectangle draw to mask array cells `(row, col, height,
+/// width)`, mirroring silx `MaskToolsWidget._plotDrawEvent`'s rectangle branch
+/// (`MaskToolsWidget.py:805-825`) with origin 0 / scale 1 (data == cell):
+/// `row = int(y)`, `col = int(x)`, `height = int(|height|)`,
+/// `width = int(|width|)`, where silx `int()` truncates toward zero. The draw's
+/// `(x, y)` is the min corner and `width`/`height` are non-negative extents
+/// (`DrawParams::Rectangle`). The returned cells feed
+/// [`MaskToolsWidget::update_rectangle`], which masks rows `row..=row+height`
+/// and columns `col..=col+width` (silx slice `[row : row + height + 1]`).
+pub(crate) fn rect_params_to_cells(
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+) -> (i64, i64, i64, i64) {
+    (y as i64, x as i64, height.abs() as i64, width.abs() as i64)
 }
 
 /// Return a boolean fill mask (row-major, `height * width`) that is `true`
@@ -1306,6 +1421,60 @@ mod tests {
             0, 0, 0, 0, //
         ];
         assert_eq!(w.mask, expected);
+    }
+
+    #[test]
+    fn rect_params_to_cells_matches_silx_truncation() {
+        // silx _plotDrawEvent rectangle (origin 0, scale 1): row=int(y),
+        // col=int(x), height=int(|height|), width=int(|width|); int() truncates
+        // toward zero. (x, y) is the min corner.
+        // (2.7, 3.2) corner, width 4.9, height 1.1 ->
+        // row=int(3.2)=3, col=int(2.7)=2, height=int(1.1)=1, width=int(4.9)=4.
+        assert_eq!(rect_params_to_cells(2.7, 3.2, 4.9, 1.1), (3, 2, 1, 4));
+        // Negative corner truncates toward zero (silx int(), not floor):
+        // int(-0.5) == 0.
+        assert_eq!(rect_params_to_cells(-0.5, -0.5, 2.0, 2.0), (0, 0, 2, 2));
+    }
+
+    #[test]
+    fn fill_from_draw_rectangle_masks_and_commits() {
+        // A finished rectangle draw masks the current level over the converted
+        // cells and commits to the undo history (silx _plotDrawEvent ->
+        // updateRectangle -> commit). Rectangle min corner (2, 3), width 4,
+        // height 1 -> rows 3..=4, cols 2..=6.
+        let mut w = MaskToolsWidget::new(10, 10);
+        w.level = 1;
+        w.fill_from_draw(&DrawParams::Rectangle {
+            x: 2.0,
+            y: 3.0,
+            width: 4.0,
+            height: 1.0,
+        });
+        for r in 3..=4 {
+            for c in 2..=6 {
+                assert_eq!(
+                    w.mask[(r * 10 + c) as usize],
+                    1,
+                    "cell ({r}, {c}) should be masked"
+                );
+            }
+        }
+        // Cells just outside the rectangle stay unmasked.
+        assert_eq!(w.mask[(2 * 10 + 2) as usize], 0, "row above must be clear");
+        assert_eq!(w.mask[(5 * 10 + 2) as usize], 0, "row below must be clear");
+        assert_eq!(w.mask[(3 * 10 + 7) as usize], 0, "col right must be clear");
+        // The fill is committed (undo available).
+        assert!(w.can_undo(), "fill_from_draw must commit to undo history");
+    }
+
+    #[test]
+    fn fill_from_draw_ignores_unwired_shapes() {
+        // Only wired shapes (gated by MaskTool::draw_mode) reach fill_from_draw;
+        // an unwired param kind is a no-op and does not commit.
+        let mut w = MaskToolsWidget::new(4, 4);
+        w.fill_from_draw(&DrawParams::Point { x: 1.0, y: 1.0 });
+        assert!(w.mask.iter().all(|&v| v == 0));
+        assert!(!w.can_undo(), "a no-op fill must not commit");
     }
 
     #[test]

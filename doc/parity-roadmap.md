@@ -123,7 +123,7 @@ as-of-sweep reference.
 | status | P | E | feature | silx ref | gap |
 |---|---|---|---|---|---|
 | ◐ Partial | H | M | ColormapDialog Stddev3/Percentile from raw pixels | ColormapDialog.py:240-280 | Selector exists but applies MinMax because the dialog isn't fed the raw pixel array via `setHistogram()` (Plot2D `get_image_pixels_raw` exists — wire it) |
-| ☐ Missing | H | M | Mask drawing tool: Rectangle | MaskToolsWidget.py:805-826 | `MaskTool::Rectangle` variant exists but no on-plot drawing implementation |
+| ✅ Done (W15) | H | M | Mask drawing tool: Rectangle | MaskToolsWidget.py:805-826 | On-plot rectangle draw: `MaskTool::draw_mode` arms a `DrawState` driven by `handle_shape_draw`; `rect_params_to_cells` (silx `int()` truncation) → `update_rectangle` on finish; `ImageView::handle_mask_shape_draw` paints the rubber-band preview (reuses `paint_draw_preview`/`feed_draw_state`) |
 | ☐ Missing | H | M | Mask drawing tool: Polygon | MaskToolsWidget.py:840-847 | `MaskTool::Polygon` variant exists but no fill-drawing implementation |
 | ☐ Missing | H | L | Mask drawing tool: Ellipse | MaskToolsWidget.py:828-838 | `MaskTool::Ellipse` variant exists but no fill-drawing implementation |
 | ☐ Missing | M | M | Colormap catalog: matplotlib-dynamic loading | colors.py:938-955 | Fixed 15-entry catalog; silx loads all matplotlib colormaps dynamically at runtime |
