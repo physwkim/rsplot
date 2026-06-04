@@ -29,13 +29,15 @@ struct RoiDrag {
 }
 
 /// An in-progress draggable-marker drag, stashed in egui temp memory across
-/// frames (mirrors [`RoiDrag`]). `index` is the index into `plot.markers` (the
-/// per-frame mirror) that was grabbed; `anchor` is the marker's data position at
-/// grab time, the constraint anchor passed to
+/// frames. `handle` is the stable identity of the grabbed marker; the index into
+/// `plot.markers` (the per-frame, z-sorted mirror that `sync_plot_items`
+/// rebuilds) is re-resolved from `handle` each frame, so the drag keeps tracking
+/// the same marker even if the mirror is rebuilt or reordered mid-drag. `anchor`
+/// is the marker's data position at grab time, the constraint anchor passed to
 /// [`Marker::drag`](crate::core::marker::Marker::drag) each frame.
 #[derive(Clone, Copy)]
 struct MarkerDrag {
-    index: usize,
+    handle: crate::core::backend::ItemHandle,
     anchor: (f64, f64),
 }
 
@@ -565,9 +567,10 @@ fn apply_interaction(
         && response.drag_started_by(PointerButton::Primary)
         && let Some(p) = response.interact_pointer_pos()
         && let Some(index) = interaction::marker_at(&plot.markers, view, p)
+        && let Some(&handle) = plot.marker_handles.get(index)
     {
         let anchor = plot.markers[index].position();
-        ui.data_mut(|d| d.insert_temp(marker_id, MarkerDrag { index, anchor }));
+        ui.data_mut(|d| d.insert_temp(marker_id, MarkerDrag { handle, anchor }));
     }
     // Whether a marker drag is active this frame; gates pan/zoom/ROI below so
     // the marker drag is the sole primary-drag consumer while it runs.
@@ -578,12 +581,16 @@ fn apply_interaction(
     if let Some(md) = ui.data_mut(|d| d.get_temp::<MarkerDrag>(marker_id)) {
         if response.dragged_by(PointerButton::Primary)
             && let Some(cur) = response.interact_pointer_pos()
-            && let Some(marker) = plot.markers.get_mut(md.index)
+            // Re-resolve the mirror index from the stable handle each frame, so a
+            // mid-drag rebuild/reorder of `plot.markers` can never move the wrong
+            // marker; if the marker was removed mid-drag this simply no-ops.
+            && let Some(index) = plot.marker_handles.iter().position(|&h| h == md.handle)
+            && let Some(marker) = plot.markers.get_mut(index)
         {
             // Live-render this frame via the mirror; persistence to the backend
             // item happens in PlotWidget::show via the returned handle.
             marker.drag(md.anchor, view.pixel_to_data(cur));
-            marker_moved = plot.marker_handles.get(md.index).copied();
+            marker_moved = Some(md.handle);
         }
         if response.drag_stopped_by(PointerButton::Primary) {
             ui.data_mut(|d| d.remove::<MarkerDrag>(marker_id));
@@ -709,9 +716,11 @@ fn apply_interaction(
     let mut marker_cursor_set = false;
     if mode != PlotInteractionMode::MaskDraw {
         let cursor_marker = if marker_dragging {
-            // While dragging, follow the grabbed marker's index.
+            // While dragging, follow the grabbed marker by its stable handle
+            // (re-resolving the mirror index each frame, like the drag-apply).
             ui.data_mut(|d| d.get_temp::<MarkerDrag>(marker_id))
-                .and_then(|md| plot.markers.get(md.index))
+                .and_then(|md| plot.marker_handles.iter().position(|&h| h == md.handle))
+                .and_then(|i| plot.markers.get(i))
         } else if let Some(p) = response.hover_pos().filter(|p| area.contains(*p)) {
             interaction::marker_at(&plot.markers, view, p).and_then(|i| plot.markers.get(i))
         } else {
