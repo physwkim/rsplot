@@ -27,6 +27,14 @@ parity achieved differently (immediate-mode + persistent GPU buffers make redraw
 imperative `apply_interaction` dispatch replaces the silx state-machine hierarchy). This closes the enumerated
 interaction-events-panzoom open rows.
 
+**Mask drawing tools (main, not pushed):** ≈215 Done · ~106 open — 3 H rows closed: on-plot Rectangle (row 126),
+Ellipse (row 128), and Polygon (row 127) mask draws. The pure fill primitives (`update_rectangle`/`update_ellipse`/
+`update_polygon`) already existed; the gap was the on-plot draw interaction. Wired high-level like the pencil
+(reusing `DrawState`/`feed_draw_state`/the extracted `paint_draw_preview`, no new interaction mode or `PlotEvent`):
+`MaskTool::draw_mode` is the single source of truth for which tools are shape draws; `MaskToolsWidget::handle_shape_draw`
+feeds the draw machine and, on finish, `fill_from_draw` converts data→cells (silx `int()`/`astype(int64)` truncation,
+`_plotDrawEvent`) and masks the level; `ImageView::handle_mask_shape_draw` paints the rubber-band preview.
+
 Status legend: ✅ Done · ◐ Partial · ☐ Missing · ✅ N/A (resolved: parity achieved differently). Effort S/M/L. Priority H/M/L.
 
 > This file tracks the port. The per-area tables below are the **as-of-sweep
@@ -124,7 +132,7 @@ as-of-sweep reference.
 |---|---|---|---|---|---|
 | ◐ Partial | H | M | ColormapDialog Stddev3/Percentile from raw pixels | ColormapDialog.py:240-280 | Selector exists but applies MinMax because the dialog isn't fed the raw pixel array via `setHistogram()` (Plot2D `get_image_pixels_raw` exists — wire it) |
 | ✅ Done (W15) | H | M | Mask drawing tool: Rectangle | MaskToolsWidget.py:805-826 | On-plot rectangle draw: `MaskTool::draw_mode` arms a `DrawState` driven by `handle_shape_draw`; `rect_params_to_cells` (silx `int()` truncation) → `update_rectangle` on finish; `ImageView::handle_mask_shape_draw` paints the rubber-band preview (reuses `paint_draw_preview`/`feed_draw_state`) |
-| ☐ Missing | H | M | Mask drawing tool: Polygon | MaskToolsWidget.py:840-847 | `MaskTool::Polygon` variant exists but no fill-drawing implementation |
+| ✅ Done (W15) | H | M | Mask drawing tool: Polygon | MaskToolsWidget.py:840-847 | On-plot polygon draw (click-to-add, snap-close) via the shared shape-draw wiring: `MaskTool::draw_mode` arm + `polygon_vertices_to_cells` (cast int64, swap `(x,y)`→`(row,col)` per silx `[:, (1,0)]`) → `update_polygon`/`polygon_fill_mask` on finish |
 | ✅ Done (W15) | H | L | Mask drawing tool: Ellipse | MaskToolsWidget.py:828-838 | On-plot ellipse draw via the shared shape-draw wiring: `MaskTool::draw_mode` arm + `ellipse_params_to_cells` (center cast int64, y-semi→`radius_r`, x-semi→`radius_c`; radii stay float per silx) → `update_ellipse` on finish |
 | ☐ Missing | M | M | Colormap catalog: matplotlib-dynamic loading | colors.py:938-955 | Fixed 15-entry catalog; silx loads all matplotlib colormaps dynamically at runtime |
 | ☐ Missing | M | M | ColormapDialog histogram display | ColormapDialog.py:336-380 | No histogram overlay of the data distribution over the colormap range; no `setHistogram` API |

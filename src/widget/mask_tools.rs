@@ -31,8 +31,10 @@ impl MaskTool {
         match self {
             MaskTool::Rectangle => Some(DrawMode::Rectangle),
             MaskTool::Ellipse => Some(DrawMode::Ellipse),
-            // Polygon shape draw is wired in a later wave.
-            _ => None,
+            MaskTool::Polygon => Some(DrawMode::Polygon),
+            // None / Pencil / Eraser are not shape draws (the brush paints
+            // per-pointer; None disables masking).
+            MaskTool::None | MaskTool::Pencil | MaskTool::Eraser => None,
         }
     }
 }
@@ -682,8 +684,13 @@ impl MaskToolsWidget {
                 let (crow, ccol, radius_r, radius_c) = ellipse_params_to_cells(*center, *semi_axes);
                 self.update_ellipse(level, crow, ccol, radius_r, radius_c, true);
             }
-            // Polygon fill is wired in a later wave (gated by
-            // `MaskTool::draw_mode`, so only the wired shapes can reach here).
+            DrawParams::Polygon { vertices } => {
+                let cells = polygon_vertices_to_cells(vertices);
+                self.update_polygon(level, &cells, true);
+            }
+            // Other shapes (line / h-line / v-line / freehand / point) are not
+            // mask draw modes (gated by `MaskTool::draw_mode`, so only the wired
+            // shapes can reach here).
             _ => return,
         }
         self.commit();
@@ -1077,6 +1084,20 @@ pub(crate) fn ellipse_params_to_cells(
         semi_axes.1 as f32, // radius_r = y/row semi-axis
         semi_axes.0 as f32, // radius_c = x/col semi-axis
     )
+}
+
+/// Convert a finished polygon draw's data-space `(x, y)` vertices to mask array
+/// `(row, col)` vertices, mirroring silx `MaskToolsWidget._plotDrawEvent`'s
+/// polygon branch (`MaskToolsWidget.py:840-847`) with origin 0 / scale 1
+/// (data == cell): `vertices.astype(int64)[:, (1, 0)]` casts each `(x, y)` to
+/// `int64` (truncate toward zero) and swaps to `(row = int(y), col = int(x))`.
+/// The result feeds [`MaskToolsWidget::update_polygon`] (via
+/// [`polygon_fill_mask`], whose vertices are `(row, col)`).
+pub(crate) fn polygon_vertices_to_cells(vertices: &[(f64, f64)]) -> Vec<(i64, i64)> {
+    vertices
+        .iter()
+        .map(|&(x, y)| (y as i64, x as i64))
+        .collect()
 }
 
 /// Return a boolean fill mask (row-major, `height * width`) that is `true`
@@ -1536,6 +1557,32 @@ mod tests {
             0,
             "row offset 2 (== row radius 2) is excluded (strict <)"
         );
+        assert!(w.can_undo(), "fill_from_draw must commit");
+    }
+
+    #[test]
+    fn polygon_vertices_to_cells_swaps_xy_to_row_col() {
+        // silx: vertices (x, y) -> astype(int64)[:, (1, 0)] =
+        // (row = int(y), col = int(x)); int() truncates toward zero.
+        let cells = polygon_vertices_to_cells(&[(1.7, 2.3), (4.9, 0.1), (-0.5, 3.8)]);
+        assert_eq!(cells, vec![(2, 1), (0, 4), (3, 0)]);
+    }
+
+    #[test]
+    fn fill_from_draw_polygon_masks_interior_and_commits() {
+        // A square polygon given in data (x, y) corners; the converter swaps to
+        // (row, col) and the scanline fill masks the interior. Verifying an
+        // interior cell is masked and exterior corners are not also confirms
+        // the x/y -> row/col swap (a wrong swap would shift the square).
+        let mut w = MaskToolsWidget::new(6, 6);
+        w.level = 1;
+        w.fill_from_draw(&DrawParams::Polygon {
+            vertices: vec![(1.0, 1.0), (4.0, 1.0), (4.0, 4.0), (1.0, 4.0)],
+        });
+        let at = |r: i64, c: i64| w.mask[(r * 6 + c) as usize];
+        assert_eq!(at(2, 2), 1, "interior cell is masked");
+        assert_eq!(at(0, 0), 0, "exterior corner stays unmasked");
+        assert_eq!(at(5, 5), 0, "exterior corner stays unmasked");
         assert!(w.can_undo(), "fill_from_draw must commit");
     }
 
