@@ -7,6 +7,8 @@ adjacent silx.gui** (colors, data-adjacent GUI widgets).
 **Totals (as-of-sweep):** 397 features — 165 Done, 49 Partial, 183 Missing.
 **Re-baselined 2026-06-04 (main @ `d04232a`):** ≈191 Done · 130 open (10 H / 48 M /
 34 L) — see [Remaining work (re-baselined 2026-06-04)](#remaining-work-re-baselined-2026-06-04-main--d04232a).
+**After Wave 13 (ROI styling, main @ `7495590`, not pushed):** ≈199 Done · 122 open (7 H / 44 M / 33 L) — 8 ROI
+rows closed (per-instance color/name/selection, `sigCurrentRoiChanged`, line style/width, manager default-color, fill).
 
 Status legend: ✅ Done · ◐ Partial · ☐ Missing. Effort S/M/L. Priority H/M/L.
 
@@ -76,24 +78,24 @@ as-of-sweep reference.
 
 | status | P | E | feature | silx ref | gap |
 |---|---|---|---|---|---|
-| ☐ Missing | H | S | Per-instance ROI color on the **live** plot | items/_roi_base.py:389-405 | `draw_roi` honors `RoiAppearance.color` (chrome.rs:732) and `RoiManagerWidget` feeds real appearance (roi_manager.rs:223-235), but the live render `plot_widget.rs:353 → draw_rois` passes `RoiAppearance::default()` and `plot.rois` is bare `Roi` — **two decoupled ROI collections**, manager metadata not plumbed to the interactive ROIs |
-| ☐ Missing | H | M | ROI label/name text on the live plot | items/_roi_base.py:492-511 (`_updateText`) | `draw_roi` renders `appearance.name` (chrome.rs:916) but the live `draw_rois` path passes no name; `plot.rois` carries no label (same two-collection cause) |
-| ☐ Missing | H | S | ROI selection/highlight on the live plot | tools/roi.py:528-590 (`setHighlighted`) | `draw_roi` thickens stroke when `appearance.selected` (chrome.rs:736) but the live `draw_rois` path passes `selected:false`; no current-ROI plumbed to the renderer (same cause) |
+| ✅ Done | H | S | Per-instance ROI color on the **live** plot | items/_roi_base.py:389-405 | Wave 13: unified `plot.rois` to `Vec<ManagedRoi>` (single source of truth); the live render `plot_widget.rs → chrome::draw_rois` resolves each ROI's color as `managed.color.unwrap_or(plot.roi_color)` via pure `chrome::roi_appearance`. On-screen pixels GPU/PlotWidget-UNVERIFIED; appearance resolution headlessly tested |
+| ✅ Done | H | M | ROI label/name text on the live plot | items/_roi_base.py:492-511 (`_updateText`) | Wave 13: `ManagedRoi.name` plumbed through `chrome::roi_appearance.name` into the live `draw_rois` path (empty name → no label). Same single-collection fix as the color row |
+| ✅ Done | H | S | ROI selection/highlight on the live plot | tools/roi.py:528-590 (`setHighlighted`) | Wave 13: `Plot::set_current_roi` (sole owner of `ManagedRoi.selected`) drives the live highlight; `draw_roi` thickens the current ROI's stroke. Invariant (exactly one selected; out-of-range clears; remove adjusts index) headlessly tested |
 | ☐ Missing | H | L | CurvesROIWidget integration | CurvesROIWidget.py:62-400 | No dedicated dock widget with ROI table + per-curve ROI stats |
 | ☐ Missing | H | L | ROIStatsWidget display | ROIStatsWidget.py | No dock widget showing min/max/mean/sum/integral for a selected ROI + item (`image_roi_stats`/`curve_roi_stats` already compute these) |
 | ◐ Partial | M | M | EllipseROI orientation/rotation | items/roi.py:875-1177 | Axis-aligned only; missing rotational geometry / `_orientation` field |
 | ◐ Partial | M | M | CircleROI dedicated handle UI | items/roi.py:727-950 | On-plot creation done; editing is whole-ROI translate + center/radius map, no dedicated handle UI |
 | ◐ Partial | M | M | CrossROI marker symbols | items/roi.py:133-185 | Creation works; missing marker-symbol control + composite handle/label management |
 | ◐ Partial | M | L | ArcROI interaction sub-modes | items/_arc_roi.py | Polar editing present; silx default ThreePointMode sub-mode + toggle UI missing |
-| ◐ Partial | M | S | Manager `sigCurrentRoiChanged` signal | tools/roi.py:346-347 | `RoiChanged`/`RoiCreated` present; distinct current-ROI-changed signal on selection missing |
+| ✅ Done | M | S | Manager `sigCurrentRoiChanged` signal | tools/roi.py:346-347 | Wave 13: `PlotEvent::CurrentRoiChanged { previous, current }` emitted by `set_current_roi` only when the selection actually changes (mirrors silx `sigCurrentRoiChanged`) |
 | ☐ Missing | M | M | ROI handle-symbol customization | items/_roi_base.py:600-680 | All handles render as fixed 6px squares; no `+` center / `s` vertex / `o` close-polygon glyphs |
-| ☐ Missing | M | M | ROI line style (dash/dot) on canvas | items/_roi_base.py (LineMixIn) | `line_style` metadata tracked but the render path draws a fixed solid stroke (same two-collection cause) |
-| ☐ Missing | M | S | ROI line width on canvas | items/_roi_base.py:245 | `line_width` metadata exists but `draw_rois` hardcodes 1.0pt (same cause) |
-| ☐ Missing | M | S | Manager default-color application | tools/roi.py:782-797 | Manager has no color field; `DEFAULT_ROI_COLOR` hardcoded; color buttons don't apply |
+| ✅ Done | M | M | ROI line style (dash/dot) on canvas | items/_roi_base.py (LineMixIn) | Wave 13: `ManagedRoi.line_style` (`RoiLineStyle::{Solid,Dashed,Dotted}`) resolved into `RoiAppearance.line_style` and drawn by the live path; manager combo edits it |
+| ✅ Done | M | S | ROI line width on canvas | items/_roi_base.py:245 | Wave 13: `ManagedRoi.line_width` resolved into `RoiAppearance.line_width` on the live `draw_rois` path (was hardcoded 1.0pt); manager drag-value edits it |
+| ✅ Done | M | S | Manager default-color application | tools/roi.py:782-797 | Wave 13: added `Plot::roi_color` (silx-default red) applied as the per-ROI fallback; manager color buttons now write `managed.color` and apply on the live plot |
 | ☐ Missing | M | M | ROI edge-position constraints | items/_roi_base.py + per-class | `move_edge` does basic min/max clamping only; no inner>outer prevention, ratio lock, snapping |
 | ◐ Partial | L | L | BandROI edge constraints/collision | items/_band_roi.py | Geometry + corner handles present; missing edge-snapping, collision detection, rotation sub-mode |
 | ◐ Partial | L | M | ROI creation preview polish | tools/roi.py:493-510 | Live overlay present; missing polygon close-handle indicator + mode-label overlay during creation |
-| ◐ Partial | L | S | ROI fill enable/disable toggle | items/roi.py:531-539 | Fixed semi-transparent fill (alpha 24); no `setFill(True/False)` toggle |
+| ✅ Done | L | S | ROI fill enable/disable toggle | items/roi.py:531-539 | Wave 13: `ManagedRoi.fill` plumbed to `RoiAppearance.fill`; `set_roi_fill` API + manager checkbox toggle the interior fill on the live plot (silx `setFill`) |
 | ☐ Missing | L | S | Distinct Horizontal/VerticalLineROI kinds | items/roi.py:366-510 | Uses HRange/VRange only; no single-Y/single-X spanning-line ROI with X/YMarker |
 | ☐ Missing | L | M | ROI right-click context menu | tools/roi.py:625-642 (`_feedContextMenu`) | No remove / mode-select right-click menu |
 | ☐ Missing | L | L | ROI save/load from file | CurvesROIWidget.py:194-210 (dictdump) | No `Serialize` on `Roi`; no file I/O in the manager |
@@ -174,16 +176,15 @@ as-of-sweep reference.
 
 ### Top candidate next waves (re-baselined 2026-06-04)
 
-1. **ROI on-canvas styling + selection feedback** (M, ~9 rows, top H cluster) —
-   close the largest H-priority cluster in one file-disjoint area (`chrome.rs`
-   `draw_rois` + `plot_widget.rs` + `roi_manager.rs`/`core/plot.rs`): per-instance
-   color, name label, selection highlight, line width/style, handle symbols, manager
-   default color. **Structural cause is one thing:** `plot.rois` (bare `Roi`) and
-   `RoiManagerWidget`'s `Vec<ManagedRoi>` (full metadata) are two decoupled
-   collections, and the live render path feeds `RoiAppearance::default()`. The fix is
-   to unify them / plumb `ManagedRoi` appearance into the live `draw_rois` — not new
-   data, just wiring + a structural join. Prereq for ROI context-menu and
-   selection-driven stats UX.
+1. ~~**ROI on-canvas styling + selection feedback**~~ — **DONE (Wave 13, main, not
+   pushed).** Closed the top H cluster via the structural fix: `plot.rois` is now
+   `Vec<ManagedRoi>` (geometry + appearance) = single source of truth, the one live
+   `chrome::draw_rois` path resolves each ROI's color/name/selection/width/style/fill,
+   and `RoiManagerWidget` was reworked to a stateless editor over that one collection
+   (its second `Vec<ManagedRoi>` removed). Closed rows: per-instance color, name label,
+   selection highlight, `sigCurrentRoiChanged`, line style, line width, manager
+   default-color, fill toggle. *Still open (separate rows, not this wave):* ROI
+   handle-symbol customization, right-click context menu, edge-position constraints.
 2. **Mask drawing tools + threshold/finite ops** (L, ~8 rows) — three H-priority
    Missing draw tools (Rectangle/Polygon/Ellipse) + threshold UI, invert/transparency/
    not-finite controls, Mask/Unmask toggle. Enum variants + `ImageMask` buffer +
@@ -871,6 +872,47 @@ recon's raw output: the H-priority "ROI per-instance color/label/selection on ca
 (roi_manager.rs:223-235), but the live plot render (`plot_widget.rs:353 → draw_rois`) passes
 `RoiAppearance::default()` over a bare `plot.rois: Vec<Roi>`; the fix is to plumb/join `ManagedRoi` metadata into
 the live render path, not to add new render code.
+
+### Wave 13 — ROI on-canvas styling + selection feedback (unify the two decoupled ROI collections)
+Done **inline** (not the parallel worktree method), 4 one-feature-per-commit landings on `main` (not pushed),
+each passing the full per-crate gate (`cargo fmt --all`; `cargo clippy -p egui-silx --all-targets -- -D warnings`
+clean; `cargo nextest run -p egui-silx`; `cargo test --doc -p egui-silx`). Closes candidate-wave #1 — the top
+H-priority cluster — via the **structural fix the re-baseline named**: the root cause was two decoupled ROI
+collections (`Plot.rois: Vec<Roi>`, rendered live with a hardcoded `RoiAppearance::default()`, vs
+`RoiManagerWidget`'s own `Vec<ManagedRoi>` whose `draw()` was never overlaid), so per-ROI styling never reached
+the interactive plot.
+- **`3c614c8` — Unify ROI collections: `plot.rois` holds `ManagedRoi` as the single source of truth.** Moved
+  `ManagedRoi`/`RoiLineStyle` from `widget::roi_manager` into `core::roi` (core may not depend on widget;
+  re-exported from `widget::roi_manager` + `lib.rs` for path compat). `Plot::rois` is now `Vec<ManagedRoi>`;
+  added `Plot::roi_color` (silx-default red) + private `current_roi`; the one live `chrome::draw_rois(painter, t,
+  rois: &[ManagedRoi], default_color, style)` path resolves each ROI's appearance. **Single-owner invariant:**
+  `Plot::set_current_roi` is the SOLE writer of every `ManagedRoi.selected`; `Plot::remove_roi` (remove + adjust
+  index) and `Plot::clear_rois` (clear + `current_roi=None`) are the SOLE collection-shrinking mutators → "exactly
+  the current ROI is highlighted; the current index never dangles" holds by construction. Bypass audit anchor
+  `rg '\.rois\.(push|remove|clear)'`: push sites distinct (a new ROI is not auto-current); the two high-level
+  remove/clear bypass sites routed through the owner. Adapted every `.roi` reader/writer (plot_widget render +
+  edit-drag + creation + cursor, interaction `roi_grab_at`, high_level `add_roi`/`rois`/`rois_mut`/
+  `show_roi_manager`, 4 examples). Tests: selection/removal invariant in `core::plot`.
+- **`c60bae6` — high-level ROI styling API + current-ROI selection event.** `set_roi_color`/`set_roi_name`/
+  `set_roi_line_width`/`set_roi_line_style`/`set_roi_fill` (handle-indexed), `add_managed_roi`,
+  `current_roi`/`set_current_roi`; `PlotEvent::CurrentRoiChanged { previous, current }` emitted only when the
+  selection actually changes (silx `sigCurrentRoiChanged`). *(Commit-split note: the new variant forced a
+  `--all-targets` match arm in 3 exhaustive-match examples — same enum consequence as Wave 11/12.)*
+- **`b29db3c` — rework `RoiManagerWidget` onto `plot.rois`; remove the second ROI collection.** The manager is now
+  stateless beyond its window (`{ win, open }`): every control (current-ROI radio, color swatch, name, line
+  width/style, fill, remove, the +shape and clear-all buttons) mutates the plot's single `ManagedRoi` collection
+  via the owner methods, so edits render on the plot at once. Its own `Vec<ManagedRoi>`/`current`/`default_color`
+  + dead `draw()` removed (−4 owned-state tests). `examples/high_level_roi_manager.rs` now seeds two styled, named
+  ROIs (blue "feature A" rect; orange filled "spot" circle set current) in Select mode.
+- **`7495590` — extract testable ROI appearance resolution.** Pure `chrome::roi_appearance(&ManagedRoi,
+  default_color) -> RoiAppearance` (color fallback, name→Option, selected, width, style, fill) with a headless
+  `mod tests` case — the GPU-render boundary's testable seam.
+- **Verification boundary (reported honestly):** `PlotWidget::new` needs a wgpu `RenderState` no crate test
+  builds, so the on-screen ROI pixels stay **GPU/PlotWidget-UNVERIFIED**. Headlessly tested = the core
+  selection/removal invariant (`core::plot`) + pure `chrome::roi_appearance` resolution. Final gate: 781 tests
+  passed / 0 failed, doctest ok (11 ignored), clippy `-D warnings` clean.
+- **Wave 13 complete**, `main` @ `7495590` (NOT pushed). Per-crate scope only (`-p egui-silx` == `--workspace`,
+  sole member), so the pre-push full-workspace pass is satisfied by the per-crate run.
 
 
 ## PlotWidget core, axes, frame, ticks  — 25✅ 2◐ 7☐
