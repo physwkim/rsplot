@@ -27,8 +27,9 @@ parity achieved differently (immediate-mode + persistent GPU buffers make redraw
 imperative `apply_interaction` dispatch replaces the silx state-machine hierarchy). This closes the enumerated
 interaction-events-panzoom open rows.
 
-**Mask drawing tools (main, not pushed):** ≈215 Done · ~106 open — 3 H rows closed: on-plot Rectangle (row 126),
-Ellipse (row 128), and Polygon (row 127) mask draws. The pure fill primitives (`update_rectangle`/`update_ellipse`/
+**Mask drawing tools + colormap autoscale (main, not pushed):** ≈216 Done · ~105 open — 3 H rows closed: on-plot
+Rectangle (row 126), Ellipse (row 128), and Polygon (row 127) mask draws; plus the ColormapDialog Stddev3/Percentile
+autoscale wired to raw pixels (row 133, ◐→✅). The pure fill primitives (`update_rectangle`/`update_ellipse`/
 `update_polygon`) already existed; the gap was the on-plot draw interaction. Wired high-level like the pencil
 (reusing `DrawState`/`feed_draw_state`/the extracted `paint_draw_preview`, no new interaction mode or `PlotEvent`):
 `MaskTool::draw_mode` is the single source of truth for which tools are shape draws; `MaskToolsWidget::handle_shape_draw`
@@ -130,7 +131,7 @@ as-of-sweep reference.
 
 | status | P | E | feature | silx ref | gap |
 |---|---|---|---|---|---|
-| ◐ Partial | H | M | ColormapDialog Stddev3/Percentile from raw pixels | ColormapDialog.py:240-280 | Selector exists but applies MinMax because the dialog isn't fed the raw pixel array via `setHistogram()` (Plot2D `get_image_pixels_raw` exists — wire it) |
+| ✅ Done (W15) | H | M | ColormapDialog Stddev3/Percentile from raw pixels | ColormapDialog.py:240-280 | `ColormapDialog::apply` now autoscales from the active image's raw pixels (`Plot2D::get_image_pixels_raw`) via the pure `autoscale_range` (delegates to `AutoscaleMode::range` with the dialog's mode + percentiles) — Stddev3 (mean ± 3·std clamped to data range) and Percentile compute the real distribution range instead of falling back to MinMax; falls back to aggregated stats min/max only when no raw scalar pixels are retained |
 | ✅ Done (W15) | H | M | Mask drawing tool: Rectangle | MaskToolsWidget.py:805-826 | On-plot rectangle draw: `MaskTool::draw_mode` arms a `DrawState` driven by `handle_shape_draw`; `rect_params_to_cells` (silx `int()` truncation) → `update_rectangle` on finish; `ImageView::handle_mask_shape_draw` paints the rubber-band preview (reuses `paint_draw_preview`/`feed_draw_state`) |
 | ✅ Done (W15) | H | M | Mask drawing tool: Polygon | MaskToolsWidget.py:840-847 | On-plot polygon draw (click-to-add, snap-close) via the shared shape-draw wiring: `MaskTool::draw_mode` arm + `polygon_vertices_to_cells` (cast int64, swap `(x,y)`→`(row,col)` per silx `[:, (1,0)]`) → `update_polygon`/`polygon_fill_mask` on finish |
 | ✅ Done (W15) | H | L | Mask drawing tool: Ellipse | MaskToolsWidget.py:828-838 | On-plot ellipse draw via the shared shape-draw wiring: `MaskTool::draw_mode` arm + `ellipse_params_to_cells` (center cast int64, y-semi→`radius_r`, x-semi→`radius_c`; radii stay float per silx) → `update_ellipse` on finish |

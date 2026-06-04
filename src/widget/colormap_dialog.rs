@@ -236,30 +236,43 @@ impl ColormapDialog {
         }
     }
 
+    /// The autoscale `(vmin, vmax)` this dialog applies over `pixels` for its
+    /// current mode and percentiles (silx `Colormap` autoscale via the
+    /// `ColormapDialog`-fed histogram). MinMax = finite min/max, Stddev3 =
+    /// mean ± 3·std clamped to the data range, Percentile = the dialog's
+    /// `(low, high)` percentiles. Split out so the mode/percentile selection is
+    /// testable without a GPU-backed [`Plot2D`]; [`Self::apply`] feeds it the
+    /// active image's raw pixels.
+    pub(crate) fn autoscale_range(&self, pixels: &[f64]) -> (f64, f64) {
+        self.autoscale_mode.range(pixels, self.percentiles)
+    }
+
     /// Re-calculate and apply the colormap to the plot.
     pub fn apply(&self, plot: &mut Plot2D) {
         let mut final_vmin = self.vmin;
         let mut final_vmax = self.vmax;
 
         if self.autoscale {
-            // Autoscale uses the first image's scalar stats. Plot2D exposes only
-            // aggregated stats (min/max/mean), not the raw pixel array, so only
-            // AutoscaleMode::MinMax can be computed here — it maps to the stats
-            // min/max exactly. Stddev3 / Percentile need the raw data and are
-            // computed by the public AutoscaleMode::range; until Plot2D exposes
-            // the scalar array, the dialog falls back to the min/max range for
-            // those modes.
-            let mut found_stats = false;
-            if let Some(&handle) = plot.get_all_images().first()
+            // Autoscale from the active image's raw scalar pixels so every mode
+            // uses the data distribution — MinMax, Stddev3 (mean ± 3·std clamped
+            // to the data range), and Percentile (the dialog's percentile pair)
+            // all via the shared AutoscaleMode::range (silx ColormapDialog's
+            // setHistogram-fed autoscale, ColormapDialog.py:240-280). Falls back
+            // to the aggregated image stats min/max (== MinMax) when the active
+            // item has no retained scalar pixels (e.g. an RGBA image), and to
+            // [0, 1] when there is no image at all.
+            if let Some(pixels) = plot.get_image_pixels_raw() {
+                let (vmin, vmax) = self.autoscale_range(&pixels);
+                final_vmin = vmin;
+                final_vmax = vmax;
+            } else if let Some(&handle) = plot.get_all_images().first()
                 && let Some(stats) = plot.image_stats(handle)
                 && let Some(scalar) = &stats.scalar
                 && let (Some(smin), Some(smax)) = (scalar.min, scalar.max)
             {
                 final_vmin = smin;
                 final_vmax = smax;
-                found_stats = true;
-            }
-            if !found_stats {
+            } else {
                 final_vmin = 0.0;
                 final_vmax = 1.0;
             }
@@ -341,5 +354,41 @@ mod tests {
         // percentile 2.5 -> 2.5, 97.5 -> 97.5 over 0..=100 (numpy linear interp).
         assert!((rmin - 2.5).abs() < 1e-9, "rmin {rmin}");
         assert!((rmax - 97.5).abs() < 1e-9, "rmax {rmax}");
+    }
+
+    // ── Row 133: autoscale from raw pixels honors the selected mode ──────────
+
+    #[test]
+    fn autoscale_range_uses_selected_mode_not_always_minmax() {
+        // Row 133 regression: the dialog must compute the autoscale range for
+        // its CURRENT mode + percentiles over the raw pixels, not always fall
+        // back to MinMax (which is what the aggregated-stats path produced).
+        let data: Vec<f64> = (0..100).map(|i| i as f64).collect(); // 0..=99
+        let mut dialog = ColormapDialog::new();
+        dialog.autoscale = true;
+
+        dialog.autoscale_mode = AutoscaleMode::MinMax;
+        let minmax = dialog.autoscale_range(&data);
+        assert_eq!(minmax, (0.0, 99.0));
+
+        // Percentile (10, 90) is strictly tighter than min/max — a MinMax
+        // fallback would instead equal `minmax`, so this proves the mode is
+        // honored — and must match the public AutoscaleMode::range computation
+        // with the dialog's percentiles.
+        dialog.autoscale_mode = AutoscaleMode::Percentile;
+        dialog.percentiles = (10.0, 90.0);
+        let pct = dialog.autoscale_range(&data);
+        assert_eq!(pct, AutoscaleMode::Percentile.range(&data, (10.0, 90.0)));
+        assert!(
+            pct.0 > minmax.0 && pct.1 < minmax.1,
+            "percentile {pct:?} must be tighter than minmax {minmax:?}"
+        );
+
+        // Stddev3 likewise routes through the public computation for the mode.
+        dialog.autoscale_mode = AutoscaleMode::Stddev3;
+        assert_eq!(
+            dialog.autoscale_range(&data),
+            AutoscaleMode::Stddev3.range(&data, dialog.percentiles)
+        );
     }
 }
