@@ -52,6 +52,14 @@ background for net counts; numpy-trapezoid for area; NaN-y summed as-is, unlike 
 (`curve_roi_counts`, 7 tests) + row-building (`curve_roi_rows`, 2 tests) are headlessly tested; the active-curve feed
 + egui render stay GPU-unverified. New example `high_level_curves_roi`. No open H rows remain in the primary table.
 
+**Histogram bin alignment (main, not pushed):** ≈219 Done · ~102 open — 1 M row closed (row 108, ◐→✅). `HistogramAlign`
+{Left,Center,Right} + the pure `histogram_edges(positions, align)` mirror silx `items.histogram._computeEdges`
+(`Histogram.setData(align=)`): Left treats positions as left edges (append `x[-1]+last_gap`), Right as right edges
+(prepend `x[0]-first_gap`), Center right-aligns then shifts each edge left by half its following gap so positions land
+at bin centres; a lone position uses silx's unit-gap fallback. Public `PlotWidget::add_histogram_aligned`/`_with_legend`
+take N positions + N counts + an alignment. The pure edge derivation is headlessly tested per alignment (incl.
+single-position, non-uniform centre, empty, and the edges→step-values composition); the GPU add stays unverified.
+
 Status legend: ✅ Done · ◐ Partial · ☐ Missing · ✅ N/A (resolved: parity achieved differently). Effort S/M/L. Priority H/M/L.
 
 > This file tracks the port. The per-area tables below are the **as-of-sweep
@@ -105,7 +113,7 @@ as-of-sweep reference.
 
 | status | P | E | feature | silx ref | gap |
 |---|---|---|---|---|---|
-| ◐ Partial | M | M | Histogram bin alignment (left/center/right) | histogram.py:53-85 (`_computeEdges`, `setData(align=)`) | `histogram_step_values` is always center-aligned; no alignment parameter on the public API |
+| ✅ Done | M | M | Histogram bin alignment (left/center/right) | histogram.py:53-85 (`_computeEdges`, `setData(align=)`) | W15: `HistogramAlign` {Left,Center,Right} + pure `histogram_edges(positions, align)` mirror silx `_computeEdges` (Left=positions are left edges, append `x[-1]+last_gap`; Right=right edges, prepend `x[0]-first_gap`; Center right-aligns then shifts each edge left by half its following gap; lone position uses unit gap). Public `PlotWidget::add_histogram_aligned`/`_with_legend` take N positions + N counts + align. 7 headless tests (each align, single-position unit gap, non-uniform center, empty, step-value composition). The GPU add itself stays unverified |
 | ◐ Partial | M | L | Scatter mode-specific picking | scatter.py:804-860 | Points-mode picking works; Solid/RegularGrid/IrregularGrid/BinnedStatistic render but have no mode-specific picking |
 | ◐ Partial | M | M | Image per-pixel validity mask before upload | items/image.py:209-251 | `ScalarMask` + Plot2D wiring (`8ef46c2`) exist; pre-upload mask application in the GPU render path still pending |
 | ◐ Partial | M | L | Marker custom-callback constraint | items/marker.py:208-235 | H/V presets wired (Wave 11); arbitrary `setConstraint(fn)` callback form unsupported |
@@ -1036,7 +1044,7 @@ egui-silx covers basic curve rendering (solid/dashed lines, single symbols, erro
 | ☐ | M | L | Scatter visualization mode: Solid (Delaunay triangulation) | `scatter.py:283-296, core.py:1271-1275 (Visualization.SOLID)` | silx computes Delaunay triangulation in background thread and renders as filled triangles. egui-silx has no Delaunay support or triangle visualization. |
 | ☐ | M | L | Scatter visualization mode: IrregularGrid (image from unstructured points) | `scatter.py:283-296, core.py:1286-1293 (Visualization.IRREGULAR_GRID)` | silx uses Delaunay triangulation + linear interpolation to create image from scattered points. egui-silx has no support. |
 | ✅ | M | M | Curve highlight/selection state with different style | `curve.py:196,280-311 (getCurrentStyle), core.py:1875-1905 (HighlightedMixIn)` | Wave 10: the active curve renders with a distinct highlight style. `current_curve_style` is silx `getCurrentStyle`'s per-field merge (highlight field if Some, else the curve's own); default active style = line width 2 (silx `DEFAULT_PLOT_ACTIVE_CURVE_LINEWIDTH`), color unchanged. Applied as a render-time overlay (retained base stays the single source of truth), gated to `PlotItemKind::Curve`. **GPU-UNVERIFIED:** the on-screen thicker line needs a GPU `RenderState` no crate test constructs; only the pure merge is unit-tested. |
-| ◐ | M | M | Histogram bin alignment (left, center, right) | `histogram.py:53-85 (_computeEdges), setData(align='center'/'left'/'right'), getAlignment` | histogram_step_values does not accept or track alignment parameter. egui-silx always produces center-aligned step values, but silx supports 'left', 'center', 'right'. No alignment parameter in public  |
+| ✅ | M | M | Histogram bin alignment (left, center, right) | `histogram.py:53-85 (_computeEdges), setData(align='center'/'left'/'right'), getAlignment` | W15: `HistogramAlign` + pure `histogram_edges(positions, align)` mirror silx `_computeEdges`; public `add_histogram_aligned`/`_with_legend` accept N positions + N counts + alignment. Headlessly tested per alignment. |
 | ☐ | M | M | Scatter visualization mode: RegularGrid (image-like grid rendering) | `scatter.py:283-296, core.py:1277-1282 (Visualization.REGULAR_GRID)` | silx auto-detects regular grid from point coordinates and renders as image. egui-silx has no grid detection or grid rendering mode. |
 | ☐ | M | M | Scatter per-point alpha transparency | `scatter.py:1009,1024,1051-1060 (setData with alpha parameter, __alpha field)` | silx Scatter supports per-point alpha values. egui-silx ScatterView only has global alpha from CurveSpec (scalar). |
 | ◐ | M | M | Scatter picking with mode-specific logic | `scatter.py:804-860 (pick with special handling per Visualization mode)` | Points mode picking works (nearest_point). No picking support for Solid/RegularGrid/IrregularGrid/BinnedStatistic modes because those visualizations are not implemented. silx has triangulation-based p |

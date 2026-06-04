@@ -1117,6 +1117,88 @@ pub fn histogram_step_values(
     Ok((x, y))
 }
 
+/// How bin positions relate to the bins they describe when deriving the `N + 1`
+/// bin edges from `N` positions, mirroring the silx histogram `align` parameter
+/// (`Histogram.setData(align=)`, values `"left"`/`"center"`/`"right"`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum HistogramAlign {
+    /// Each position is its bin's **left** edge; the trailing edge extends by the
+    /// last spacing (silx `_computeEdges(x, "right")` — silx names it from where
+    /// the extra edge is appended, on the right).
+    Left,
+    /// Each position is its bin's **center** (silx default; `_computeEdges(x,
+    /// "center")`).
+    #[default]
+    Center,
+    /// Each position is its bin's **right** edge; the leading edge extends back by
+    /// the first spacing (silx `_computeEdges(x, "left")`).
+    Right,
+}
+
+/// Derive the `N + 1` histogram bin edges from `N` bin positions and an
+/// alignment, mirroring silx `items.histogram._computeEdges` (used by
+/// `Histogram.setData(align=)`).
+///
+/// silx assumes uniform-ish spacing and extends the open end by one neighbour
+/// gap: for `Left` (positions are left edges) the trailing edge is
+/// `x[-1] + (x[-1] − x[-2])`; for `Right` (positions are right edges) the leading
+/// edge is `x[0] − (x[1] − x[0])`; for `Center` it right-aligns first, then
+/// shifts every edge left by half of its following gap (the last half-gap reused
+/// for the final edge), placing each position at its bin centre. A lone position
+/// uses a unit gap (silx `width = 1`). An empty input yields no edges.
+///
+/// Note the silx naming inversion this enum corrects: silx's `"right"` rule
+/// appends the extra edge on the right and so treats positions as **left** edges
+/// (and vice-versa); [`HistogramAlign`] names the variant after where the
+/// position sits in its bin.
+pub fn histogram_edges(positions: &[f64], align: HistogramAlign) -> Vec<f64> {
+    if positions.is_empty() {
+        return Vec::new();
+    }
+    let n = positions.len();
+    match align {
+        HistogramAlign::Left => {
+            // silx `_computeEdges(x, "right")`: positions are left edges; append
+            // x[-1] + last_gap.
+            let width = if n > 1 {
+                positions[n - 1] - positions[n - 2]
+            } else {
+                1.0
+            };
+            let mut edges = positions.to_vec();
+            edges.push(positions[n - 1] + width);
+            edges
+        }
+        HistogramAlign::Right => {
+            // silx `_computeEdges(x, "left")`: positions are right edges; prepend
+            // x[0] - first_gap.
+            let width = if n > 1 {
+                positions[1] - positions[0]
+            } else {
+                1.0
+            };
+            let mut edges = Vec::with_capacity(n + 1);
+            edges.push(positions[0] - width);
+            edges.extend_from_slice(positions);
+            edges
+        }
+        HistogramAlign::Center => {
+            // silx: right-align (positions as left edges), then shift each edge
+            // left by half its following gap so the positions land at bin centres.
+            let right = histogram_edges(positions, HistogramAlign::Left);
+            let mut widths: Vec<f64> = right.windows(2).map(|w| (w[1] - w[0]) / 2.0).collect();
+            if let Some(&last) = widths.last() {
+                widths.push(last);
+            }
+            right
+                .iter()
+                .zip(widths.iter())
+                .map(|(&edge, &width)| edge - width)
+                .collect()
+        }
+    }
+}
+
 /// Extract one image row as a 1D profile.
 pub fn horizontal_profile_values(
     width: u32,
@@ -3357,6 +3439,38 @@ impl PlotWidget {
         legend: impl Into<String>,
     ) -> Result<ItemHandle, PlotDataError> {
         let handle = self.add_histogram(edges, counts, color)?;
+        self.set_item_legend(handle, legend);
+        Ok(handle)
+    }
+
+    /// Add a histogram from `N` bin positions and `N` counts, deriving the
+    /// `N + 1` bin edges from `align` (silx `Histogram.setData(align=)`).
+    ///
+    /// The edges are computed by [`histogram_edges`]; `positions.len()` must equal
+    /// `counts.len()` (mismatched lengths surface as
+    /// [`PlotDataError::HistogramLength`] from the underlying [`Self::add_histogram`]).
+    pub fn add_histogram_aligned(
+        &mut self,
+        positions: &[f64],
+        counts: &[f64],
+        color: Color32,
+        align: HistogramAlign,
+    ) -> Result<ItemHandle, PlotDataError> {
+        let edges = histogram_edges(positions, align);
+        self.add_histogram(&edges, counts, color)
+    }
+
+    /// Add an aligned histogram (see [`Self::add_histogram_aligned`]) and assign a
+    /// legend label.
+    pub fn add_histogram_aligned_with_legend(
+        &mut self,
+        positions: &[f64],
+        counts: &[f64],
+        color: Color32,
+        align: HistogramAlign,
+        legend: impl Into<String>,
+    ) -> Result<ItemHandle, PlotDataError> {
+        let handle = self.add_histogram_aligned(positions, counts, color, align)?;
         self.set_item_legend(handle, legend);
         Ok(handle)
     }
@@ -9254,6 +9368,83 @@ mod tests {
             histogram_step_values(&[0.0, 1.0], &[2.0, 4.0]).unwrap_err(),
             PlotDataError::HistogramLength { bins: 2, edges: 2 }
         );
+    }
+
+    #[test]
+    fn histogram_edges_left_treats_positions_as_left_edges() {
+        // Row 108: silx `_computeEdges(x, "right")` — append x[-1] + last gap.
+        // Positions [0,1,2] (gap 1) -> edges [0,1,2,3].
+        assert_eq!(
+            histogram_edges(&[0.0, 1.0, 2.0], HistogramAlign::Left),
+            vec![0.0, 1.0, 2.0, 3.0]
+        );
+    }
+
+    #[test]
+    fn histogram_edges_right_treats_positions_as_right_edges() {
+        // Row 108: silx `_computeEdges(x, "left")` — prepend x[0] - first gap.
+        // Positions [1,2,3] (gap 1) -> edges [0,1,2,3].
+        assert_eq!(
+            histogram_edges(&[1.0, 2.0, 3.0], HistogramAlign::Right),
+            vec![0.0, 1.0, 2.0, 3.0]
+        );
+    }
+
+    #[test]
+    fn histogram_edges_center_puts_positions_at_bin_centres() {
+        // Row 108: silx `_computeEdges(x, "center")` right-aligns then shifts each
+        // edge left by half its following gap. Centres [1,2,3] -> [0.5,1.5,2.5,3.5].
+        assert_eq!(
+            histogram_edges(&[1.0, 2.0, 3.0], HistogramAlign::Center),
+            vec![0.5, 1.5, 2.5, 3.5]
+        );
+    }
+
+    #[test]
+    fn histogram_edges_single_position_uses_unit_gap() {
+        // Row 108: a lone position uses silx's width = 1 fallback.
+        assert_eq!(
+            histogram_edges(&[5.0], HistogramAlign::Left),
+            vec![5.0, 6.0]
+        );
+        assert_eq!(
+            histogram_edges(&[5.0], HistogramAlign::Right),
+            vec![4.0, 5.0]
+        );
+        assert_eq!(
+            histogram_edges(&[5.0], HistogramAlign::Center),
+            vec![4.5, 5.5]
+        );
+    }
+
+    #[test]
+    fn histogram_edges_nonuniform_center_uses_following_gap() {
+        // Row 108: with non-uniform spacing the centre rule shifts each edge by
+        // half of its *following* right-aligned gap (last half-gap reused).
+        // Positions [0, 1, 3]: right-align -> [0,1,3,5] (last gap 3->5 = 2);
+        // half-gaps -> [0.5,1.0,1.0,1.0]; edges = [-0.5, 0.0, 2.0, 4.0].
+        assert_eq!(
+            histogram_edges(&[0.0, 1.0, 3.0], HistogramAlign::Center),
+            vec![-0.5, 0.0, 2.0, 4.0]
+        );
+    }
+
+    #[test]
+    fn histogram_edges_empty_is_empty() {
+        assert!(histogram_edges(&[], HistogramAlign::Center).is_empty());
+    }
+
+    #[test]
+    fn aligned_histogram_edges_feed_valid_step_values() {
+        // Row 108: the path add_histogram_aligned takes (sans the GPU add) — N
+        // positions + N counts derive N+1 edges that histogram_step_values
+        // accepts. Centres [1,2,3] -> edges [0.5,1.5,2.5,3.5], stairs at counts.
+        let positions = [1.0, 2.0, 3.0];
+        let counts = [5.0, 6.0, 7.0];
+        let edges = histogram_edges(&positions, HistogramAlign::Center);
+        let (x, y) = histogram_step_values(&edges, &counts).unwrap();
+        assert_eq!(x, vec![0.5, 0.5, 1.5, 1.5, 2.5, 2.5, 3.5, 3.5]);
+        assert_eq!(y, vec![0.0, 5.0, 5.0, 6.0, 6.0, 7.0, 7.0, 0.0]);
     }
 
     #[test]
