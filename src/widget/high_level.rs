@@ -340,11 +340,22 @@ pub enum PlotEvent {
         handle: ItemHandle,
         button: MouseButton,
     },
-    /// The cursor hovered over an item with no button held (silx hover signal).
-    /// `kind` is the hovered item's type.
+    /// The cursor hovered over an item with no button held (silx `hover` signal,
+    /// `prepareHoverSignal`). Mirrors silx's payload: `kind` is the item type,
+    /// `label` its name, `x`/`y` the data-space cursor position, `xpixel`/`ypixel`
+    /// the pixel cursor position, and `draggable` whether the item can be dragged
+    /// (true only for a draggable marker). silx's `selectable` flag is omitted: in
+    /// egui-silx every pickable item is set active on click, so the flag would be
+    /// a constant `true` carrying no information.
     ItemHovered {
         handle: ItemHandle,
         kind: PlotItemKind,
+        label: Option<String>,
+        x: f64,
+        y: f64,
+        xpixel: f32,
+        ypixel: f32,
+        draggable: bool,
     },
 }
 
@@ -2810,14 +2821,28 @@ impl PlotWidget {
             }
             PlotPointerEvent::Moved {
                 button: None,
+                data,
                 pixel,
-                ..
             } => {
                 let pos = egui::pos2(pixel.0, pixel.1);
                 if let Some((handle, _)) = self.pick_topmost(pos)
                     && let Some(kind) = self.item_kind(handle)
                 {
-                    self.events.push(PlotEvent::ItemHovered { handle, kind });
+                    // Assemble the silx prepareHoverSignal payload: label from the
+                    // item record, data/pixel cursor position from this move, and
+                    // draggable from the marker flag (false for non-marker items).
+                    let label = self.item_legend(handle).map(str::to_owned);
+                    let draggable = self.backend.marker(handle).is_some_and(|m| m.is_draggable);
+                    self.events.push(PlotEvent::ItemHovered {
+                        handle,
+                        kind,
+                        label,
+                        x: data.0,
+                        y: data.1,
+                        xpixel: pixel.0,
+                        ypixel: pixel.1,
+                        draggable,
+                    });
                 }
             }
             _ => {}

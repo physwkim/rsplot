@@ -260,7 +260,15 @@ fn format_event(event: PlotEvent) -> String {
             button,
         } => format!("image #{handle} clicked @ ({col},{row}) [{button:?}]"),
         PlotEvent::ItemClicked { handle, button } => format!("item #{handle} clicked [{button:?}]"),
-        PlotEvent::ItemHovered { handle, kind } => format!("hover {kind:?} #{handle}"),
+        PlotEvent::ItemHovered {
+            handle,
+            kind,
+            draggable,
+            ..
+        } => format!(
+            "hover {kind:?} #{handle}{}",
+            if draggable { " (draggable)" } else { "" }
+        ),
     }
 }
 

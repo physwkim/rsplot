@@ -10,9 +10,10 @@ adjacent silx.gui** (colors, data-adjacent GUI widgets).
 **After Wave 13 (ROI styling, main @ `7495590`, not pushed):** ≈199 Done · 122 open (7 H / 44 M / 33 L) — 8 ROI
 rows closed (per-instance color/name/selection, `sigCurrentRoiChanged`, line style/width, manager default-color, fill).
 
-**After Wave 14 (item-click + hover signals, main, not pushed):** ≈202 Done · 119 open (6 H / 44 M / 31 L) — 3
-rows closed (curveClicked H, curveClicked/imageClicked L), 1 moved to partial (hover-with-metadata M). Item-drag
-triad still deferred.
+**After Wave 14 (item-click + hover signals, main, not pushed):** ≈203 Done · 118 open (6 H / 43 M / 31 L) — 4
+rows closed (curveClicked H, curveClicked/imageClicked L, hover-with-metadata M). `ItemHovered` now carries the full
+silx `prepareHoverSignal` payload (label/type/x/y/xpixel/ypixel/draggable; `selectable` omitted as structurally
+constant). Item-drag triad still deferred.
 
 Status legend: ✅ Done · ◐ Partial · ☐ Missing. Effort S/M/L. Priority H/M/L.
 
@@ -51,7 +52,7 @@ as-of-sweep reference.
 | status | P | E | feature | silx ref | gap |
 |---|---|---|---|---|---|
 | ✔ Done (W14) | H | M | Specific item-click signals (curveClicked/markerClicked/imageClicked) | PlotInteraction.py:1223-1261, PlotEvents.py:88-173 | `PlotEvent::{CurveClicked,ImageClicked,ItemClicked}` carry handle + position + button via the `pick_topmost`/`click_event_for_pick` owner path |
-| ◐ Partial (W14) | M | M | Hover event signals with item metadata | PlotInteraction.py:1135-1154, PlotEvents.py:73-85 | `PlotEvent::ItemHovered{handle,kind}` delivers item identity + type; label/draggable/selectable derivable via handle but not inlined, posData/posPixel not in the event |
+| ✔ Done (W14) | M | M | Hover event signals with item metadata | PlotInteraction.py:1135-1154, PlotEvents.py:73-85 | `PlotEvent::ItemHovered{handle,kind,label,x,y,xpixel,ypixel,draggable}` mirrors silx `prepareHoverSignal`. silx `selectable` omitted by design: every pickable item is set-active on click in egui-silx, so the flag is structurally constant `true` (uninformative) |
 | ◐ Partial | M | S | DrawingProgress / DrawingFinished event wiring | PlotInteraction.py:529-532, PlotEvents.py:34-55 | `DrawEvent` enums emit from `DrawState` but are not wired into the `PlotWidget` callback surface or consumed by `high_level.rs` |
 | ☐ Missing | M | M | ItemsInteraction state machine (item picking/dragging) | PlotInteraction.py:1115-1350 | Picking helpers (`nearest_point`, `image_index`) exist but are not wired into a unified picker/state machine |
 | ◐ Partial | L | S | Marker drag-finished vs drag-moving signal split | PlotInteraction.py:1276-1299, 1350 | `MarkerMoved` fires every frame; not split into a distinct on-release signal, carries handle not full payload |
@@ -202,14 +203,16 @@ as-of-sweep reference.
    frame's `PlotPointerEvent` through one owner `pick_topmost(pos) ->
    (ItemHandle, PickResult)` (extends the prior `pick_topmost_item`), and the pure
    `click_event_for_pick(handle, &PickResult, button)` maps each `PickResult`
-   variant to its event (unit-tested per boundary). *Closed rows:* curveClicked/
-   markerClicked/imageClicked (row 49). *Partial:* hover (row 50) — `ItemHovered`
-   carries `handle`+`kind`(=type); label/draggable/selectable are derivable via the
-   handle but not inlined, and posData/posPixel are not in the event. *Still open
-   (deferred to a later wave):* the general item-drag triad (drag-start/drag/
-   drag-finished). **GPU boundary:** the end-to-end `pick_item` needs a wgpu
-   `RenderState` no test builds, so on-hardware picking is GPU-unverified; the pure
-   mapping + the existing pure pickers are the headlessly-tested seam.
+   variant to its event (unit-tested per boundary). `ItemHovered` was then
+   expanded to the full silx `prepareHoverSignal` payload
+   `{handle,kind,label,x,y,xpixel,ypixel,draggable}` (silx `selectable` omitted as
+   structurally constant). *Closed rows:* curveClicked/markerClicked/imageClicked
+   (row 49) + hover-with-metadata (row 50). *Still open (deferred to a later
+   wave):* the general item-drag triad (drag-start/drag/drag-finished). **GPU
+   boundary:** the end-to-end `pick_item` and the hover metadata assembly
+   (`backend.marker`/`item_legend`) need a wgpu `RenderState` no test builds, so
+   on-hardware picking is GPU-unverified; the pure `click_event_for_pick` + the
+   existing pure pickers are the headlessly-tested seam.
 4. **ROI stats dock widgets** (L, 2 H rows) — `CurvesROIWidget` + `ROIStatsWidget`;
    the compute (`image_roi_stats`/`curve_roi_stats`) already exists, so it's widget
    construction + binding. Consumes the selection feedback from wave 3.
