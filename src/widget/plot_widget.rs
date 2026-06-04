@@ -760,26 +760,39 @@ fn apply_interaction(
     // precedence over box zoom.
     let mut selection = None;
     if let Some(mut rd) = ui.data_mut(|d| d.get_temp::<RoiDrag>(roi_id)) {
-        if response.dragged_by(PointerButton::Primary)
-            && let Some(cur) = response.interact_pointer_pos()
-            && let Some(roi) = plot.rois.get_mut(rd.roi)
-        {
-            let cur_data = view.pixel_to_data(cur);
-            match rd.grab {
-                // Edge resize: move the grabbed handle to the absolute cursor.
-                RoiGrab::Edge(edge) => roi.move_edge(edge, cur_data),
-                // Whole-ROI translate: shift by this frame's delta, then advance
-                // the carried anchor so deltas accumulate (silx body drag).
-                RoiGrab::Translate => {
-                    roi.translate(cur_data.0 - rd.last_data.0, cur_data.1 - rd.last_data.1);
-                    rd.last_data = cur_data;
-                    ui.data_mut(|d| d.insert_temp(roi_id, rd));
-                }
-            }
-            roi_changed = Some(rd.roi);
-        }
-        if response.drag_stopped_by(PointerButton::Primary) {
+        // A stored ROI drag is only valid while the mode still grabs ROI edges.
+        // The start gate above already requires `mode_grabs_roi_edge`; mirror it
+        // here so the apply path is symmetric. A mid-drag switch to a non-ROI
+        // mode (silx `setInteractiveMode` resets the in-progress interaction)
+        // cancels the drag: drop the temp entry and apply no edit, so it can
+        // neither leak edits into the new mode nor resume if the mode switches
+        // back. The drag-stopped removal stays inside the still-grabbing branch
+        // for the normal end-of-gesture path.
+        if !mode_grabs_roi_edge(mode) {
             ui.data_mut(|d| d.remove::<RoiDrag>(roi_id));
+        } else {
+            if response.dragged_by(PointerButton::Primary)
+                && let Some(cur) = response.interact_pointer_pos()
+                && let Some(roi) = plot.rois.get_mut(rd.roi)
+            {
+                let cur_data = view.pixel_to_data(cur);
+                match rd.grab {
+                    // Edge resize: move the grabbed handle to the absolute cursor.
+                    RoiGrab::Edge(edge) => roi.move_edge(edge, cur_data),
+                    // Whole-ROI translate: shift by this frame's delta, then
+                    // advance the carried anchor so deltas accumulate (silx body
+                    // drag).
+                    RoiGrab::Translate => {
+                        roi.translate(cur_data.0 - rd.last_data.0, cur_data.1 - rd.last_data.1);
+                        rd.last_data = cur_data;
+                        ui.data_mut(|d| d.insert_temp(roi_id, rd));
+                    }
+                }
+                roi_changed = Some(rd.roi);
+            }
+            if response.drag_stopped_by(PointerButton::Primary) {
+                ui.data_mut(|d| d.remove::<RoiDrag>(roi_id));
+            }
         }
     } else if !marker_dragging {
         // Box zoom: left-drag selects a rectangle; release zooms to it. A marker
@@ -1604,6 +1617,94 @@ mod tests {
                 assert!((y.1 - (before.1.1 + ddy)).abs() < 1e-6, "y1 {y:?}");
                 // A real shift occurred (the test would be vacuous otherwise).
                 assert!(ddx.abs() > 1e-6 || ddy.abs() > 1e-6);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn roi_drag_cancelled_on_mid_drag_mode_switch() {
+        // A body-translate ROI drag started in a grab-allowing mode (Select)
+        // must NOT keep editing the ROI if the mode switches mid-drag to one
+        // that does not grab ROI edges (MaskDraw), and must not resume when the
+        // mode switches back — the stale drag is cancelled (silx
+        // `setInteractiveMode` resets the in-progress interaction).
+        let ctx = egui::Context::default();
+        let mut plot = Plot::new(0);
+        plot.limits = (0.0, 10.0, 0.0, 10.0);
+        plot.rois.push(crate::core::roi::Roi::Rect {
+            x: (1.0, 9.0),
+            y: (1.0, 9.0),
+        });
+        let screen = egui::vec2(200.0, 200.0);
+
+        let (_r0, area) = run_mode_frame(
+            &ctx,
+            &mut plot,
+            PlotInteractionMode::Select,
+            screen_input(screen),
+        );
+        let c = area.center();
+        let a_px = c + egui::vec2(8.0, 8.0);
+        let b_px = c + egui::vec2(18.0, -2.0);
+
+        // Start the drag in Select and anchor the grab (drag_started fires by
+        // the first move at the latest).
+        let _ = run_mode_frame(
+            &ctx,
+            &mut plot,
+            PlotInteractionMode::Select,
+            press_at(screen, c),
+        );
+        let _ = run_mode_frame(
+            &ctx,
+            &mut plot,
+            PlotInteractionMode::Select,
+            move_to(screen, a_px),
+        );
+        let before = match &plot.rois[0] {
+            crate::core::roi::Roi::Rect { x, y } => (*x, *y),
+            other => panic!("{other:?}"),
+        };
+
+        // Mid-drag switch to MaskDraw (no ROI-edge grab) and move: the drag is
+        // cancelled, so no edit lands this frame.
+        let (resp, _) = run_mode_frame(
+            &ctx,
+            &mut plot,
+            PlotInteractionMode::MaskDraw,
+            move_to(screen, b_px),
+        );
+        assert_eq!(
+            resp.roi_changed, None,
+            "ROI must not edit in a mode that does not grab ROI edges"
+        );
+        match &plot.rois[0] {
+            crate::core::roi::Roi::Rect { x, y } => {
+                assert_eq!((*x, *y), before, "rect unchanged after the mode switch")
+            }
+            other => panic!("{other:?}"),
+        }
+
+        // Switching back to Select must not resume the cancelled drag; with the
+        // button still held (no new drag_started), a further move does nothing.
+        let (resp2, _) = run_mode_frame(
+            &ctx,
+            &mut plot,
+            PlotInteractionMode::Select,
+            move_to(screen, c),
+        );
+        assert_eq!(
+            resp2.roi_changed, None,
+            "cancelled drag must not resume when the mode switches back"
+        );
+        match &plot.rois[0] {
+            crate::core::roi::Roi::Rect { x, y } => {
+                assert_eq!(
+                    (*x, *y),
+                    before,
+                    "rect still unchanged after switching back"
+                )
             }
             other => panic!("{other:?}"),
         }
