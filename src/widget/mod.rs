@@ -11,6 +11,7 @@ pub mod chrome;
 pub mod colorbar;
 pub mod colormap_dialog;
 pub mod complex_image_view;
+pub mod curves_roi_widget;
 pub mod detached;
 pub mod fit_widget;
 pub mod high_level;

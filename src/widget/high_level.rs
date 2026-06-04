@@ -1640,6 +1640,41 @@ fn roi_stats_rows(
         .collect()
 }
 
+/// One row per curve ROI (those with an `x`-span) over the active curve's
+/// `(x, y)`, reduced via [`curve_roi_counts`] (silx `CurvesROIWidget`). ROIs with
+/// no `x`-span (e.g. `HRange`) are not curve ROIs and are skipped; the surviving
+/// rows keep each ROI's original index in its `ROI {index}` fallback label so it
+/// stays traceable to [`PlotWidget::rois`].
+///
+/// [`curve_roi_counts`]: crate::widget::roi_stats::curve_roi_counts
+fn curve_roi_rows(
+    rois: &[ManagedRoi],
+    x: &[f64],
+    y: &[f64],
+) -> Vec<crate::widget::curves_roi_widget::CurveRoiRow> {
+    use crate::widget::curves_roi_widget::CurveRoiRow;
+    use crate::widget::roi_stats::{curve_roi_counts, roi_x_span};
+
+    rois.iter()
+        .enumerate()
+        .filter_map(|(index, managed)| {
+            let (from, to) = roi_x_span(&managed.roi)?;
+            let counts = curve_roi_counts(&managed.roi, x, y)?;
+            let label = if managed.name.is_empty() {
+                format!("ROI {index}")
+            } else {
+                managed.name.clone()
+            };
+            Some(CurveRoiRow {
+                label,
+                from,
+                to,
+                counts,
+            })
+        })
+        .collect()
+}
+
 /// Capture a scalar image spec's raw pixels and geometry for live consumers, or
 /// `None` for an RGBA image (no scalar field to retain).
 fn image_spec_retained_data(spec: &ImageSpec<'_>) -> Option<RetainedItemData> {
@@ -4675,6 +4710,48 @@ impl PlotWidget {
         widget: &mut crate::widget::roi_stats_widget::RoiStatsWidget,
     ) {
         self.feed_roi_stats(widget);
+        widget.ui(ui);
+    }
+
+    /// Compute per-ROI raw/net counts and raw/net area over the active **curve**
+    /// and store them in `widget` (silx `CurvesROIWidget`): one row per curve ROI
+    /// (those with an `x`-span), reduced via [`curve_roi_counts`]. Returns `true`
+    /// when the active item is a curve with retained data; `false` otherwise
+    /// (the active item is an image, or there is none — the widget is cleared,
+    /// since these counts are curve-specific).
+    ///
+    /// [`curve_roi_counts`]: crate::widget::roi_stats::curve_roi_counts
+    pub fn feed_curves_roi_stats(
+        &self,
+        widget: &mut crate::widget::curves_roi_widget::CurvesRoiWidget,
+    ) -> bool {
+        match self
+            .active_item
+            .and_then(|handle| self.retained_data(handle))
+        {
+            Some(RetainedItemData::Curve { x, y }) => {
+                widget.set_rows(curve_roi_rows(self.rois(), x, y));
+                true
+            }
+            _ => {
+                widget.set_rows(Vec::new());
+                false
+            }
+        }
+    }
+
+    /// Feed the active curve's per-ROI counts into `widget` and render its table
+    /// (silx `CurvesROIWidget`). Combines [`Self::feed_curves_roi_stats`] with
+    /// [`CurvesRoiWidget::ui`]; the table follows the active curve and the live
+    /// ROI list.
+    ///
+    /// [`CurvesRoiWidget::ui`]: crate::widget::curves_roi_widget::CurvesRoiWidget::ui
+    pub fn show_curves_roi_widget(
+        &self,
+        ui: &mut egui::Ui,
+        widget: &mut crate::widget::curves_roi_widget::CurvesRoiWidget,
+    ) {
+        self.feed_curves_roi_stats(widget);
         widget.ui(ui);
     }
 
@@ -9910,6 +9987,62 @@ mod tests {
             y: vec![1.0, 2.0],
         };
         assert!(roi_stats_rows(&[], &data).is_empty());
+    }
+
+    #[test]
+    fn curve_roi_rows_match_curve_roi_counts_and_skip_non_curve_rois() {
+        // Item 110 (CurvesROIWidget): one row per curve ROI (x-span), reduced via
+        // curve_roi_counts; ROIs with no x-span (HRange) are skipped, and the
+        // surviving rows keep their original ROI index in the label.
+        use crate::widget::roi_stats::{curve_roi_counts, roi_x_span};
+        let x = vec![0.0, 1.0, 2.0, 3.0, 4.0];
+        let y = vec![0.0, 0.0, 10.0, 0.0, 0.0];
+
+        let mut named = ManagedRoi::new(Roi::VRange { x: (0.0, 4.0) });
+        named.name = "peak".to_owned();
+        let rois = vec![
+            named,
+            // index 1: HRange has no x-span -> not a curve ROI, skipped.
+            ManagedRoi::new(Roi::HRange { y: (0.0, 5.0) }),
+            // index 2: a Rect contributes its x-extent.
+            ManagedRoi::new(Roi::Rect {
+                x: (1.0, 3.0),
+                y: (-100.0, 100.0),
+            }),
+        ];
+
+        let rows = curve_roi_rows(&rois, &x, &y);
+        assert_eq!(rows.len(), 2); // the HRange row is skipped
+
+        // First surviving row is the named VRange (index 0).
+        assert_eq!(rows[0].label, "peak");
+        assert_eq!(
+            (rows[0].from, rows[0].to),
+            roi_x_span(&rois[0].roi).unwrap()
+        );
+        assert_eq!(
+            rows[0].counts,
+            curve_roi_counts(&rois[0].roi, &x, &y).unwrap()
+        );
+
+        // Second surviving row keeps its original index (2) in the label.
+        assert_eq!(rows[1].label, "ROI 2");
+        assert_eq!(
+            (rows[1].from, rows[1].to),
+            roi_x_span(&rois[2].roi).unwrap()
+        );
+        assert_eq!(
+            rows[1].counts,
+            curve_roi_counts(&rois[2].roi, &x, &y).unwrap()
+        );
+    }
+
+    #[test]
+    fn curve_roi_rows_empty_without_rois() {
+        // Item 110: no ROIs -> no rows even with curve data.
+        let x = vec![0.0, 1.0, 2.0];
+        let y = vec![1.0, 2.0, 3.0];
+        assert!(curve_roi_rows(&[], &x, &y).is_empty());
     }
 
     #[test]

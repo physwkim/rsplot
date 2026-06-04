@@ -71,6 +71,7 @@ pub use crate::widget::alpha_slider::{AlphaSlider, AlphaSliderOrientation};
 pub use crate::widget::colorbar::{ColorBarOrientation, ColorBarWidget};
 pub use crate::widget::colormap_dialog::ColormapDialog;
 pub use crate::widget::complex_image_view::{ComplexImageView, ComplexMode};
+pub use crate::widget::curves_roi_widget::{CurveRoiRow, CurvesRoiWidget};
 pub use crate::widget::fit_widget::{
     FitModelChoice, FitWidget, format_param_value_error, format_reduced_chisq,
 };
