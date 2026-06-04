@@ -181,7 +181,9 @@ fn format_event(event: PlotEvent) -> String {
         PlotEvent::ActiveItemChanged { previous, current } => {
             format!("active {previous:?} -> {current:?}")
         }
-        PlotEvent::LimitsChanged => "limits changed".to_owned(),
+        PlotEvent::LimitsChanged { x, y, y2 } => {
+            format!("limits x{x:?} y{y:?} y2{y2:?}")
+        }
         PlotEvent::RoiChanged { index } => format!("roi changed #{index}"),
         PlotEvent::RoiCreated { index } => format!("roi created #{index}"),
         PlotEvent::RoisCleared => "rois cleared".to_owned(),

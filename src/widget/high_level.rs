@@ -292,8 +292,15 @@ pub enum PlotEvent {
         previous: Option<ItemHandle>,
         current: Option<ItemHandle>,
     },
-    /// The display limits changed (pan, zoom, or programmatic update).
-    LimitsChanged,
+    /// The display limits changed (pan, zoom, or programmatic update), carrying
+    /// the new ranges (silx `limitsChanged`, `PlotEvents.py:176-184`): `x` and
+    /// `y` are the left axes' `(min, max)`, `y2` the right axis' `(min, max)` or
+    /// `None` when no right axis is in use.
+    LimitsChanged {
+        x: (f64, f64),
+        y: (f64, f64),
+        y2: Option<(f64, f64)>,
+    },
     /// An ROI edge drag or whole-ROI body drag moved the ROI at `index`.
     RoiChanged { index: usize },
     /// A new ROI was created at `index` by an on-plot draw in
@@ -2753,8 +2760,14 @@ impl PlotWidget {
     }
 
     fn push_limits_changed_if(&mut self, before: LimitsSnapshot) {
-        if before != self.limits_snapshot() {
-            self.events.push(PlotEvent::LimitsChanged);
+        let after = self.limits_snapshot();
+        if before != after {
+            let ((xmin, xmax, ymin, ymax), y2) = after;
+            self.events.push(PlotEvent::LimitsChanged {
+                x: (xmin, xmax),
+                y: (ymin, ymax),
+                y2,
+            });
         }
     }
 
