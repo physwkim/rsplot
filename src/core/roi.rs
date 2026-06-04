@@ -1104,6 +1104,44 @@ mod tests {
     }
 
     #[test]
+    fn circle_handles_drag_center_and_radius() {
+        // Vertex 0 translates the center; Vertex 1 sets the radius to the
+        // distance from the center (silx `CircleROI`).
+        let mut roi = Roi::Circle {
+            center: (5.0, 5.0),
+            radius: 2.0,
+        };
+        roi.move_edge(RoiEdge::Vertex(1), (8.0, 9.0)); // dist √(9+16) = 5
+        roi.move_edge(RoiEdge::Vertex(0), (1.0, 2.0));
+        if let Roi::Circle { center, radius } = roi {
+            assert_eq!(center, (1.0, 2.0));
+            assert!((radius - 5.0).abs() < 1e-9, "radius {radius}");
+        } else {
+            panic!("not a circle");
+        }
+    }
+
+    #[test]
+    fn ellipse_handles_drag_center_and_each_semi_axis() {
+        // Vertex 0 translates the center; Vertex 1 sets the x semi-axis,
+        // Vertex 2 the y semi-axis (silx `EllipseROI`, axis-aligned).
+        let mut roi = Roi::Ellipse {
+            center: (0.0, 0.0),
+            radii: (3.0, 4.0),
+        };
+        roi.move_edge(RoiEdge::Vertex(1), (5.0, 0.0)); // x semi-axis -> 5
+        roi.move_edge(RoiEdge::Vertex(2), (0.0, 7.0)); // y semi-axis -> 7
+        roi.move_edge(RoiEdge::Vertex(0), (2.0, 3.0)); // center
+        assert_eq!(
+            roi,
+            Roi::Ellipse {
+                center: (2.0, 3.0),
+                radii: (5.0, 7.0),
+            }
+        );
+    }
+
+    #[test]
     fn line_roi_endpoints_move_independently() {
         let mut roi = Roi::Line {
             start: (0.0, 0.0),
