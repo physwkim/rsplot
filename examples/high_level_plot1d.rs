@@ -186,6 +186,10 @@ fn format_event(event: PlotEvent) -> String {
         }
         PlotEvent::RoiChanged { index } => format!("roi changed #{index}"),
         PlotEvent::RoiCreated { index } => format!("roi created #{index}"),
+        PlotEvent::DrawingProgress { mode, points } => {
+            format!("drawing {mode:?} ({} pts)", points.len())
+        }
+        PlotEvent::DrawingFinished { mode, .. } => format!("drawing finished {mode:?}"),
         PlotEvent::RoisCleared => "rois cleared".to_owned(),
         PlotEvent::CurrentRoiChanged { previous, current } => {
             format!("current roi {previous:?} -> {current:?}")

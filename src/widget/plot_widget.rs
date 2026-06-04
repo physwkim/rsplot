@@ -74,6 +74,10 @@ struct Interaction {
     /// (the same overlay the box-zoom selection uses). `None` when no
     /// `RoiCreate` draw is active.
     roi_preview: Option<(interaction::DrawMode, Vec<(f64, f64)>)>,
+    /// This frame's draw-state event in `RoiCreate` mode (silx `drawingProgress`
+    /// / `drawingFinished`), or `None`. Surfaced on `PlotResponse.draw_event` so
+    /// `high_level.rs` can emit the corresponding `PlotEvent`.
+    draw_event: Option<interaction::DrawEvent>,
     /// Handle of the marker a drag moved this frame (silx `markerMoving`), or
     /// `None`. Set only on the frame the marker actually moved.
     marker_moved: Option<crate::core::backend::ItemHandle>,
@@ -252,6 +256,7 @@ impl PlotView {
             marker_moved,
             marker_drag_started,
             marker_drag_finished,
+            draw_event,
             pointer_event,
         } = apply_interaction(ui, &response, plot, area, &view, interaction_mode);
 
@@ -437,9 +442,10 @@ impl PlotView {
             marker_drag_started,
             marker_drag_finished,
             pointer_event,
-            // The plain show path runs no draw state machine; show_with_draw
-            // fills this in below.
-            draw_event: None,
+            // Set in `RoiCreate` mode from the draw state machine (silx
+            // drawingProgress / drawingFinished); `None` in other modes.
+            // `show_with_draw` overwrites it with its own draw-state event.
+            draw_event,
             interaction_mode,
         }
     }
@@ -878,6 +884,7 @@ fn apply_interaction(
     // surfaced for the caller to paint via `draw_overlay`.
     let mut roi_created = None;
     let mut roi_preview = None;
+    let mut draw_event = None;
     if let PlotInteractionMode::RoiCreate(kind) = mode {
         let draw_id = id.with("roi-draw");
         let mut draw = ui
@@ -899,6 +906,10 @@ fn apply_interaction(
         }
 
         ui.data_mut(|d| d.insert_temp(draw_id, draw));
+        // Surface this frame's draw event (silx drawingProgress / drawingFinished)
+        // so `show` can route it onto PlotResponse for high-level consumption,
+        // alongside the roi_created/roi_preview derived from it.
+        draw_event = event;
     }
 
     // Marker cursor (silx size cursor over a draggable marker), taking
@@ -995,6 +1006,7 @@ fn apply_interaction(
         marker_moved,
         marker_drag_started,
         marker_drag_finished,
+        draw_event,
         pointer_event,
     }
 }
@@ -1693,6 +1705,46 @@ mod tests {
         // Still drawing: no ROI created mid-drag.
         assert!(plot.rois.is_empty());
         assert_eq!(mid.roi_created, None);
+    }
+
+    #[test]
+    fn roi_create_surfaces_draw_event_progress_then_finished() {
+        // RoiCreate routes the draw state machine's events onto
+        // PlotResponse.draw_event: InProgress while dragging (silx
+        // drawingProgress), Finished on release (silx drawingFinished), the
+        // latter on the same frame as roi_created.
+        let ctx = egui::Context::default();
+        let mut plot = Plot::new(0);
+        plot.limits = (0.0, 10.0, 0.0, 10.0);
+        let mode = PlotInteractionMode::RoiCreate(RoiDrawKind::Line);
+        let screen = egui::vec2(200.0, 200.0);
+
+        let (_r0, area) = run_mode_frame(&ctx, &mut plot, mode, screen_input(screen));
+        let a = area.center() - egui::vec2(20.0, 20.0);
+        let b = area.center() + egui::vec2(20.0, 20.0);
+
+        let _ = run_mode_frame(&ctx, &mut plot, mode, press_at(screen, a));
+        let (mid, _) = run_mode_frame(&ctx, &mut plot, mode, move_to(screen, b));
+        assert!(
+            matches!(
+                mid.draw_event,
+                Some(interaction::DrawEvent::InProgress { .. })
+            ),
+            "drawingProgress surfaced mid-drag: {:?}",
+            mid.draw_event
+        );
+
+        let (end, _) = run_mode_frame(&ctx, &mut plot, mode, release_at(screen, b));
+        assert!(
+            matches!(
+                end.draw_event,
+                Some(interaction::DrawEvent::Finished { .. })
+            ),
+            "drawingFinished surfaced on release: {:?}",
+            end.draw_event
+        );
+        // The finished draw also created the ROI on the same frame.
+        assert_eq!(end.roi_created, Some(0));
     }
 
     #[test]

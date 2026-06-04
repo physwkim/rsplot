@@ -30,7 +30,7 @@ use crate::render::backend_wgpu::WgpuBackend;
 use crate::render::gpu_curve::CurveData;
 use crate::render::gpu_image::{AggregationMode, ImageData, ImagePixels, InterpolationMode};
 use crate::render::save::{SaveError, SaveFormat};
-use crate::widget::interaction::{MouseButton, RoiDrawKind};
+use crate::widget::interaction::{DrawEvent, DrawMode, DrawParams, MouseButton, RoiDrawKind};
 use crate::widget::plot_widget::{PlotInteractionMode, PlotResponse, PlotView};
 
 /// Live profile extraction mode (silx profile toolbar).
@@ -307,6 +307,18 @@ pub enum PlotEvent {
     /// [`PlotInteractionMode::RoiCreate`] (silx `RegionOfInterestManager`
     /// shape-finished). Read its geometry with `plot().rois[index].roi`.
     RoiCreated { index: usize },
+    /// The in-progress draw preview advanced this frame in
+    /// [`PlotInteractionMode::RoiCreate`] (silx `drawingProgress`): `points` are
+    /// the current rubber-band's data-space vertices for the given `mode`.
+    DrawingProgress {
+        mode: DrawMode,
+        points: Vec<(f64, f64)>,
+    },
+    /// An on-plot draw completed this frame (silx `drawingFinished`), carrying the
+    /// resolved [`DrawParams`]. In [`PlotInteractionMode::RoiCreate`] a
+    /// [`Self::RoiCreated`] is emitted on the same frame (the ROI is built on top
+    /// of the finished draw, mirroring silx's `RegionOfInterestManager`).
+    DrawingFinished { mode: DrawMode, params: DrawParams },
     /// The ROI collection changed by a clear-all or a single-ROI removal
     /// (re-read `rois()`).
     RoisCleared,
@@ -2632,6 +2644,20 @@ impl PlotWidget {
         }
         if let Some(index) = response.roi_created {
             self.events.push(PlotEvent::RoiCreated { index });
+        }
+        // Draw-state events (silx drawingProgress / drawingFinished) from an
+        // on-plot RoiCreate draw. DrawingFinished fires on the same frame as the
+        // RoiCreated above (the ROI is built on top of the finished draw).
+        match response.draw_event.clone() {
+            Some(DrawEvent::InProgress { mode, points }) => {
+                self.events
+                    .push(PlotEvent::DrawingProgress { mode, points });
+            }
+            Some(DrawEvent::Finished { mode, params }) => {
+                self.events
+                    .push(PlotEvent::DrawingFinished { mode, params });
+            }
+            None => {}
         }
         // Marker drag lifecycle (silx beginDrag/drag/endDrag):
         // MarkerDragStarted → MarkerMoved×N → MarkerDragFinished. The start fires
