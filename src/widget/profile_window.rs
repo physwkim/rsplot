@@ -124,7 +124,9 @@ impl ProfileWindow {
         // Choose the initial position once per open session: restore the last
         // place the user left it, else sit beside the main window.
         if self.placement.is_none() {
-            self.placement = self.remembered_pos.or_else(|| self.beside_main_window(ctx));
+            self.placement = self
+                .remembered_pos
+                .or_else(|| crate::widget::detached::beside_main_window(ctx, self.size));
         }
 
         let viewport_id = egui::ViewportId::from_hash_of(self.window_id);
@@ -157,108 +159,5 @@ impl ProfileWindow {
             self.open = false;
             self.placement = None;
         }
-    }
-
-    /// Compute where to first place the profile window so it sits beside the
-    /// main window instead of covering it, mirroring silx
-    /// `ProfileManager.initProfileWindow` (tools/profile/manager.py:1030-1055):
-    /// prefer the right of the main window, else the left, else whichever side
-    /// of the screen has more room; vertically centre on the main window.
-    ///
-    /// Returns `None` when the host cannot report the window/monitor geometry
-    /// (e.g. Wayland/Android), in which case no explicit position is set.
-    fn beside_main_window(&self, ctx: &egui::Context) -> Option<egui::Pos2> {
-        let (win, monitor) = ctx.input(|i| {
-            let vp = i.viewport();
-            (vp.outer_rect, vp.monitor_size)
-        });
-        // Both are in egui points, in monitor space (monitor origin at 0,0).
-        Some(placement_beside(win?, monitor?, self.size, 5.0))
-    }
-}
-
-/// Pure placement maths behind [`ProfileWindow::beside_main_window`], split out
-/// so the silx-parity boundaries can be unit-tested without an egui context.
-///
-/// `win` is the main window's outer rect and `monitor_size` the monitor size,
-/// both in egui points / monitor space (origin at 0,0). Returns the top-left
-/// the profile window should take so it sits beside `win` without covering it.
-fn placement_beside(
-    win: egui::Rect,
-    monitor_size: egui::Vec2,
-    size: egui::Vec2,
-    margin: f32,
-) -> egui::Pos2 {
-    let profile_w = size.x;
-
-    let space_left = win.left(); // screen-left .. window-left
-    let space_right = monitor_size.x - win.right(); // window-right .. screen-right
-
-    // Vertically centre the profile on the main window.
-    let top = win.top() + (win.height() - size.y) / 2.0;
-
-    let left = if profile_w < space_right {
-        // Place the profile to the right of the main window.
-        win.right() + margin
-    } else if profile_w < space_left {
-        // Place it to the left of the main window.
-        (win.left() - profile_w - margin).max(0.0)
-    } else if space_left > space_right {
-        // Not enough room either side: push it to whichever has more.
-        0.0
-    } else {
-        monitor_size.x - profile_w
-    };
-
-    egui::pos2(left, top)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::placement_beside;
-    use egui::{Rect, pos2, vec2};
-
-    const MARGIN: f32 = 5.0;
-
-    fn approx(a: f32, b: f32) {
-        assert!((a - b).abs() < 1e-4, "expected {b}, got {a}");
-    }
-
-    #[test]
-    fn places_to_the_right_when_it_fits() {
-        // Main window 100..600 on a 1200-wide monitor: 600 pt free on the right.
-        let win = Rect::from_min_max(pos2(100.0, 0.0), pos2(600.0, 400.0));
-        let p = placement_beside(win, vec2(1200.0, 800.0), vec2(420.0, 320.0), MARGIN);
-        approx(p.x, 605.0); // win.right() + margin
-        approx(p.y, 40.0); // (400 - 320) / 2
-    }
-
-    #[test]
-    fn places_to_the_left_when_right_is_too_tight() {
-        // Right edge near the monitor edge (20 pt free); 600 pt free on the left.
-        let win = Rect::from_min_max(pos2(600.0, 0.0), pos2(1180.0, 400.0));
-        let p = placement_beside(win, vec2(1200.0, 800.0), vec2(420.0, 320.0), MARGIN);
-        approx(p.x, 175.0); // win.left() - profile_w - margin
-    }
-
-    #[test]
-    fn left_placement_clamps_to_screen_edge() {
-        // Just enough left space to choose the left branch but it would go < 0.
-        let win = Rect::from_min_max(pos2(422.0, 0.0), pos2(900.0, 400.0));
-        let p = placement_beside(win, vec2(1000.0, 500.0), vec2(420.0, 320.0), MARGIN);
-        approx(p.x, 0.0); // max(0, 422 - 420 - 5)
-    }
-
-    #[test]
-    fn overflow_both_sides_picks_the_roomier_edge() {
-        // Profile wider than either gap. More room on the left -> hug left edge.
-        let win = Rect::from_min_max(pos2(300.0, 0.0), pos2(900.0, 400.0));
-        let p = placement_beside(win, vec2(1000.0, 500.0), vec2(420.0, 320.0), MARGIN);
-        approx(p.x, 0.0);
-
-        // More room on the right -> hug the right edge (monitor.x - profile_w).
-        let win = Rect::from_min_max(pos2(80.0, 0.0), pos2(400.0, 400.0));
-        let p = placement_beside(win, vec2(1000.0, 500.0), vec2(700.0, 320.0), MARGIN);
-        approx(p.x, 300.0); // 1000 - 700
     }
 }
