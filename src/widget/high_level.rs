@@ -315,6 +315,15 @@ pub enum PlotEvent {
     /// `markerMoved`). `handle` identifies the moved marker; read its new
     /// position with [`PlotWidget::marker_position`].
     MarkerMoved { handle: ItemHandle },
+    /// A draggable marker's drag began this frame (silx `beginDrag`). The drag
+    /// lifecycle is `MarkerDragStarted` → `MarkerMoved`×N → `MarkerDragFinished`;
+    /// the first [`Self::MarkerMoved`] arrives on the same frame. Read the
+    /// position with [`PlotWidget::marker_position`].
+    MarkerDragStarted { handle: ItemHandle },
+    /// A draggable marker's drag ended this frame, i.e. the button was released
+    /// (silx `endDrag` `markerMoved`). The marker's final position is already
+    /// persisted; read it with [`PlotWidget::marker_position`].
+    MarkerDragFinished { handle: ItemHandle },
     /// A curve was clicked (silx `curveClicked`). `handle` identifies the
     /// curve; `index`/`x`/`y` locate the nearest picked vertex; `button` is the
     /// mouse button used.
@@ -2617,6 +2626,13 @@ impl PlotWidget {
         if let Some(index) = response.roi_created {
             self.events.push(PlotEvent::RoiCreated { index });
         }
+        // Marker drag lifecycle (silx beginDrag/drag/endDrag):
+        // MarkerDragStarted → MarkerMoved×N → MarkerDragFinished. The start fires
+        // on the same frame as the first MarkerMoved (the grab is also a move), so
+        // it must be queued *before* the moved block to keep the lifecycle order.
+        if let Some(handle) = response.marker_drag_started {
+            self.events.push(PlotEvent::MarkerDragStarted { handle });
+        }
         // Persist an on-screen marker drag: apply_interaction live-mutated the
         // mirror `plot.markers` for this frame's render, but the mirror is
         // rebuilt from the backend items on every sync, so the moved data must
@@ -2633,6 +2649,11 @@ impl PlotWidget {
                 self.backend.update_marker(handle, marker);
                 self.events.push(PlotEvent::MarkerMoved { handle });
             }
+        }
+        // Drag finished on release (silx endDrag markerMoved): the final position
+        // is already persisted by the preceding MarkerMoved frames.
+        if let Some(handle) = response.marker_drag_finished {
+            self.events.push(PlotEvent::MarkerDragFinished { handle });
         }
         response
     }

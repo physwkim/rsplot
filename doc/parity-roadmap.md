@@ -10,10 +10,11 @@ adjacent silx.gui** (colors, data-adjacent GUI widgets).
 **After Wave 13 (ROI styling, main @ `7495590`, not pushed):** ≈199 Done · 122 open (7 H / 44 M / 33 L) — 8 ROI
 rows closed (per-instance color/name/selection, `sigCurrentRoiChanged`, line style/width, manager default-color, fill).
 
-**After Wave 14 (item-click + hover signals, main, not pushed):** ≈203 Done · 118 open (6 H / 43 M / 31 L) — 4
-rows closed (curveClicked H, curveClicked/imageClicked L, hover-with-metadata M). `ItemHovered` now carries the full
-silx `prepareHoverSignal` payload (label/type/x/y/xpixel/ypixel/draggable; `selectable` omitted as structurally
-constant). Item-drag triad still deferred.
+**After Wave 14 (item-click + hover + marker-drag triad, main, not pushed):** ≈206 Done · 115 open (6 H / 42 M / 29 L)
+— 7 rows closed: curveClicked (H), curveClicked/imageClicked (L), hover-with-metadata (M), ItemsInteraction picker/
+state-machine (M), marker drag-start/end triad (L), markerMoving/markerMoved split (L). `ItemHovered` carries the full
+silx `prepareHoverSignal` payload (`selectable` omitted as structurally constant); the marker drag now emits
+`MarkerDragStarted`→`MarkerMoved`×N→`MarkerDragFinished` (silx `beginDrag`/`drag`/`endDrag`).
 
 Status legend: ✅ Done · ◐ Partial · ☐ Missing. Effort S/M/L. Priority H/M/L.
 
@@ -54,13 +55,13 @@ as-of-sweep reference.
 | ✔ Done (W14) | H | M | Specific item-click signals (curveClicked/markerClicked/imageClicked) | PlotInteraction.py:1223-1261, PlotEvents.py:88-173 | `PlotEvent::{CurveClicked,ImageClicked,ItemClicked}` carry handle + position + button via the `pick_topmost`/`click_event_for_pick` owner path |
 | ✔ Done (W14) | M | M | Hover event signals with item metadata | PlotInteraction.py:1135-1154, PlotEvents.py:73-85 | `PlotEvent::ItemHovered{handle,kind,label,x,y,xpixel,ypixel,draggable}` mirrors silx `prepareHoverSignal`. silx `selectable` omitted by design: every pickable item is set-active on click in egui-silx, so the flag is structurally constant `true` (uninformative) |
 | ◐ Partial | M | S | DrawingProgress / DrawingFinished event wiring | PlotInteraction.py:529-532, PlotEvents.py:34-55 | `DrawEvent` enums emit from `DrawState` but are not wired into the `PlotWidget` callback surface or consumed by `high_level.rs` |
-| ☐ Missing | M | M | ItemsInteraction state machine (item picking/dragging) | PlotInteraction.py:1115-1350 | Picking helpers (`nearest_point`, `image_index`) exist but are not wired into a unified picker/state machine |
+| ✔ Done (W14) | M | M | ItemsInteraction state machine (item picking/dragging) | PlotInteraction.py:1115-1350 | The pickers are wired through one owner `pick_topmost`: click → `Curve/Image/ItemClicked` (silx `_handleClick`), bare hover → `ItemHovered` (silx Idle), and a draggable-marker drag runs the `MarkerDragStarted`→`MarkerMoved`→`MarkerDragFinished` lifecycle (silx `beginDrag`/`drag`/`endDrag`) |
 | ◐ Partial | L | S | Marker drag-finished vs drag-moving signal split | PlotInteraction.py:1276-1299, 1350 | `MarkerMoved` fires every frame; not split into a distinct on-release signal, carries handle not full payload |
 | ◐ Partial | L | S | Selection-area color/fill-mode styling | PlotInteraction.py:98-141 | Preview hardcoded as a semi-transparent single-color rect; silx `setSelectionArea` accepts hatch/solid/none fill + per-mode colors |
 | ◐ Partial | L | S | Limits-changed event with actual range values | PlotEvents.py:176-184 | `LimitsChanged` carries x/y/y2 tuples internally but is not routed to `PlotResponse`; `high_level.rs` emits a bare flag without range data |
 | ◐ Partial | L | M | Axis constraints (min/maxXRange, min/maxYRange) | panzoom.py:222-366 | `AxisConstraints` clamps post-zoom; missing silx `ViewConstraints` adaptive expansion / `allow_scaling` normalization |
 | ☐ Missing | L | M | StateMachine base (ClickOrDrag hierarchy) | Interaction.py:87-198 | Imperative handling in `DrawState`/`plot_widget.rs`; no hierarchical state-machine base (functional parity achieved differently) |
-| ☐ Missing | L | S | Marker drag-start/end callbacks (clicked/moving/moved triad) | PlotInteraction.py:1223-1350 | Only per-frame `MarkerMoved` during drag; not split into markerClicked/markerMoving/markerMoved |
+| ✔ Done (W14) | L | S | Marker drag-start/end callbacks (clicked/moving/moved triad) | PlotInteraction.py:1223-1350 | Full lifecycle: `MarkerDragStarted` (begin) → `MarkerMoved`×N (moving) → `MarkerDragFinished` (on-release moved); marker click arrives via `ItemClicked` from the unified picker |
 | ☐ Missing | L | S | Pencil preview circle during freehand draw | PlotInteraction.py:955-1110 (`updatePencilShape`) | Freehand accumulates vertices but shows no width preview circle around the cursor |
 | ☐ Missing | L | S | Cursor snap indicator in polygon mode | PlotInteraction.py:485-621 | Polygon snap-to-close logic exists but no visual snap indicator/preview line |
 
@@ -196,7 +197,7 @@ as-of-sweep reference.
    `MaskHistory` already exist (`mask_tools.rs`); this wave wires interaction + UI on
    done primitives. Biggest functional hole in the image workflow.
 3. ~~**Structured item-click + hover signals**~~ — **DONE (Wave 14, main, not
-   pushed) — click + hover only; drag triad still open.** Added item-identified
+   pushed) — click, hover, AND marker-drag triad.** Added item-identified
    `PlotEvent` variants `CurveClicked{handle,index,x,y,button}` /
    `ImageClicked{handle,col,row,button}` / `ItemClicked{handle,button}` (marker/
    scatter/shape) / `ItemHovered{handle,kind}`. `PlotWidget::show` routes this
@@ -206,12 +207,18 @@ as-of-sweep reference.
    variant to its event (unit-tested per boundary). `ItemHovered` was then
    expanded to the full silx `prepareHoverSignal` payload
    `{handle,kind,label,x,y,xpixel,ypixel,draggable}` (silx `selectable` omitted as
-   structurally constant). *Closed rows:* curveClicked/markerClicked/imageClicked
-   (row 49) + hover-with-metadata (row 50). *Still open (deferred to a later
-   wave):* the general item-drag triad (drag-start/drag/drag-finished). **GPU
+   structurally constant). Finally the marker-drag triad was added: the single
+   owner `apply_interaction` (plot_widget.rs) surfaces `marker_drag_started`/
+   `marker_drag_finished` on `PlotResponse` at the grab and release sites, and
+   `show` emits `MarkerDragStarted`→`MarkerMoved`×N→`MarkerDragFinished` (silx
+   `beginDrag`/`drag`/`endDrag`), covered by a headless press→move→release test.
+   *Closed rows:* curveClicked/markerClicked/imageClicked (row 49) +
+   hover-with-metadata (row 50) + ItemsInteraction picker/state-machine + marker
+   drag-start/end triad + markerMoving/markerMoved split. **GPU
    boundary:** the end-to-end `pick_item` and the hover metadata assembly
    (`backend.marker`/`item_legend`) need a wgpu `RenderState` no test builds, so
-   on-hardware picking is GPU-unverified; the pure `click_event_for_pick` + the
+   on-hardware picking is GPU-unverified; the pure `click_event_for_pick`, the
+   headless marker-drag state-machine test, + the
    existing pure pickers are the headlessly-tested seam.
 4. **ROI stats dock widgets** (L, 2 H rows) — `CurvesROIWidget` + `ROIStatsWidget`;
    the compute (`image_roi_stats`/`curve_roi_stats`) already exists, so it's widget
@@ -969,7 +976,7 @@ egui-silx implements core panning and zooming, including wheel zoom anchored at 
 | ☐ | L | L | Interaction state machine (ClickOrDrag, StateMachine) | `Interaction.py:87-198, PlotInteraction.py:153-209` | No explicit state machine architecture in egui-silx. silx uses StateMachine base class with State subclasses for each interaction mode (Idle, Drag, etc.). egui-silx uses imperative event handling with |
 | ☐ | L | M | Signal: hover (mouseMoved) with item label, type, draggable/selectable flags | `PlotInteraction.py:1135-1154, PlotEvents.py:73-85` | No hover event signals. silx emits hover with item metadata (label, type, whether draggable/selectable, data and pixel position). egui-silx only tracks crosshair rendering. |
 | ☐ | L | M | Signal: markerClicked with marker details and position | `PlotInteraction.py:1223-1241, PlotEvents.py:88-139` | No marker click event. silx emits structured markerClicked signal with marker name, position data, button, and draggable/selectable flags. egui-silx has no equivalent. |
-| ◐ | L | M | Signal: markerMoving/markerMoved (marker drag feedback) | `PlotInteraction.py:1276-1299, 1350` | Wave 11 emits PlotEvent::MarkerMoved { handle } (and PlotResponse.marker_moved) each frame the marker is dragged — covers markerMoving feedback. Not yet split into a distinct on-release markerMoved, and the event carries the handle, not the full position/draggable payload. |
+| ✅ (W14) | L | M | Signal: markerMoving/markerMoved (marker drag feedback) | `PlotInteraction.py:1276-1299, 1350` | Now split: `MarkerMoved{handle}` each frame during the drag (silx `markerMoving`) plus a distinct on-release `MarkerDragFinished{handle}` (silx `markerMoved`), bracketed by `MarkerDragStarted{handle}`. Each event carries the handle; position is read via `PlotWidget::marker_position`. |
 | ✅ (W14) | L | M | Signal: curveClicked with curve indices and position | `PlotInteraction.py:1243-1261, PlotEvents.py:159-173` | `PlotEvent::CurveClicked{handle,index,x,y,button}` carries the nearest picked vertex index + data position + button. (silx's full xdata/ydata arrays are reachable via the handle, not inlined.) |
 | ✅ (W14) | L | M | Signal: imageClicked with pixel (col, row) index and position | `PlotInteraction.py:1263-1272, PlotEvents.py:142-156` | `PlotEvent::ImageClicked{handle,col,row,button}` emitted from the `pick_topmost` owner path over the existing `image_index`/`pick_image_pixel` picker. |
 | ✅ | L | M | Cursor shape change (resize cursors for draggable markers/handles) | `PlotInteraction.py:1165-1184` | ROI-edge resize cursors were already set; Wave 11 adds the draggable-marker size cursor (marker_cursor: VLine→SizeHor, HLine→SizeVer, free Point→SizeAll, constrained Point→the free axis), shown on hover and during drag, taking precedence over the ROI-edge cursor. Matches silx CURSOR_SIZE_HOR/VER/ALL. |

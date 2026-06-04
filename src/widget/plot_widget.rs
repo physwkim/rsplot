@@ -77,6 +77,13 @@ struct Interaction {
     /// Handle of the marker a drag moved this frame (silx `markerMoving`), or
     /// `None`. Set only on the frame the marker actually moved.
     marker_moved: Option<crate::core::backend::ItemHandle>,
+    /// Handle of the marker whose drag began this frame (silx `beginDrag` on a
+    /// draggable marker), or `None`. Set on the frame the grab is anchored.
+    marker_drag_started: Option<crate::core::backend::ItemHandle>,
+    /// Handle of the marker whose drag ended this frame (silx `endDrag`
+    /// `markerMoved`), or `None`. Set on the frame the primary button is
+    /// released while a marker drag was active.
+    marker_drag_finished: Option<crate::core::backend::ItemHandle>,
     /// The low-level pointer event detected over the data area this frame
     /// (click / double-click / move), or `None`.
     pointer_event: Option<interaction::PlotPointerEvent>,
@@ -138,6 +145,17 @@ pub struct PlotResponse {
     /// for this frame's render; `PlotWidget::show` persists the change back to
     /// the backend item and emits [`crate::PlotEvent::MarkerMoved`].
     pub marker_moved: Option<crate::core::backend::ItemHandle>,
+    /// Handle of the marker whose drag *began* this frame (silx `beginDrag` on a
+    /// draggable marker), or `None`. `PlotWidget::show` emits
+    /// [`crate::PlotEvent::MarkerDragStarted`]. The first
+    /// [`Self::marker_moved`] fires on the same frame (the grab is also a move),
+    /// matching silx emitting the first `markerMoving` at drag begin.
+    pub marker_drag_started: Option<crate::core::backend::ItemHandle>,
+    /// Handle of the marker whose drag *ended* this frame (silx `endDrag`
+    /// `markerMoved`), or `None`. `PlotWidget::show` emits
+    /// [`crate::PlotEvent::MarkerDragFinished`]; the marker's final position is
+    /// already persisted by the preceding [`Self::marker_moved`] frames.
+    pub marker_drag_finished: Option<crate::core::backend::ItemHandle>,
     /// The low-level pointer event detected over the data area this frame
     /// (silx `prepareMouseSignal` "mouseClicked" / "mouseDoubleClicked" /
     /// "mouseMoved", `PlotEvents.py:58-71`), or `None` when there was none. The
@@ -232,6 +250,8 @@ impl PlotView {
             roi_created,
             roi_preview,
             marker_moved,
+            marker_drag_started,
+            marker_drag_finished,
             pointer_event,
         } = apply_interaction(ui, &response, plot, area, &view, interaction_mode);
 
@@ -414,6 +434,8 @@ impl PlotView {
             roi_changed,
             roi_created,
             marker_moved,
+            marker_drag_started,
+            marker_drag_finished,
             pointer_event,
             // The plain show path runs no draw state machine; show_with_draw
             // fills this in below.
@@ -666,6 +688,8 @@ fn apply_interaction(
 
     let marker_id = id.with("marker-drag");
     let mut marker_moved = None;
+    let mut marker_drag_started = None;
+    let mut marker_drag_finished = None;
     // Grab on drag-start: hit-test the topmost draggable marker at the press.
     if mode_allows_marker_drag(mode)
         && response.drag_started_by(PointerButton::Primary)
@@ -675,6 +699,7 @@ fn apply_interaction(
     {
         let anchor = plot.markers[index].position();
         ui.data_mut(|d| d.insert_temp(marker_id, MarkerDrag { handle, anchor }));
+        marker_drag_started = Some(handle);
     }
     // Whether a marker drag is active this frame; gates pan/zoom/ROI below so
     // the marker drag is the sole primary-drag consumer while it runs.
@@ -698,6 +723,7 @@ fn apply_interaction(
         }
         if response.drag_stopped_by(PointerButton::Primary) {
             ui.data_mut(|d| d.remove::<MarkerDrag>(marker_id));
+            marker_drag_finished = Some(md.handle);
         }
     }
 
@@ -967,6 +993,8 @@ fn apply_interaction(
         roi_created,
         roi_preview,
         marker_moved,
+        marker_drag_started,
+        marker_drag_finished,
         pointer_event,
     }
 }
@@ -1723,6 +1751,76 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn draggable_marker_drag_emits_started_moved_finished_triad() {
+        // Silx beginDrag/drag/endDrag lifecycle for a draggable marker:
+        // MarkerDragStarted (grab) → MarkerMoved×N → MarkerDragFinished (release).
+        // The start fires on the same frame as the first move (the grab is also a
+        // move), matching silx emitting the first markerMoving at begin.
+        use crate::core::marker::Marker;
+        let ctx = egui::Context::default();
+        let mut plot = Plot::new(0);
+        plot.limits = (0.0, 10.0, 0.0, 10.0);
+        let mode = PlotInteractionMode::Select;
+        let screen = egui::vec2(200.0, 200.0);
+
+        // Baseline frame to read the transform, then place a draggable marker at
+        // the data point under the area center (so a press at the center picks it).
+        let (r0, area) = run_mode_frame(&ctx, &mut plot, mode, screen_input(screen));
+        let c = area.center();
+        let (mx, my) = r0.transform.pixel_to_data(c);
+        let mut marker = Marker::point(mx, my);
+        marker.is_draggable = true;
+        plot.markers.push(marker);
+        plot.marker_handles.push(42);
+
+        // Press on the marker, then move >6px so egui starts the drag: the grab
+        // anchors and the first move applies on the same frame.
+        let _ = run_mode_frame(&ctx, &mut plot, mode, press_at(screen, c));
+        let (r1, _) = run_mode_frame(
+            &ctx,
+            &mut plot,
+            mode,
+            move_to(screen, c + egui::vec2(12.0, 9.0)),
+        );
+        assert_eq!(
+            r1.marker_drag_started,
+            Some(42),
+            "drag start on the grab frame"
+        );
+        assert_eq!(
+            r1.marker_moved,
+            Some(42),
+            "first markerMoving on the same frame as the grab"
+        );
+        assert_eq!(r1.marker_drag_finished, None);
+
+        // A further move: moving feedback only, the start does not repeat.
+        let (r2, _) = run_mode_frame(
+            &ctx,
+            &mut plot,
+            mode,
+            move_to(screen, c + egui::vec2(24.0, 3.0)),
+        );
+        assert_eq!(r2.marker_drag_started, None, "start fires exactly once");
+        assert_eq!(r2.marker_moved, Some(42));
+        assert_eq!(r2.marker_drag_finished, None);
+
+        // Release: drag finished, no move on the release frame.
+        let (r3, _) = run_mode_frame(
+            &ctx,
+            &mut plot,
+            mode,
+            release_at(screen, c + egui::vec2(24.0, 3.0)),
+        );
+        assert_eq!(r3.marker_drag_finished, Some(42), "drag finish on release");
+        assert_eq!(r3.marker_drag_started, None);
+        assert_eq!(
+            r3.marker_moved, None,
+            "the release frame carries no markerMoving"
+        );
     }
 
     #[test]

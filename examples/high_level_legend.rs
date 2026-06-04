@@ -246,6 +246,8 @@ fn format_event(event: PlotEvent) -> String {
             format!("current roi {previous:?} -> {current:?}")
         }
         PlotEvent::MarkerMoved { handle } => format!("marker moved #{handle}"),
+        PlotEvent::MarkerDragStarted { handle } => format!("marker drag start #{handle}"),
+        PlotEvent::MarkerDragFinished { handle } => format!("marker drag finish #{handle}"),
         PlotEvent::CurveClicked {
             handle,
             index,
