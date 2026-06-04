@@ -467,10 +467,31 @@ impl Roi {
                 RoiEdge::Vertex(2) => radii.1 = (dy - center.1).abs(),
                 _ => {}
             },
-            // Arc/Band per-handle drag editing (silx `handleDragUpdated`) is
-            // owned by the on-plot interaction wave, not this pure-geometry
-            // layer; the whole-shape move is exposed via [`Roi::translate`].
-            Roi::Arc { .. } | Roi::Band { .. } => {}
+            // Arc per-handle drag editing is implemented in the Arc arm below.
+            Roi::Arc { .. } => {}
+            // Band handle drag (silx `BandROI.handleDragUpdated`): the begin/end
+            // handles set the segment endpoints; the two width handles set the
+            // band width from the handle's signed projection onto the band
+            // normal (silx `__handleWidthUp/DownConstraint`: the constrained
+            // handle sits at `center ± offset·normal` with `offset = max(0,
+            // ±normal·(p − center))`, and the width is `2·offset`). The
+            // translate-center handle is handled by the ROI body-drag path, not
+            // here.
+            Roi::Band { begin, end, width } => match edge {
+                RoiEdge::Vertex(0) => *begin = (dx, dy),
+                RoiEdge::Vertex(1) => *end = (dx, dy),
+                RoiEdge::Vertex(2) | RoiEdge::Vertex(3) => {
+                    let center = ((begin.0 + end.0) * 0.5, (begin.1 + end.1) * 0.5);
+                    let n = band_normal(*begin, *end);
+                    let mut proj = n.0 * (dx - center.0) + n.1 * (dy - center.1);
+                    // The down handle measures the opposite side of the normal.
+                    if let RoiEdge::Vertex(3) = edge {
+                        proj = -proj;
+                    }
+                    *width = 2.0 * proj.max(0.0);
+                }
+                _ => {}
+            },
         }
     }
 
@@ -1073,6 +1094,51 @@ mod tests {
                 vertices: vec![(0.0, 0.0), (6.0, 1.0), (5.0, 5.0)]
             }
         );
+    }
+
+    #[test]
+    fn band_handles_drag_endpoints_and_width() {
+        // Axis-aligned band begin(0,0)→end(10,0), width 4. normal = (0,1),
+        // center = (5,0); width-up handle at (5,2), width-down at (5,-2).
+        let mut roi = Roi::Band {
+            begin: (0.0, 0.0),
+            end: (10.0, 0.0),
+            width: 4.0,
+        };
+        // begin / end handles set the segment endpoints directly.
+        roi.move_edge(RoiEdge::Vertex(0), (1.0, 1.0));
+        roi.move_edge(RoiEdge::Vertex(1), (9.0, 1.0));
+        assert_eq!(
+            roi,
+            Roi::Band {
+                begin: (1.0, 1.0),
+                end: (9.0, 1.0),
+                width: 4.0,
+            }
+        );
+        // Width-up handle: width = 2·(normal·(p − center)). New center (5,1),
+        // normal (0,1); dragging to (5,4) → proj 3 → width 6.
+        roi.move_edge(RoiEdge::Vertex(2), (5.0, 4.0));
+        if let Roi::Band { width, .. } = roi {
+            assert!((width - 6.0).abs() < 1e-9, "width {width}");
+        } else {
+            panic!("not a band");
+        }
+        // Width-down handle measures the opposite side: dragging to (5,-2) →
+        // proj 3 (sign-flipped) → width 6; the same point on the up side clamps
+        // the width to 0.
+        roi.move_edge(RoiEdge::Vertex(3), (5.0, -2.0));
+        if let Roi::Band { width, .. } = roi {
+            assert!((width - 6.0).abs() < 1e-9, "width {width}");
+        } else {
+            panic!("not a band");
+        }
+        roi.move_edge(RoiEdge::Vertex(3), (5.0, 5.0));
+        if let Roi::Band { width, .. } = roi {
+            assert!((width - 0.0).abs() < 1e-9, "clamped width {width}");
+        } else {
+            panic!("not a band");
+        }
     }
 
     #[test]
