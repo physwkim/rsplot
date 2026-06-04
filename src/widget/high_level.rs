@@ -550,8 +550,8 @@ fn draw_toolbar_icon(painter: &egui::Painter, rect: egui::Rect, icon: ToolbarIco
         ToolbarIcon::Grid => draw_grid_icon(painter, rect, stroke, 3),
         ToolbarIcon::MinorGrid => draw_grid_icon(painter, rect, stroke, 4),
         ToolbarIcon::Aspect => draw_center_text(painter, rect, "1:1", 11.0, color),
-        ToolbarIcon::LogX => draw_log_icon(painter, rect, "X", color),
-        ToolbarIcon::LogY => draw_log_icon(painter, rect, "Y", color),
+        ToolbarIcon::LogX => draw_log_icon(painter, rect, false, stroke),
+        ToolbarIcon::LogY => draw_log_icon(painter, rect, true, stroke),
         ToolbarIcon::InvertX => draw_axis_icon(painter, rect, "X", false, stroke),
         ToolbarIcon::InvertY => draw_axis_icon(painter, rect, "Y", true, stroke),
         ToolbarIcon::ShowAxis => draw_show_axis_icon(painter, rect, stroke),
@@ -613,27 +613,31 @@ fn draw_median_filter_icon(painter: &egui::Painter, rect: egui::Rect, stroke: eg
 }
 
 /// Draw a labeled axis with a double-headed fit-arrow for the
-/// Shared glyph for the per-axis autoscale (silx `plot-xauto` / `plot-yauto`)
-/// and invert toggles. A prominent axis letter occupies the bulk of the icon
-/// while a double-headed arrow is tucked against one edge — the X arrow along
-/// the bottom, the Y arrow down the left — so the arrow and the letter never
-/// overlap. (The previous design ran the arrow through the centre and painted
-/// the letter on top of the shaft, which crowded the two together.) `inward`
-/// points the arrowheads toward each other (invert / flip) instead of outward
-/// (autoscale fit-to-extent), keeping the two actions visually distinct.
+/// Shared glyph for the per-axis autoscale (silx `plot-xauto` / `plot-yauto`),
+/// log-scale (silx `plot-xlog` / `plot-ylog`) and invert toggles. A `label`
+/// (the axis letter, or "log") occupies the bulk of the icon while a
+/// double-headed arrow — whose orientation names the axis — is tucked against
+/// one edge: the X arrow along the bottom, the Y arrow down the left. The
+/// label and arrow sit in separate bands so they never overlap. (The previous
+/// autoscale/invert glyphs ran the arrow through the centre and painted the
+/// label on top of the shaft; the log glyph stacked two text lines in the
+/// 14px height — both crowded.) `inward` points the arrowheads toward each
+/// other (invert / flip) instead of outward (autoscale / log), keeping the
+/// actions visually distinct.
 fn draw_axis_arrow_icon(
     painter: &egui::Painter,
     rect: egui::Rect,
-    axis: &str,
+    label: &str,
     vertical: bool,
     inward: bool,
+    font_size: f32,
     stroke: egui::Stroke,
 ) {
     // Arrowhead barb length. Each head is a compact "V" spanning `a` along the
     // shaft; `inward` flips which side the vertex sits on so the head points
-    // toward (invert) or away from (autoscale) the centre.
+    // toward (invert) or away from (autoscale / log) the centre.
     let a = 2.0;
-    let font = egui::FontId::proportional(11.0);
+    let font = egui::FontId::proportional(font_size);
     if vertical {
         // Vertical double-arrow tucked against the left edge.
         let x = rect.left() + 2.5;
@@ -652,12 +656,12 @@ fn draw_axis_arrow_icon(
             painter.line_segment([egui::pos2(x, ybot), egui::pos2(x - a, ybot - a)], stroke);
             painter.line_segment([egui::pos2(x, ybot), egui::pos2(x + a, ybot - a)], stroke);
         }
-        // Axis letter centred in the area to the right of the arrow.
+        // Label centred in the area to the right of the arrow.
         let lx = (x + a + rect.right()) * 0.5;
         painter.text(
             egui::pos2(lx, rect.center().y),
             egui::Align2::CENTER_CENTER,
-            axis,
+            label,
             font,
             stroke.color,
         );
@@ -677,12 +681,12 @@ fn draw_axis_arrow_icon(
             painter.line_segment([egui::pos2(xr, y), egui::pos2(xr - a, y - a)], stroke);
             painter.line_segment([egui::pos2(xr, y), egui::pos2(xr - a, y + a)], stroke);
         }
-        // Axis letter centred in the area above the arrow.
+        // Label centred in the area above the arrow.
         let ly = (rect.top() + (y - a)) * 0.5;
         painter.text(
             egui::pos2(rect.center().x, ly),
             egui::Align2::CENTER_CENTER,
-            axis,
+            label,
             font,
             stroke.color,
         );
@@ -699,7 +703,7 @@ fn draw_autoscale_icon(
     vertical: bool,
     stroke: egui::Stroke,
 ) {
-    draw_axis_arrow_icon(painter, rect, axis, vertical, false, stroke);
+    draw_axis_arrow_icon(painter, rect, axis, vertical, false, 11.0, stroke);
 }
 
 /// Draw two overlapping document outlines for the [`ToolbarIcon::Copy`] button.
@@ -967,21 +971,13 @@ fn draw_grid_icon(
     }
 }
 
-fn draw_log_icon(painter: &egui::Painter, rect: egui::Rect, axis: &str, color: Color32) {
-    painter.text(
-        egui::pos2(rect.center().x, rect.top() + 3.0),
-        egui::Align2::CENTER_CENTER,
-        "Log",
-        egui::FontId::proportional(8.5),
-        color,
-    );
-    painter.text(
-        egui::pos2(rect.center().x, rect.bottom() - 4.0),
-        egui::Align2::CENTER_CENTER,
-        axis,
-        egui::FontId::proportional(11.0),
-        color,
-    );
+/// [`ToolbarIcon::LogX`] / [`ToolbarIcon::LogY`] toggles (silx `plot-xlog` /
+/// `plot-ylog`): the word "log" with a double-arrow tucked against the axis
+/// edge (X along the bottom, Y down the left) naming the axis the log scale
+/// applies to. Mirrors the autoscale glyph but labelled "log" instead of a
+/// single letter; `vertical` selects the Y orientation.
+fn draw_log_icon(painter: &egui::Painter, rect: egui::Rect, vertical: bool, stroke: egui::Stroke) {
+    draw_axis_arrow_icon(painter, rect, "log", vertical, false, 9.0, stroke);
 }
 
 /// [`ToolbarIcon::InvertX`] / [`ToolbarIcon::InvertY`] toggles: the same axis
@@ -995,7 +991,7 @@ fn draw_axis_icon(
     vertical: bool,
     stroke: egui::Stroke,
 ) {
-    draw_axis_arrow_icon(painter, rect, axis, vertical, true, stroke);
+    draw_axis_arrow_icon(painter, rect, axis, vertical, true, 11.0, stroke);
 }
 
 fn draw_center_text(
