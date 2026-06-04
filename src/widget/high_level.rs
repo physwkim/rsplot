@@ -21,7 +21,7 @@ use crate::core::colormap::{AutoscaleMode, Colormap};
 use crate::core::items::{Baseline, LineStyle, ScalarMask, Symbol};
 use crate::core::marker::{Marker, MarkerKind, MarkerSymbol};
 use crate::core::plot::{DataRange, GraphGrid, Plot, PlotId};
-use crate::core::roi::{ManagedRoi, Roi};
+use crate::core::roi::{ManagedRoi, Roi, RoiLineStyle};
 use crate::core::scatter_viz::GridImage;
 use crate::core::shape::{Shape, ShapeKind};
 use crate::core::transform::{Margins, Scale, YAxis};
@@ -302,6 +302,13 @@ pub enum PlotEvent {
     RoiCreated { index: usize },
     /// All ROIs were cleared.
     RoisCleared,
+    /// The current/highlighted ROI changed, by a manager selection or
+    /// [`PlotWidget::set_current_roi`] (silx `sigCurrentRoiChanged`). Carries the
+    /// previously- and newly-current ROI indices (either may be `None`).
+    CurrentRoiChanged {
+        previous: Option<usize>,
+        current: Option<usize>,
+    },
     /// A draggable marker was moved, either by an on-screen drag or by
     /// [`PlotWidget::set_marker_position`] (silx `markerMoving` /
     /// `markerMoved`). `handle` identifies the moved marker; read its new
@@ -5324,6 +5331,78 @@ impl PlotWidget {
     pub fn clear_rois(&mut self) {
         self.backend.plot_mut().rois.clear();
         self.events.push(PlotEvent::RoisCleared);
+    }
+
+    /// Append a fully-specified [`ManagedRoi`] (geometry + appearance) and
+    /// return its index, emitting [`PlotEvent::RoiChanged`] (silx
+    /// `RegionOfInterestManager.addRoi`). Use this to add a styled/named ROI in
+    /// one call; [`Self::add_roi`] adds bare geometry with default appearance.
+    pub fn add_managed_roi(&mut self, managed: ManagedRoi) -> usize {
+        self.backend.plot_mut().rois.push(managed);
+        let index = self.backend.plot().rois.len() - 1;
+        self.events.push(PlotEvent::RoiChanged { index });
+        index
+    }
+
+    /// Set the per-ROI color override at `index` (silx `RegionOfInterest.setColor`).
+    /// An out-of-range index is ignored.
+    pub fn set_roi_color(&mut self, index: usize, color: Color32) {
+        if let Some(r) = self.backend.plot_mut().rois.get_mut(index) {
+            r.color = Some(color);
+        }
+    }
+
+    /// Set the display name of the ROI at `index` (silx `RegionOfInterest.setName`).
+    /// An out-of-range index is ignored.
+    pub fn set_roi_name(&mut self, index: usize, name: impl Into<String>) {
+        if let Some(r) = self.backend.plot_mut().rois.get_mut(index) {
+            r.name = name.into();
+        }
+    }
+
+    /// Set the outline line width of the ROI at `index` (silx
+    /// `RegionOfInterest.setLineWidth`). An out-of-range index is ignored.
+    pub fn set_roi_line_width(&mut self, index: usize, width: f32) {
+        if let Some(r) = self.backend.plot_mut().rois.get_mut(index) {
+            r.line_width = width;
+        }
+    }
+
+    /// Set the outline stroke style of the ROI at `index` (silx
+    /// `RegionOfInterest.setLineStyle`). An out-of-range index is ignored.
+    pub fn set_roi_line_style(&mut self, index: usize, style: RoiLineStyle) {
+        if let Some(r) = self.backend.plot_mut().rois.get_mut(index) {
+            r.line_style = style;
+        }
+    }
+
+    /// Set whether the ROI at `index` fills its interior (silx
+    /// `RegionOfInterest.setFill`). An out-of-range index is ignored.
+    pub fn set_roi_fill(&mut self, index: usize, fill: bool) {
+        if let Some(r) = self.backend.plot_mut().rois.get_mut(index) {
+            r.fill = fill;
+        }
+    }
+
+    /// The index of the current/highlighted ROI, or `None` (silx
+    /// `RegionOfInterestManager.getCurrentRoi`).
+    pub fn current_roi(&self) -> Option<usize> {
+        self.backend.plot().current_roi()
+    }
+
+    /// Set the current/highlighted ROI by index, or `None` to clear it (silx
+    /// `RegionOfInterestManager.setCurrentRoi`). Highlights exactly that ROI on
+    /// the plot; an out-of-range index clears the selection. Emits
+    /// [`PlotEvent::CurrentRoiChanged`] when the current ROI actually changes
+    /// (silx `sigCurrentRoiChanged`).
+    pub fn set_current_roi(&mut self, index: Option<usize>) {
+        let previous = self.backend.plot().current_roi();
+        self.backend.plot_mut().set_current_roi(index);
+        let current = self.backend.plot().current_roi();
+        if current != previous {
+            self.events
+                .push(PlotEvent::CurrentRoiChanged { previous, current });
+        }
     }
 
     /// Show a compact ROI manager panel: a table listing all current ROIs with
