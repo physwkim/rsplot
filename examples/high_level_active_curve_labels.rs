@@ -9,9 +9,9 @@
 //!    bound to the right (Y2) axis routes its Y label to the right axis, leaving
 //!    the left axis on its graph default.
 //!
-//!    Click a curve (active-curve handling is on) — or use the side-panel
-//!    buttons — and watch the axis labels swap. "Clear active" restores the
-//!    `(graph default ...)` labels so you can see the fallback.
+//!    Click a curve in the plot (active-curve handling is on) — or click a row
+//!    in the side-panel legend — and watch the axis labels swap. "Clear active"
+//!    restores the `(graph default ...)` labels so you can see the fallback.
 //!
 //! 2. **Right-click zoom context menu** (silx `PlotWidget.contextMenuEvent`).
 //!    Right-click anywhere on the plot for a `Zoom Back` / `Reset Zoom` menu.
@@ -26,11 +26,10 @@ use egui_silx::{CurveSpec, GraphGrid, ItemHandle, PlotInteractionMode, PlotWidge
 const N: usize = 400;
 const T_MAX: f64 = 10.0;
 
-/// One curve's display metadata, kept so the side panel can label its button
-/// and report which axis the curve's Y label routes to.
+/// One curve's display metadata, kept so the side panel can report which axis
+/// the active curve's Y label routes to and echo its labels.
 struct CurveInfo {
     handle: ItemHandle,
-    legend: &'static str,
     x_label: &'static str,
     y_label: &'static str,
     axis: YAxis,
@@ -117,21 +116,18 @@ impl ActiveLabelApp {
         let curves = vec![
             CurveInfo {
                 handle: voltage_h,
-                legend: "Voltage (left)",
                 x_label: "Time [s]",
                 y_label: "Voltage [V]",
                 axis: YAxis::Left,
             },
             CurveInfo {
                 handle: current_h,
-                legend: "Current (left)",
                 x_label: "Time [s]",
                 y_label: "Current [A]",
                 axis: YAxis::Left,
             },
             CurveInfo {
                 handle: temperature_h,
-                legend: "Temperature (right / Y2)",
                 x_label: "Time [s]",
                 y_label: "Temperature [\u{b0}C]",
                 axis: YAxis::Right,
@@ -166,26 +162,23 @@ impl eframe::App for ActiveLabelApp {
             .resizable(true)
             .default_size(260.0)
             .show_inside(ui, |ui| {
-                ui.heading("Active curve");
-                let active = self.plot.active_curve();
+                ui.heading("Curve legend");
+                // The graph legend shows each curve's icon (color, line style,
+                // marker) and makes the clicked curve active (silx
+                // CurveLegendsWidget). Activating a curve swaps in its axis labels,
+                // echoed below.
+                self.plot.show_legend(ui);
 
-                if ui
-                    .selectable_label(active.is_none(), "None (graph defaults)")
-                    .clicked()
-                {
+                // The legend has no "no active curve" row, so offer an explicit
+                // reset to the graph-default labels (silx setActiveCurve(None)).
+                if ui.button("Clear active (graph defaults)").clicked() {
                     self.plot.set_active_curve(None);
-                }
-                for info in &self.curves {
-                    if ui
-                        .selectable_label(active == Some(info.handle), info.legend)
-                        .clicked()
-                    {
-                        self.plot.set_active_curve(Some(info.handle));
-                    }
                 }
 
                 ui.separator();
                 ui.heading("Displayed axis labels");
+                // Read after the legend so a click this frame is reflected now.
+                let active = self.plot.active_curve();
                 match active.and_then(|h| self.curves.iter().find(|c| c.handle == h)) {
                     Some(info) => {
                         ui.label(format!("X: {}", info.x_label));
@@ -208,7 +201,9 @@ impl eframe::App for ActiveLabelApp {
                 }
 
                 ui.separator();
-                ui.label("Click a curve to activate it; its labels override the graph defaults.");
+                ui.label(
+                    "Click a legend row to activate that curve; its labels override the graph defaults.",
+                );
                 ui.label("Right-click the plot for Zoom Back / Reset Zoom.");
             });
 
