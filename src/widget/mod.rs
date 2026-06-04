@@ -25,6 +25,7 @@ pub mod profile_window;
 pub mod radar_view;
 pub mod roi_manager;
 pub mod roi_stats;
+pub mod roi_stats_widget;
 pub mod scatter_mask;
 pub mod stats_widget;
 pub mod sync;

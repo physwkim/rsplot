@@ -1585,6 +1585,61 @@ fn retained_curve_xy(data: &RetainedItemData) -> Option<(&[f64], &[f64])> {
     }
 }
 
+/// Build one [`RoiStatsRow`] per ROI by reducing the active item's retained
+/// `data` inside each ROI, for a [`RoiStatsWidget`] (silx `ROIStatsWidget`
+/// table). An image is reduced with the proper per-pixel `roi.contains` test +
+/// integral ([`image_roi_stats`]); a curve over its `x`-span
+/// ([`curve_roi_stats`]). The row label is the ROI's name, or `ROI {index}`
+/// when the name is empty. Pure (no GPU), so the row building is unit-testable.
+///
+/// [`RoiStatsRow`]: crate::widget::roi_stats_widget::RoiStatsRow
+/// [`RoiStatsWidget`]: crate::widget::roi_stats_widget::RoiStatsWidget
+/// [`image_roi_stats`]: crate::widget::roi_stats::image_roi_stats
+/// [`curve_roi_stats`]: crate::widget::roi_stats::curve_roi_stats
+fn roi_stats_rows(
+    rois: &[ManagedRoi],
+    data: &RetainedItemData,
+) -> Vec<crate::widget::roi_stats_widget::RoiStatsRow> {
+    use crate::widget::roi_stats::{curve_roi_stats, image_roi_stats};
+    use crate::widget::roi_stats_widget::RoiStatsRow;
+
+    rois.iter()
+        .enumerate()
+        .map(|(index, managed)| {
+            let stats = match data {
+                RetainedItemData::Image {
+                    data,
+                    width,
+                    height,
+                    origin,
+                    scale,
+                    ..
+                } => {
+                    // image_roi_stats reduces f32 pixels; the retained pixels are
+                    // f64 narrowed from the originally-f32 image, so the cast back
+                    // to f32 is lossless.
+                    let pixels: Vec<f32> = data.iter().map(|&v| v as f32).collect();
+                    image_roi_stats(
+                        &managed.roi,
+                        &pixels,
+                        *width,
+                        *height,
+                        [origin.0, origin.1],
+                        [scale.0, scale.1],
+                    )
+                }
+                RetainedItemData::Curve { x, y } => curve_roi_stats(&managed.roi, x, y),
+            };
+            let label = if managed.name.is_empty() {
+                format!("ROI {index}")
+            } else {
+                managed.name.clone()
+            };
+            RoiStatsRow { label, stats }
+        })
+        .collect()
+}
+
 /// Capture a scalar image spec's raw pixels and geometry for live consumers, or
 /// `None` for an RGBA image (no scalar field to retain).
 fn image_spec_retained_data(spec: &ImageSpec<'_>) -> Option<RetainedItemData> {
@@ -4578,6 +4633,49 @@ impl PlotWidget {
                 false
             }
         }
+    }
+
+    /// Compute per-ROI statistics over the active item's retained data and store
+    /// them in `widget` (silx `ROIStatsWidget` bound to the active item): one
+    /// row per ROI on the plot, reduced inside that ROI via [`image_roi_stats`]
+    /// (image) / [`curve_roi_stats`] (curve). Returns `true` when there is an
+    /// active item with retained data to reduce; `false` otherwise (the widget
+    /// is then cleared).
+    ///
+    /// [`image_roi_stats`]: crate::widget::roi_stats::image_roi_stats
+    /// [`curve_roi_stats`]: crate::widget::roi_stats::curve_roi_stats
+    pub fn feed_roi_stats(
+        &self,
+        widget: &mut crate::widget::roi_stats_widget::RoiStatsWidget,
+    ) -> bool {
+        match self
+            .active_item
+            .and_then(|handle| self.retained_data(handle))
+        {
+            Some(data) => {
+                widget.set_rows(roi_stats_rows(self.rois(), data));
+                true
+            }
+            None => {
+                widget.set_rows(Vec::new());
+                false
+            }
+        }
+    }
+
+    /// Feed the active item's per-ROI statistics into `widget` and render its
+    /// table (silx `ROIStatsWidget`). Combines [`Self::feed_roi_stats`] with
+    /// [`RoiStatsWidget::ui`]; the table follows the active item and the live
+    /// ROI list.
+    ///
+    /// [`RoiStatsWidget::ui`]: crate::widget::roi_stats_widget::RoiStatsWidget::ui
+    pub fn show_roi_stats_widget(
+        &self,
+        ui: &mut egui::Ui,
+        widget: &mut crate::widget::roi_stats_widget::RoiStatsWidget,
+    ) {
+        self.feed_roi_stats(widget);
+        widget.ui(ui);
     }
 
     /// Feed an item's retained curve `(x, y)` into a [`FitWidget`] as its fit
@@ -9735,6 +9833,83 @@ mod tests {
             crate::core::stats::StatScope::All,
         );
         assert_eq!(rows[0].1, core);
+    }
+
+    #[test]
+    fn roi_stats_rows_image_match_image_roi_stats_per_roi() {
+        // Item 110: one row per ROI, each reduced over the active image's pixels
+        // inside that ROI via image_roi_stats (identical geometry/cast). The
+        // unnamed ROI gets the "ROI {index}" label; a named one keeps its name.
+        use crate::widget::roi_stats::image_roi_stats;
+        let pixels = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let data = RetainedItemData::Image {
+            data: pixels.clone(),
+            width: 3,
+            height: 2,
+            origin: (0.0, 0.0),
+            scale: (1.0, 1.0),
+            colormap: Box::new(Colormap::viridis(0.0, 1.0)),
+        };
+        let mut named = ManagedRoi::new(Roi::Rect {
+            x: (0.0, 2.0),
+            y: (0.0, 1.0),
+        });
+        named.name = "left".to_owned();
+        let rois = vec![
+            named,
+            ManagedRoi::new(Roi::Rect {
+                x: (1.0, 3.0),
+                y: (0.0, 2.0),
+            }),
+        ];
+
+        let rows = roi_stats_rows(&rois, &data);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].label, "left");
+        assert_eq!(rows[1].label, "ROI 1");
+
+        // Each row equals image_roi_stats over the same f32-cast pixels/geometry.
+        let f32_pixels: Vec<f32> = pixels.iter().map(|&v| v as f32).collect();
+        for (row, managed) in rows.iter().zip(rois.iter()) {
+            let expected = image_roi_stats(&managed.roi, &f32_pixels, 3, 2, [0.0, 0.0], [1.0, 1.0]);
+            assert_eq!(row.stats, expected);
+        }
+    }
+
+    #[test]
+    fn roi_stats_rows_curve_match_curve_roi_stats_per_roi() {
+        // Item 110: for a curve item each row reduces the curve's y inside the
+        // ROI's x-span via curve_roi_stats.
+        use crate::widget::roi_stats::curve_roi_stats;
+        let x = vec![0.0, 1.0, 2.0, 3.0, 4.0];
+        let y = vec![10.0, 20.0, 30.0, 40.0, 50.0];
+        let data = RetainedItemData::Curve {
+            x: x.clone(),
+            y: y.clone(),
+        };
+        let rois = vec![
+            ManagedRoi::new(Roi::VRange { x: (1.0, 3.0) }),
+            ManagedRoi::new(Roi::Rect {
+                x: (0.0, 2.0),
+                y: (0.0, 100.0),
+            }),
+        ];
+
+        let rows = roi_stats_rows(&rois, &data);
+        assert_eq!(rows.len(), 2);
+        for (row, managed) in rows.iter().zip(rois.iter()) {
+            assert_eq!(row.stats, curve_roi_stats(&managed.roi, &x, &y));
+        }
+    }
+
+    #[test]
+    fn roi_stats_rows_empty_without_rois() {
+        // Item 110: no ROIs -> no rows (the table is empty even with data).
+        let data = RetainedItemData::Curve {
+            x: vec![0.0, 1.0],
+            y: vec![1.0, 2.0],
+        };
+        assert!(roi_stats_rows(&[], &data).is_empty());
     }
 
     #[test]

@@ -6,14 +6,14 @@
 //! Run with: `cargo run --example high_level_roi_stats`
 
 use eframe::egui;
-use egui_silx::{Colormap, Plot2D, PlotWidget, Roi, ValueStats};
+use egui_silx::{Colormap, Plot2D, PlotWidget, Roi, RoiStatsWidget};
 
 const WIDTH: u32 = 180;
 const HEIGHT: u32 = 140;
 
 struct RoiStatsApp {
     plot: Plot2D,
-    image: Vec<f32>,
+    roi_stats: RoiStatsWidget,
 }
 
 impl RoiStatsApp {
@@ -40,7 +40,10 @@ impl RoiStatsApp {
         plot.add_roi(Roi::VRange { x: (115.0, 145.0) });
         plot.drain_events();
 
-        Self { plot, image }
+        Self {
+            plot,
+            roi_stats: RoiStatsWidget::new(),
+        }
     }
 }
 
@@ -48,14 +51,13 @@ impl eframe::App for RoiStatsApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         egui::Panel::right("roi_stats")
             .resizable(true)
-            .default_size(250.0)
+            .default_size(320.0)
             .show_inside(ui, |ui| {
                 ui.heading("ROI stats");
-                for (index, managed) in self.plot.rois().iter().enumerate() {
-                    ui.label(format!("ROI {index}: {:?}", managed.roi));
-                    show_stats(ui, roi_stats(&self.image, managed.roi.clone()));
-                    ui.separator();
-                }
+                // One row per ROI, reduced over the active image's pixels inside
+                // each ROI (silx ROIStatsWidget). The table follows the active
+                // item and the live ROI list.
+                self.plot.show_roi_stats_widget(ui, &mut self.roi_stats);
             });
 
         egui::CentralPanel::default().show_inside(ui, |ui| {
@@ -91,39 +93,6 @@ fn build_image() -> Vec<f32> {
         }
     }
     data
-}
-
-fn roi_stats(image: &[f32], roi: Roi) -> ValueStats {
-    let (x, y) = match roi {
-        Roi::Rect { x, y } => (x, y),
-        Roi::HRange { y } => ((0.0, WIDTH as f64), y),
-        Roi::VRange { x } => (x, (0.0, HEIGHT as f64)),
-        _ => return ValueStats::default(),
-    };
-
-    let col0 = x.0.min(x.1).floor().clamp(0.0, WIDTH as f64) as u32;
-    let col1 = x.0.max(x.1).ceil().clamp(0.0, WIDTH as f64) as u32;
-    let row0 = y.0.min(y.1).floor().clamp(0.0, HEIGHT as f64) as u32;
-    let row1 = y.0.max(y.1).ceil().clamp(0.0, HEIGHT as f64) as u32;
-
-    let mut values = Vec::with_capacity(((col1 - col0) * (row1 - row0)) as usize);
-    for row in row0..row1 {
-        let start = (row * WIDTH + col0) as usize;
-        let end = (row * WIDTH + col1) as usize;
-        values.extend_from_slice(&image[start..end]);
-    }
-    ValueStats::from_f32(&values)
-}
-
-fn show_stats(ui: &mut egui::Ui, stats: ValueStats) {
-    ui.label(format!("pixels: {}", stats.count));
-    ui.label(format!("min: {}", fmt_value(stats.min)));
-    ui.label(format!("max: {}", fmt_value(stats.max)));
-    ui.label(format!("mean: {}", fmt_value(stats.mean)));
-}
-
-fn fmt_value(value: Option<f64>) -> String {
-    value.map_or_else(|| "n/a".to_owned(), |value| format!("{value:.4}"))
 }
 
 fn main() -> eframe::Result {

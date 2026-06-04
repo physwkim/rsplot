@@ -36,6 +36,13 @@ autoscale wired to raw pixels (row 133, ◐→✅). The pure fill primitives (`u
 feeds the draw machine and, on finish, `fill_from_draw` converts data→cells (silx `int()`/`astype(int64)` truncation,
 `_plotDrawEvent`) and masks the level; `ImageView::handle_mask_shape_draw` paints the rubber-band preview.
 
+**ROIStatsWidget display (main, not pushed):** ≈217 Done · ~104 open — 1 H row closed: the per-ROI statistics table
+(row 111). `RoiStatsWidget` renders one row per ROI (`ROI | N | min | max | mean | sum | integral`) over the active
+item; `PlotWidget::feed_roi_stats`/`show_roi_stats_widget` reduce each ROI via the pre-existing
+`image_roi_stats`/`curve_roi_stats` and follow the active item + live ROI list. Pure row-building (`roi_stats_rows`)
+is headlessly tested (image/curve per-ROI, empty); the active-item feed + render stay GPU-unverified. The
+`high_level_roi_stats` example now uses the widget instead of a hand-rolled bbox reduction.
+
 Status legend: ✅ Done · ◐ Partial · ☐ Missing · ✅ N/A (resolved: parity achieved differently). Effort S/M/L. Priority H/M/L.
 
 > This file tracks the port. The per-area tables below are the **as-of-sweep
@@ -108,7 +115,7 @@ as-of-sweep reference.
 | ✅ Done | H | M | ROI label/name text on the live plot | items/_roi_base.py:492-511 (`_updateText`) | Wave 13: `ManagedRoi.name` plumbed through `chrome::roi_appearance.name` into the live `draw_rois` path (empty name → no label). Same single-collection fix as the color row |
 | ✅ Done | H | S | ROI selection/highlight on the live plot | tools/roi.py:528-590 (`setHighlighted`) | Wave 13: `Plot::set_current_roi` (sole owner of `ManagedRoi.selected`) drives the live highlight; `draw_roi` thickens the current ROI's stroke. Invariant (exactly one selected; out-of-range clears; remove adjusts index) headlessly tested |
 | ☐ Missing | H | L | CurvesROIWidget integration | CurvesROIWidget.py:62-400 | No dedicated dock widget with ROI table + per-curve ROI stats |
-| ☐ Missing | H | L | ROIStatsWidget display | ROIStatsWidget.py | No dock widget showing min/max/mean/sum/integral for a selected ROI + item (`image_roi_stats`/`curve_roi_stats` already compute these) |
+| ✅ Done | H | L | ROIStatsWidget display | ROIStatsWidget.py | W15: `RoiStatsWidget` renders one row per ROI (`ROI \| N \| min \| max \| mean \| sum \| integral`) over the active item; `PlotWidget::feed_roi_stats`/`show_roi_stats_widget` reduce each ROI via `image_roi_stats`/`curve_roi_stats` and follow the active item + live ROI list. Row-building (`roi_stats_rows`) headlessly tested (image/curve per-ROI, empty); the active-item feed + render stay GPU-unverified. Example `high_level_roi_stats` uses it |
 | ◐ Partial | M | M | EllipseROI orientation/rotation | items/roi.py:875-1177 | Axis-aligned only; missing rotational geometry / `_orientation` field |
 | ◐ Partial | M | M | CircleROI dedicated handle UI | items/roi.py:727-950 | On-plot creation done; editing is whole-ROI translate + center/radius map, no dedicated handle UI |
 | ◐ Partial | M | M | CrossROI marker symbols | items/roi.py:133-185 | Creation works; missing marker-symbol control + composite handle/label management |
@@ -1089,7 +1096,7 @@ egui-silx has a minimal but functional implementation of colormaps with 8 catalo
 | ◐ | L | S | Colormap copy/comparison/serialization | `/Users/stevek/codes/silx/src/silx/gui/colors.py:399-423, 960-1050` | silx Colormap has copy(), setFromColormap(), __eq__, restoreState(), saveState() for round-trip serialization and state management. egui-silx Colormap derives Clone/PartialEq but lacks setFromColormap |
 | ☐ | L | S | Colormap editability flag | `/Users/stevek/codes/silx/src/silx/gui/colors.py:351, 659-674` | silx Colormap._editable flag controls whether setName, setNormalization, etc. are allowed; raises NotEditableError if frozen. egui-silx Colormap has no editability concept. Required: add editable bool |
 
-## ROI system (creation, editing, manager, statistics)  — 8✅ 10◐ 19☐
+## ROI system (creation, editing, manager, statistics)  — 9✅ 10◐ 18☐
 
 egui-silx implements a ROI core with all 11 silx shape kinds (Rect, HRange, VRange, Point, Line, Polygon, Cross, Circle, Ellipse [axis-aligned], Arc, Band), supporting on-plot interactive creation for every kind (Wave 12: arm a draw shape, draw it, the ROI is appended), edge dragging via handle-detection, and whole-ROI translate — all in pure data space. The manager provides basic add/remove/list UI and event reporting (RoiChanged + RoiCreated). However, it still lacks much of silx's visual/behavioral richness: no per-ROI color, naming/labels, selection highlighting, handle-symbol customization, style properties (line width, style, gap color), specialized edit handles (Ellipse orientation, Circle/Arc radius handles, Band rotation, Arc start/end-angle sub-modes), statistics calculation (mean, sum, integral, peaks), curves ROI integration with per-ROI curve stats tables, or ROI persistence/load features.
 
@@ -1099,7 +1106,7 @@ egui-silx implements a ROI core with all 11 silx shape kinds (Rect, HRange, VRan
 | ◐ | H | L | Manager ROI list as table widget (ROITable/CurvesROIWidget) | `CurvesROIWidget.py:62-400, ROITable:452-860` | egui shows a scrollable list with remove button per ROI and add buttons (Rect/HRange/VRange/Point/Line only). silx ROITable is a rich table with per-ROI stats columns (min/max/sum/mean/etc.), editable |
 | ☐ | H | L | ROI statistics calculation (mean, sum, min, max, integral, peaks) | `CurvesROIWidget.py:355-430, ROIStatsWidget.py (full file)` | silx calculates and displays ROI stats for curves and images; egui has no stats module or calculation. |
 | ☐ | H | L | CurvesROIWidget integration (ROI stats per curve item) | `CurvesROIWidget.py (entire file)` | silx CurvesROIWidget is a dedicated QWidget showing ROI table with per-curve stats; egui has no integration with curve items. |
-| ☐ | H | L | ROIStatsWidget (image/curve ROI stats display) | `ROIStatsWidget.py (entire file)` | silx ROIStatsWidget is a dock widget showing statistics for a selected ROI + item; egui has no stats display widget. |
+| ✅ | H | L | ROIStatsWidget (image/curve ROI stats display) | `ROIStatsWidget.py (entire file)` | W15: `RoiStatsWidget` shows a per-ROI stats table (`ROI \| N \| min \| max \| mean \| sum \| integral`) over the active item via `PlotWidget::feed_roi_stats`/`show_roi_stats_widget`, reducing each ROI with `image_roi_stats`/`curve_roi_stats`. |
 | ☐ | H | M | ROI per-instance color (independent from manager default) | `items/_roi_base.py:389-405, tools/roi.py:713-742` | silx ROI has setColor()/getColor(); egui Roi struct stores no color. Manager has manager-level color only (ui buttons). |
 | ☐ | H | M | ROI label/text display on canvas | `items/_roi_base.py:492-511` | silx draws ROI name as text overlay; egui draw_rois (chrome.rs:492-540) draws no labels; needs text layer + positioning. |
 | ☐ | H | M | ROI selection/highlighting (visual feedback) | `tools/roi.py:528-590 (setCurrentRoi/getCurrentRoi/sigCurrentRoiChanged)` | silx highlights selected ROI via setHighlighted(); egui has no selection state in Roi struct or rendering; no visual distinction. |
