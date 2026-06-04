@@ -406,17 +406,22 @@ impl PlotView {
         }
 
         // Box-zoom selection rectangle (drawn last, on top of everything).
+        // silx's Zoom interaction draws it via setSelectionArea(fill="none")
+        // — an unfilled dashed rectangle, not a solid fill
+        // (PlotInteraction.py:430). Routed through the same selection-overlay
+        // renderer as the draw-mode preview so both stay identical.
         if let Some(sel) = selection {
-            painter.rect_filled(
-                sel,
-                egui::CornerRadius::ZERO,
-                crate::core::color::with_alpha(style.axis, 32),
-            );
-            painter.rect_stroke(
-                sel,
-                egui::CornerRadius::ZERO,
-                Stroke::new(1.0, style.axis),
-                egui::StrokeKind::Inside,
+            let corners = [
+                sel.left_top(),
+                sel.right_top(),
+                sel.right_bottom(),
+                sel.left_bottom(),
+            ];
+            draw_selection_polygon(
+                painter,
+                &corners,
+                true,
+                interaction::SelectionStyle::new(interaction::FillMode::None, style.axis),
             );
         }
 
@@ -508,7 +513,7 @@ fn draw_overlay(
     points: &[(f64, f64)],
     style: interaction::SelectionStyle,
 ) {
-    use interaction::{DrawMode, FillMode};
+    use interaction::DrawMode;
 
     if points.is_empty() {
         return;
@@ -520,13 +525,37 @@ fn draw_overlay(
 
     // FreeHand / Line are open polylines; the rest are closed areas.
     let closed = !matches!(mode, DrawMode::FreeHand | DrawMode::Line);
+    draw_selection_polygon(painter, &pix, closed, style);
+}
+
+/// Paint a selection-area overlay from screen-space polygon vertices `pix`:
+/// the fill per `style.fill` plus silx's dashed outline (`linestyle="--"`,
+/// `PlotInteraction.setSelectionArea`, `PlotInteraction.py:98-141`). `closed`
+/// marks an area (filled, outline wraps back to the first vertex) vs. an open
+/// polyline. Shared by the box-zoom rubber band and the draw-mode preview so
+/// both render identically.
+fn draw_selection_polygon(
+    painter: &egui::Painter,
+    pix: &[Pos2],
+    closed: bool,
+    style: interaction::SelectionStyle,
+) {
+    use interaction::FillMode;
+
+    if pix.is_empty() {
+        return;
+    }
 
     if closed && pix.len() >= 3 {
-        let bb = Rect::from_points(&pix);
+        let bb = Rect::from_points(pix);
         match style.fill {
             FillMode::Solid => {
                 let fill = crate::core::color::with_alpha(style.color, style.color.a() / 2);
-                painter.add(egui::Shape::convex_polygon(pix.clone(), fill, Stroke::NONE));
+                painter.add(egui::Shape::convex_polygon(
+                    pix.to_vec(),
+                    fill,
+                    Stroke::NONE,
+                ));
             }
             FillMode::Hatch => {
                 // Diagonal hatch over the bounding box (the box-clipped
@@ -542,7 +571,7 @@ fn draw_overlay(
 
     // Dashed outline (silx linestyle="--").
     let stroke = Stroke::new(1.5, style.color);
-    let mut outline = pix.clone();
+    let mut outline = pix.to_vec();
     if closed && outline.len() >= 2 {
         outline.push(outline[0]);
     }
@@ -1745,6 +1774,40 @@ mod tests {
         );
         // The finished draw also created the ROI on the same frame.
         assert_eq!(end.roi_created, Some(0));
+    }
+
+    #[test]
+    fn box_zoom_rubber_band_commits_only_on_release() {
+        // A primary drag in Zoom mode paints the box-zoom rubber band every
+        // frame (now through the shared selection overlay, silx Zoom
+        // fill="none"), but commits the zoom only on release: mid-drag the view
+        // is unchanged; release narrows it to the selected region. Drives the
+        // render path with FillMode::None to guard against a regression there.
+        let ctx = egui::Context::default();
+        let mut plot = Plot::new(0);
+        plot.limits = (0.0, 10.0, 0.0, 10.0);
+        let before = plot.limits;
+        let mode = PlotInteractionMode::Zoom;
+        let screen = egui::vec2(200.0, 200.0);
+
+        let (_r0, area) = run_mode_frame(&ctx, &mut plot, mode, screen_input(screen));
+        let a = area.center() - egui::vec2(20.0, 20.0);
+        let b = area.center() + egui::vec2(20.0, 20.0);
+
+        let _ = run_mode_frame(&ctx, &mut plot, mode, press_at(screen, a));
+        // Mid-drag: rubber band renders this frame; the view must not commit yet.
+        let _ = run_mode_frame(&ctx, &mut plot, mode, move_to(screen, b));
+        assert_eq!(plot.limits, before, "box zoom must not commit mid-drag");
+
+        // Release commits the box zoom, narrowing the x/y spans.
+        let _ = run_mode_frame(&ctx, &mut plot, mode, release_at(screen, b));
+        let (x0, x1, y0, y1) = plot.limits;
+        assert!(
+            x1 - x0 < before.1 - before.0 && y1 - y0 < before.3 - before.2,
+            "box zoom narrows the view on release: {:?} -> {:?}",
+            before,
+            plot.limits
+        );
     }
 
     #[test]
