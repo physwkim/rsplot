@@ -28,12 +28,26 @@ struct RoiDrag {
     edge: RoiEdge,
 }
 
+/// An in-progress draggable-marker drag, stashed in egui temp memory across
+/// frames (mirrors [`RoiDrag`]). `index` is the index into `plot.markers` (the
+/// per-frame mirror) that was grabbed; `anchor` is the marker's data position at
+/// grab time, the constraint anchor passed to
+/// [`Marker::drag`](crate::core::marker::Marker::drag) each frame.
+#[derive(Clone, Copy)]
+struct MarkerDrag {
+    index: usize,
+    anchor: (f64, f64),
+}
+
 /// What `apply_interaction` produced this frame.
 struct Interaction {
     /// In-progress box-zoom selection rectangle (screen space).
     selection: Option<egui::Rect>,
     /// Index of the ROI whose bounds an edge drag changed this frame.
     roi_changed: Option<usize>,
+    /// Handle of the marker a drag moved this frame (silx `markerMoving`), or
+    /// `None`. Set only on the frame the marker actually moved.
+    marker_moved: Option<crate::core::backend::ItemHandle>,
     /// The low-level pointer event detected over the data area this frame
     /// (click / double-click / move), or `None`.
     pointer_event: Option<interaction::PlotPointerEvent>,
@@ -76,6 +90,11 @@ pub struct PlotResponse {
     /// Index into `Plot::rois` of the region whose bounds changed this frame
     /// from an edge drag, or `None` (`doc/design.md` §13 C3).
     pub roi_changed: Option<usize>,
+    /// Handle of the marker an on-screen drag moved this frame (silx
+    /// `markerMoving`), or `None`. The mirror `Plot::markers` is already updated
+    /// for this frame's render; `PlotWidget::show` persists the change back to
+    /// the backend item and emits [`crate::PlotEvent::MarkerMoved`].
+    pub marker_moved: Option<crate::core::backend::ItemHandle>,
     /// The low-level pointer event detected over the data area this frame
     /// (silx `prepareMouseSignal` "mouseClicked" / "mouseDoubleClicked" /
     /// "mouseMoved", `PlotEvents.py:58-71`), or `None` when there was none. The
@@ -166,6 +185,7 @@ impl PlotView {
         let Interaction {
             selection,
             roi_changed,
+            marker_moved,
             pointer_event,
         } = apply_interaction(ui, &response, plot, area, &view, interaction_mode);
 
@@ -327,6 +347,7 @@ impl PlotView {
             response,
             transform,
             roi_changed,
+            marker_moved,
             pointer_event,
             // The plain show path runs no draw state machine; show_with_draw
             // fills this in below.
@@ -532,9 +553,50 @@ fn apply_interaction(
         }
     }
 
+    // Marker drag (silx item-drag branch of the default interaction): the
+    // highest-precedence primary-drag consumer in every mode except MaskDraw
+    // (which reserves the primary drag for mask painting). It pre-empts
+    // pan/zoom/ROI so a draggable marker under the cursor wins the gesture.
+    let id = response.id;
+    let marker_id = id.with("marker-drag");
+    let mut marker_moved = None;
+    // Grab on drag-start: hit-test the topmost draggable marker at the press.
+    if mode != PlotInteractionMode::MaskDraw
+        && response.drag_started_by(PointerButton::Primary)
+        && let Some(p) = response.interact_pointer_pos()
+        && let Some(index) = interaction::marker_at(&plot.markers, view, p)
+    {
+        let anchor = plot.markers[index].position();
+        ui.data_mut(|d| d.insert_temp(marker_id, MarkerDrag { index, anchor }));
+    }
+    // Whether a marker drag is active this frame; gates pan/zoom/ROI below so
+    // the marker drag is the sole primary-drag consumer while it runs.
+    let marker_dragging = ui
+        .data_mut(|d| d.get_temp::<MarkerDrag>(marker_id))
+        .is_some();
+    // Apply / finish the active marker drag.
+    if let Some(md) = ui.data_mut(|d| d.get_temp::<MarkerDrag>(marker_id)) {
+        if response.dragged_by(PointerButton::Primary)
+            && let Some(cur) = response.interact_pointer_pos()
+            && let Some(marker) = plot.markers.get_mut(md.index)
+        {
+            // Live-render this frame via the mirror; persistence to the backend
+            // item happens in PlotWidget::show via the returned handle.
+            marker.drag(md.anchor, view.pixel_to_data(cur));
+            marker_moved = plot.marker_handles.get(md.index).copied();
+        }
+        if response.drag_stopped_by(PointerButton::Primary) {
+            ui.data_mut(|d| d.remove::<MarkerDrag>(marker_id));
+        }
+    }
+
     // Pan: secondary-drag always pans; pan mode also binds primary-drag to pan.
-    let primary_pan =
-        mode == PlotInteractionMode::Pan && response.dragged_by(PointerButton::Primary);
+    // A marker drag pre-empts the primary-drag pan (secondary-drag pan is
+    // unaffected, matching silx — only the item-drag branch competes with the
+    // primary pan).
+    let primary_pan = mode == PlotInteractionMode::Pan
+        && !marker_dragging
+        && response.dragged_by(PointerButton::Primary);
     if response.dragged_by(PointerButton::Secondary) || primary_pan {
         // Push the pre-pan view once, at the start of the pan gesture, so
         // zoom-back can restore it (silx pushes on box-zoom; here the limits
@@ -568,11 +630,13 @@ fn apply_interaction(
     // Left-drag start: select/zoom modes prefer grabbing an ROI edge under the
     // cursor. Zoom mode falls back to a box-zoom selection; select mode does
     // not, so item/handle interactions are not preempted by zoom. MaskDraw
-    // reserves the primary drag for mask painting, so it grabs no ROI edge.
-    let id = response.id;
+    // reserves the primary drag for mask painting, so it grabs no ROI edge. A
+    // marker drag (grabbed above) pre-empts both, so neither runs while it is
+    // active.
     let roi_id = id.with("roi-drag");
     let mut roi_changed = None;
     if mode_grabs_roi_edge(mode)
+        && !marker_dragging
         && response.drag_started_by(PointerButton::Primary)
         && let Some(p) = response.interact_pointer_pos()
     {
@@ -605,8 +669,10 @@ fn apply_interaction(
         if response.drag_stopped_by(PointerButton::Primary) {
             ui.data_mut(|d| d.remove::<RoiDrag>(roi_id));
         }
-    } else {
-        // Box zoom: left-drag selects a rectangle; release zooms to it.
+    } else if !marker_dragging {
+        // Box zoom: left-drag selects a rectangle; release zooms to it. A marker
+        // drag pre-empts box zoom (no box-zoom start was stored above when a
+        // marker was grabbed), so this is skipped while a marker drag is active.
         if mode == PlotInteractionMode::Zoom && response.dragged_by(PointerButton::Primary) {
             let start = ui.data_mut(|d| d.get_temp::<Pos2>(id));
             if let (Some(start), Some(cur)) = (start, response.interact_pointer_pos()) {
@@ -634,13 +700,39 @@ fn apply_interaction(
         }
     }
 
+    // Marker cursor (silx size cursor over a draggable marker), taking
+    // precedence over the ROI-edge cursor: while dragging a marker show that
+    // marker's drag-DOF cursor; otherwise, when hovering a draggable marker (in
+    // any mode except MaskDraw, which owns the primary drag), show its cursor.
+    // `marker_cursor_set` suppresses the ROI-edge cursor below so a marker under
+    // an ROI handle still shows the marker's cursor.
+    let mut marker_cursor_set = false;
+    if mode != PlotInteractionMode::MaskDraw {
+        let cursor_marker = if marker_dragging {
+            // While dragging, follow the grabbed marker's index.
+            ui.data_mut(|d| d.get_temp::<MarkerDrag>(marker_id))
+                .and_then(|md| plot.markers.get(md.index))
+        } else if let Some(p) = response.hover_pos().filter(|p| area.contains(*p)) {
+            interaction::marker_at(&plot.markers, view, p).and_then(|i| plot.markers.get(i))
+        } else {
+            None
+        };
+        if let Some(marker) = cursor_marker {
+            ui.ctx()
+                .set_cursor_icon(interaction::marker_cursor(marker).to_egui());
+            marker_cursor_set = true;
+        }
+    }
+
     // Cursor shape: while hovering an ROI edge (and not box-zoom dragging), show
     // the matching resize/move cursor so a grabbable handle is discoverable,
     // mirroring silx `_setCursorForMarker` (`PlotInteraction.py:1165-1184`). Skip
     // in pan mode (primary drag pans there), in MaskDraw mode (primary drag
-    // paints the mask, so the edge is not grabbable), and while an edge drag is
-    // active.
+    // paints the mask, so the edge is not grabbable), while an edge drag is
+    // active, and when a marker cursor already claimed this frame (marker takes
+    // precedence over an ROI edge).
     if mode_grabs_roi_edge(mode)
+        && !marker_cursor_set
         && selection.is_none()
         && !response.dragged_by(PointerButton::Primary)
         && let Some(p) = response.hover_pos()
@@ -667,6 +759,7 @@ fn apply_interaction(
     Interaction {
         selection,
         roi_changed,
+        marker_moved,
         pointer_event,
     }
 }

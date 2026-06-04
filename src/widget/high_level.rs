@@ -2389,6 +2389,23 @@ impl PlotWidget {
         if let Some(index) = response.roi_changed {
             self.events.push(PlotEvent::RoiChanged { index });
         }
+        // Persist an on-screen marker drag: apply_interaction live-mutated the
+        // mirror `plot.markers` for this frame's render, but the mirror is
+        // rebuilt from the backend items on every sync, so the moved data must
+        // be written back to the owning backend item. Read the new marker from
+        // the mirror (located via the parallel marker_handles), then persist it.
+        if let Some(handle) = response.marker_moved {
+            let plot = self.backend.plot();
+            let moved = plot
+                .marker_handles
+                .iter()
+                .position(|&h| h == handle)
+                .and_then(|index| plot.markers.get(index).cloned());
+            if let Some(marker) = moved {
+                self.backend.update_marker(handle, marker);
+                self.events.push(PlotEvent::MarkerMoved { handle });
+            }
+        }
         response
     }
 
