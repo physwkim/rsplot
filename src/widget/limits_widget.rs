@@ -1,10 +1,9 @@
 use crate::core::transform::YAxis;
 use crate::widget::high_level::Plot2D;
-use egui::Window;
 
 /// A widget for interactively setting the plot limits, scaling, and grid options.
 pub struct LimitsWidget {
-    window_id: egui::Id,
+    win: crate::widget::detached::DetachedWindow,
     pub open: bool,
 
     // Staged limits. When the user types/drags values, they update these,
@@ -25,7 +24,10 @@ pub struct LimitsWidget {
 impl Default for LimitsWidget {
     fn default() -> Self {
         Self {
-            window_id: egui::Id::new("limits_widget"),
+            win: crate::widget::detached::DetachedWindow::new(
+                egui::Id::new("limits_widget"),
+                egui::vec2(300.0, 360.0),
+            ),
             open: false,
             x_min: 0.0,
             x_max: 1.0,
@@ -68,14 +70,21 @@ impl LimitsWidget {
             self.initialized = true;
         }
 
-        let mut open = self.open;
+        if !self.open {
+            return;
+        }
         let mut apply = false;
+        let pos = self.win.position(ctx);
+        let id = self.win.id();
+        let size = self.win.size();
 
-        Window::new("Axis & Limits Settings")
-            .id(self.window_id)
-            .open(&mut open)
-            .resizable(false)
-            .show(ctx, |ui| {
+        let signals = crate::widget::detached::show_detached(
+            ctx,
+            id,
+            "Axis & Limits Settings",
+            size,
+            pos,
+            |ui| {
                 ui.group(|ui| {
                     ui.heading("X Axis");
                     ui.horizontal(|ui| {
@@ -133,9 +142,10 @@ impl LimitsWidget {
                         self.sync_from_plot(plot);
                     }
                 });
-            });
+            },
+        );
 
-        self.open = open;
+        self.win.apply_signals(&signals, &mut self.open);
 
         if apply {
             // Apply limits to plot

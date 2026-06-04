@@ -27,7 +27,7 @@ pub struct ColormapDialog {
     /// 0)`.
     pub nan_color: [u8; 4],
 
-    window_id: egui::Id,
+    win: crate::widget::detached::DetachedWindow,
     pub open: bool,
 }
 
@@ -44,7 +44,10 @@ impl Default for ColormapDialog {
             gamma: 2.0,
             // silx Colormap._DEFAULT_NAN_COLOR = (255, 255, 255, 0).
             nan_color: [255, 255, 255, 0],
-            window_id: egui::Id::new("colormap_dialog"),
+            win: crate::widget::detached::DetachedWindow::new(
+                egui::Id::new("colormap_dialog"),
+                egui::vec2(320.0, 420.0),
+            ),
             open: false,
         }
     }
@@ -68,14 +71,16 @@ impl ColormapDialog {
 
     /// Show the Colormap dialog. If it's open and modified, updates the plot in real-time.
     pub fn show(&mut self, ctx: &egui::Context, plot: &mut Plot2D) {
-        let mut open = self.open;
+        if !self.open {
+            return;
+        }
         let mut changed = false;
+        let pos = self.win.position(ctx);
+        let id = self.win.id();
+        let size = self.win.size();
 
-        egui::Window::new("Colormap")
-            .id(self.window_id)
-            .open(&mut open)
-            .resizable(false)
-            .show(ctx, |ui| {
+        let signals =
+            crate::widget::detached::show_detached(ctx, id, "Colormap", size, pos, |ui| {
                 ui.horizontal(|ui| {
                     ui.label("Name:");
                     let prev_name = self.name;
@@ -224,7 +229,7 @@ impl ColormapDialog {
                 }
             });
 
-        self.open = open;
+        self.win.apply_signals(&signals, &mut self.open);
 
         if changed {
             self.apply(plot);

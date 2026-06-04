@@ -3992,13 +3992,14 @@ impl PlotWidget {
         // false so `rename_state` stays cleared.
         let mut keep_open = true;
         let mut apply = false;
-        let mut open = true;
-        egui::Window::new("Rename")
-            .id(ui.id().with(("legend_rename", handle)))
-            .collapsible(false)
-            .resizable(false)
-            .open(&mut open)
-            .show(ui.ctx(), |ui| {
+        let id = ui.id().with(("legend_rename", handle));
+        let signals = crate::widget::detached::show_detached(
+            ui.ctx(),
+            id,
+            "Rename",
+            egui::vec2(260.0, 110.0),
+            None,
+            |ui| {
                 let edit = ui.add(egui::TextEdit::singleline(&mut buffer).desired_width(200.0));
                 // Enter in the field applies, matching a dialog's default button.
                 if edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
@@ -4012,7 +4013,8 @@ impl PlotWidget {
                         keep_open = false;
                     }
                 });
-            });
+            },
+        );
         if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
             keep_open = false;
         }
@@ -4020,8 +4022,8 @@ impl PlotWidget {
             self.set_item_legend(handle, buffer.clone());
             keep_open = false;
         }
-        // The window's own close button (`open`) is a Cancel.
-        if !open {
+        // The detached window's own close button is a Cancel.
+        if signals.close_requested {
             keep_open = false;
         }
         if keep_open {
@@ -5602,17 +5604,18 @@ impl Plot2D {
             let mut params = ui
                 .data(|d| d.get_temp::<MedianFilterParams>(params_id))
                 .unwrap_or_default();
-            let mut window_open = true;
-            egui::Window::new("Median filter")
-                .id(open_id.with("window"))
-                .open(&mut window_open)
-                .resizable(false)
-                .collapsible(false)
-                .show(ui.ctx(), |ui| {
+            let signals = crate::widget::detached::show_detached(
+                ui.ctx(),
+                open_id.with("window"),
+                "Median filter",
+                egui::vec2(320.0, 220.0),
+                None,
+                |ui| {
                     applied = self.show_median_filter(ui, &mut params);
-                });
+                },
+            );
             ui.data_mut(|d| d.insert_temp(params_id, params));
-            if !window_open {
+            if signals.close_requested {
                 open = false;
             }
         }
@@ -5723,17 +5726,18 @@ impl Plot2D {
 
         if open {
             let mut n_bins = ui.data(|d| d.get_temp::<Option<usize>>(bins_id)).flatten();
-            let mut window_open = true;
-            egui::Window::new("Pixel intensity")
-                .id(open_id.with("window"))
-                .open(&mut window_open)
-                .resizable(true)
-                .collapsible(false)
-                .show(ui.ctx(), |ui| {
+            let signals = crate::widget::detached::show_detached(
+                ui.ctx(),
+                open_id.with("window"),
+                "Pixel intensity",
+                egui::vec2(480.0, 360.0),
+                None,
+                |ui| {
                     self.show_pixel_histogram(ui, &mut n_bins);
-                });
+                },
+            );
             ui.data_mut(|d| d.insert_temp(bins_id, n_bins));
-            if !window_open {
+            if signals.close_requested {
                 open = false;
             }
         }

@@ -97,7 +97,7 @@ pub struct FitWidget {
     plot: Plot1D,
     data_handle: Option<ItemHandle>,
     fit_handle: Option<ItemHandle>,
-    window_id: egui::Id,
+    win: crate::widget::detached::DetachedWindow,
     open: bool,
 
     // Data
@@ -126,7 +126,10 @@ impl FitWidget {
             plot,
             data_handle: None,
             fit_handle: None,
-            window_id: egui::Id::new(plot_id).with("fit_widget"),
+            win: crate::widget::detached::DetachedWindow::new(
+                egui::Id::new(plot_id).with("fit_widget"),
+                egui::vec2(600.0, 400.0),
+            ),
             open: false,
             x_data: Vec::new(),
             y_data: Vec::new(),
@@ -324,12 +327,14 @@ impl FitWidget {
 
     /// Show the fit widget using the given egui context.
     pub fn show(&mut self, ctx: &egui::Context) {
-        let mut open = self.open;
-        egui::Window::new("Fit Widget")
-            .id(self.window_id)
-            .open(&mut open)
-            .default_size([600.0, 400.0])
-            .show(ctx, |ui| {
+        if !self.open {
+            return;
+        }
+        let pos = self.win.position(ctx);
+        let id = self.win.id();
+        let size = self.win.size();
+        let signals =
+            crate::widget::detached::show_detached(ctx, id, "Fit Widget", size, pos, |ui| {
                 ui.horizontal(|ui| {
                     ui.label("Fit Function:");
                     egui::ComboBox::from_id_salt("fit_function_combo")
@@ -399,7 +404,7 @@ impl FitWidget {
                 // Show the plot
                 self.plot.show(ui);
             });
-        self.open = open;
+        self.win.apply_signals(&signals, &mut self.open);
     }
 }
 

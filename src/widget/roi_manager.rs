@@ -8,7 +8,7 @@
 //! color, a name label, and a thicker outline when selected) goes through
 //! [`chrome::draw_roi`](crate::widget::chrome::draw_roi).
 
-use egui::{Color32, Window};
+use egui::Color32;
 
 use crate::core::items::LineStyle;
 use crate::core::roi::Roi;
@@ -105,8 +105,8 @@ impl ManagedRoi {
 /// mirroring silx `RegionOfInterestManager`. The geometry can be drawn over a
 /// plot with [`Self::draw`].
 pub struct RoiManagerWidget {
-    window_id: egui::Id,
-    /// Whether the floating manager window is shown.
+    win: crate::widget::detached::DetachedWindow,
+    /// Whether the detached manager window is shown.
     pub open: bool,
     rois: Vec<ManagedRoi>,
     /// Index of the current ROI, or `None`.
@@ -119,7 +119,10 @@ pub struct RoiManagerWidget {
 impl Default for RoiManagerWidget {
     fn default() -> Self {
         Self {
-            window_id: egui::Id::new("roi_manager_widget"),
+            win: crate::widget::detached::DetachedWindow::new(
+                egui::Id::new("roi_manager_widget"),
+                egui::vec2(320.0, 360.0),
+            ),
             open: false,
             rois: Vec::new(),
             current: None,
@@ -238,16 +241,17 @@ impl RoiManagerWidget {
     /// buttons to add each ROI kind centered on the plot view, and a clear-all
     /// button (silx `RegionOfInterestTableWidget` / `RegionOfInterestManager`).
     pub fn show(&mut self, ctx: &egui::Context, plot: &mut Plot2D) {
-        let mut open = self.open;
-        Window::new("ROI Manager")
-            .id(self.window_id)
-            .open(&mut open)
-            .resizable(true)
-            .min_width(240.0)
-            .show(ctx, |ui| {
+        if !self.open {
+            return;
+        }
+        let pos = self.win.position(ctx);
+        let id = self.win.id();
+        let size = self.win.size();
+        let signals =
+            crate::widget::detached::show_detached(ctx, id, "ROI Manager", size, pos, |ui| {
                 self.ui(ui, plot);
             });
-        self.open = open;
+        self.win.apply_signals(&signals, &mut self.open);
     }
 
     /// Render the manager controls into `ui`. Seeds new ROIs at the center of
