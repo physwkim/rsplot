@@ -36,47 +36,79 @@ pub struct AxisConstraints {
 impl AxisConstraints {
     /// Return `(lo, hi)` clamped so all set constraints are satisfied. The
     /// span is corrected first (centered on the current midpoint), then the
-    /// position window is clamped (shifting both ends equally).
+    /// position window is clamped.
+    ///
+    /// Mirrors silx `ViewConstraints` (`_utils/panzoom.py`) with
+    /// `allow_scaling=True` — the only mode egui-silx uses, since [`apply`]
+    /// runs after every pan/zoom. Two silx mechanisms are reproduced:
+    ///
+    /// - The `update` sanity check (panzoom.py:297-305): when `max_range`,
+    ///   `min_pos` and `max_pos` are all set, the maximum span can never
+    ///   exceed the `[min_pos, max_pos]` window width, so `max_range` is
+    ///   capped to it.
+    /// - The `normalize` position clamp (panzoom.py:337-363): when **both**
+    ///   ends fall outside `[min_pos, max_pos]` the view is wider than the
+    ///   window, so it snaps to exactly `[min_pos, max_pos]` (the span adapts
+    ///   to fit — silx's "adaptive expansion"). When only one end is out, the
+    ///   whole window shifts to pull that end back in bounds.
+    ///
+    /// [`apply`]: AxisConstraints::apply
     pub fn apply(self, lo: f64, hi: f64) -> (f64, f64) {
         let mut span = hi - lo;
         if span <= 0.0 {
             return (lo, hi);
         }
 
-        // 1. Clamp the span.
+        // 1. Cap the max span to the position window when both bounds and a
+        //    max range are set (silx ViewConstraints.update, panzoom.py:297-305).
+        let mut effective_max_range = self.max_range;
+        if let (Some(max_range), Some(min_pos), Some(max_pos)) =
+            (self.max_range, self.min_pos, self.max_pos)
+        {
+            effective_max_range = Some(max_range.min(max_pos - min_pos));
+        }
+
+        // 2. Clamp the span.
         if let Some(min) = self.min_range
             && span < min
         {
             span = min;
         }
-        if let Some(max) = self.max_range
+        if let Some(max) = effective_max_range
             && span > max
         {
             span = max;
         }
 
-        // 2. Re-center the clamped span on the original midpoint.
+        // 3. Re-center the clamped span on the original midpoint.
         let mid = (lo + hi) * 0.5;
         let mut new_lo = mid - span * 0.5;
         let mut new_hi = mid + span * 0.5;
 
-        // 3. Clamp the position window (shift both ends to stay inside bounds).
-        if let Some(min_pos) = self.min_pos
-            && new_lo < min_pos
-        {
-            let shift = min_pos - new_lo;
-            new_lo += shift;
-            new_hi += shift;
-        }
-        if let Some(max_pos) = self.max_pos
-            && new_hi > max_pos
-        {
-            let shift = new_hi - max_pos;
-            new_lo -= shift;
-            new_hi -= shift;
+        // 4. Clamp the position window (silx ViewConstraints.normalize,
+        //    panzoom.py:337-363). Both ends out -> snap to the window so the
+        //    span shrinks to fit; one end out -> shift the window to pull it in.
+        let below = self.min_pos.filter(|&min_pos| new_lo < min_pos);
+        let above = self.max_pos.filter(|&max_pos| new_hi > max_pos);
+        match (below, above) {
+            (Some(min_pos), Some(max_pos)) => {
+                new_lo = min_pos;
+                new_hi = max_pos;
+            }
+            (Some(min_pos), None) => {
+                let shift = min_pos - new_lo;
+                new_lo += shift;
+                new_hi += shift;
+            }
+            (None, Some(max_pos)) => {
+                let shift = max_pos - new_hi;
+                new_lo += shift;
+                new_hi += shift;
+            }
+            (None, None) => {}
         }
 
-        // 4. Final sanity — keep lo < hi even if constraints are contradictory.
+        // 5. Final sanity — keep lo < hi even if constraints are contradictory.
         if new_lo >= new_hi {
             return (lo, hi);
         }
@@ -937,6 +969,50 @@ mod tests {
         let (lo, hi) = c.apply(6.0, 12.0);
         assert!((hi - 8.0).abs() < 1e-10, "hi={hi}");
         assert!((lo - 2.0).abs() < 1e-10, "lo={lo}");
+    }
+
+    #[test]
+    fn axis_constraints_view_wider_than_window_snaps_to_window() {
+        let c = AxisConstraints {
+            min_pos: Some(0.0),
+            max_pos: Some(10.0),
+            ..Default::default()
+        };
+        // View [-5, 15] (span 20) is wider than the [0, 10] window with both
+        // ends out; silx normalize snaps it to exactly the window (span 10).
+        let (lo, hi) = c.apply(-5.0, 15.0);
+        assert!((lo - 0.0).abs() < 1e-10, "lo={lo}");
+        assert!((hi - 10.0).abs() < 1e-10, "hi={hi}");
+    }
+
+    #[test]
+    fn axis_constraints_max_range_capped_to_window_keeps_offcenter_in_bounds() {
+        let c = AxisConstraints {
+            min_pos: Some(0.0),
+            max_pos: Some(10.0),
+            max_range: Some(100.0),
+            ..Default::default()
+        };
+        // max_range=100 is capped to the 10-wide window (silx update sanity),
+        // so the span-20 off-center view [2, 22] shrinks to the window and
+        // shifts fully in bounds instead of overshooting the far edge.
+        let (lo, hi) = c.apply(2.0, 22.0);
+        assert!((lo - 0.0).abs() < 1e-10, "lo={lo}");
+        assert!((hi - 10.0).abs() < 1e-10, "hi={hi}");
+    }
+
+    #[test]
+    fn axis_constraints_one_end_out_shifts_within_both_bounds() {
+        let c = AxisConstraints {
+            min_pos: Some(0.0),
+            max_pos: Some(10.0),
+            ..Default::default()
+        };
+        // View [-2, 3] (span 5) fits the window; only the low end is out, so
+        // the window shifts right to [0, 5] without touching the span.
+        let (lo, hi) = c.apply(-2.0, 3.0);
+        assert!((lo - 0.0).abs() < 1e-10, "lo={lo}");
+        assert!((hi - 5.0).abs() < 1e-10, "hi={hi}");
     }
 
     #[test]
