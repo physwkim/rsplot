@@ -98,7 +98,9 @@ pub use crate::widget::radar_view::{
     DataRect, RadarMapping, RadarResponse, RadarView, clamp_viewport, point_in_rect,
 };
 pub use crate::widget::roi_manager::RoiManagerWidget;
-pub use crate::widget::roi_stats::{RoiStats, curve_roi_stats, image_roi_stats, roi_x_span};
+pub use crate::widget::roi_stats::{
+    CurveRoiCounts, RoiStats, curve_roi_counts, curve_roi_stats, image_roi_stats, roi_x_span,
+};
 pub use crate::widget::roi_stats_widget::{RoiStatsRow, RoiStatsWidget};
 pub use crate::widget::scatter_mask::{ScatterMaskWidget, point_in_polygon};
 pub use crate::widget::stats_widget::{
