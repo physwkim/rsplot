@@ -1,6 +1,7 @@
 //! The `Plot` model, backend abstraction, and shared types.
 
 pub mod backend;
+pub mod color;
 pub mod colormap;
 pub mod decimate;
 pub mod dtime_ticks;

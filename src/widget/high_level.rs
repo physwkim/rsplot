@@ -1372,12 +1372,14 @@ fn curve_spec_retained_data(spec: &CurveSpec<'_>) -> RetainedItemData {
     }
 }
 
-/// Premultiply `color`'s alpha channel by `alpha` (clamped to `[0, 1]`),
-/// mirroring the backend's `apply_alpha`.
+/// Scale `color`'s alpha channel by `alpha` (clamped to `[0, 1]`), mirroring the
+/// backend's `apply_alpha`. Delegates to
+/// [`scale_alpha`](crate::core::color::scale_alpha), which scales the *straight*
+/// alpha and keeps the straight RGB — reading the premultiplied `Color32`
+/// accessors and re-wrapping would double-premultiply the RGB for translucent
+/// curve colors.
 fn apply_curve_alpha(color: Color32, alpha: f32) -> Color32 {
-    let alpha = alpha.clamp(0.0, 1.0);
-    let a = ((color.a() as f32) * alpha).round() as u8;
-    Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), a)
+    crate::core::color::scale_alpha(color, alpha)
 }
 
 /// Multiply per-point alpha into each color's alpha channel in place, mirroring
@@ -2308,13 +2310,13 @@ fn draw_legend_eye(
     let eye_color = if active {
         color
     } else {
-        Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 180)
+        crate::core::color::with_alpha(color, 180)
     };
     if visible {
         painter.circle_stroke(egui::pos2(cx, cy), r, egui::Stroke::new(1.5, eye_color));
         painter.circle_filled(egui::pos2(cx, cy), r * 0.45, eye_color);
     } else {
-        let dim = Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 80);
+        let dim = crate::core::color::with_alpha(color, 80);
         painter.circle_stroke(egui::pos2(cx, cy), r, egui::Stroke::new(1.5, dim));
         painter.line_segment(
             [egui::pos2(cx - r * 1.3, cy), egui::pos2(cx + r * 1.3, cy)],

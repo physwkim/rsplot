@@ -40,9 +40,9 @@ impl Style {
         let fill = v.window_fill();
         Self {
             axis: text,
-            grid: Color32::from_rgba_unmultiplied(text.r(), text.g(), text.b(), 28),
+            grid: crate::core::color::with_alpha(text, 28),
             text,
-            readout_bg: Color32::from_rgba_unmultiplied(fill.r(), fill.g(), fill.b(), 210),
+            readout_bg: crate::core::color::with_alpha(fill, 210),
         }
     }
 
@@ -55,7 +55,7 @@ impl Style {
             self.text = c;
             // Default the grid to a faint tint of the new foreground unless the
             // caller also overrides it below.
-            self.grid = Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), 28);
+            self.grid = crate::core::color::with_alpha(c, 28);
         }
         if let Some(g) = grid {
             self.grid = g;
@@ -397,14 +397,12 @@ pub fn draw_axes_with_x_tick_mode(
     let area = t.area;
     let axis = Stroke::new(1.0, style.axis);
     let grid = Stroke::new(1.0, style.grid);
+    // `style.grid` is itself translucent (alpha 28), so a premultiplied read +
+    // rewrap would crush the minor-grid RGB toward black; `with_alpha` keeps the
+    // straight RGB and just halves the alpha.
     let minor_grid = Stroke::new(
         1.0,
-        Color32::from_rgba_unmultiplied(
-            style.grid.r(),
-            style.grid.g(),
-            style.grid.b(),
-            style.grid.a() / 2,
-        ),
+        crate::core::color::with_alpha(style.grid, style.grid.a() / 2),
     );
     let font = FontId::proportional(11.0);
     let tick_len = 4.0;
@@ -712,8 +710,7 @@ pub fn draw_roi(
     // Fill: `Some(false)` means no fill (silx `setFill(False)`); `Some(true)` and
     // the default both draw the translucent tint.
     let fill_enabled = appearance.fill.unwrap_or(true);
-    let fill =
-        fill_enabled.then(|| Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 24));
+    let fill = fill_enabled.then(|| crate::core::color::with_alpha(color, 24));
     let line_style = appearance.line_style.clone().unwrap_or(LineStyle::Solid);
 
     // Draw a closed outline through `path` honoring width and dash style; the

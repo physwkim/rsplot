@@ -820,9 +820,11 @@ impl Backend for WgpuBackend {
 }
 
 fn apply_alpha(color: Color32, alpha: f32) -> Color32 {
-    let alpha = alpha.clamp(0.0, 1.0);
-    let a = ((color.a() as f32) * alpha).round() as u8;
-    Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), a)
+    // Scale the straight alpha by `alpha`, preserving the straight RGB. Reading
+    // the premultiplied `color.r()/g()/b()` accessors and re-wrapping via
+    // `from_rgba_unmultiplied` would double-premultiply the RGB for translucent
+    // colors; `scale_alpha` reads straight RGB.
+    crate::core::color::scale_alpha(color, alpha)
 }
 
 fn curve_data_from_spec(spec: CurveSpec<'_>) -> CurveData {

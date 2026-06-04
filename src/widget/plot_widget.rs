@@ -12,7 +12,7 @@
 //! primary drag for panning. Secondary drag pans in every mode; wheel zoom and
 //! double-click reset remain available.
 
-use egui::{Color32, PointerButton, Pos2, Rect, Sense, Stroke, Ui};
+use egui::{PointerButton, Pos2, Rect, Sense, Stroke, Ui};
 
 use crate::core::plot::Plot;
 use crate::core::transform::{Scale, Transform};
@@ -376,7 +376,7 @@ impl PlotView {
             painter.rect_filled(
                 sel,
                 egui::CornerRadius::ZERO,
-                Color32::from_rgba_unmultiplied(style.axis.r(), style.axis.g(), style.axis.b(), 32),
+                crate::core::color::with_alpha(style.axis, 32),
             );
             painter.rect_stroke(
                 sel,
@@ -488,12 +488,7 @@ fn draw_overlay(
         let bb = Rect::from_points(&pix);
         match style.fill {
             FillMode::Solid => {
-                let fill = Color32::from_rgba_unmultiplied(
-                    style.color.r(),
-                    style.color.g(),
-                    style.color.b(),
-                    style.color.a() / 2,
-                );
+                let fill = crate::core::color::with_alpha(style.color, style.color.a() / 2);
                 painter.add(egui::Shape::convex_polygon(pix.clone(), fill, Stroke::NONE));
             }
             FillMode::Hatch => {
