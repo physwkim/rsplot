@@ -215,6 +215,7 @@ fn format_event(event: PlotEvent) -> String {
         PlotEvent::LimitsChanged { x, y, y2 } => {
             format!("limits x{x:?} y{y:?} y2{y2:?}")
         }
+        PlotEvent::RoiAdded { index } => format!("roi added #{index}"),
         PlotEvent::RoiChanged { index } => format!("roi changed #{index}"),
         PlotEvent::RoiCreated { index } => format!("roi created #{index}"),
         PlotEvent::DrawingProgress { mode, points } => {

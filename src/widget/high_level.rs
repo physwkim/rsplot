@@ -301,11 +301,24 @@ pub enum PlotEvent {
         y: (f64, f64),
         y2: Option<(f64, f64)>,
     },
-    /// An ROI edge drag or whole-ROI body drag moved the ROI at `index`.
+    /// A ROI was added to the collection at `index` (silx `sigRoiAdded`),
+    /// whether programmatically ([`PlotWidget::add_roi`] /
+    /// [`PlotWidget::add_managed_roi`]) or by an on-plot interactive draw. For an
+    /// interactive draw a [`Self::RoiCreated`] is emitted on the same frame,
+    /// after this (silx emits `sigRoiAdded` then `sigInteractiveRoiFinalized`).
+    /// Distinct from [`Self::RoiChanged`], which signals only a geometry change
+    /// to an existing ROI.
+    RoiAdded { index: usize },
+    /// An ROI edge drag or whole-ROI body drag moved the ROI at `index`
+    /// (silx `sigRoiChanged`). A pure geometry change — adds emit
+    /// [`Self::RoiAdded`] instead.
     RoiChanged { index: usize },
     /// A new ROI was created at `index` by an on-plot draw in
-    /// [`PlotInteractionMode::RoiCreate`] (silx `RegionOfInterestManager`
-    /// shape-finished). Read its geometry with `plot().rois[index].roi`.
+    /// [`PlotInteractionMode::RoiCreate`] (silx `sigInteractiveRoiFinalized`:
+    /// the interactive draw gesture finished). Read its geometry with
+    /// `plot().rois[index].roi`. siplot builds the ROI only on draw-finish (no
+    /// mid-draw ROI object), so silx's separate `sigInteractiveRoiCreated`
+    /// (mid-gesture) collapses into this finish event.
     RoiCreated { index: usize },
     /// The in-progress draw preview advanced this frame in
     /// [`PlotInteractionMode::RoiCreate`] (silx `drawingProgress`): `points` are
@@ -3087,6 +3100,9 @@ impl PlotWidget {
             self.events.push(PlotEvent::RoiChanged { index });
         }
         if let Some(index) = response.roi_created {
+            // An interactive draw added a new ROI: emit RoiAdded then RoiCreated,
+            // mirroring silx's `sigRoiAdded` → `sigInteractiveRoiFinalized` order.
+            self.events.push(PlotEvent::RoiAdded { index });
             self.events.push(PlotEvent::RoiCreated { index });
         }
         // Draw-state events (silx drawingProgress / drawingFinished) from an
@@ -6133,7 +6149,7 @@ impl PlotWidget {
     pub fn add_roi(&mut self, roi: Roi) -> usize {
         self.backend.plot_mut().rois.push(ManagedRoi::new(roi));
         let index = self.backend.plot().rois.len() - 1;
-        self.events.push(PlotEvent::RoiChanged { index });
+        self.events.push(PlotEvent::RoiAdded { index });
         index
     }
 
@@ -6163,13 +6179,14 @@ impl PlotWidget {
     }
 
     /// Append a fully-specified [`ManagedRoi`] (geometry + appearance) and
-    /// return its index, emitting [`PlotEvent::RoiChanged`] (silx
-    /// `RegionOfInterestManager.addRoi`). Use this to add a styled/named ROI in
-    /// one call; [`Self::add_roi`] adds bare geometry with default appearance.
+    /// return its index, emitting [`PlotEvent::RoiAdded`] (silx
+    /// `RegionOfInterestManager.addRoi` → `sigRoiAdded`). Use this to add a
+    /// styled/named ROI in one call; [`Self::add_roi`] adds bare geometry with
+    /// default appearance.
     pub fn add_managed_roi(&mut self, managed: ManagedRoi) -> usize {
         self.backend.plot_mut().rois.push(managed);
         let index = self.backend.plot().rois.len() - 1;
-        self.events.push(PlotEvent::RoiChanged { index });
+        self.events.push(PlotEvent::RoiAdded { index });
         index
     }
 
