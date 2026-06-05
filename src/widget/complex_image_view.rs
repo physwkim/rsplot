@@ -44,13 +44,18 @@ pub enum ComplexMode {
     SquareAmplitude,
     /// `log10(|z|)` — the base-10 log of the amplitude.
     Log10Amplitude,
-    /// HSV composite: hue from the phase, value from the normalized amplitude.
+    /// HSV composite: hue from the phase, value from the linearly normalized
+    /// amplitude (silx `AMPLITUDE_PHASE`).
     AmplitudePhase,
+    /// HSV composite: hue from the phase, value from the log10-normalized
+    /// amplitude over a settable displayed range (silx `LOG10_AMPLITUDE_PHASE`,
+    /// see [`amplitude_phase_log_rgba`]).
+    Log10AmplitudePhase,
 }
 
 impl ComplexMode {
     /// All modes in the silx menu order, for building a picker.
-    pub const ALL: [ComplexMode; 7] = [
+    pub const ALL: [ComplexMode; 8] = [
         ComplexMode::Absolute,
         ComplexMode::SquareAmplitude,
         ComplexMode::Phase,
@@ -58,6 +63,8 @@ impl ComplexMode {
         ComplexMode::Imaginary,
         ComplexMode::Log10Amplitude,
         ComplexMode::AmplitudePhase,
+        // silx groups LOG10_AMPLITUDE_PHASE right after AMPLITUDE_PHASE.
+        ComplexMode::Log10AmplitudePhase,
     ];
 
     /// Human-readable label, matching the silx menu text.
@@ -70,13 +77,18 @@ impl ComplexMode {
             ComplexMode::Imaginary => "Imaginary part",
             ComplexMode::Log10Amplitude => "Log10(amplitude)",
             ComplexMode::AmplitudePhase => "Amplitude and Phase",
+            ComplexMode::Log10AmplitudePhase => "Log10 Amplitude and Phase",
         }
     }
 
     /// `true` for modes whose displayed image is an RGBA composite rather than a
-    /// colormapped scalar (only [`ComplexMode::AmplitudePhase`]).
+    /// colormapped scalar ([`ComplexMode::AmplitudePhase`] and
+    /// [`ComplexMode::Log10AmplitudePhase`]).
     pub fn is_rgba(self) -> bool {
-        matches!(self, ComplexMode::AmplitudePhase)
+        matches!(
+            self,
+            ComplexMode::AmplitudePhase | ComplexMode::Log10AmplitudePhase
+        )
     }
 
     /// Convert a complex sample `(re, im)` to the scalar shown by this mode.
@@ -89,8 +101,10 @@ impl ComplexMode {
     /// - `SquareAmplitude` → `re^2 + im^2` = `numpy.absolute(z) ** 2`
     /// - `Log10Amplitude`  → `log10(hypot(re, im))`
     ///
-    /// Returns `0.0` for [`ComplexMode::AmplitudePhase`], which has no scalar
-    /// representation (use [`amplitude_phase_rgba`] instead).
+    /// Returns `0.0` for the RGBA composite modes
+    /// ([`ComplexMode::AmplitudePhase`] / [`ComplexMode::Log10AmplitudePhase`]),
+    /// which have no scalar representation (use [`amplitude_phase_rgba`] /
+    /// [`amplitude_phase_log_rgba`] instead).
     pub fn to_scalar(self, re: f32, im: f32) -> f32 {
         match self {
             ComplexMode::Absolute => re.hypot(im),
@@ -99,7 +113,7 @@ impl ComplexMode {
             ComplexMode::Imaginary => im,
             ComplexMode::SquareAmplitude => re * re + im * im,
             ComplexMode::Log10Amplitude => re.hypot(im).log10(),
-            ComplexMode::AmplitudePhase => 0.0,
+            ComplexMode::AmplitudePhase | ComplexMode::Log10AmplitudePhase => 0.0,
         }
     }
 }
@@ -191,6 +205,71 @@ pub fn amplitude_phase_rgba(data: &[(f32, f32)]) -> Vec<[u8; 4]> {
         .collect()
 }
 
+/// silx default displayed amplitude range in log10 units
+/// (`_AmplitudeRangeDialog` `displayedRange` default `(None, 2)`,
+/// `ImageComplexData._setAmplitudeRangeInfo` `delta=2`).
+pub const DEFAULT_AMPLITUDE_DELTA: f32 = 2.0;
+
+/// Build the LOG10 `AMPLITUDE_PHASE` RGBA composite for row-major complex
+/// `data`, porting the amplitude math of silx `_complex2rgbalog`
+/// (items/complex.py:62-82) with a runtime-settable displayed amplitude range.
+///
+/// `max_amplitude` is silx `smax` (the dialog's "Displayed Max."): `Some(m)`
+/// clamps every amplitude above `m` down to `m` (so the brightest pixels
+/// saturate); `None` autoscales to the data's own maximum amplitude. `delta` is
+/// silx `dlogs` (the dialog's "Displayed delta (log10 unit)", default
+/// [`DEFAULT_AMPLITUDE_DELTA`], `>= 1` per the silx validator): the number of
+/// log10 orders of magnitude shown below the (clamped) maximum.
+///
+/// The amplitude is taken to `a = log10(|z| + 1e-20)`, shifted so the maximum
+/// maps to `delta` (silx `a -= a.max() - dlogs`), then normalized to `a / delta`
+/// clamped to `[0, 1]`. Like [`amplitude_phase_rgba`], that normalized amplitude
+/// drives the HSV *value* channel (siplot's opaque-RGBA convention) rather than
+/// silx's alpha channel; the clamping + log-window normalization is the faithful
+/// silx port. Hue is the phase, saturation `1`, alpha opaque. Empty data yields
+/// an empty vector. Uniform-amplitude data maps every pixel to full value (the
+/// silx degenerate case where `a.max()` equals every `a`).
+pub fn amplitude_phase_log_rgba(
+    data: &[(f32, f32)],
+    max_amplitude: Option<f32>,
+    delta: f32,
+) -> Vec<[u8; 4]> {
+    if data.is_empty() {
+        return Vec::new();
+    }
+    // Amplitudes, optionally clamped to the displayed max (silx `smax`), then
+    // taken to log10 with the silx `+ 1e-20` floor so zero amplitudes are well
+    // defined.
+    let logs: Vec<f32> = data
+        .iter()
+        .map(|&(re, im)| {
+            let mut a = re.hypot(im);
+            if let Some(m) = max_amplitude
+                && a > m
+            {
+                a = m;
+            }
+            (a + 1e-20_f32).log10()
+        })
+        .collect();
+    let log_max = logs.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+
+    data.iter()
+        .zip(logs)
+        .map(|(&(re, im), log_a)| {
+            // Shift so the max maps to `delta`, display `delta` orders of
+            // magnitude, then normalize into [0, 1] (silx `a/dlogs`, with the
+            // `(a > 0)` mask folded into the lower clamp).
+            let a = log_a - (log_max - delta);
+            let value = (a / delta).clamp(0.0, 1.0);
+            let phase = im.atan2(re);
+            let hue = (phase + std::f32::consts::PI) / (2.0 * std::f32::consts::PI);
+            let [r, g, b] = hsv_to_rgb(hue, 1.0, value);
+            [r, g, b, 255]
+        })
+        .collect()
+}
+
 /// Compute the `[min, max]` of `values` over finite entries, returning
 /// `(0.0, 1.0)` when there is no finite value (degenerate range fallback that
 /// the colormap maps to its low color).
@@ -254,6 +333,12 @@ pub struct ComplexImageView {
     height: u32,
     data: Vec<(f32, f32)>,
     mode: ComplexMode,
+    /// Displayed max amplitude for [`ComplexMode::Log10AmplitudePhase`] (silx
+    /// `smax`): `None` autoscales to the data max.
+    max_amplitude: Option<f32>,
+    /// Displayed range in log10 units for [`ComplexMode::Log10AmplitudePhase`]
+    /// (silx `dlogs`/`delta`, default [`DEFAULT_AMPLITUDE_DELTA`]).
+    delta: f32,
     image_handle: Option<ItemHandle>,
     dirty: bool,
 }
@@ -270,6 +355,9 @@ impl ComplexImageView {
             height: 0,
             data: Vec::new(),
             mode: ComplexMode::Absolute,
+            // silx default amplitude range: autoscale max, 2 log10 decades.
+            max_amplitude: None,
+            delta: DEFAULT_AMPLITUDE_DELTA,
             image_handle: None,
             dirty: false,
         }
@@ -311,6 +399,33 @@ impl ComplexImageView {
             self.mode = mode;
             self.dirty = true;
         }
+    }
+
+    /// Set the displayed amplitude range for
+    /// [`ComplexMode::Log10AmplitudePhase`] (silx
+    /// `ImageComplexData._setAmplitudeRangeInfo`).
+    ///
+    /// `max_amplitude` is silx `smax` (the dialog's "Displayed Max."): `None`
+    /// autoscales to the data's maximum amplitude. `delta` is silx `dlogs` (the
+    /// dialog's "Displayed delta (log10 unit)", `>= 1`). Recomputes the image on
+    /// the next [`Self::show`] when in the log composite mode.
+    pub fn set_amplitude_range_info(&mut self, max_amplitude: Option<f32>, delta: f32) {
+        if self.max_amplitude != max_amplitude || self.delta != delta {
+            self.max_amplitude = max_amplitude;
+            self.delta = delta;
+            // Only the log composite uses this range; flagging dirty is harmless
+            // for other modes (the recomputed image is identical) but avoids a
+            // mode check here.
+            self.dirty = true;
+        }
+    }
+
+    /// The displayed amplitude range `(max, delta)` for
+    /// [`ComplexMode::Log10AmplitudePhase`] (silx
+    /// `ImageComplexData._getAmplitudeRangeInfo`); `max` is `None` when
+    /// autoscaling to the data max.
+    pub fn amplitude_range_info(&self) -> (Option<f32>, f32) {
+        (self.max_amplitude, self.delta)
     }
 
     /// Access the underlying [`Plot2D`].
@@ -372,7 +487,12 @@ impl ComplexImageView {
     /// in place (reusing the existing item handle so the zoom is preserved).
     fn rebuild_image(&mut self) {
         if self.mode.is_rgba() {
-            let rgba = amplitude_phase_rgba(&self.data);
+            let rgba = match self.mode {
+                ComplexMode::Log10AmplitudePhase => {
+                    amplitude_phase_log_rgba(&self.data, self.max_amplitude, self.delta)
+                }
+                _ => amplitude_phase_rgba(&self.data),
+            };
             self.set_rgba_image(&rgba);
         } else {
             let scalar: Vec<f32> = self
@@ -638,6 +758,72 @@ mod tests {
         // max_amp == 0 -> value 0 everywhere -> black.
         let rgba = amplitude_phase_rgba(&[(0.0, 0.0), (0.0, 0.0)]);
         assert_eq!(rgba, vec![[0, 0, 0, 255], [0, 0, 0, 255]]);
+    }
+
+    // ── LOG10_AMPLITUDE_PHASE composite (silx _complex2rgbalog) ─────────────
+
+    #[test]
+    fn log10_amplitude_phase_mode_is_rgba_with_no_scalar() {
+        assert!(ComplexMode::Log10AmplitudePhase.is_rgba());
+        assert_eq!(ComplexMode::Log10AmplitudePhase.to_scalar(3.0, 4.0), 0.0);
+        assert!(ComplexMode::ALL.contains(&ComplexMode::Log10AmplitudePhase));
+        assert_eq!(
+            ComplexMode::Log10AmplitudePhase.label(),
+            "Log10 Amplitude and Phase"
+        );
+    }
+
+    #[test]
+    fn log_composite_empty_is_empty() {
+        assert!(amplitude_phase_log_rgba(&[], None, DEFAULT_AMPLITUDE_DELTA).is_empty());
+    }
+
+    #[test]
+    fn log_composite_normalizes_over_delta_decades() {
+        // delta = 2 decades. Max amplitude 100 (phase 0) -> value 1 (full cyan);
+        // amplitude 10 is one decade below the max -> a = 1, value = 1/2 ->
+        // half-bright cyan. Autoscale (max = None).
+        let rgba = amplitude_phase_log_rgba(&[(100.0, 0.0), (10.0, 0.0)], None, 2.0);
+        assert_eq!(rgba[0], [0, 255, 255, 255]);
+        assert_eq!(rgba[1], [0, 128, 128, 255]);
+    }
+
+    #[test]
+    fn log_composite_floor_below_window_is_zero() {
+        // amplitude 1 is two decades below max 100 with delta = 2 -> a = 0 ->
+        // value clamped to 0 -> black.
+        let rgba = amplitude_phase_log_rgba(&[(100.0, 0.0), (1.0, 0.0)], None, 2.0);
+        assert_eq!(rgba[0], [0, 255, 255, 255]);
+        assert_eq!(rgba[1], [0, 0, 0, 255]);
+    }
+
+    #[test]
+    fn log_composite_clamps_to_displayed_max() {
+        // Without clamping, amplitude 10 sits two decades below the 1000 max
+        // (delta 2) and floors to 0. Clamping the displayed max to 100 lifts the
+        // reference to 100, so amplitude 10 is only one decade below -> value 0.5.
+        let data = [(1000.0, 0.0), (10.0, 0.0)];
+        let uncapped = amplitude_phase_log_rgba(&data, None, 2.0);
+        assert_eq!(uncapped[1], [0, 0, 0, 255]);
+        let capped = amplitude_phase_log_rgba(&data, Some(100.0), 2.0);
+        assert_eq!(capped[0], [0, 255, 255, 255]); // 1000 saturates to 100
+        assert_eq!(capped[1], [0, 128, 128, 255]); // 10 -> one decade below 100
+    }
+
+    #[test]
+    fn log_composite_uniform_amplitude_is_full_value() {
+        // silx degenerate case: every amplitude equal -> a.max() == every a ->
+        // value 1 for all pixels.
+        let rgba = amplitude_phase_log_rgba(&[(5.0, 0.0), (5.0, 0.0)], None, 2.0);
+        assert_eq!(rgba, vec![[0, 255, 255, 255], [0, 255, 255, 255]]);
+    }
+
+    #[test]
+    fn log_composite_zero_amplitude_matches_silx_degenerate() {
+        // All zeros: log10(0 + 1e-20) is uniform, so the silx shift maps every
+        // pixel to full value (matching _complex2rgbalog alpha == 255).
+        let rgba = amplitude_phase_log_rgba(&[(0.0, 0.0), (0.0, 0.0)], None, 2.0);
+        assert_eq!(rgba, vec![[0, 255, 255, 255], [0, 255, 255, 255]]);
     }
 
     // ── hsv LUT / phase colormap ────────────────────────────────────────────
