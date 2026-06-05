@@ -8490,6 +8490,36 @@ impl ScatterView {
         scatter_masked_selection(&self.mask.mask)
     }
 
+    /// The per-point selection mask as raw levels (silx
+    /// `ScatterView.getSelectionMask`): one `u8` per scatter point, `0`
+    /// unmasked and `1..=255` a mask level. Empty until [`Self::set_data`] has
+    /// sized it to the point count — silx returns an empty array when there is
+    /// no active scatter.
+    pub fn selection_mask(&self) -> &[u8] {
+        &self.mask.mask
+    }
+
+    /// Replace the per-point selection mask (silx
+    /// `ScatterView.setSelectionMask`).
+    ///
+    /// `mask` must have exactly one entry per scatter point — the current
+    /// [`selection_mask`](Self::selection_mask) length (the last
+    /// [`Self::set_data`] point count). On success the new mask is committed to
+    /// the undo history and its point count returned; a length mismatch returns
+    /// [`PlotDataError`] and leaves the mask unchanged (silx raises `ValueError`
+    /// on a shape mismatch).
+    pub fn set_selection_mask(&mut self, mask: &[u8]) -> Result<usize, PlotDataError> {
+        if mask.len() != self.mask.mask.len() {
+            return Err(PlotDataError::ImageDataLength {
+                expected: self.mask.mask.len(),
+                actual: mask.len(),
+            });
+        }
+        self.mask.mask.copy_from_slice(mask);
+        self.mask.commit();
+        Ok(mask.len())
+    }
+
     /// Mask (or unmask) the scatter points inside the data-space rectangle with
     /// bottom-left `anchor = (x, y)` and `size = (width, height)`, at the
     /// current mask level, then commit it to the undo history (silx
