@@ -1419,14 +1419,19 @@ pub fn line_profile_values(
     Ok((x_vals, y_vals))
 }
 
-/// Extract a 1D profile within a rectangle by averaging along an axis.
+/// Extract a 1D profile within a rectangle by reducing along an axis.
+///
 /// `rect` is (x_min, x_max, y_min, y_max) in (column, row) coordinates.
+/// `method` selects the band reduction (silx profile `method`):
+/// [`ProfileMethod::Mean`] averages the band, [`ProfileMethod::Sum`] integrates
+/// it (silx `numpy.mean` / `numpy.sum` over the rectangle's short axis).
 pub fn rect_profile_values(
     width: u32,
     height: u32,
     data: &[f32],
     rect: (f64, f64, f64, f64),
     horizontal: bool,
+    method: ProfileMethod,
 ) -> Result<(Vec<f64>, Vec<f64>), PlotDataError> {
     validate_image_len(width, height, data.len())?;
     let (x_min, x_max, y_min, y_max) = rect;
@@ -1444,6 +1449,11 @@ pub fn rect_profile_values(
         return Ok((vec![], vec![]));
     }
 
+    let reduce = |sum: f64, count: f64| match method {
+        ProfileMethod::Mean => sum / count,
+        ProfileMethod::Sum => sum,
+    };
+
     if horizontal {
         let num_rows = (row_max - row_min + 1) as f64;
         let mut x_vals = Vec::with_capacity(col_max - col_min + 1);
@@ -1455,7 +1465,7 @@ pub fn rect_profile_values(
                 sum += data[row * width as usize + col] as f64;
             }
             x_vals.push(col as f64);
-            y_vals.push(sum / num_rows);
+            y_vals.push(reduce(sum, num_rows));
         }
         Ok((x_vals, y_vals))
     } else {
@@ -1469,7 +1479,7 @@ pub fn rect_profile_values(
                 sum += data[row * width as usize + col] as f64;
             }
             x_vals.push(row as f64);
-            y_vals.push(sum / num_cols);
+            y_vals.push(reduce(sum, num_cols));
         }
         Ok((x_vals, y_vals))
     }
@@ -7187,7 +7197,7 @@ fn image_view_profile_values(
                 start.1.min(end.1),
                 start.1.max(end.1),
             );
-            rect_profile_values(width, height, pixels, rect, true).ok()
+            rect_profile_values(width, height, pixels, rect, true, ProfileMethod::Mean).ok()
         }
     }
 }
@@ -10720,6 +10730,24 @@ mod tests {
             aligned_profile_values(3, 2, &data, 1.0, 3, false, ProfileMethod::Sum).unwrap(),
             vec![6.0, 15.0]
         );
+    }
+
+    #[test]
+    fn rect_profile_mean_and_sum_reduce_the_band() {
+        // 3x2 image, rows: [1,2,3],[4,5,6]. Whole-rectangle horizontal profile.
+        let data = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let rect = (0.0, 2.0, 0.0, 1.0);
+        // Mean over the two rows per column.
+        let (x, y) = rect_profile_values(3, 2, &data, rect, true, ProfileMethod::Mean).unwrap();
+        assert_eq!(x, vec![0.0, 1.0, 2.0]);
+        assert_eq!(y, vec![2.5, 3.5, 4.5]);
+        // Sum over the two rows per column.
+        let (_, y_sum) = rect_profile_values(3, 2, &data, rect, true, ProfileMethod::Sum).unwrap();
+        assert_eq!(y_sum, vec![5.0, 7.0, 9.0]);
+        // Vertical sum reduces along columns -> per-row totals.
+        let (xr, yr) = rect_profile_values(3, 2, &data, rect, false, ProfileMethod::Sum).unwrap();
+        assert_eq!(xr, vec![0.0, 1.0]);
+        assert_eq!(yr, vec![6.0, 15.0]);
     }
 
     #[test]

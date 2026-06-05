@@ -5,7 +5,7 @@ use crate::core::backend::ItemHandle;
 use crate::core::plot::PlotId;
 use crate::core::roi::Roi;
 use crate::render::gpu_curve::CurveData;
-use crate::widget::high_level::{Plot1D, line_profile_values, rect_profile_values};
+use crate::widget::high_level::{Plot1D, ProfileMethod, line_profile_values, rect_profile_values};
 
 /// A window widget to display the 1D profile of an image based on an ROI.
 pub struct ProfileWindow {
@@ -64,7 +64,15 @@ impl ProfileWindow {
             Roi::Line { start, end } => line_profile_values(width, height, data, *start, *end).ok(),
             Roi::Rect { x, y } => {
                 // By default, average along the columns (vertical axis) for a row profile.
-                rect_profile_values(width, height, data, (x.0, x.1, y.0, y.1), true).ok()
+                rect_profile_values(
+                    width,
+                    height,
+                    data,
+                    (x.0, x.1, y.0, y.1),
+                    true,
+                    ProfileMethod::Mean,
+                )
+                .ok()
             }
             Roi::HRange { y } => {
                 let row = ((y.0 + y.1) / 2.0).round() as u32;
