@@ -7221,6 +7221,37 @@ fn image_row_sums(pixels: &[f32], w: usize, h: usize) -> Vec<f64> {
         .collect()
 }
 
+/// The `(col, row, value)` triple silx `ImageView.valueChanged` emits for a
+/// cursor at data coordinates `(x, y)` over the active image
+/// (`ImageView._imagePlotCB`, ImageView.py:585-601). siplot's ImageView uses
+/// identity image geometry (origin `(0, 0)`, scale `(1, 1)`), so a pixel index
+/// is the truncated coordinate. Returns `None` — silx emits nothing — when the
+/// cursor is left of / below the origin or outside the pixel grid, or when no
+/// image is loaded.
+fn image_value_at(
+    x: f64,
+    y: f64,
+    pixels: &[f32],
+    width: usize,
+    height: usize,
+) -> Option<(f64, f64, f64)> {
+    if width == 0 || height == 0 || pixels.len() < width * height {
+        return None;
+    }
+    // silx guard: cursor must be at or beyond the image origin (here (0, 0)).
+    if x < 0.0 || y < 0.0 {
+        return None;
+    }
+    // silx `int((x - origin) / scale)`: truncation toward zero. The non-negative
+    // guard above makes `as usize` (also truncating) equal to a floor here.
+    let col = x as usize;
+    let row = y as usize;
+    if col >= width || row >= height {
+        return None;
+    }
+    Some((col as f64, row as f64, pixels[row * width + col] as f64))
+}
+
 impl ImageView {
     /// Create a new `ImageView`.
     ///
@@ -8015,6 +8046,23 @@ impl ImageView {
             ImageHistogramAxis::Y => (image_row_sums(&self.pixels, w, h), (0.0, h as f64)),
         };
         Some(ImageProfileHistogram { data, extent })
+    }
+
+    /// The `(col, row, value)` under the live cursor, as silx
+    /// `ImageView.valueChanged` emits it (ImageView.py:381, emitted at :601):
+    /// integer pixel indices returned as floats, with the pixel value at that
+    /// index. Returns `None` when the cursor is off the image, before an image
+    /// is set, or before any pointer move — silx emits nothing in those cases.
+    /// The cursor is updated each frame by [`Self::show`] from the live pointer.
+    pub fn value_changed(&self) -> Option<(f64, f64, f64)> {
+        let [x, y] = self.cursor?;
+        image_value_at(
+            x,
+            y,
+            &self.pixels,
+            self.width as usize,
+            self.height as usize,
+        )
     }
 
     fn rebuild_histograms(&mut self) {
@@ -10066,6 +10114,46 @@ mod tests {
                 .all(|&s| s == h as f64)
         );
         assert!(image_row_sums(&pixels, w, h).iter().all(|&s| s == w as f64));
+    }
+
+    // ── ImageView valueChanged pixel-under-cursor (silx _imagePlotCB) ─────────
+
+    #[test]
+    fn image_value_at_maps_cursor_to_pixel_like_silx() {
+        // 3×2 row-major image (row-major: pixels[row*w + col]):
+        //   row 0: 1 2 3
+        //   row 1: 4 5 6
+        let pixels = [1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let (w, h) = (3usize, 2usize);
+        // Cursor inside a cell: truncation toward zero picks the pixel index.
+        // (col 0, row 0) → value 1; (col 2, row 1) → value 6.
+        assert_eq!(
+            image_value_at(0.4, 0.9, &pixels, w, h),
+            Some((0.0, 0.0, 1.0))
+        );
+        assert_eq!(
+            image_value_at(2.7, 1.2, &pixels, w, h),
+            Some((2.0, 1.0, 6.0))
+        );
+        // Exact integer coordinate maps to that index.
+        assert_eq!(
+            image_value_at(1.0, 1.0, &pixels, w, h),
+            Some((1.0, 1.0, 5.0))
+        );
+    }
+
+    #[test]
+    fn image_value_at_returns_none_off_image() {
+        let pixels = [1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let (w, h) = (3usize, 2usize);
+        // Left of / below the origin (silx `x >= origin` guard).
+        assert_eq!(image_value_at(-0.1, 0.5, &pixels, w, h), None);
+        assert_eq!(image_value_at(0.5, -0.1, &pixels, w, h), None);
+        // At or beyond the far edge (extent is exclusive at width/height).
+        assert_eq!(image_value_at(3.0, 0.5, &pixels, w, h), None);
+        assert_eq!(image_value_at(0.5, 2.0, &pixels, w, h), None);
+        // No image loaded.
+        assert_eq!(image_value_at(0.5, 0.5, &[], 0, 0), None);
     }
 
     #[test]
