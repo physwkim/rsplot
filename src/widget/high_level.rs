@@ -8123,6 +8123,19 @@ impl ImageView {
                     self.mask.commit();
                     self.upload_image();
                 }
+                // silx `_BaseMaskToolsWidget` "Set min-max from colormap"
+                // (MaskToolsWidget override :883-892): copy the colormap's value
+                // range into the threshold fields. siplot's `colormap.vmin/vmax`
+                // already hold the effective (post-autoscale) range after upload,
+                // so this is the faithful equivalent of silx's vmin/vmax-or-auto.
+                if ui
+                    .button("Min-max from colormap")
+                    .on_hover_text("Copy the colormap's value range into the threshold fields")
+                    .clicked()
+                {
+                    self.mask.threshold_min = self.colormap.vmin as f32;
+                    self.mask.threshold_max = self.colormap.vmax as f32;
+                }
             });
         }
     }
