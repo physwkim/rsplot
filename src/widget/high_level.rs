@@ -8121,6 +8121,97 @@ fn scatter_grid_image(
     }
 }
 
+/// A scatter point picked under the cursor — the result of silx
+/// `ScatterView._pickScatterData`: the data `index` and its `(x, y)`
+/// coordinates and `value`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScatterPick {
+    /// Index of the point in the scatter's data arrays.
+    pub index: usize,
+    /// The point's X coordinate.
+    pub x: f64,
+    /// The point's Y coordinate.
+    pub y: f64,
+    /// The point's value (the colormapped scalar).
+    pub value: f64,
+}
+
+/// Pixel snap radius for the scatter position-info pick (silx picks points
+/// whose symbol overlaps the cursor); sized to the default marker symbol.
+const SCATTER_PICK_RADIUS_PX: f32 = crate::core::marker::DEFAULT_MARKER_SIZE;
+
+/// Index of the scatter point nearest `cursor` in pixel space within `radius`
+/// pixels, or `None` if none is close enough — the pure core of silx
+/// `ScatterView._pickScatterData`. `points` are the per-point pixel positions
+/// `(px, py)` (project the data points through the display transform first).
+/// Distance ties resolve to the highest index (silx top-most = last-drawn
+/// point).
+pub fn scatter_pick_pixels(
+    cursor: (f32, f32),
+    points: &[(f32, f32)],
+    radius: f32,
+) -> Option<usize> {
+    let r2 = radius * radius;
+    let mut best: Option<(usize, f32)> = None;
+    for (i, &(px, py)) in points.iter().enumerate() {
+        let d2 = (px - cursor.0).powi(2) + (py - cursor.1).powi(2);
+        if d2 > r2 {
+            continue;
+        }
+        // `<=` so a later (higher) index at an equal distance wins the tie.
+        let take = match best {
+            None => true,
+            Some((_, best_d2)) => d2 <= best_d2,
+        };
+        if take {
+            best = Some((i, d2));
+        }
+    }
+    best.map(|(i, _)| i)
+}
+
+/// Build the silx `ScatterView` position-info bar — the `X`, `Y`, `Data`,
+/// `Index` columns (ScatterView.py:90-101). When a scatter point is picked,
+/// `X`/`Y` snap to it and `Data`/`Index` show its value/index; otherwise `X`/`Y`
+/// show the bare cursor coordinates (`%.7g`) and `Data`/`Index` show `"-"`
+/// (silx `_getPickedValue`/`_getPickedIndex` fallback).
+pub fn scatter_position_info(
+    pick: Option<ScatterPick>,
+) -> crate::widget::position_info::PositionInfo {
+    use crate::widget::position_info::{Converter, PositionInfo, format_value};
+    let columns: Vec<(String, Converter)> = vec![
+        (
+            "X".to_owned(),
+            Box::new(move |x, _| match pick {
+                Some(p) => format_value(p.x),
+                None => format_value(x),
+            }),
+        ),
+        (
+            "Y".to_owned(),
+            Box::new(move |_, y| match pick {
+                Some(p) => format_value(p.y),
+                None => format_value(y),
+            }),
+        ),
+        (
+            "Data".to_owned(),
+            Box::new(move |_, _| match pick {
+                Some(p) => format_value(p.value),
+                None => "-".to_owned(),
+            }),
+        ),
+        (
+            "Index".to_owned(),
+            Box::new(move |_, _| match pick {
+                Some(p) => p.index.to_string(),
+                None => "-".to_owned(),
+            }),
+        ),
+    ];
+    PositionInfo::new(columns)
+}
+
 /// A scatter plot where marker colours are driven by a per-point value array
 /// mapped through a [`Colormap`], mirroring silx `ScatterView`.
 ///
@@ -8171,6 +8262,10 @@ pub struct ScatterView {
     /// alpha in the `Points` visualization (silx
     /// `__applyColormapToData`); `None` leaves the colormap alpha untouched.
     alpha: Option<Vec<f64>>,
+    /// Last cursor data coordinates fed into the position-info readout (silx
+    /// `ScatterView._positionInfo`, updated on `sigMouseMoved`); `None` until the
+    /// pointer has moved over the data area.
+    cursor: Option<[f64; 2]>,
 }
 
 impl ScatterView {
@@ -8190,6 +8285,7 @@ impl ScatterView {
             mask: crate::widget::scatter_mask::ScatterMaskWidget::new(0),
             show_colorbar: true,
             alpha: None,
+            cursor: None,
         }
     }
 
@@ -8518,6 +8614,54 @@ impl ScatterView {
         self.mask.mask.copy_from_slice(mask);
         self.mask.commit();
         Ok(mask.len())
+    }
+
+    /// The last cursor data coordinates `(x, y)` fed into the position-info
+    /// readout (silx `ScatterView` `sigMouseMoved`), or `None` before the
+    /// pointer has moved over the data area.
+    pub fn cursor(&self) -> Option<[f64; 2]> {
+        self.cursor
+    }
+
+    /// Show the silx `ScatterView` position-info bar below the plot: the `X`,
+    /// `Y`, `Data`, `Index` columns, snapping to the scatter point under the
+    /// cursor (silx ScatterView.py:90-101 + `_pickScatterData`).
+    ///
+    /// Pass the [`PlotResponse`] returned by [`Self::show`] this frame: the
+    /// cursor is updated from its pointer event and the pick is done in pixel
+    /// space through its display [`Transform`] (so the snap radius is constant on
+    /// screen regardless of zoom). When a point is within
+    /// [`SCATTER_PICK_RADIUS_PX`] of the cursor, `X`/`Y` snap to it and
+    /// `Data`/`Index` show its value/index; otherwise `X`/`Y` show the cursor
+    /// coordinates and `Data`/`Index` show `"-"`.
+    pub fn show_position_info(&mut self, ui: &mut egui::Ui, response: &PlotResponse) {
+        if let Some(cursor) = cursor_from_pointer_event(response.pointer_event.as_ref()) {
+            self.cursor = Some(cursor);
+        }
+        let pick = self.cursor.and_then(|[cx, cy]| {
+            let (xs, ys, vs) = self.points.as_ref()?;
+            let cursor_px = response.transform.data_to_pixel(cx, cy);
+            let points_px: Vec<(f32, f32)> = xs
+                .iter()
+                .zip(ys)
+                .map(|(&x, &y)| {
+                    let p = response.transform.data_to_pixel(x, y);
+                    (p.x, p.y)
+                })
+                .collect();
+            let i = scatter_pick_pixels(
+                (cursor_px.x, cursor_px.y),
+                &points_px,
+                SCATTER_PICK_RADIUS_PX,
+            )?;
+            Some(ScatterPick {
+                index: i,
+                x: xs[i],
+                y: ys[i],
+                value: vs[i],
+            })
+        });
+        scatter_position_info(pick).ui(ui, self.cursor);
     }
 
     /// Mask (or unmask) the scatter points inside the data-space rectangle with
@@ -9291,6 +9435,50 @@ mod tests {
             dimension_axis_labels(StackPerspective::Axis2, &labels),
             ("Dimension 1".to_string(), "Dimension 0".to_string())
         );
+    }
+
+    #[test]
+    fn scatter_pick_returns_nearest_point_within_radius() {
+        // Pixel positions relative to a cursor at the origin.
+        let points = [(10.0, 0.0), (3.0, 4.0), (100.0, 100.0)];
+        // radius 8: (10,0) d=10 out, (3,4) d=5 in, (100,100) out → index 1.
+        assert_eq!(scatter_pick_pixels((0.0, 0.0), &points, 8.0), Some(1));
+    }
+
+    #[test]
+    fn scatter_pick_none_when_all_outside_radius() {
+        let points = [(100.0, 0.0), (0.0, 100.0)];
+        assert_eq!(scatter_pick_pixels((0.0, 0.0), &points, 8.0), None);
+    }
+
+    #[test]
+    fn scatter_pick_ties_resolve_to_highest_index() {
+        // Two coincident points at equal distance — the top-most (last) wins.
+        let points = [(5.0, 0.0), (5.0, 0.0)];
+        assert_eq!(scatter_pick_pixels((0.0, 0.0), &points, 8.0), Some(1));
+    }
+
+    #[test]
+    fn scatter_position_info_snaps_to_pick() {
+        let pick = Some(ScatterPick {
+            index: 7,
+            x: 1.5,
+            y: 2.5,
+            value: 3.5,
+        });
+        // X/Y snap to the pick (ignoring the bare cursor), Data/Index show it.
+        let cols = scatter_position_info(pick).values(Some([9.0, 9.0]));
+        assert_eq!(cols, vec!["1.5", "2.5", "3.5", "7"]);
+    }
+
+    #[test]
+    fn scatter_position_info_falls_back_without_pick() {
+        // No pick: X/Y show the cursor, Data/Index show "-".
+        let cols = scatter_position_info(None).values(Some([1.5, 2.5]));
+        assert_eq!(cols, vec!["1.5", "2.5", "-", "-"]);
+        // No cursor at all: every column is the silx placeholder.
+        let cols = scatter_position_info(None).values(None);
+        assert_eq!(cols, vec!["------", "------", "------", "------"]);
     }
 
     #[test]

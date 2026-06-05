@@ -85,6 +85,16 @@ commits to the mask's undo history. The mask is a selection query (not a render 
 The accessors are thin wrappers over the already-tested `ScatterMaskWidget`; constructing a `ScatterView` needs a wgpu
 `RenderState`, so the wrapper's length-check path itself stays GPU-unverified.
 
+**ScatterView position-info panel (main, not pushed):** ≈224 Done · ~97 open — 1 M row closed (205, ◐→✅; duplicate
+1261). `ScatterView::show_position_info(ui, &PlotResponse)` embeds the existing `PositionInfo` widget with the silx
+X/Y/Data/Index columns (ScatterView.py:90-101). The pure `scatter_pick_pixels(cursor, points_px, radius)` picks the
+nearest scatter point in **pixel** space (so the snap radius is constant on screen at any zoom; ties → highest/top-most
+index, silx `_pickScatterData`), and `scatter_position_info(Option<ScatterPick>)` builds the bar: X/Y/value/index snap
+to the pick, or X/Y show the bare cursor and Data/Index show "-" when nothing is within `SCATTER_PICK_RADIUS_PX`
+(= default marker size). The cursor is tracked from the plot's pointer event (silx `sigMouseMoved`). Pure pick + column
+builder headlessly tested (nearest/none/tie, snap/fallback/placeholder); the transform-projection + render path stays
+GPU-unverified.
+
 Status legend: ✅ Done · ◐ Partial · ☐ Missing · ✅ N/A (resolved: parity achieved differently). Effort S/M/L. Priority H/M/L.
 
 > This file tracks the port. The per-area tables below are the **as-of-sweep
@@ -202,7 +212,7 @@ as-of-sweep reference.
 | ◐ Partial | M | S | ImageView `getHistogram()` public API | ImageView.py:699-725 | Private `rebuild_histograms` exists; `active_image_histogram` returns `ValueStats`, not a `{data, extent}` dict |
 | ◐ Partial | M | S | ImageView side-histogram show/hide API | ImageView.py:552-559 | Histograms in fixed layout; no `is/setSideHistogramDisplayed()` |
 | ◐ Partial | M | S | ImageView `valueChanged` signal | ImageView.py:381-390 | Cursor tracked internally but not emitted as a `(row, col, value)` callback |
-| ◐ Partial | M | M | ScatterView position-info panel API | ScatterView.py:90-101 | `PositionInfo` not embedded in the composite (exists in core, not wired) |
+| ✅ Done | M | M | ScatterView position-info panel API | ScatterView.py:90-101 | `show_position_info(ui, &PlotResponse)` embeds `PositionInfo` with X/Y/Data/Index, snapping to the picked point (`scatter_pick_pixels`, pixel-space, silx `_pickScatterData`) |
 | ✅ Done | M | S | ScatterView get/setSelectionMask API | ScatterView.py:412-418 | `selection_mask()`/`set_selection_mask(&[u8])` (silx getSelectionMask/setSelectionMask): per-point u8 levels; set validates length == point count, commits to undo history |
 | ✅ Done | M | M | StackView perspective selection | StackView.py:364-397 | `StackPerspective` {Axis0,Axis1,Axis2} + `set_perspective`/`perspective`/`perspective_ui` combo pick the browse dimension |
 | ✅ Done | M | M | StackView 3D transposition | StackView.py:409-441 | `set_volume([d0,d1,d2])` + `stack_frame` re-slice per perspective (silx transpose (1,0,2)/(2,0,1)); axis labels via `dimension_axis_labels` |
@@ -1247,9 +1257,9 @@ egui-silx implements a core minimal toolbar with 11 built-in buttons (Reset Zoom
 | ◐ | L | S | XAxisOriginToolButton (menu: invert/non-invert X) | `PlotToolButtons.py:193-199` | silx provides menu-style button. egui-silx is a simple toggle. |
 | ☐ | L | S | ProfileOptionToolButton (sum/mean) | `PlotToolButtons.py:227-302` | silx provides menu button to switch profile aggregation (sum vs mean). egui-silx has no ProfileOptionToolButton in toolbar. |
 
-## Composite views (ImageView/ScatterView/StackView/CompareImages/ComplexImageView/ImageStack)  — 14✅ 0◐ 30☐
+## Composite views (ImageView/ScatterView/StackView/CompareImages/ComplexImageView/ImageStack)  — 15✅ 0◐ 29☐
 
-egui-silx implements ImageView, ScatterView, StackView, and CompareImages at a basic functional level with core visualization features. ImageView has side histograms and axis sync but lacks RadarView (position overview), profile toolbar integration, and histogram access API. ScatterView has value-coloured scatter but is missing mask tools, statistics, and position info panel. StackView supports frame browsing plus 3D volume browsing (perspective/axis selection, automatic transposition, and per-dimension axis labels) but still lacks the 3D-profile toolbar and per-axis calibration. CompareImages has 4 basic modes (A/B/split/subtract) but lacks vertical/horizontal line separators, SIFT keypoint alignment, composite RGB modes, alignment modes (origin/center/stretch), and the full visualization mode set. ComplexImageView and ImageStack are entirely absent. Overall, these are lightweight versions capturing the core interaction model but missing several advanced features, UX details, and specialized tooling from silx.
+egui-silx implements ImageView, ScatterView, StackView, and CompareImages at a basic functional level with core visualization features. ImageView has side histograms and axis sync but lacks RadarView (position overview), profile toolbar integration, and histogram access API. ScatterView has value-coloured scatter, an X/Y/Data/Index position-info panel, and programmatic selection-mask accessors, but is still missing the full on-plot mask-drawing widget and per-point statistics. StackView supports frame browsing plus 3D volume browsing (perspective/axis selection, automatic transposition, and per-dimension axis labels) but still lacks the 3D-profile toolbar and per-axis calibration. CompareImages has 4 basic modes (A/B/split/subtract) but lacks vertical/horizontal line separators, SIFT keypoint alignment, composite RGB modes, alignment modes (origin/center/stretch), and the full visualization mode set. ComplexImageView and ImageStack are entirely absent. Overall, these are lightweight versions capturing the core interaction model but missing several advanced features, UX details, and specialized tooling from silx.
 
 | | P | E | Feature | silx | gap |
 |---|---|---|---|---|---|
@@ -1258,7 +1268,7 @@ egui-silx implements ImageView, ScatterView, StackView, and CompareImages at a b
 | ✅ | M | L | StackView: perspective selection (axis selection for 3D browsing) | `StackView.py:364-397` | `StackPerspective` + `perspective_ui` combo browses dimension 0, 1, or 2; `set_volume`+`stack_frame` auto-transpose per perspective |
 | ☐ | M | M | ImageView: show/hide side histograms | `ImageView.py:552-559` | No toggle for histogram visibility; histograms always displayed |
 | ☐ | M | M | ImageView: valueChanged signal (pixel/histogram hover) | `ImageView.py:381-390,585-646` | No callback/signal for cursor position over image/histograms; silx emits (row, col, value) or (NaN, col, histo_value) |
-| ☐ | M | M | ScatterView: position info panel (X, Y, Data, Index) | `ScatterView.py:90-101` | No PositionInfo widget; silx shows custom converters: X, Y, Data (value under cursor), Index (scatter point index) |
+| ✅ | M | M | ScatterView: position info panel (X, Y, Data, Index) | `ScatterView.py:90-101` | `show_position_info` shows X/Y/Data/Index, snapping X/Y/value/index to the picked scatter point (pixel-space pick, "-" when none) |
 | ✅ | M | M | StackView: 3D transposition and dimension swapping | `StackView.py:409-441` | `stack_frame` re-slices the volume per perspective (silx transpose (1,0,2)/(2,0,1)); `set_perspective` rebuilds frames + axis labels |
 | ☐ | M | M | CompareImages: vertical line separator (vline mode) | `CompareImages.py:124-133,397-407` | No draggable vertical line; silx allows vertical marker to split and independently pan/crop left/right images |
 | ☐ | M | M | CompareImages: horizontal line separator (hline mode) | `CompareImages.py:135-144,397-407` | No draggable horizontal line; silx allows horizontal marker to split and independently crop top/bottom |
