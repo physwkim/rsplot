@@ -7169,6 +7169,45 @@ fn colorbar_column_width(show: bool, has_colorbar: bool) -> f32 {
     }
 }
 
+/// Which side-histogram profile [`ImageView::histogram`] returns, mirroring the
+/// `axis` argument of silx `ImageView.getHistogram(axis)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImageHistogramAxis {
+    /// Horizontal histogram: per-column sums over the image rows (silx `'x'`).
+    X,
+    /// Vertical histogram: per-row sums over the image columns (silx `'y'`).
+    Y,
+}
+
+/// A side-histogram profile and its index extent, mirroring the silx
+/// `ImageView.getHistogram` dict `{data, extent}`: `data` is the profile sum per
+/// column ([`ImageHistogramAxis::X`]) or per row ([`ImageHistogramAxis::Y`]), and
+/// `extent` is the `(start, end)` index range with `end` exclusive
+/// (`data.len() == end - start`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImageProfileHistogram {
+    /// Per-column (X) or per-row (Y) sum of the image pixels.
+    pub data: Vec<f64>,
+    /// `(start, end)` index extent; `end` is exclusive.
+    pub extent: (f64, f64),
+}
+
+/// Per-column sums of a row-major `w×h` image (silx `histoH`):
+/// `out[col] = Σ_row pixels[row*w + col]`. Empty when `w == 0`.
+fn image_column_sums(pixels: &[f32], w: usize, h: usize) -> Vec<f64> {
+    (0..w)
+        .map(|col| (0..h).map(|row| pixels[row * w + col] as f64).sum())
+        .collect()
+}
+
+/// Per-row sums of a row-major `w×h` image (silx `histoV`):
+/// `out[row] = Σ_col pixels[row*w + col]`. Empty when `h == 0`.
+fn image_row_sums(pixels: &[f32], w: usize, h: usize) -> Vec<f64> {
+    (0..h)
+        .map(|row| (0..w).map(|col| pixels[row * w + col] as f64).sum())
+        .collect()
+}
+
 impl ImageView {
     /// Create a new `ImageView`.
     ///
@@ -7922,24 +7961,39 @@ impl ImageView {
         &mut self.image_plot
     }
 
+    /// The side-histogram profile sum and its index extent for `axis`, mirroring
+    /// silx `ImageView.getHistogram(axis)` (the `{data, extent}` dict).
+    /// [`ImageHistogramAxis::X`] returns per-column sums over `[0, width)`,
+    /// [`ImageHistogramAxis::Y`] per-row sums over `[0, height)` (extent `end`
+    /// exclusive). Returns `None` before an image is set — silx returns `None`
+    /// when no histogram has been computed.
+    pub fn histogram(&self, axis: ImageHistogramAxis) -> Option<ImageProfileHistogram> {
+        if self.width == 0 || self.height == 0 || self.pixels.is_empty() {
+            return None;
+        }
+        let w = self.width as usize;
+        let h = self.height as usize;
+        let (data, extent) = match axis {
+            ImageHistogramAxis::X => (image_column_sums(&self.pixels, w, h), (0.0, w as f64)),
+            ImageHistogramAxis::Y => (image_row_sums(&self.pixels, w, h), (0.0, h as f64)),
+        };
+        Some(ImageProfileHistogram { data, extent })
+    }
+
     fn rebuild_histograms(&mut self) {
         if self.width == 0 || self.pixels.is_empty() {
             return;
         }
         let w = self.width as usize;
         let h = self.height as usize;
-        let pixels = &self.pixels;
 
         // Column sums: histo_h — x = column index, y = sum of that column.
-        let col_sums: Vec<f64> = (0..w)
-            .map(|col| (0..h).map(|row| pixels[row * w + col] as f64).sum())
-            .collect();
+        // Row sums: histo_v — x = sum of that row, y = row index. Computed via
+        // the shared pure helpers (also serving `ImageView::histogram`); both
+        // sums are taken before any mutable `self.histo_*` borrow below.
+        let col_sums = image_column_sums(&self.pixels, w, h);
+        let row_sums = image_row_sums(&self.pixels, w, h);
         let col_x: Vec<f64> = (0..w).map(|i| i as f64).collect();
-
-        // Row sums: histo_v — x = sum of that row, y = row index.
-        let row_sums: Vec<f64> = (0..h)
-            .map(|row| (0..w).map(|col| pixels[row * w + col] as f64).sum())
-            .collect();
         let row_y: Vec<f64> = (0..h).map(|i| i as f64).collect();
 
         if let Some(h) = self.histo_h_curve {
@@ -9933,6 +9987,38 @@ mod tests {
         assert_eq!(colorbar_column_width(true, false), 0.0);
         // Hidden and unavailable: none.
         assert_eq!(colorbar_column_width(false, false), 0.0);
+    }
+
+    // ── ImageView side-histogram profile sums (silx getHistogram data) ────────
+
+    #[test]
+    fn image_column_and_row_sums_match_silx_profile() {
+        // 3×2 row-major image:
+        //   row 0: 1 2 3
+        //   row 1: 4 5 6
+        let pixels = [1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let (w, h) = (3usize, 2usize);
+        // histoH = per-column sums over rows: [1+4, 2+5, 3+6].
+        assert_eq!(image_column_sums(&pixels, w, h), vec![5.0, 7.0, 9.0]);
+        // histoV = per-row sums over columns: [1+2+3, 4+5+6].
+        assert_eq!(image_row_sums(&pixels, w, h), vec![6.0, 15.0]);
+    }
+
+    #[test]
+    fn image_profile_sums_have_one_entry_per_index() {
+        // The X profile has `width` entries, the Y profile `height` — matching
+        // the extent silx reports as (0, width) / (0, height).
+        let pixels = vec![1.0f32; 12]; // 4×3
+        let (w, h) = (4usize, 3usize);
+        assert_eq!(image_column_sums(&pixels, w, h).len(), w);
+        assert_eq!(image_row_sums(&pixels, w, h).len(), h);
+        // Uniform image: each column sums to h, each row to w.
+        assert!(
+            image_column_sums(&pixels, w, h)
+                .iter()
+                .all(|&s| s == h as f64)
+        );
+        assert!(image_row_sums(&pixels, w, h).iter().all(|&s| s == w as f64));
     }
 
     #[test]

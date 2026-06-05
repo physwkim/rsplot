@@ -76,13 +76,14 @@ pub use crate::widget::fit_widget::{
     FitModelChoice, FitWidget, format_param_value_error, format_reduced_chisq,
 };
 pub use crate::widget::high_level::{
-    CompareImages, CompareMode, CurveStats, CurveStyle, HistogramAlign, ImageGeometry, ImageStats,
-    ImageView, ItemStats, LegendAction, LegendResponse, Plot1D, Plot2D, PlotDataError, PlotEvent,
-    PlotItemKind, PlotWidget, PlotWindow, PlotWithToolbarResponse, ProfileMode, ScatterPick,
-    ScatterView, ScatterVisualization, StackPerspective, StackView, ToolbarResponse, ValueStats,
-    default_dimension_label, dimension_axis_labels, histogram_edges, histogram_step_values,
-    horizontal_profile_values, line_profile_values, rect_profile_values, scatter_pick_pixels,
-    scatter_position_info, stack_frame, stack_frame_count, vertical_profile_values,
+    CompareImages, CompareMode, CurveStats, CurveStyle, HistogramAlign, ImageGeometry,
+    ImageHistogramAxis, ImageProfileHistogram, ImageStats, ImageView, ItemStats, LegendAction,
+    LegendResponse, Plot1D, Plot2D, PlotDataError, PlotEvent, PlotItemKind, PlotWidget, PlotWindow,
+    PlotWithToolbarResponse, ProfileMode, ScatterPick, ScatterView, ScatterVisualization,
+    StackPerspective, StackView, ToolbarResponse, ValueStats, default_dimension_label,
+    dimension_axis_labels, histogram_edges, histogram_step_values, horizontal_profile_values,
+    line_profile_values, rect_profile_values, scatter_pick_pixels, scatter_position_info,
+    stack_frame, stack_frame_count, vertical_profile_values,
 };
 pub use crate::widget::image_stack::{Frame, ImageStack};
 pub use crate::widget::interaction::{
