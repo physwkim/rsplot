@@ -7147,6 +7147,11 @@ pub struct ImageView {
     /// ImageView's `ColorBarWidget` visibility). Defaults to `true`; when `false`
     /// the colorbar column is not reserved and the image fills its width.
     show_colorbar: bool,
+    /// Whether the side histograms (and the radar overview) are shown (silx
+    /// `ImageView.setSideHistogramDisplayed`, ImageView.py:552-566). Defaults to
+    /// `true`; when `false` the top/right strips and the radar are not drawn and
+    /// the image reclaims that space.
+    show_side_histograms: bool,
     /// Per-pixel mask editor for the active image (silx `ImageView`'s mask
     /// `MaskToolsWidget`). Resized to the active image on [`Self::set_image`].
     /// Painting is gated strictly on [`PlotInteractionMode::MaskDraw`]
@@ -7167,6 +7172,14 @@ fn colorbar_column_width(show: bool, has_colorbar: bool) -> f32 {
     } else {
         0.0
     }
+}
+
+/// Extent (points) to reserve for a side-histogram strip given the show flag
+/// (silx `ImageView.setSideHistogramDisplayed`): the `requested` size when
+/// shown, else `0.0` — the strip is not drawn and the image reclaims the space.
+/// Split out so the show/hide reservation is unit-testable without a GPU backend.
+fn side_histogram_extent(show: bool, requested: f32) -> f32 {
+    if show { requested } else { 0.0 }
 }
 
 /// Which side-histogram profile [`ImageView::histogram`] returns, mirroring the
@@ -7282,6 +7295,7 @@ impl ImageView {
             ),
             profile_drag_start: None,
             show_colorbar: true,
+            show_side_histograms: true,
             mask: crate::widget::mask_tools::MaskToolsWidget::new(0, 0),
         }
     }
@@ -7296,6 +7310,20 @@ impl ImageView {
     /// fills the freed width.
     pub fn set_show_colorbar(&mut self, show: bool) {
         self.show_colorbar = show;
+    }
+
+    /// Whether the side histograms (and the radar overview) are displayed (silx
+    /// `ImageView.isSideHistogramDisplayed`).
+    pub fn is_side_histogram_displayed(&self) -> bool {
+        self.show_side_histograms
+    }
+
+    /// Show or hide the side histograms and the radar overview (silx
+    /// `ImageView.setSideHistogramDisplayed`). When hidden, [`Self::show`] does
+    /// not reserve the top/right strips or the radar, and the image reclaims
+    /// that space.
+    pub fn set_side_histogram_displayed(&mut self, show: bool) {
+        self.show_side_histograms = show;
     }
 
     /// Upload and display a new image.
@@ -7629,9 +7657,12 @@ impl ImageView {
     pub fn show(&mut self, ui: &mut egui::Ui, histo_height: Option<f32>, histo_width: Option<f32>) {
         // Default strip size = silx `HISTOGRAMS_HEIGHT` (ImageView.py:374): the
         // side-profile strips are 200px on their short dimension, enough room for
-        // the profile curve plus the sum-axis tick labels.
-        let histo_h_h = histo_height.unwrap_or(200.0);
-        let histo_v_w = histo_width.unwrap_or(200.0);
+        // the profile curve plus the sum-axis tick labels. When the side
+        // histograms are hidden (silx `setSideHistogramDisplayed(False)`), the
+        // strips reserve no space and the image reclaims the freed width/height.
+        let show_histos = self.show_side_histograms;
+        let histo_h_h = side_histogram_extent(show_histos, histo_height.unwrap_or(200.0));
+        let histo_v_w = side_histogram_extent(show_histos, histo_width.unwrap_or(200.0));
 
         // Synchronise axes before rendering.
         self.sync_x
@@ -7646,19 +7677,22 @@ impl ImageView {
         // `ColorBarAction`).
         let colorbar_w = colorbar_column_width(self.show_colorbar, true);
 
-        // Top row: horizontal histogram.
-        ui.allocate_ui(
-            egui::vec2(avail.x - histo_v_w - colorbar_w, histo_h_h),
-            |ui| {
-                self.histo_h.show(ui);
-            },
-        );
+        // Top row: horizontal histogram (skipped when side histograms hidden).
+        if show_histos {
+            ui.allocate_ui(
+                egui::vec2(avail.x - histo_v_w - colorbar_w, histo_h_h),
+                |ui| {
+                    self.histo_h.show(ui);
+                },
+            );
 
-        // Sync the radar viewport to the image plot's current limits before
-        // rendering (silx `__setVisibleRectFromPlot`).
-        let (xmin, xmax) = self.image_plot.x_limits();
-        if let Some((ymin, ymax)) = self.image_plot.y_limits(YAxis::Left) {
-            self.radar.set_viewport_limits(xmin, xmax, ymin, ymax);
+            // Sync the radar viewport to the image plot's current limits before
+            // rendering (silx `__setVisibleRectFromPlot`). The radar is part of
+            // the side-histogram cluster, so it too is gated here.
+            let (xmin, xmax) = self.image_plot.x_limits();
+            if let Some((ymin, ymax)) = self.image_plot.y_limits(YAxis::Left) {
+                self.radar.set_viewport_limits(xmin, xmax, ymin, ymax);
+            }
         }
 
         // Bottom row: image + vertical histogram + colorbar side by side. The
@@ -7671,23 +7705,26 @@ impl ImageView {
             let response = ui
                 .allocate_ui(egui::vec2(img_w, img_h), |ui| self.image_plot.show(ui))
                 .inner;
-            // Vertical histogram with the radar overview stacked below it. The
-            // enclosing `ui.horizontal` makes child layouts horizontal by
-            // default, so an explicit `ui.vertical` is required here — otherwise
-            // the radar lands beside the histogram and overflows the column.
-            ui.allocate_ui(egui::vec2(histo_v_w, img_h), |ui| {
-                ui.vertical(|ui| {
-                    ui.allocate_ui(egui::vec2(histo_v_w, img_h - radar_h), |ui| {
-                        self.histo_v.show(ui);
+            // Vertical histogram with the radar overview stacked below it
+            // (skipped when side histograms hidden). The enclosing
+            // `ui.horizontal` makes child layouts horizontal by default, so an
+            // explicit `ui.vertical` is required here — otherwise the radar lands
+            // beside the histogram and overflows the column.
+            if show_histos {
+                ui.allocate_ui(egui::vec2(histo_v_w, img_h), |ui| {
+                    ui.vertical(|ui| {
+                        ui.allocate_ui(egui::vec2(histo_v_w, img_h - radar_h), |ui| {
+                            self.histo_v.show(ui);
+                        });
+                        let radar = self.radar.ui(ui, egui::vec2(histo_v_w, radar_h));
+                        if let Some((rx0, rx1, ry0, ry1)) = radar.dragged_limits {
+                            // Forward the dragged viewport to pan/zoom the image
+                            // plot (silx `plot.setLimits`, RadarView.py:326).
+                            self.image_plot.set_limits(rx0, rx1, ry0, ry1, None);
+                        }
                     });
-                    let radar = self.radar.ui(ui, egui::vec2(histo_v_w, radar_h));
-                    if let Some((rx0, rx1, ry0, ry1)) = radar.dragged_limits {
-                        // Forward the dragged viewport to pan/zoom the image plot
-                        // (silx `plot.setLimits`, RadarView.py:326).
-                        self.image_plot.set_limits(rx0, rx1, ry0, ry1, None);
-                    }
                 });
-            });
+            }
             // Colorbar column, synced to the active image's colormap limits.
             if colorbar_w > 0.0 {
                 self.colorbar().ui(ui, egui::vec2(colorbar_w, img_h));
@@ -9987,6 +10024,16 @@ mod tests {
         assert_eq!(colorbar_column_width(true, false), 0.0);
         // Hidden and unavailable: none.
         assert_eq!(colorbar_column_width(false, false), 0.0);
+    }
+
+    #[test]
+    fn side_histogram_extent_reserves_only_when_shown() {
+        // Shown: the requested strip size is reserved verbatim.
+        assert_eq!(side_histogram_extent(true, 200.0), 200.0);
+        assert_eq!(side_histogram_extent(true, 80.0), 80.0);
+        // Hidden: no space, regardless of the requested size.
+        assert_eq!(side_histogram_extent(false, 200.0), 0.0);
+        assert_eq!(side_histogram_extent(false, 80.0), 0.0);
     }
 
     // ── ImageView side-histogram profile sums (silx getHistogram data) ────────
