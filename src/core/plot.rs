@@ -285,6 +285,12 @@ pub struct Plot {
     /// Colormap drawn as the colorbar (mirrors the displayed image's colormap).
     /// `None` hides the colorbar (`doc/design.md` §5·§8).
     pub colormap: Option<Colormap>,
+    /// Whether the built-in colorbar is drawn when a [`colormap`](Self::colormap)
+    /// is present. Defaults to `true`. Composite views that render their own
+    /// dedicated colorbar (e.g. `ImageView`, whose internal image plot still
+    /// carries the active image's colormap) set this `false` so the colorbar is
+    /// not drawn twice.
+    pub show_colorbar: bool,
     /// Limits to restore via the Reset Zoom context-menu item. The widget
     /// captures the first observed `limits` here so the home view survives
     /// pan/zoom (`doc/design.md` §8·§11.6). `None` until the first frame.
@@ -448,6 +454,7 @@ impl Plot {
             limits: (0.0, 1.0, 0.0, 1.0),
             margins: Margins::ZERO,
             colormap: None,
+            show_colorbar: true,
             home_limits: None,
             x_scale: Scale::Linear,
             y_scale: Scale::Linear,
@@ -1396,6 +1403,16 @@ mod tests {
         assert!(!plot.autoreplot());
         plot.set_autoreplot(true);
         assert!(plot.autoreplot());
+    }
+
+    #[test]
+    fn show_colorbar_defaults_true() {
+        // Backward compat: every plot draws its colorbar when it has a colormap
+        // unless a caller (e.g. ImageView's internal image plot) opts out.
+        let mut plot = Plot::new(0);
+        assert!(plot.show_colorbar);
+        plot.show_colorbar = false;
+        assert!(!plot.show_colorbar);
     }
 
     #[test]

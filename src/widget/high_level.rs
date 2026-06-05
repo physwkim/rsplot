@@ -5550,6 +5550,20 @@ impl PlotWidget {
         self.backend.plot().grid
     }
 
+    /// Whether the built-in colorbar is drawn when the plot has a colormap
+    /// (silx colorbar visibility). Defaults to `true`.
+    pub fn show_colorbar(&self) -> bool {
+        self.backend.plot().show_colorbar
+    }
+
+    /// Set whether the built-in colorbar is drawn when the plot has a colormap.
+    /// Composite views that render their own dedicated colorbar (e.g.
+    /// `ImageView`) set this `false` on their internal image plot so the
+    /// colorbar is not drawn twice.
+    pub fn set_show_colorbar(&mut self, show: bool) {
+        self.backend.plot_mut().show_colorbar = show;
+    }
+
     pub fn set_graph_minor_grid(&mut self, on: bool) {
         self.backend.plot_mut().grid = if on {
             GraphGrid::MajorAndMinor
@@ -7165,6 +7179,12 @@ impl ImageView {
         let mut image_plot = Plot2D::new(render_state, image_id);
         image_plot.set_graph_cursor(true);
         image_plot.set_keep_data_aspect_ratio(true);
+        // ImageView renders its own dedicated colorbar column (silx
+        // `getColorBarWidget` at grid (0,2), ImageView.py:499). The image plot
+        // still carries the active image's colormap, which would otherwise draw
+        // a second, built-in colorbar — suppress it so only the dedicated one
+        // shows.
+        image_plot.set_show_colorbar(false);
 
         // Side profile plots mirror silx `_SideHistogram` (ImageView.py:168): a
         // bare plot with no graph title, no axis labels, and no grid so the full

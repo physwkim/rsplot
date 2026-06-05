@@ -229,7 +229,7 @@ impl PlotView {
 
         // Chrome gutters depend only on which axes/colorbar/labels show, not on
         // limits.
-        let with_colorbar = plot.colormap.is_some();
+        let with_colorbar = plot.colormap.is_some() && plot.show_colorbar;
         let with_y2 = plot.y2.is_some();
         let axes_displayed = plot.axes_displayed();
         let chrome_request = chrome::ChromeRequest {
