@@ -1419,6 +1419,123 @@ pub fn line_profile_values(
     Ok((x_vals, y_vals))
 }
 
+/// Bilinear interpolation of `data` (row-major `width × height`) at fractional
+/// column `col` and row `row`, porting silx `BilinearImage.c_funct`
+/// (image/bilinear.pyx:121-215, the no-mask path). Coordinates outside the image
+/// clamp to the nearest edge (silx "nearest for outside"). Indexed
+/// `data[row * width + col]`.
+fn bilinear_sample(width: usize, height: usize, data: &[f32], col: f64, row: f64) -> f64 {
+    // silx clamps the row coord (`d0`) and column coord (`d1`) into the image.
+    let d0 = row.clamp(0.0, height as f64 - 1.0);
+    let d1 = col.clamp(0.0, width as f64 - 1.0);
+    let r0 = d0.floor();
+    let r1 = d0.ceil();
+    let c0 = d1.floor();
+    let c1 = d1.ceil();
+    let (i0, i1) = (r0 as usize, r1 as usize); // row indices
+    let (j0, j1) = (c0 as usize, c1 as usize); // column indices
+    let at = |i: usize, j: usize| data[i * width + j] as f64;
+    if i0 == i1 && j0 == j1 {
+        at(i0, j0)
+    } else if i0 == i1 {
+        // Same row: interpolate across columns.
+        at(i0, j0) * (c1 - d1) + at(i0, j1) * (d1 - c0)
+    } else if j0 == j1 {
+        // Same column: interpolate across rows.
+        at(i0, j0) * (r1 - d0) + at(i1, j0) * (d0 - r0)
+    } else {
+        // Full bilinear: row weights (r1-d0)/(d0-r0), col weights (c1-d1)/(d1-c0).
+        at(i0, j0) * (r1 - d0) * (c1 - d1)
+            + at(i1, j0) * (d0 - r0) * (c1 - d1)
+            + at(i0, j1) * (r1 - d0) * (d1 - c0)
+            + at(i1, j1) * (d0 - r0) * (d1 - c0)
+    }
+}
+
+/// Extract a free-line image profile with a perpendicular band of `linewidth`
+/// pixels, porting silx `BilinearImage.profile_line` (image/bilinear.pyx:391-466).
+///
+/// `start`/`end` are `(column, row)` pixel-centre coordinates (matching
+/// [`line_profile_values`]; integer coordinates are pixel centres, so silx's
+/// `-0.5` plot-corner shift is *not* applied here). The profile has
+/// `ceil(length + 1)` samples; each sample bilinearly interpolates
+/// ([`bilinear_sample`]) `linewidth` points spaced one pixel apart along the
+/// perpendicular to the line and centred on it, then reduces them by `method`
+/// ([`ProfileMethod::Mean`] = mean of the in-bounds finite band points, silx
+/// default; [`ProfileMethod::Sum`] = their sum). Band points outside the image
+/// are dropped (silx strict bounds test); a sample with no in-bounds finite
+/// point is `NaN` under `Mean` and `0` under `Sum`, matching silx. Unlike the
+/// nearest-neighbour [`line_profile_values`], sampling is bilinear and supports a
+/// band width. Returns `(distance_along_line, value)` pairs.
+pub fn line_profile_band(
+    width: u32,
+    height: u32,
+    data: &[f32],
+    start: (f64, f64),
+    end: (f64, f64),
+    linewidth: u32,
+    method: ProfileMethod,
+) -> Result<(Vec<f64>, Vec<f64>), PlotDataError> {
+    validate_image_len(width, height, data.len())?;
+    let w = width as usize;
+    let h = height as usize;
+    let (src_col0, src_row0) = start;
+    let (dst_col, dst_row) = end;
+    // Degenerate line: silx returns a single interpolated sample.
+    if src_row0 == dst_row && src_col0 == dst_col {
+        return Ok((
+            vec![0.0],
+            vec![bilinear_sample(w, h, data, src_col0, src_row0)],
+        ));
+    }
+    let lw = linewidth.max(1) as usize;
+    let d_row = dst_row - src_row0;
+    let d_col = dst_col - src_col0;
+    let length = (d_row * d_row + d_col * d_col).sqrt();
+    // Perpendicular unit vector (silx row_width / col_width) for the band offset.
+    let row_width = d_col / length;
+    let col_width = -d_row / length;
+    let count = (length + 1.0).ceil() as usize; // silx `lengt`
+    let denom = (count - 1) as f64; // count >= 2 since start != end
+    let step_row = d_row / denom;
+    let step_col = d_col / denom;
+    // Shift the start onto the band's first perpendicular offset, centred on the
+    // line (silx `src -= width * (linewidth - 1) / 2`).
+    let src_row = src_row0 - row_width * (lw as f64 - 1.0) / 2.0;
+    let src_col = src_col0 - col_width * (lw as f64 - 1.0) / 2.0;
+
+    let mut x_vals = Vec::with_capacity(count);
+    let mut y_vals = Vec::with_capacity(count);
+    for i in 0..count {
+        let row = src_row + i as f64 * step_row;
+        let col = src_col + i as f64 * step_col;
+        let mut sum = 0.0;
+        let mut cnt = 0usize;
+        for j in 0..lw {
+            let nr = row + j as f64 * row_width;
+            let nc = col + j as f64 * col_width;
+            // silx strict bounds test (band points outside the image are dropped,
+            // unlike c_funct's internal edge clamp).
+            if nc >= 0.0 && nc < width as f64 && nr >= 0.0 && nr < height as f64 {
+                let val = bilinear_sample(w, h, data, nc, nr);
+                if val.is_finite() {
+                    cnt += 1;
+                    sum += val;
+                }
+            }
+        }
+        let value = match (cnt > 0, method) {
+            (true, ProfileMethod::Mean) => sum / cnt as f64,
+            (true, ProfileMethod::Sum) => sum,
+            (false, ProfileMethod::Mean) => f64::NAN,
+            (false, ProfileMethod::Sum) => 0.0,
+        };
+        x_vals.push(i as f64 / denom * length);
+        y_vals.push(value);
+    }
+    Ok((x_vals, y_vals))
+}
+
 /// Extract a 1D profile within a rectangle by reducing along an axis.
 ///
 /// `rect` is (x_min, x_max, y_min, y_max) in (column, row) coordinates.
@@ -10748,6 +10865,86 @@ mod tests {
         let (xr, yr) = rect_profile_values(3, 2, &data, rect, false, ProfileMethod::Sum).unwrap();
         assert_eq!(xr, vec![0.0, 1.0]);
         assert_eq!(yr, vec![6.0, 15.0]);
+    }
+
+    #[test]
+    fn line_profile_band_width_one_samples_along_row() {
+        // 3x2: row 0 = [1,2,3], row 1 = [4,5,6]. Width-1 line along row 0.
+        let data = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let (x, y) =
+            line_profile_band(3, 2, &data, (0.0, 0.0), (2.0, 0.0), 1, ProfileMethod::Mean).unwrap();
+        assert_eq!(x, vec![0.0, 1.0, 2.0]);
+        assert_eq!(y, vec![1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn line_profile_band_width_two_averages_perpendicular_rows() {
+        // Line centred at row 0.5 with linewidth 2 spans both rows; the band mean
+        // matches the per-column average, the sum matches the per-column total.
+        let data = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let (_, mean) =
+            line_profile_band(3, 2, &data, (0.0, 0.5), (2.0, 0.5), 2, ProfileMethod::Mean).unwrap();
+        assert_eq!(mean, vec![2.5, 3.5, 4.5]);
+        let (_, sum) =
+            line_profile_band(3, 2, &data, (0.0, 0.5), (2.0, 0.5), 2, ProfileMethod::Sum).unwrap();
+        assert_eq!(sum, vec![5.0, 7.0, 9.0]);
+    }
+
+    #[test]
+    fn line_profile_band_vertical_width_one() {
+        // Vertical width-1 line down column 0: samples rows 0 and 1.
+        let data = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let (x, y) =
+            line_profile_band(3, 2, &data, (0.0, 0.0), (0.0, 1.0), 1, ProfileMethod::Mean).unwrap();
+        assert_eq!(x, vec![0.0, 1.0]);
+        assert_eq!(y, vec![1.0, 4.0]);
+    }
+
+    #[test]
+    fn line_profile_band_diagonal_is_linear_on_gradient() {
+        // 3x3 gradient 0..8; the main diagonal profile is linear (silx
+        // test_profile_grad), i.e. equal successive differences.
+        let data = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
+        let (_, y) =
+            line_profile_band(3, 3, &data, (0.0, 0.0), (2.0, 2.0), 1, ProfileMethod::Mean).unwrap();
+        // length = sqrt(8) ~= 2.83 -> ceil(length + 1) = 4 samples.
+        assert_eq!(y.len(), 4);
+        let diffs: Vec<f64> = y.windows(2).map(|w| w[1] - w[0]).collect();
+        for d in &diffs {
+            assert!((d - diffs[0]).abs() < 1e-9, "diffs not constant: {diffs:?}");
+        }
+        // Endpoints are the exact corner pixels.
+        assert!((y[0] - 0.0).abs() < 1e-9);
+        assert!((y[3] - 8.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn line_profile_band_degenerate_returns_single_sample() {
+        let data = [1.0, 2.0, 3.0, 4.0];
+        let (x, y) =
+            line_profile_band(2, 2, &data, (1.0, 1.0), (1.0, 1.0), 1, ProfileMethod::Mean).unwrap();
+        assert_eq!(x, vec![0.0]);
+        assert_eq!(y, vec![4.0]); // data[row 1, col 1] = 4
+    }
+
+    #[test]
+    fn line_profile_band_validates_length() {
+        assert_eq!(
+            line_profile_band(
+                2,
+                2,
+                &[1.0, 2.0, 3.0],
+                (0.0, 0.0),
+                (1.0, 1.0),
+                1,
+                ProfileMethod::Mean
+            )
+            .unwrap_err(),
+            PlotDataError::ImageDataLength {
+                expected: 4,
+                actual: 3,
+            }
+        );
     }
 
     #[test]

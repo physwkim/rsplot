@@ -82,8 +82,8 @@ pub use crate::widget::high_level::{
     PlotWithToolbarResponse, ProfileMethod, ProfileMode, ScatterPick, ScatterView,
     ScatterVisualization, StackPerspective, StackView, ToolbarResponse, ValueStats,
     aligned_profile_values, default_dimension_label, dimension_axis_labels, histogram_edges,
-    histogram_step_values, horizontal_profile_values, line_profile_values, pick_histogram,
-    rect_profile_values, scatter_pick_pixels, scatter_position_info, stack_frame,
+    histogram_step_values, horizontal_profile_values, line_profile_band, line_profile_values,
+    pick_histogram, rect_profile_values, scatter_pick_pixels, scatter_position_info, stack_frame,
     stack_frame_count, vertical_profile_values,
 };
 pub use crate::widget::image_stack::{Frame, ImageStack};
