@@ -243,6 +243,59 @@ impl Symbol {
         };
         Some(symbol)
     }
+
+    /// Human-readable name for this symbol, matching the values of silx
+    /// `SymbolMixIn._SUPPORTED_SYMBOLS` (silx `getSymbolName`).
+    /// [`Symbol::Triangle`] (an egui extra silx lacks) is named `"Triangle"`.
+    /// The returned name round-trips through [`Symbol::from_code`].
+    pub fn name(self) -> &'static str {
+        match self {
+            Symbol::Circle => "Circle",
+            Symbol::Diamond => "Diamond",
+            Symbol::Square => "Square",
+            Symbol::Plus => "Plus",
+            Symbol::Cross => "Cross",
+            Symbol::Point => "Point",
+            Symbol::Pixel => "Pixel",
+            Symbol::VerticalLine => "Vertical line",
+            Symbol::HorizontalLine => "Horizontal line",
+            Symbol::TickLeft => "Tick left",
+            Symbol::TickRight => "Tick right",
+            Symbol::TickUp => "Tick up",
+            Symbol::TickDown => "Tick down",
+            Symbol::CaretLeft => "Caret left",
+            Symbol::CaretRight => "Caret right",
+            Symbol::CaretUp => "Caret up",
+            Symbol::CaretDown => "Caret down",
+            Symbol::Triangle => "Triangle",
+        }
+    }
+
+    /// Every supported symbol, ordered to match silx `_SUPPORTED_SYMBOLS`
+    /// (silx `getSupportedSymbols`) with [`Symbol::Triangle`] — an egui extra
+    /// silx lacks — appended last. silx's empty "None" symbol and the `'♥'`
+    /// Heart glyph are not representable here and so are absent (see
+    /// [`Symbol::from_code`]). Used to build the silx `SymbolToolButton` menu.
+    pub const ALL: [Symbol; 18] = [
+        Symbol::Circle,
+        Symbol::Diamond,
+        Symbol::Square,
+        Symbol::Plus,
+        Symbol::Cross,
+        Symbol::Point,
+        Symbol::Pixel,
+        Symbol::VerticalLine,
+        Symbol::HorizontalLine,
+        Symbol::TickLeft,
+        Symbol::TickRight,
+        Symbol::TickUp,
+        Symbol::TickDown,
+        Symbol::CaretLeft,
+        Symbol::CaretRight,
+        Symbol::CaretUp,
+        Symbol::CaretDown,
+        Symbol::Triangle,
+    ];
 }
 
 /// Where a filled curve's area extends to (silx `baseline`). The fill is the
@@ -556,6 +609,37 @@ mod tests {
         assert_eq!(Symbol::from_code("\u{2665}"), None);
         assert_eq!(Symbol::from_code("heart"), None);
         assert_eq!(Symbol::from_code("nope"), None);
+    }
+
+    #[test]
+    fn all_catalog_covers_every_variant_with_unique_round_tripping_names() {
+        // `ALL` lists every variant exactly once (17 silx symbols + Triangle).
+        assert_eq!(Symbol::ALL.len(), 18);
+        let mut names: Vec<&str> = Symbol::ALL.iter().map(|s| s.name()).collect();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), 18, "symbol names must be unique");
+        // Every catalog name parses back to the same symbol (silx getSymbolName /
+        // setSymbol round-trip), so the tool-button labels are valid codes.
+        for symbol in Symbol::ALL {
+            assert_eq!(
+                Symbol::from_code(symbol.name()),
+                Some(symbol),
+                "{} name must round-trip",
+                symbol.name()
+            );
+        }
+        // silx order: the first five are o, d, s, +, x.
+        assert_eq!(
+            &Symbol::ALL[..5],
+            &[
+                Symbol::Circle,
+                Symbol::Diamond,
+                Symbol::Square,
+                Symbol::Plus,
+                Symbol::Cross
+            ]
+        );
     }
 
     #[test]

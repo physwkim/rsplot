@@ -4685,6 +4685,63 @@ impl PlotWidget {
         true
     }
 
+    /// Handles of every curve-like item that carries retained [`CurveData`]
+    /// (curve, histogram, scatter) — the siplot equivalent of the silx
+    /// `SymbolMixIn` items a `SymbolToolButton` iterates over.
+    fn symbol_bearing_handles(&self) -> Vec<ItemHandle> {
+        self.item_records
+            .iter()
+            .filter(|record| record.curve_data.is_some())
+            .map(|record| record.handle)
+            .collect()
+    }
+
+    /// Set the marker symbol of every curve-like item (curve, histogram,
+    /// scatter) in one call, mirroring silx `SymbolToolButton` /
+    /// `_SymbolToolButtonBase._markerChanged`, which calls `setSymbol` on every
+    /// `SymbolMixIn` item in the plot. `Some(symbol)` draws that marker at each
+    /// point; `None` hides the markers (silx's "None" entry, an empty symbol
+    /// string). Returns the number of items whose symbol actually changed.
+    pub fn set_all_symbols(&mut self, symbol: Option<Symbol>) -> usize {
+        let mut changed = 0;
+        for handle in self.symbol_bearing_handles() {
+            let Some(mut data) = self.record_curve_data(handle).cloned() else {
+                continue;
+            };
+            if data.symbol == symbol {
+                continue;
+            }
+            data.symbol = symbol;
+            if self.update_curve_data(handle, &data) {
+                changed += 1;
+            }
+        }
+        changed
+    }
+
+    /// Set the marker size (logical points) of every curve-like item, mirroring
+    /// silx `SymbolToolButton` / `_SymbolToolButtonBase._sizeChanged`, which
+    /// calls `setSymbolSize` on every single-symbol-size `SymbolMixIn` item.
+    /// siplot curves carry one size per item (no per-point sizes), so every
+    /// curve-like item qualifies. Returns the number of items whose size
+    /// actually changed.
+    pub fn set_all_symbol_sizes(&mut self, size: f32) -> usize {
+        let mut changed = 0;
+        for handle in self.symbol_bearing_handles() {
+            let Some(mut data) = self.record_curve_data(handle).cloned() else {
+                continue;
+            };
+            if data.marker_size == size {
+                continue;
+            }
+            data.marker_size = size;
+            if self.update_curve_data(handle, &data) {
+                changed += 1;
+            }
+        }
+        changed
+    }
+
     /// Set the active curve-like item.
     pub fn set_active_curve(&mut self, item: Option<ItemHandle>) -> bool {
         if item.is_some_and(|handle| {
@@ -6747,6 +6804,51 @@ impl Plot2D {
 
         ui.data_mut(|d| d.insert_temp(open_id, open));
         applied
+    }
+
+    /// A drop-down tool button that sets the marker symbol and size of *every*
+    /// curve-like item in the plot, mirroring silx `SymbolToolButton`
+    /// (`PlotToolButtons.py:458-478`, instant-popup menu). The menu carries a
+    /// size [`egui::DragValue`] (silx's 1..20 size slider) followed by a "None"
+    /// entry (silx's empty symbol) and one entry per [`Symbol`]
+    /// ([`Symbol::ALL`], silx order). Picking a size drives
+    /// [`PlotWidget::set_all_symbol_sizes`]; picking a symbol drives
+    /// [`PlotWidget::set_all_symbols`]. The pending size persists in egui temp
+    /// memory keyed by the plot id so it survives across frames, like the other
+    /// toolbar popups here.
+    ///
+    /// Place it inside [`PlotWidget::show_toolbar_with`] to share the standard
+    /// toolbar row.
+    pub fn symbol_tool_button(&mut self, ui: &mut egui::Ui) {
+        let plot_id = self.backend().plot().id;
+        let size_id = egui::Id::new(plot_id).with("symbol_tool_size");
+        let mut size = ui.data(|d| d.get_temp::<f32>(size_id)).unwrap_or(7.0);
+
+        ui.menu_button("Symbol", |ui| {
+            ui.horizontal(|ui| {
+                ui.label("Size:");
+                if ui
+                    .add(egui::DragValue::new(&mut size).range(1.0..=20.0).speed(0.5))
+                    .on_hover_text("Marker size for every curve/scatter")
+                    .changed()
+                {
+                    self.set_all_symbol_sizes(size);
+                }
+            });
+            ui.separator();
+            if ui.button("None").clicked() {
+                self.set_all_symbols(None);
+                ui.close();
+            }
+            for symbol in Symbol::ALL {
+                if ui.button(symbol.name()).clicked() {
+                    self.set_all_symbols(Some(symbol));
+                    ui.close();
+                }
+            }
+        });
+
+        ui.data_mut(|d| d.insert_temp(size_id, size));
     }
 
     /// Draw the pixel-intensity histogram of the active image as bars + stats,
