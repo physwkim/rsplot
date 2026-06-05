@@ -45,13 +45,14 @@ impl ColormapDialogApp {
 impl eframe::App for ColormapDialogApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         ui.vertical(|ui| {
-            if ui.button("Toggle Colormap Dialog").clicked() {
-                self.colormap_dialog.open = !self.colormap_dialog.open;
-            }
-
-            ui.separator();
-
-            self.image_plot.show_with_toolbar(ui);
+            // The colormap toggle sits in the plot toolbar row as a checkable
+            // action, mirroring silx ColormapAction.
+            let dialog = &mut self.colormap_dialog;
+            self.image_plot.show_toolbar_with(ui, |ui, _plot| {
+                ui.separator();
+                dialog.toggle_button(ui);
+            });
+            self.image_plot.show(ui);
 
             // Show the colormap dialog floating window, which updates the plot colormap internally
             self.colormap_dialog.show(ui.ctx(), &mut self.image_plot);
