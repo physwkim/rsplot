@@ -20,8 +20,15 @@
 //!   per-point alpha array (silx `scatter.py` per-point alpha).
 //!
 //! Faithful to the silx semantics; GPU wiring (feeding these into
-//! `backend_wgpu.rs` / `high_level.rs`) and scatter picking per mode are
-//! deferred to a later wave.
+//! `backend_wgpu.rs` / `high_level.rs`) is deferred to a later wave.
+//!
+//! Mode-specific picking (silx `Scatter.pick`, `scatter.py:804-861`) is provided
+//! for the grid modes that map a rendered cell back to source points:
+//! [`regular_grid_pick`] (REGULAR_GRID) and [`BinnedStatistic::pick`]
+//! (BINNED_STATISTIC). POINTS/SOLID use plain nearest-point picking (silx's
+//! default `super().pick()`); IRREGULAR_GRID has no 1:1 cell→point mapping in
+//! siplot's interpolated-image render (silx picks Delaunay triangles), so it is
+//! intentionally not covered here.
 
 use egui::Color32;
 
@@ -381,6 +388,78 @@ impl GridImage {
             None
         }
     }
+
+    /// The grid cell `(row, col)` containing data coordinates `(x, y)`, or `None`
+    /// when the point falls outside the image. Mirrors a backend image pick:
+    /// `col = ⌊(x − ox) / sx⌋`, `row = ⌊(y − oy) / sy⌋`, bounds-checked against
+    /// the shape. A negative scale (a reversed-bounds regular grid) is handled —
+    /// numerator and scale flip sign together so the cell index stays in range.
+    #[must_use]
+    pub fn cell(&self, x: f64, y: f64) -> Option<(usize, usize)> {
+        grid_cell(self.shape, self.origin, self.scale, x, y)
+    }
+}
+
+/// Map data coordinates `(x, y)` to the row-major grid cell `(row, col)` for a
+/// grid of `shape` (rows, cols) placed at `origin` with per-axis `scale`, or
+/// `None` when the point is outside the grid or `scale` is zero / non-finite.
+/// Shared by [`GridImage::cell`] and [`BinnedStatistic::pick`].
+fn grid_cell(
+    shape: (usize, usize),
+    origin: (f64, f64),
+    scale: (f64, f64),
+    x: f64,
+    y: f64,
+) -> Option<(usize, usize)> {
+    let (sx, sy) = scale;
+    if sx == 0.0 || sy == 0.0 {
+        return None;
+    }
+    let cf = (x - origin.0) / sx;
+    let rf = (y - origin.1) / sy;
+    if !cf.is_finite() || !rf.is_finite() || cf < 0.0 || rf < 0.0 {
+        return None;
+    }
+    let col = cf.floor() as usize;
+    let row = rf.floor() as usize;
+    if row < shape.0 && col < shape.1 {
+        Some((row, col))
+    } else {
+        None
+    }
+}
+
+/// The scatter point index for a [`crate::core::scatter_viz`]
+/// `Visualization.REGULAR_GRID` pick at data coordinates `(x, y)`, mirroring silx
+/// `Scatter.pick` REGULAR_GRID branch (items/scatter.py:815-835).
+///
+/// `image` is the rendered grid (its `shape`/`origin`/`scale`), `order` the grid
+/// major order, and `point_count` the number of scatter points. The picked image
+/// cell `(row, col)` maps to a source index by the major order — `row * cols +
+/// col` for [`GridMajorOrder::Row`], `row + col * rows` for
+/// [`GridMajorOrder::Column`] (siplot stores column-major points transposed into
+/// the row-major image, so this inverts that placement). Returns `None` when the
+/// cursor is off the grid, or when the cell maps past the last point (silx: "image
+/// can be larger than scatter").
+#[must_use]
+pub fn regular_grid_pick(
+    image: &GridImage,
+    order: GridMajorOrder,
+    point_count: usize,
+    x: f64,
+    y: f64,
+) -> Option<usize> {
+    let (row, col) = image.cell(x, y)?;
+    let (rows, cols) = image.shape;
+    let index = match order {
+        GridMajorOrder::Row => row * cols + col,
+        GridMajorOrder::Column => row + col * rows,
+    };
+    if index < point_count {
+        Some(index)
+    } else {
+        None
+    }
 }
 
 /// Rasterize a triangulation to a `rows x cols` value image by barycentric
@@ -663,6 +742,40 @@ impl BinnedStatistic {
             BinnedStatisticFunction::Mean => self.mean.clone(),
             BinnedStatisticFunction::Count => self.count.iter().map(|&c| c as f64).collect(),
             BinnedStatisticFunction::Sum => self.sum.clone(),
+        }
+    }
+
+    /// The indices of all scatter points falling in the bin under data
+    /// coordinates `(px, py)`, mirroring silx `Scatter.pick` BINNED_STATISTIC
+    /// branch (items/scatter.py:837-859).
+    ///
+    /// The picked bin `(row, col)` expands back to its data range
+    /// `[ox + sx·col, ox + sx·(col+1)) × [oy + sy·row, oy + sy·(row+1))` and
+    /// every point inside it is returned (silx
+    /// `numpy.nonzero(logical_and(...))`). The upper bin edges are exclusive, as
+    /// in silx. `x` and `y` are the scatter point coordinates; pairs beyond the
+    /// shorter slice are ignored. Returns `None` when the cursor is off the grid
+    /// or no point lies in the bin (silx returns no pick).
+    #[must_use]
+    pub fn pick(&self, x: &[f64], y: &[f64], px: f64, py: f64) -> Option<Vec<usize>> {
+        let (row, col) = grid_cell(self.shape, self.origin, self.scale, px, py)?;
+        let (ox, oy) = self.origin;
+        let (sx, sy) = self.scale;
+        let x_lo = ox + sx * col as f64;
+        let x_hi = ox + sx * (col + 1) as f64;
+        let y_lo = oy + sy * row as f64;
+        let y_hi = oy + sy * (row + 1) as f64;
+        let indices: Vec<usize> = x
+            .iter()
+            .zip(y.iter())
+            .enumerate()
+            .filter(|&(_, (&xi, &yi))| xi >= x_lo && xi < x_hi && yi >= y_lo && yi < y_hi)
+            .map(|(i, _)| i)
+            .collect();
+        if indices.is_empty() {
+            None
+        } else {
+            Some(indices)
         }
     }
 }
@@ -1165,6 +1278,131 @@ mod tests {
         // Only the finite-valued point is counted in bin 0.
         assert_eq!(bs.count[0], 1);
         assert!((bs.sum[0] - 10.0).abs() < 1e-12);
+    }
+
+    // --- mode-specific picking (silx Scatter.pick) --------------------------
+
+    #[test]
+    fn regular_grid_pick_row_major_maps_cell_to_index() {
+        // 2 rows x 3 cols, row-major, unit scale at origin (0,0); 6 points.
+        let image = GridImage {
+            data: vec![0.0; 6],
+            shape: (2, 3),
+            origin: (0.0, 0.0),
+            scale: (1.0, 1.0),
+        };
+        // (col 2, row 0) -> 0*3 + 2 = 2.
+        assert_eq!(
+            regular_grid_pick(&image, GridMajorOrder::Row, 6, 2.5, 0.5),
+            Some(2)
+        );
+        // (col 0, row 1) -> 1*3 + 0 = 3.
+        assert_eq!(
+            regular_grid_pick(&image, GridMajorOrder::Row, 6, 0.5, 1.5),
+            Some(3)
+        );
+        // Off the grid (col 3 >= cols).
+        assert_eq!(
+            regular_grid_pick(&image, GridMajorOrder::Row, 6, 3.5, 0.5),
+            None
+        );
+    }
+
+    #[test]
+    fn regular_grid_pick_column_major_inverts_transposed_placement() {
+        // Column-major points are stored transposed -> index = row + col*rows.
+        let image = GridImage {
+            data: vec![0.0; 6],
+            shape: (2, 3),
+            origin: (0.0, 0.0),
+            scale: (1.0, 1.0),
+        };
+        // (col 2, row 1) -> 1 + 2*2 = 5.
+        assert_eq!(
+            regular_grid_pick(&image, GridMajorOrder::Column, 6, 2.5, 1.5),
+            Some(5)
+        );
+        // (col 1, row 0) -> 0 + 1*2 = 2.
+        assert_eq!(
+            regular_grid_pick(&image, GridMajorOrder::Column, 6, 1.5, 0.5),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn regular_grid_pick_none_past_last_point() {
+        // 6-cell image but only 5 points: the trailing cell maps past the data
+        // (silx "image can be larger than scatter").
+        let image = GridImage {
+            data: vec![0.0; 6],
+            shape: (2, 3),
+            origin: (0.0, 0.0),
+            scale: (1.0, 1.0),
+        };
+        // Last cell (col 2, row 1) -> index 5 >= point_count 5 -> None.
+        assert_eq!(
+            regular_grid_pick(&image, GridMajorOrder::Row, 5, 2.5, 1.5),
+            None
+        );
+        // (col 1, row 1) -> index 4 < 5 -> Some(4).
+        assert_eq!(
+            regular_grid_pick(&image, GridMajorOrder::Row, 5, 1.5, 1.5),
+            Some(4)
+        );
+    }
+
+    #[test]
+    fn regular_grid_pick_handles_negative_scale() {
+        // Reversed-bounds grid: x descending 10,8,6 -> scale -2, origin 11.
+        let image = GridImage {
+            data: vec![0.0; 3],
+            shape: (1, 3),
+            origin: (11.0, -0.5),
+            scale: (-2.0, 1.0),
+        };
+        // x=10 -> col 0; x=6 -> col 2.
+        assert_eq!(
+            regular_grid_pick(&image, GridMajorOrder::Row, 3, 10.0, 0.0),
+            Some(0)
+        );
+        assert_eq!(
+            regular_grid_pick(&image, GridMajorOrder::Row, 3, 6.0, 0.0),
+            Some(2)
+        );
+        // x beyond the begin edge (12 > 11) -> negative cell -> None.
+        assert_eq!(
+            regular_grid_pick(&image, GridMajorOrder::Row, 3, 12.0, 0.0),
+            None
+        );
+    }
+
+    #[test]
+    fn binned_statistic_pick_returns_points_in_bin() {
+        // 4 points pin [0,2]x[0,2] into 2x2 unit bins.
+        let x = [0.0, 0.5, 1.5, 2.0];
+        let y = [0.0, 0.5, 1.5, 2.0];
+        let v = [10.0, 30.0, 5.0, 7.0];
+        let bs = binned_statistic(&x, &y, &v, 2, 2).expect("binned");
+        assert_eq!(bs.origin, (0.0, 0.0));
+        assert_eq!(bs.scale, (1.0, 1.0));
+        // Bin (row0,col0) range x[0,1) y[0,1): points 0 and 1.
+        assert_eq!(bs.pick(&x, &y, 0.5, 0.5), Some(vec![0, 1]));
+        // Bin (row1,col1) range x[1,2) y[1,2): point 2 in; point 3 at the max
+        // edge is excluded by the strict upper bound (silx behaviour).
+        assert_eq!(bs.pick(&x, &y, 1.5, 1.5), Some(vec![2]));
+    }
+
+    #[test]
+    fn binned_statistic_pick_none_off_grid_or_empty_bin() {
+        let x = [0.0, 0.5, 2.0];
+        let y = [0.0, 0.5, 2.0];
+        let v = [10.0, 30.0, 7.0];
+        let bs = binned_statistic(&x, &y, &v, 2, 2).expect("binned");
+        // Empty bin (row0,col1): x[1,2) y[0,1) holds no point.
+        assert_eq!(bs.pick(&x, &y, 1.5, 0.5), None);
+        // Cursor off the grid (right of, and left of).
+        assert_eq!(bs.pick(&x, &y, 2.5, 0.5), None);
+        assert_eq!(bs.pick(&x, &y, -0.5, 0.5), None);
     }
 
     // --- Per-point alpha ----------------------------------------------------
