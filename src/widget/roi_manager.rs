@@ -117,6 +117,22 @@ impl RoiManagerWidget {
                                     ui.selectable_value(&mut r.line_style, s, s.label());
                                 }
                             });
+                        // Gap color for dashed/dotted outlines (silx
+                        // setLineGapColor): a checkbox enables it, then a swatch
+                        // edits it. Only affects non-solid line styles.
+                        let mut has_gap = r.gap_color.is_some();
+                        if ui
+                            .checkbox(&mut has_gap, "gap")
+                            .on_hover_text("Fill dash/dot gaps with a color")
+                            .changed()
+                        {
+                            r.gap_color = has_gap.then_some(default_color);
+                        }
+                        if let Some(mut gap) = r.gap_color
+                            && ui.color_edit_button_srgba(&mut gap).changed()
+                        {
+                            r.gap_color = Some(gap);
+                        }
                         // Fill toggle (silx setFill).
                         ui.checkbox(&mut r.fill, "fill")
                             .on_hover_text("Fill interior");

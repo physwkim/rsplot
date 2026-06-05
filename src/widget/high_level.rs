@@ -6161,6 +6161,15 @@ impl PlotWidget {
         }
     }
 
+    /// Set the gap fill color of a dashed/dotted ROI outline at `index` (silx
+    /// `LineMixIn.setLineGapColor`); `None` leaves the gaps transparent. Only
+    /// visible on a dashed/dotted line style. An out-of-range index is ignored.
+    pub fn set_roi_line_gap_color(&mut self, index: usize, gap_color: Option<Color32>) {
+        if let Some(r) = self.backend.plot_mut().rois.get_mut(index) {
+            r.gap_color = gap_color;
+        }
+    }
+
     /// Set whether the ROI at `index` fills its interior (silx
     /// `RegionOfInterest.setFill`). An out-of-range index is ignored.
     pub fn set_roi_fill(&mut self, index: usize, fill: bool) {

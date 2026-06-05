@@ -975,13 +975,17 @@ pub struct ManagedRoi {
     pub line_width: f32,
     /// Outline stroke style (silx `setLineStyle`, default solid).
     pub line_style: RoiLineStyle,
+    /// Color filling the gaps of a dashed/dotted outline (silx
+    /// `LineMixIn.setLineGapColor`); `None` leaves the gaps transparent. Has no
+    /// visible effect on a solid outline.
+    pub gap_color: Option<Color32>,
     /// Whether the ROI's interior is filled (silx `setFill`, default `false`).
     pub fill: bool,
 }
 
 impl ManagedRoi {
     /// Wrap `roi` with default metadata: no color override, empty name, not
-    /// selected, solid 1.0-width outline, unfilled (silx defaults).
+    /// selected, solid 1.0-width outline, no gap color, unfilled (silx defaults).
     pub fn new(roi: Roi) -> Self {
         Self {
             roi,
@@ -990,6 +994,7 @@ impl ManagedRoi {
             selected: false,
             line_width: DEFAULT_ROI_LINE_WIDTH,
             line_style: RoiLineStyle::default(),
+            gap_color: None,
             fill: false,
         }
     }

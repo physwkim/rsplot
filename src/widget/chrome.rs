@@ -641,6 +641,10 @@ pub struct RoiAppearance<'a> {
     /// Outline stroke style (silx `getLineStyle`). `None` is solid; a dashed or
     /// dotted style is emitted as manual dash segments.
     pub line_style: Option<LineStyle>,
+    /// Color filling the gaps between dashes/dots of the outline (silx
+    /// `getLineGapColor`). `None` leaves the gaps transparent; only visible on a
+    /// dashed/dotted `line_style`.
+    pub gap_color: Option<Color32>,
     /// Whether the ROI interior is filled with a translucent tint. `None` keeps
     /// the legacy faint fill; `Some(false)` draws no fill (silx `setFill(False)`).
     pub fill: Option<bool>,
@@ -678,6 +682,7 @@ fn roi_appearance(managed: &ManagedRoi, default_color: Color32) -> RoiAppearance
         selected: managed.selected,
         line_width: Some(managed.line_width),
         line_style: Some(managed.line_style.to_line_style()),
+        gap_color: managed.gap_color,
         fill: Some(managed.fill),
     }
 }
@@ -784,13 +789,16 @@ pub fn draw_roi(
     let fill_enabled = appearance.fill.unwrap_or(true);
     let fill = fill_enabled.then(|| crate::core::color::with_alpha(color, 24));
     let line_style = appearance.line_style.clone().unwrap_or(LineStyle::Solid);
+    // Gap fill color for dashed/dotted outlines (silx `getLineGapColor`); a
+    // no-op on solid lines.
+    let gap_color = appearance.gap_color;
 
     // Draw a closed outline through `path` honoring width and dash style; the
     // path is closed back to its first point before stroking.
     let outline = |mut path: Vec<Pos2>| {
         if let Some(&first) = path.first() {
             path.push(first);
-            draw_styled_line(painter, path, color, width, &line_style, None);
+            draw_styled_line(painter, path, color, width, &line_style, gap_color);
         }
     };
 
@@ -814,7 +822,7 @@ pub fn draw_roi(
                 color,
                 width,
                 &line_style,
-                None,
+                gap_color,
             );
             draw_styled_line(
                 painter,
@@ -822,14 +830,14 @@ pub fn draw_roi(
                 color,
                 width,
                 &line_style,
-                None,
+                gap_color,
             );
             Some(p)
         }
         Roi::Line { start, end } => {
             let a = t.data_to_pixel(start.0, start.1);
             let b = t.data_to_pixel(end.0, end.1);
-            draw_styled_line(painter, vec![a, b], color, width, &line_style, None);
+            draw_styled_line(painter, vec![a, b], color, width, &line_style, gap_color);
             Some(a)
         }
         Roi::Polygon { vertices } if !vertices.is_empty() => {
@@ -1435,6 +1443,7 @@ mod tests {
         assert!(!a.selected);
         assert_eq!(a.line_width, Some(1.0));
         assert_eq!(a.line_style, Some(LineStyle::Solid));
+        assert_eq!(a.gap_color, None);
         assert_eq!(a.fill, Some(false));
 
         // Explicit overrides pass through; the per-ROI color wins over default.
@@ -1444,6 +1453,7 @@ mod tests {
         styled.selected = true;
         styled.line_width = 3.5;
         styled.line_style = RoiLineStyle::Dashed;
+        styled.gap_color = Some(Color32::BLUE);
         styled.fill = true;
         let b = roi_appearance(&styled, Color32::RED);
         assert_eq!(b.color, Some(Color32::GREEN));
@@ -1451,6 +1461,7 @@ mod tests {
         assert!(b.selected);
         assert_eq!(b.line_width, Some(3.5));
         assert_eq!(b.line_style, Some(LineStyle::Dashed));
+        assert_eq!(b.gap_color, Some(Color32::BLUE));
         assert_eq!(b.fill, Some(true));
     }
 
