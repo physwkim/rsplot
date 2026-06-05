@@ -270,6 +270,17 @@ pub fn amplitude_phase_log_rgba(
         .collect()
 }
 
+/// The maximum finite amplitude `|z|` over `data`, or `0.0` when there is no
+/// finite sample. Used to seed the "Displayed Max." field when the user leaves
+/// autoscale (silx autoscale is `numpy.absolute(data).max()`); non-finite
+/// samples are skipped so a stray NaN/inf does not poison the seeded value.
+fn data_max_amplitude(data: &[(f32, f32)]) -> f32 {
+    data.iter()
+        .map(|&(re, im)| re.hypot(im))
+        .filter(|a| a.is_finite())
+        .fold(0.0_f32, f32::max)
+}
+
 /// Compute the `[min, max]` of `values` over finite entries, returning
 /// `(0.0, 1.0)` when there is no finite value (degenerate range fallback that
 /// the colormap maps to its low color).
@@ -481,6 +492,54 @@ impl ComplexImageView {
             self.set_mode(picked);
         }
         self.mode
+    }
+
+    /// Inline controls for the displayed amplitude range used by
+    /// [`ComplexMode::Log10AmplitudePhase`], mirroring silx
+    /// `_AmplitudeRangeDialog` (`ComplexImageView.py:50-155`): an "autoscale"
+    /// checkbox (max = `None`), a "Displayed Max." field enabled only when not
+    /// autoscaling (silx validator bottom `0.0`), and a "Displayed delta (log10
+    /// unit)" field clamped to `>= 1` (silx validator bottom `1.0`). Edits route
+    /// through [`Self::set_amplitude_range_info`] so the composite recomputes on
+    /// the next [`Self::show`]. Most useful in the log composite mode but
+    /// harmless in others (the recomputed image is identical).
+    ///
+    /// Call before [`Self::show`].
+    pub fn show_amplitude_range_controls(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            let mut autoscale = self.max_amplitude.is_none();
+            if ui
+                .checkbox(&mut autoscale, "autoscale")
+                .on_hover_text("Autoscale the displayed max to the data's max amplitude")
+                .changed()
+            {
+                // Leaving autoscale seeds the max from the data; entering it
+                // clears the max to None (silx `_autoscaleCheckBoxToggled`).
+                let max = (!autoscale).then(|| data_max_amplitude(&self.data));
+                self.set_amplitude_range_info(max, self.delta);
+            }
+
+            ui.label("Displayed Max.:");
+            let mut max_val = self
+                .max_amplitude
+                .unwrap_or_else(|| data_max_amplitude(&self.data));
+            if ui
+                .add_enabled(!autoscale, egui::DragValue::new(&mut max_val).speed(0.1))
+                .changed()
+                && !autoscale
+            {
+                self.set_amplitude_range_info(Some(max_val.max(0.0)), self.delta);
+            }
+
+            ui.label("Displayed delta (log10 unit):");
+            let mut delta = self.delta;
+            if ui
+                .add(egui::DragValue::new(&mut delta).speed(0.1))
+                .changed()
+            {
+                self.set_amplitude_range_info(self.max_amplitude, delta.max(1.0));
+            }
+        });
     }
 
     /// Recompute the displayed image for the current mode and update the plot
@@ -854,5 +913,21 @@ mod tests {
         assert_eq!(finite_range(&[f32::NAN, f32::INFINITY, 4.0]), (0.0, 1.0));
         // No finite values -> fallback.
         assert_eq!(finite_range(&[f32::NAN]), (0.0, 1.0));
+    }
+
+    #[test]
+    fn data_max_amplitude_is_finite_max_modulus() {
+        // The seeded "Displayed Max." is the max finite |z| over the data.
+        assert_eq!(
+            data_max_amplitude(&[(3.0, 4.0), (0.0, 0.0), (1.0, 1.0)]),
+            5.0
+        );
+        // Empty data -> 0.0.
+        assert_eq!(data_max_amplitude(&[]), 0.0);
+        // NaN / inf amplitudes are skipped; the finite max wins.
+        assert_eq!(
+            data_max_amplitude(&[(f32::NAN, 0.0), (f32::INFINITY, 0.0), (6.0, 8.0)]),
+            10.0
+        );
     }
 }
