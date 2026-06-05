@@ -1199,6 +1199,66 @@ pub fn histogram_edges(positions: &[f64], align: HistogramAlign) -> Vec<f64> {
     }
 }
 
+/// Pick the filled-histogram bin under data coordinates `(x_data, y_data)`,
+/// mirroring silx `Histogram.__pickFilledHistogram` (items/histogram.py:244-279).
+///
+/// `edges` are the `N + 1` ascending bin edges and `values` the `N` per-bin
+/// heights; `baseline` is the level the bars rise from (silx default `0`). A bar
+/// occupies `[edges[i], edges[i + 1]) × [baseline, value]` (or `[value, baseline]`
+/// when the bar points down). Returns the index of the bar containing the point,
+/// or `None` when the point is outside the histogram's bounding box or not inside
+/// any bar.
+///
+/// The bounding-box test is strict (silx `xmin < x < xmax`, `ymin < y < ymax`,
+/// with the y-bounds including `0` so the fill region between bars and baseline is
+/// covered); the per-bar test is inclusive. The bin is located with silx's
+/// `searchsorted(edges, x, side="left") - 1`, clamped to `[0, N - 1]`.
+pub fn pick_histogram(
+    edges: &[f64],
+    values: &[f64],
+    baseline: f64,
+    x_data: f64,
+    y_data: f64,
+) -> Option<usize> {
+    if values.is_empty() || edges.len() != values.len() + 1 {
+        return None;
+    }
+
+    // Bounding box (silx `Histogram._getBounds`, linear-axis branch): x spans the
+    // edges; y includes 0 so the area between the bars and the baseline counts.
+    let xmin = edges[0];
+    let xmax = edges[edges.len() - 1];
+    let mut vmin = f64::INFINITY;
+    let mut vmax = f64::NEG_INFINITY;
+    for &v in values {
+        if v.is_finite() {
+            vmin = vmin.min(v);
+            vmax = vmax.max(v);
+        }
+    }
+    if !vmin.is_finite() {
+        // All values NaN: silx `_getBounds` returns None → nothing to pick.
+        return None;
+    }
+    let ymin = vmin.min(0.0);
+    let ymax = vmax.max(0.0);
+    if x_data <= xmin || x_data >= xmax || y_data <= ymin || y_data >= ymax {
+        return None;
+    }
+
+    // Bin index: silx `searchsorted(edges, x, side="left") - 1`, clamped to a
+    // valid bin. `partition_point` counts edges strictly below x = side="left".
+    let index = edges
+        .partition_point(|&e| e < x_data)
+        .saturating_sub(1)
+        .min(values.len() - 1);
+
+    let value = values[index];
+    let hit = (baseline <= value && baseline <= y_data && y_data <= value)
+        || (value < baseline && value <= y_data && y_data <= baseline);
+    if hit { Some(index) } else { None }
+}
+
 /// Extract one image row as a 1D profile.
 pub fn horizontal_profile_values(
     width: u32,
@@ -10293,6 +10353,53 @@ mod tests {
     #[test]
     fn histogram_edges_empty_is_empty() {
         assert!(histogram_edges(&[], HistogramAlign::Center).is_empty());
+    }
+
+    #[test]
+    fn pick_histogram_locates_bin_and_checks_fill() {
+        // 3 bins on edges [0,1,2,3]; heights [2, -1, 3]; baseline 0.
+        let edges = [0.0, 1.0, 2.0, 3.0];
+        let values = [2.0, -1.0, 3.0];
+        // Inside bin 0 (bar [0,2]): y between baseline and value hits.
+        assert_eq!(pick_histogram(&edges, &values, 0.0, 0.5, 1.0), Some(0));
+        // Bin 0, above the bar top (y 2.5 > value 2): miss.
+        assert_eq!(pick_histogram(&edges, &values, 0.0, 0.5, 2.5), None);
+        // Bin 1 points down (value -1): y in [-1, 0] hits.
+        assert_eq!(pick_histogram(&edges, &values, 0.0, 1.5, -0.5), Some(1));
+        // Bin 1, y above baseline while the bar is below it: miss.
+        assert_eq!(pick_histogram(&edges, &values, 0.0, 1.5, 0.5), None);
+        // Bin 2 (bar [0,3]): hit.
+        assert_eq!(pick_histogram(&edges, &values, 0.0, 2.5, 2.0), Some(2));
+    }
+
+    #[test]
+    fn pick_histogram_outside_bbox_is_none() {
+        let edges = [0.0, 1.0, 2.0, 3.0];
+        let values = [2.0, 1.0, 3.0];
+        // Left of xmin / right of xmax.
+        assert_eq!(pick_histogram(&edges, &values, 0.0, -0.1, 1.0), None);
+        assert_eq!(pick_histogram(&edges, &values, 0.0, 3.1, 1.0), None);
+        // Below ymin (0) / above ymax (3).
+        assert_eq!(pick_histogram(&edges, &values, 0.0, 0.5, -0.1), None);
+        assert_eq!(pick_histogram(&edges, &values, 0.0, 0.5, 3.1), None);
+        // Exactly on the box edge is excluded (strict bounds).
+        assert_eq!(pick_histogram(&edges, &values, 0.0, 0.0, 1.0), None);
+        // Malformed: edges/values length mismatch and empty input.
+        assert_eq!(pick_histogram(&edges, &[1.0, 2.0], 0.0, 0.5, 1.0), None);
+        assert_eq!(pick_histogram(&[], &[], 0.0, 0.5, 1.0), None);
+    }
+
+    #[test]
+    fn pick_histogram_honours_nonzero_baseline() {
+        // Bars rise from baseline 5; bbox y-bounds = [min(0,3), max(0,8)] = [0,8].
+        let edges = [0.0, 1.0, 2.0];
+        let values = [8.0, 3.0];
+        // Bin 0 bar [5,8]: y 6 hits.
+        assert_eq!(pick_histogram(&edges, &values, 5.0, 0.5, 6.0), Some(0));
+        // Bin 1 value 3 < baseline 5 → bar [3,5]: y 4 hits.
+        assert_eq!(pick_histogram(&edges, &values, 5.0, 1.5, 4.0), Some(1));
+        // Bin 0, y 4 below the bar [5,8]: miss.
+        assert_eq!(pick_histogram(&edges, &values, 5.0, 0.5, 4.0), None);
     }
 
     #[test]
