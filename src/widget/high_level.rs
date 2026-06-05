@@ -8546,6 +8546,29 @@ pub enum ScatterVisualization {
     BinnedStatistic,
 }
 
+impl ScatterVisualization {
+    /// All visualization modes in silx menu order (`items/core.py:1262-1295`),
+    /// for building a picker.
+    pub const ALL: [ScatterVisualization; 5] = [
+        ScatterVisualization::Points,
+        ScatterVisualization::Solid,
+        ScatterVisualization::RegularGrid,
+        ScatterVisualization::IrregularGrid,
+        ScatterVisualization::BinnedStatistic,
+    ];
+
+    /// Human-readable label matching the silx visualization menu text.
+    pub fn label(self) -> &'static str {
+        match self {
+            ScatterVisualization::Points => "Points",
+            ScatterVisualization::Solid => "Solid",
+            ScatterVisualization::RegularGrid => "Regular Grid",
+            ScatterVisualization::IrregularGrid => "Irregular Grid",
+            ScatterVisualization::BinnedStatistic => "Binned Statistic",
+        }
+    }
+}
+
 /// Reshape `values` onto the auto-detected regular grid for
 /// [`ScatterVisualization::RegularGrid`], faithful to silx
 /// `__getRegularGridInfo` + the REGULAR_GRID render branch
@@ -9379,7 +9402,9 @@ impl ScatterView {
     /// whether [`Self::show`] reserves the side colorbar column.
     pub fn show_toolbar(&mut self, ui: &mut egui::Ui) -> ToolbarResponse {
         let show_colorbar = self.show_colorbar;
+        let current_viz = self.visualization;
         let mut toggle = false;
+        let mut picked_viz = current_viz;
         let (out, ()) = self.inner.show_toolbar_with(ui, |ui, _| {
             ui.separator();
             if ui
@@ -9389,10 +9414,24 @@ impl ScatterView {
             {
                 toggle = true;
             }
+            // Visualization-mode selector (silx `ScatterVisualizationToolButton`,
+            // PlotToolButtons.py:550+): pick the scatter rendering mode on the
+            // toolbar rather than only via `set_visualization`.
+            ui.separator();
+            egui::ComboBox::from_id_salt("scatter_visualization")
+                .selected_text(current_viz.label())
+                .show_ui(ui, |ui| {
+                    for mode in ScatterVisualization::ALL {
+                        ui.selectable_value(&mut picked_viz, mode, mode.label());
+                    }
+                });
         });
         if toggle {
             crate::widget::actions::control::scatter_colorbar_toggle(self);
         }
+        // `set_visualization` is a no-op when the mode is unchanged, so calling
+        // it unconditionally only rebuilds on an actual selection change.
+        self.set_visualization(picked_viz);
         out
     }
 
@@ -11994,5 +12033,34 @@ mod tests {
         assert_eq!(legend_row_width(180.0), 180.0);
         assert_eq!(legend_row_width(80.0), 80.0);
         assert_eq!(legend_row_width(0.0), LEGEND_ROW_MIN_WIDTH);
+    }
+
+    #[test]
+    fn scatter_visualization_catalog_is_silx_order_with_unique_labels() {
+        // The toolbar picker lists all five modes in silx menu order.
+        assert_eq!(
+            ScatterVisualization::ALL,
+            [
+                ScatterVisualization::Points,
+                ScatterVisualization::Solid,
+                ScatterVisualization::RegularGrid,
+                ScatterVisualization::IrregularGrid,
+                ScatterVisualization::BinnedStatistic,
+            ]
+        );
+        // Default is Points (silx `Visualization.POINTS`).
+        assert_eq!(
+            ScatterVisualization::default(),
+            ScatterVisualization::Points
+        );
+        // Labels are unique so the ComboBox entries are distinguishable.
+        let labels: Vec<&str> = ScatterVisualization::ALL
+            .iter()
+            .map(|m| m.label())
+            .collect();
+        let mut deduped = labels.clone();
+        deduped.sort_unstable();
+        deduped.dedup();
+        assert_eq!(labels.len(), deduped.len(), "labels must be unique");
     }
 }
