@@ -37,6 +37,7 @@ medians = "3.0.12"
 # Only the example (an eframe app) needs a window + RenderState.
 [dev-dependencies]
 eframe = "0.34"
+egui_kittest = { version = "0.34.3", features = ["wgpu", "snapshot"] }
 
 [[example]]
 name = "bootstrap"
@@ -201,3 +202,7 @@ path = "examples/high_level_limits_widget.rs"
 [[example]]
 name = "high_level_roi_manager"
 path = "examples/high_level_roi_manager.rs"
+
+[[example]]
+name = "gallery"
+path = "examples/gallery.rs"

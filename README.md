@@ -17,6 +17,27 @@ License: MIT OR Apache-2.0.
 
 ---
 
+## Gallery
+
+A few of the high-level widgets, captured headlessly from the matching
+`high_level_*` examples. Each image is rendered to an offscreen wgpu texture
+by [`examples/gallery.rs`](examples/gallery.rs) — full egui chrome plus the
+`egui_wgpu` data layer, no window — so the gallery can be regenerated with
+`cargo run --example gallery`.
+
+| | |
+| :---: | :---: |
+| ![PlotWidget](doc/images/plot_widget.png) | ![Plot2D](doc/images/plot2d.png) |
+| **PlotWidget** — colormapped image with a curve overlay, legend, and active-item stats | **Plot2D** — an image with a threshold mask overlay |
+| ![ImageView](doc/images/image_view.png) | ![ScatterView](doc/images/scatter_view.png) |
+| **ImageView** — a central image with column/row side-profile histograms | **ScatterView** — value-coloured scatter with a colorbar |
+| ![StackView](doc/images/stack_view.png) | ![CompareImages](doc/images/compare_images.png) |
+| **StackView** — a 3D volume browsed as 2D frames, with perspective selection | **CompareImages** — half-split A vs B comparison |
+| ![FitWidget](doc/images/fit_widget.png) | ![ROI manager](doc/images/roi_manager.png) |
+| **FitWidget** — an iterative Gaussian curve fit with parameter errors | **ROI manager** — styled, named ROIs rendered on the plot |
+
+---
+
 ## Highlights
 
 - **Curves** — line styles, point symbols, fill/baseline bands, error bars
@@ -145,7 +166,7 @@ around a bare `Plot` model.
 
 ## Examples
 
-The repository ships 59 runnable examples. Run any of them with:
+The repository ships 60 runnable examples. Run any of them with:
 
 ```sh
 cargo run --example <name>
