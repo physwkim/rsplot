@@ -20,7 +20,7 @@ use crate::core::backend::{
 use crate::core::colormap::{AutoscaleMode, Colormap};
 use crate::core::items::{Baseline, LineStyle, ScalarMask, Symbol};
 use crate::core::marker::{Marker, MarkerKind, MarkerSymbol};
-use crate::core::plot::{DataRange, GraphGrid, Plot, PlotId};
+use crate::core::plot::{DataMargins, DataRange, GraphGrid, Plot, PlotId};
 use crate::core::roi::{ManagedRoi, Roi, RoiLineStyle};
 use crate::core::scatter_viz::GridImage;
 use crate::core::shape::{Shape, ShapeKind};
@@ -7166,15 +7166,35 @@ impl ImageView {
         image_plot.set_graph_cursor(true);
         image_plot.set_keep_data_aspect_ratio(true);
 
+        // Side profile plots mirror silx `_SideHistogram` (ImageView.py:168): a
+        // bare plot with no graph title, no axis labels, and no grid so the full
+        // strip is the profile curve — `Plot1D::new` defaults a title-less plot
+        // with "X"/"Y" labels and a major grid, so those are cleared here. A 10%
+        // data margin is set on the independent "sum" axis (silx `setDataMargins`,
+        // ImageView.py:464/477) so the profile peak does not touch the frame
+        // edge. The "sum" axis is histo_h's Y and histo_v's X; the other axis is
+        // synced to the image and overrides any margin there.
         let mut histo_h = Plot1D::new(render_state, image_id + 1);
-        histo_h.set_graph_title("Column profile");
-        histo_h.set_graph_x_label("column");
-        histo_h.set_graph_y_label("sum", YAxis::Left);
+        histo_h.clear_graph_x_label();
+        histo_h.clear_graph_y_label(YAxis::Left);
+        histo_h.set_graph_grid(false);
+        histo_h.plot_mut().set_data_margins(DataMargins {
+            x_min: 0.0,
+            x_max: 0.0,
+            y_min: 0.1,
+            y_max: 0.1,
+        });
 
         let mut histo_v = Plot1D::new(render_state, image_id + 2);
-        histo_v.set_graph_title("Row profile");
-        histo_v.set_graph_x_label("sum");
-        histo_v.set_graph_y_label("row", YAxis::Left);
+        histo_v.clear_graph_x_label();
+        histo_v.clear_graph_y_label(YAxis::Left);
+        histo_v.set_graph_grid(false);
+        histo_v.plot_mut().set_data_margins(DataMargins {
+            x_min: 0.1,
+            x_max: 0.1,
+            y_min: 0.0,
+            y_max: 0.0,
+        });
 
         Self {
             image_plot,
@@ -7548,8 +7568,11 @@ impl ImageView {
     /// points of vertical space; the right histogram occupies `histo_width`
     /// points of horizontal space.  Pass `None` to use the defaults (80 pt).
     pub fn show(&mut self, ui: &mut egui::Ui, histo_height: Option<f32>, histo_width: Option<f32>) {
-        let histo_h_h = histo_height.unwrap_or(80.0);
-        let histo_v_w = histo_width.unwrap_or(80.0);
+        // Default strip size = silx `HISTOGRAMS_HEIGHT` (ImageView.py:374): the
+        // side-profile strips are 200px on their short dimension, enough room for
+        // the profile curve plus the sum-axis tick labels.
+        let histo_h_h = histo_height.unwrap_or(200.0);
+        let histo_v_w = histo_width.unwrap_or(200.0);
 
         // Synchronise axes before rendering.
         self.sync_x
