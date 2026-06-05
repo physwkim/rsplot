@@ -495,6 +495,14 @@ const DEFAULT_SAVE_SIZE: (u32, u32) = (1024, 768);
 /// snapshot. PNG/PPM/SVG ignore it (px-sized containers).
 const DEFAULT_SAVE_DPI: u32 = 96;
 
+/// Order two axis bounds so the result is `(min, max)`, mirroring silx
+/// `LimitsToolBar._xFloatEditChanged`'s swap when the user types `max < min`.
+/// Pure so the [`PlotWidget::show_limits_toolbar`] swap is unit-testable without
+/// a GPU backend.
+fn ordered_limits(a: f64, b: f64) -> (f64, f64) {
+    if a <= b { (a, b) } else { (b, a) }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ToolbarIcon {
     Home,
@@ -5254,6 +5262,42 @@ impl PlotWidget {
             });
         });
         out
+    }
+
+    /// Draw the silx `LimitsToolBar` (`tools/LimitsToolBar.py`): editable
+    /// X-min/X-max/Y-min/Y-max fields that display and control the plot's
+    /// display limits.
+    ///
+    /// The fields always reflect the current effective limits (silx's
+    /// `limitsChanged` slot, which refreshes the edits on every plot limit
+    /// change). Committing an edit applies it through
+    /// [`set_graph_x_limits`](Self::set_graph_x_limits) /
+    /// [`set_graph_y_limits`](Self::set_graph_y_limits), ordering the two bounds
+    /// so min ≤ max (silx `_xFloatEditChanged` swaps when `max < min`). The Y
+    /// fields edit the primary (left) axis.
+    pub fn show_limits_toolbar(&mut self, ui: &mut egui::Ui) {
+        let (xmin0, xmax0, ymin0, ymax0) = self.backend.plot().limits;
+        ui.horizontal(|ui| {
+            ui.label("Limits:");
+            ui.label("X:");
+            let mut xmin = xmin0;
+            let mut xmax = xmax0;
+            let x_changed = ui.add(egui::DragValue::new(&mut xmin)).changed()
+                | ui.add(egui::DragValue::new(&mut xmax)).changed();
+            if x_changed {
+                let (lo, hi) = ordered_limits(xmin, xmax);
+                self.set_graph_x_limits(lo, hi);
+            }
+            ui.label("Y:");
+            let mut ymin = ymin0;
+            let mut ymax = ymax0;
+            let y_changed = ui.add(egui::DragValue::new(&mut ymin)).changed()
+                | ui.add(egui::DragValue::new(&mut ymax)).changed();
+            if y_changed {
+                let (lo, hi) = ordered_limits(ymin, ymax);
+                self.set_graph_y_limits(lo, hi, YAxis::Left);
+            }
+        });
     }
 
     /// Draw the standard toolbar and append caller-provided controls in the
@@ -10264,6 +10308,16 @@ mod tests {
             dimension_axis_labels(StackPerspective::Axis2, &labels),
             ("Dimension 1".to_string(), "Dimension 0".to_string())
         );
+    }
+
+    #[test]
+    fn ordered_limits_swaps_reversed_bounds() {
+        // Already ordered: returned unchanged.
+        assert_eq!(ordered_limits(1.0, 5.0), (1.0, 5.0));
+        // Reversed: swapped so min ≤ max (silx LimitsToolBar swap).
+        assert_eq!(ordered_limits(5.0, 1.0), (1.0, 5.0));
+        // Equal: unchanged.
+        assert_eq!(ordered_limits(2.0, 2.0), (2.0, 2.0));
     }
 
     #[test]
