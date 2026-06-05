@@ -8914,6 +8914,35 @@ pub fn scatter_pick_pixels(
     best.map(|(i, _)| i)
 }
 
+/// Among `candidates` (scatter indices in a picked
+/// [`ScatterVisualization::BinnedStatistic`] bin), the index whose data point is
+/// nearest `(cx, cy)` in data space, ties resolving to the highest index — the
+/// pure core of silx `ScatterView._pickScatterData`'s BINNED_STATISTIC branch
+/// (`selected = indices[::-1]; argmin(...)`, ScatterView.py:197-204). Returns
+/// `None` for an empty candidate set.
+fn nearest_candidate_in_data(
+    candidates: &[usize],
+    xs: &[f64],
+    ys: &[f64],
+    cx: f64,
+    cy: f64,
+) -> Option<usize> {
+    let mut best: Option<(usize, f64)> = None;
+    for &i in candidates {
+        let d2 = (xs[i] - cx).powi(2) + (ys[i] - cy).powi(2);
+        // `<=` so a later (higher) candidate index at an equal distance wins the
+        // tie, matching silx's reversed-order `argmin` (highest index first).
+        let take = match best {
+            None => true,
+            Some((_, best_d2)) => d2 <= best_d2,
+        };
+        if take {
+            best = Some((i, d2));
+        }
+    }
+    best.map(|(i, _)| i)
+}
+
 /// Build the silx `ScatterView` position-info bar — the `X`, `Y`, `Data`,
 /// `Index` columns (ScatterView.py:90-101). When a scatter point is picked,
 /// `X`/`Y` snap to it and `Data`/`Index` show its value/index; otherwise `X`/`Y`
@@ -9383,21 +9412,53 @@ impl ScatterView {
             self.cursor = Some(cursor);
         }
         let pick = self.cursor.and_then(|[cx, cy]| {
+            use crate::core::scatter_viz;
             let (xs, ys, vs) = self.points.as_ref()?;
-            let cursor_px = response.transform.data_to_pixel(cx, cy);
-            let points_px: Vec<(f32, f32)> = xs
-                .iter()
-                .zip(ys)
-                .map(|(&x, &y)| {
-                    let p = response.transform.data_to_pixel(x, y);
-                    (p.x, p.y)
-                })
-                .collect();
-            let i = scatter_pick_pixels(
-                (cursor_px.x, cursor_px.y),
-                &points_px,
-                SCATTER_PICK_RADIUS_PX,
-            )?;
+            // Mode-specific picking, mirroring silx `Scatter.pick`
+            // (scatter.py:804-861) followed by `ScatterView._pickScatterData`'s
+            // per-mode index reduction (ScatterView.py:191-214).
+            let i = match self.visualization {
+                // REGULAR_GRID: the cursor's data cell in the rendered grid image
+                // maps straight to a source index by the grid major order
+                // (scatter.py:815-835). No pixel radius — like an image pick.
+                ScatterVisualization::RegularGrid => {
+                    let image = regular_grid_image(xs, ys, vs)?;
+                    let order = scatter_viz::detect_regular_grid(xs, ys)?.order;
+                    scatter_viz::regular_grid_pick(&image, order, xs.len(), cx, cy)?
+                }
+                // BINNED_STATISTIC: every point in the cursor's bin is a
+                // candidate (scatter.py:837-859); reduce to the one nearest the
+                // cursor in data space, highest index on ties (ScatterView.py:197).
+                ScatterVisualization::BinnedStatistic => {
+                    let (rows, cols) = self.grid_resolution;
+                    let bs = scatter_viz::binned_statistic(xs, ys, vs, rows, cols)?;
+                    let candidates = bs.pick(xs, ys, cx, cy)?;
+                    nearest_candidate_in_data(&candidates, xs, ys, cx, cy)?
+                }
+                // POINTS/SOLID: top-most point under the cursor (scatter.py base
+                // pick → `indices[-1]`). IRREGULAR_GRID falls back here: silx maps
+                // a picked triangle vertex to its point, but siplot renders that
+                // mode as an interpolated image with no vertex→point map, so the
+                // nearest rendered point is the honest equivalent (row 1086).
+                ScatterVisualization::Points
+                | ScatterVisualization::Solid
+                | ScatterVisualization::IrregularGrid => {
+                    let cursor_px = response.transform.data_to_pixel(cx, cy);
+                    let points_px: Vec<(f32, f32)> = xs
+                        .iter()
+                        .zip(ys)
+                        .map(|(&x, &y)| {
+                            let p = response.transform.data_to_pixel(x, y);
+                            (p.x, p.y)
+                        })
+                        .collect();
+                    scatter_pick_pixels(
+                        (cursor_px.x, cursor_px.y),
+                        &points_px,
+                        SCATTER_PICK_RADIUS_PX,
+                    )?
+                }
+            };
             Some(ScatterPick {
                 index: i,
                 x: xs[i],
@@ -10224,6 +10285,32 @@ mod tests {
         // Two coincident points at equal distance — the top-most (last) wins.
         let points = [(5.0, 0.0), (5.0, 0.0)];
         assert_eq!(scatter_pick_pixels((0.0, 0.0), &points, 8.0), Some(1));
+    }
+
+    #[test]
+    fn nearest_candidate_in_data_picks_closest_then_highest_index() {
+        let xs = [0.0, 1.0, 2.0, 3.0];
+        let ys = [0.0, 0.0, 0.0, 0.0];
+        // Cursor near x=1.9: among the bin's candidates {0,1,2}, index 2 (x=2) is
+        // closest in data space.
+        assert_eq!(
+            nearest_candidate_in_data(&[0, 1, 2], &xs, &ys, 1.9, 0.0),
+            Some(2)
+        );
+        // Empty candidate set yields no pick (silx returns None).
+        assert_eq!(nearest_candidate_in_data(&[], &xs, &ys, 0.0, 0.0), None);
+    }
+
+    #[test]
+    fn nearest_candidate_in_data_ties_resolve_to_highest_index() {
+        // Two coincident candidates equidistant from the cursor: the higher index
+        // wins, matching silx's reversed-order argmin (ScatterView.py:197-204).
+        let xs = [5.0, 5.0];
+        let ys = [0.0, 0.0];
+        assert_eq!(
+            nearest_candidate_in_data(&[0, 1], &xs, &ys, 0.0, 0.0),
+            Some(1)
+        );
     }
 
     #[test]
