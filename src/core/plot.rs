@@ -9,6 +9,7 @@ use egui::{Color32, Rect};
 
 use crate::core::backend::ItemHandle;
 use crate::core::colormap::Colormap;
+use crate::core::dtime_ticks::TimeZone;
 use crate::core::marker::Marker;
 use crate::core::roi::{DEFAULT_ROI_COLOR, ManagedRoi};
 use crate::core::shape::{Line, Shape};
@@ -433,6 +434,10 @@ pub struct Plot {
     /// time-series mode on the X axis only (see [`TickMode`]), so there is no
     /// Y-axis counterpart.
     x_tick_mode: TickMode,
+    /// X-axis time zone used to lay out date-time ticks when
+    /// [`TickMode::TimeSeries`] is active (silx `getXAxis().setTimeZone`).
+    /// Defaults to [`TimeZone::Utc`], matching the previous UTC-only behavior.
+    x_time_zone: TimeZone,
     /// Infinite line items drawn over the data area (silx `Line`,
     /// `items/shape.py:289`). Each is clipped to the current viewport and drawn
     /// every frame.
@@ -494,6 +499,7 @@ impl Plot {
             dirty: DirtyState::Clean,
             autoreplot: true,
             x_tick_mode: TickMode::Numeric,
+            x_time_zone: TimeZone::Utc,
             lines: Vec::new(),
         }
     }
@@ -719,6 +725,20 @@ impl Plot {
     /// date-times (the data values are epoch seconds, UTC).
     pub fn set_x_tick_mode(&mut self, mode: TickMode) {
         self.x_tick_mode = mode;
+    }
+
+    /// The X-axis time zone for date-time ticks (silx
+    /// `getXAxis().getTimeZone`).
+    pub fn x_time_zone(&self) -> TimeZone {
+        self.x_time_zone
+    }
+
+    /// Set the X-axis time zone for date-time ticks (silx
+    /// `getXAxis().setTimeZone`). Only affects layout while the X tick mode is
+    /// [`TickMode::TimeSeries`]; the data values stay epoch seconds (UTC) and
+    /// the ticks are laid out in this zone's wall-clock calendar.
+    pub fn set_x_time_zone(&mut self, tz: TimeZone) {
+        self.x_time_zone = tz;
     }
 
     /// Append an infinite line item (silx `addItem` of a `Line`). The widget
@@ -1394,6 +1414,19 @@ mod tests {
         assert_eq!(plot.x_tick_mode(), TickMode::TimeSeries);
         plot.set_x_tick_mode(TickMode::Numeric);
         assert_eq!(plot.x_tick_mode(), TickMode::Numeric);
+    }
+
+    #[test]
+    fn time_zone_defaults_utc_and_round_trips() {
+        let mut plot = Plot::new(0);
+        assert_eq!(plot.x_time_zone(), TimeZone::Utc);
+        let jst = TimeZone::FixedOffset {
+            seconds_east: 32400,
+        };
+        plot.set_x_time_zone(jst);
+        assert_eq!(plot.x_time_zone(), jst);
+        plot.set_x_time_zone(TimeZone::Utc);
+        assert_eq!(plot.x_time_zone(), TimeZone::Utc);
     }
 
     #[test]

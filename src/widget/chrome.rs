@@ -10,7 +10,7 @@ use egui::epaint::TextShape;
 use egui::{Align2, Color32, FontId, Painter, Pos2, Rect, Stroke, Visuals, pos2, vec2};
 
 use crate::core::colormap::{Colormap, Normalization};
-use crate::core::dtime_ticks;
+use crate::core::dtime_ticks::{self, TimeZone};
 use crate::core::items::LineStyle;
 use crate::core::marker::{Marker, MarkerKind, MarkerSymbol};
 use crate::core::plot::{GraphGrid, TickMode};
@@ -262,26 +262,32 @@ const TIME_SERIES_NUM_TICKS: usize = 5;
 /// linear axis, one-per-decade on a log axis. The default [`TickMode::Numeric`]
 /// path is unchanged.
 fn axis_ticks(axis: &Axis, max_ticks: usize) -> Vec<(f64, String)> {
-    axis_ticks_with_mode(axis, max_ticks, TickMode::Numeric)
+    axis_ticks_with_mode(axis, max_ticks, TickMode::Numeric, TimeZone::Utc)
 }
 
 /// As [`axis_ticks`] but honoring the axis [`TickMode`]. With
 /// [`TickMode::TimeSeries`] the axis data values are treated as epoch seconds
-/// (UTC) and tick positions + labels are produced by [`dtime_ticks`]
-/// (`calc_ticks` / `format_ticks`), mirroring silx `NiceDateLocator` +
-/// `NiceAutoDateFormatter` (`backends/BackendMatplotlib.py:153-242`). A
-/// TimeSeries tick mode is honored only on a [`Scale::Linear`] axis (silx ties
-/// the time locator to the linear/numeric axis); a log axis falls back to the
-/// numeric decade ticks.
-fn axis_ticks_with_mode(axis: &Axis, max_ticks: usize, tick_mode: TickMode) -> Vec<(f64, String)> {
+/// (UTC) and tick positions + labels are produced by [`dtime_ticks`] laid out
+/// in `tz`'s wall-clock calendar (`calc_ticks_tz` / `format_ticks_tz`),
+/// mirroring silx `NiceDateLocator` + `NiceAutoDateFormatter`
+/// (`backends/BackendMatplotlib.py:153-242`). A TimeSeries tick mode is honored
+/// only on a [`Scale::Linear`] axis (silx ties the time locator to the
+/// linear/numeric axis); a log axis falls back to the numeric decade ticks.
+/// `tz` is ignored outside the TimeSeries-on-linear path.
+fn axis_ticks_with_mode(
+    axis: &Axis,
+    max_ticks: usize,
+    tick_mode: TickMode,
+    tz: TimeZone,
+) -> Vec<(f64, String)> {
     if tick_mode == TickMode::TimeSeries && axis.scale == Scale::Linear {
         let (lo, hi) = if axis.max >= axis.min {
             (axis.min, axis.max)
         } else {
             (axis.max, axis.min)
         };
-        let (ticks, spacing, unit) = dtime_ticks::calc_ticks(lo, hi, TIME_SERIES_NUM_TICKS);
-        let labels = dtime_ticks::format_ticks(&ticks, spacing, unit);
+        let (ticks, spacing, unit) = dtime_ticks::calc_ticks_tz(lo, hi, TIME_SERIES_NUM_TICKS, tz);
+        let labels = dtime_ticks::format_ticks_tz(&ticks, spacing, unit, tz);
         return ticks.into_iter().zip(labels).collect();
     }
     match axis.scale {
@@ -375,15 +381,17 @@ pub fn draw_axes(
         x_max_ticks,
         y_max_ticks,
         TickMode::Numeric,
+        TimeZone::Utc,
     );
 }
 
 /// As [`draw_axes`] but honoring the X-axis [`TickMode`]: with
 /// [`TickMode::TimeSeries`] the X tick positions and labels are produced by
-/// [`dtime_ticks`] (epoch-seconds data values, UTC), mirroring silx's
-/// `NiceDateLocator` time-axis path (`backends/BackendMatplotlib.py:153-242`).
-/// silx supports the time-series mode on the X axis only, so the Y axis always
-/// uses numeric ticks. The default `Numeric` matches [`draw_axes`] exactly.
+/// [`dtime_ticks`] (epoch-seconds data values) laid out in `x_time_zone`'s
+/// wall-clock calendar, mirroring silx's `NiceDateLocator` time-axis path
+/// (`backends/BackendMatplotlib.py:153-242`). silx supports the time-series
+/// mode on the X axis only, so the Y axis always uses numeric ticks. The
+/// default `Numeric` + [`TimeZone::Utc`] matches [`draw_axes`] exactly.
 #[allow(clippy::too_many_arguments)]
 pub fn draw_axes_with_x_tick_mode(
     painter: &Painter,
@@ -393,6 +401,7 @@ pub fn draw_axes_with_x_tick_mode(
     x_max_ticks: Option<usize>,
     y_max_ticks: Option<usize>,
     x_tick_mode: TickMode,
+    x_time_zone: TimeZone,
 ) {
     let area = t.area;
     let axis = Stroke::new(1.0, style.axis);
@@ -407,8 +416,13 @@ pub fn draw_axes_with_x_tick_mode(
     let font = FontId::proportional(11.0);
     let tick_len = 4.0;
 
-    let xticks = axis_ticks_with_mode(&t.x, x_max_ticks.unwrap_or(8), x_tick_mode);
-    let yticks = axis_ticks_with_mode(&t.y, y_max_ticks.unwrap_or(6), TickMode::Numeric);
+    let xticks = axis_ticks_with_mode(&t.x, x_max_ticks.unwrap_or(8), x_tick_mode, x_time_zone);
+    let yticks = axis_ticks_with_mode(
+        &t.y,
+        y_max_ticks.unwrap_or(6),
+        TickMode::Numeric,
+        TimeZone::Utc,
+    );
 
     if grid_mode.minor() {
         for xv in minor_ticks(&t.x, &xticks) {
@@ -1510,7 +1524,7 @@ mod tests {
             scale: Scale::Linear,
             inverted: false,
         };
-        let ticks = axis_ticks_with_mode(&axis, 8, TickMode::TimeSeries);
+        let ticks = axis_ticks_with_mode(&axis, 8, TickMode::TimeSeries, TimeZone::Utc);
         assert!(!ticks.is_empty(), "time-series ticks empty");
         // The week window selects the Days unit -> ISO date labels "YYYY-MM-DD".
         for (_, label) in &ticks {
@@ -1534,7 +1548,7 @@ mod tests {
             scale: Scale::Linear,
             inverted: false,
         };
-        let numeric = axis_ticks_with_mode(&axis, 8, TickMode::Numeric);
+        let numeric = axis_ticks_with_mode(&axis, 8, TickMode::Numeric, TimeZone::Utc);
         let default_path = axis_ticks(&axis, 8);
         assert_eq!(numeric, default_path);
         // And the labels are plain numbers, not dates (no '-' separators after a
@@ -1557,9 +1571,43 @@ mod tests {
             scale: Scale::Log10,
             inverted: false,
         };
-        let ts = axis_ticks_with_mode(&axis, 8, TickMode::TimeSeries);
-        let log = axis_ticks_with_mode(&axis, 8, TickMode::Numeric);
+        let ts = axis_ticks_with_mode(&axis, 8, TickMode::TimeSeries, TimeZone::Utc);
+        let log = axis_ticks_with_mode(&axis, 8, TickMode::Numeric, TimeZone::Utc);
         assert_eq!(ts, log, "log axis should ignore TimeSeries");
+    }
+
+    #[test]
+    fn axis_ticks_time_series_honors_time_zone() {
+        // Same epoch window, laid out in UTC+09:00: daily ticks land on zone
+        // midnight and the labels read as the zone-local dates, differing from
+        // the UTC layout.
+        let jst = TimeZone::FixedOffset {
+            seconds_east: 32400,
+        };
+        let min = crate::core::dtime_ticks::DateTime::from_civil(2021, 1, 4, 0, 0, 0, 0)
+            .to_epoch_seconds_tz(jst);
+        let max = crate::core::dtime_ticks::DateTime::from_civil(2021, 1, 11, 0, 0, 0, 0)
+            .to_epoch_seconds_tz(jst);
+        let axis = Axis {
+            min,
+            max,
+            scale: Scale::Linear,
+            inverted: false,
+        };
+        let jst_ticks = axis_ticks_with_mode(&axis, 8, TickMode::TimeSeries, jst);
+        let utc_ticks = axis_ticks_with_mode(&axis, 8, TickMode::TimeSeries, TimeZone::Utc);
+        assert!(!jst_ticks.is_empty(), "zoned ticks empty");
+        // Every tick sits at local midnight in the zone, and the first label is
+        // the zone-local ISO date.
+        for (pos, _) in &jst_ticks {
+            let d = crate::core::dtime_ticks::DateTime::from_epoch_seconds_tz(*pos, jst);
+            assert_eq!((d.hour, d.minute, d.second), (0, 0, 0));
+        }
+        assert_eq!(jst_ticks.first().unwrap().1, "2021-01-04");
+        // The zone offset actually moved the positions vs the UTC layout.
+        let jst_pos: Vec<f64> = jst_ticks.iter().map(|(p, _)| *p).collect();
+        let utc_pos: Vec<f64> = utc_ticks.iter().map(|(p, _)| *p).collect();
+        assert_ne!(jst_pos, utc_pos);
     }
 
     #[test]

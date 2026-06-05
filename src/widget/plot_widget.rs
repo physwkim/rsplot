@@ -343,6 +343,7 @@ impl PlotView {
                 plot.x_max_ticks,
                 plot.y_max_ticks,
                 plot.x_tick_mode(),
+                plot.x_time_zone(),
             );
             if let Some(t_right) = &transform_right {
                 chrome::draw_y2_ticks(painter, t_right, &style);
