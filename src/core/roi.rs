@@ -804,8 +804,11 @@ impl Roi {
             ],
             // PointROI: a single vertex handle.
             Roi::Point { x, y } => vec![v((*x, *y))],
-            // CrossROI: a single center handle.
-            Roi::Cross { center: c } => vec![center(*c)],
+            // CrossROI: a single square drag handle at the center. silx builds
+            // it with `addHandle()` (default role -> symbol "s" square,
+            // items/roi.py:147); the cross-hairs themselves are the separate
+            // X/Y markers drawn by `draw_roi`.
+            Roi::Cross { center: c } => vec![v(*c)],
             // LineROI: 2 endpoint vertices + a translate center handle.
             Roi::Line { start, end } => vec![
                 v(*start),
@@ -2026,14 +2029,15 @@ mod tests {
             vec![Edge, Edge, Center]
         );
 
-        // Point: one vertex. Cross: one center.
+        // Point: one vertex. Cross: one square (Vertex) drag handle, matching
+        // silx `addHandle()` default symbol "s".
         assert_eq!(
             kinds(&Roi::Point { x: 1.0, y: 2.0 }.handles()),
             vec![Vertex]
         );
         assert_eq!(
             kinds(&Roi::Cross { center: (1.0, 2.0) }.handles()),
-            vec![Center]
+            vec![Vertex]
         );
 
         // Line: 2 endpoint vertices + translate center.
