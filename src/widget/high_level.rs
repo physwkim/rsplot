@@ -6698,9 +6698,15 @@ pub enum CompareMode {
     OnlyA,
     /// Show only image B.
     OnlyB,
-    /// Left/right split: the left `split` fraction shows A, the rest shows B.
+    /// Left/right split with a vertical separator: the left `split` fraction of
+    /// columns shows A, the rest shows B (silx `VisualizationMode.VERTICAL_LINE`,
+    /// CompareImages.py:422-433).
     #[default]
     HalfHalf,
+    /// Top/bottom split with a horizontal separator: the top `split` fraction of
+    /// rows shows A, the rest shows B (silx
+    /// `VisualizationMode.HORIZONTAL_LINE`, CompareImages.py:434-445).
+    SplitHorizontal,
     /// Pixel-wise A − B, normalised to `[-1, 1]` for display.
     Subtract,
 }
@@ -6819,7 +6825,16 @@ impl CompareImages {
             for (label, tooltip, m) in [
                 ("A", "Show only image A", CompareMode::OnlyA),
                 ("B", "Show only image B", CompareMode::OnlyB),
-                ("½", "Half-half split (drag slider)", CompareMode::HalfHalf),
+                (
+                    "½",
+                    "Vertical split: A left / B right (drag slider)",
+                    CompareMode::HalfHalf,
+                ),
+                (
+                    "═",
+                    "Horizontal split: A top / B bottom (drag slider)",
+                    CompareMode::SplitHorizontal,
+                ),
                 ("A-B", "Subtract: A minus B", CompareMode::Subtract),
             ] {
                 if ui
@@ -6833,7 +6848,11 @@ impl CompareImages {
                 }
             }
 
-            if self.mode == CompareMode::HalfHalf && !self.data_a.is_empty() {
+            let is_split = matches!(
+                self.mode,
+                CompareMode::HalfHalf | CompareMode::SplitHorizontal
+            );
+            if is_split && !self.data_a.is_empty() {
                 ui.add_space(4.0);
                 if ui
                     .add(egui::Slider::new(&mut self.split, 0.0..=1.0).text("split"))
@@ -6868,8 +6887,8 @@ impl CompareImages {
 
     /// Build the composite RGBA pixel array for the current mode and split.
     fn build_composite(&self) -> Vec<[u8; 4]> {
-        let n = (self.width as usize) * (self.height as usize);
-        let split_col = (self.split * self.width as f32).round() as usize;
+        let w = self.width as usize;
+        let h = self.height as usize;
 
         match self.mode {
             CompareMode::OnlyA => colormap_to_rgba(self.width, &self.data_a, &self.colormap),
@@ -6877,19 +6896,14 @@ impl CompareImages {
             CompareMode::HalfHalf => {
                 let rgba_a = colormap_to_rgba(self.width, &self.data_a, &self.colormap);
                 let rgba_b = colormap_to_rgba(self.width, &self.data_b, &self.colormap);
-                let mut out = vec![[0u8; 4]; n];
-                for row in 0..self.height as usize {
-                    let base = row * self.width as usize;
-                    for col in 0..self.width as usize {
-                        let i = base + col;
-                        out[i] = if col < split_col {
-                            rgba_a[i]
-                        } else {
-                            rgba_b[i]
-                        };
-                    }
-                }
-                out
+                let split_col = (self.split * self.width as f32).round() as usize;
+                split_composite(&rgba_a, &rgba_b, w, h, split_col, false)
+            }
+            CompareMode::SplitHorizontal => {
+                let rgba_a = colormap_to_rgba(self.width, &self.data_a, &self.colormap);
+                let rgba_b = colormap_to_rgba(self.width, &self.data_b, &self.colormap);
+                let split_row = (self.split * self.height as f32).round() as usize;
+                split_composite(&rgba_a, &rgba_b, w, h, split_row, true)
             }
             CompareMode::Subtract => self
                 .data_a
@@ -6933,6 +6947,35 @@ fn colormap_to_rgba(_width: u32, data: &[f32], colormap: &Colormap) -> Vec<[u8; 
             colormap.lut[idx]
         })
         .collect()
+}
+
+/// Composite two colormapped RGBA images along a straight separator, mirroring
+/// silx CompareImages VERTICAL_LINE / HORIZONTAL_LINE (CompareImages.py:422-445).
+///
+/// `a` and `b` are row-major `width × height` RGBA. For a vertical separator
+/// (`horizontal == false`) columns with `col < split` show `a`, the rest show `b`
+/// (silx `data[:, 0:pos]` / `data[:, pos:]`); for a horizontal separator rows
+/// with `row < split` show `a`, the rest `b` (silx `data[0:pos, :]` /
+/// `data[pos:, :]`). `split == 0` shows all `b`; `split >=` the split axis length
+/// shows all `a` (silx clamps `pos` into `[0, shape]`).
+fn split_composite(
+    a: &[[u8; 4]],
+    b: &[[u8; 4]],
+    width: usize,
+    height: usize,
+    split: usize,
+    horizontal: bool,
+) -> Vec<[u8; 4]> {
+    let mut out = vec![[0u8; 4]; width * height];
+    for row in 0..height {
+        let base = row * width;
+        for col in 0..width {
+            let i = base + col;
+            let use_a = if horizontal { row < split } else { col < split };
+            out[i] = if use_a { a[i] } else { b[i] };
+        }
+    }
+    out
 }
 
 // ─── ImageView ────────────────────────────────────────────────────────────────
@@ -9954,6 +9997,62 @@ mod tests {
         assert_eq!(
             clamp_alpha(vec![1.5, -0.5, 0.25, 1.0, 0.0]),
             vec![1.0, 0.0, 0.25, 1.0, 0.0]
+        );
+    }
+
+    #[test]
+    fn split_composite_vertical_splits_columns() {
+        // 3x2 image; A all [1,..], B all [2,..]; split at column 2 (vertical
+        // separator) -> cols 0,1 from A, col 2 from B (silx VERTICAL_LINE).
+        let a = vec![[1u8, 1, 1, 1]; 6];
+        let b = vec![[2u8, 2, 2, 2]; 6];
+        let out = split_composite(&a, &b, 3, 2, 2, false);
+        // Row 0: [A, A, B]; row 1: [A, A, B].
+        assert_eq!(out[0], a[0]);
+        assert_eq!(out[1], a[1]);
+        assert_eq!(out[2], b[2]);
+        assert_eq!(out[3], a[3]);
+        assert_eq!(out[4], a[4]);
+        assert_eq!(out[5], b[5]);
+    }
+
+    #[test]
+    fn split_composite_horizontal_splits_rows() {
+        // 3x2 image; split at row 1 (horizontal separator) -> row 0 from A, row
+        // 1 from B (silx HORIZONTAL_LINE: rows < pos show A).
+        let a = vec![[1u8, 1, 1, 1]; 6];
+        let b = vec![[2u8, 2, 2, 2]; 6];
+        let out = split_composite(&a, &b, 3, 2, 1, true);
+        // Row 0 (indices 0,1,2) from A; row 1 (3,4,5) from B.
+        assert_eq!(&out[0..3], &[a[0], a[1], a[2]]);
+        assert_eq!(&out[3..6], &[b[3], b[4], b[5]]);
+    }
+
+    #[test]
+    fn split_composite_extremes_show_one_image() {
+        let a = vec![[1u8, 1, 1, 1]; 6];
+        let b = vec![[2u8, 2, 2, 2]; 6];
+        // split 0 -> all B (no column/row satisfies idx < 0).
+        assert!(
+            split_composite(&a, &b, 3, 2, 0, false)
+                .iter()
+                .all(|&p| p == b[0])
+        );
+        assert!(
+            split_composite(&a, &b, 3, 2, 0, true)
+                .iter()
+                .all(|&p| p == b[0])
+        );
+        // split == axis length -> all A.
+        assert!(
+            split_composite(&a, &b, 3, 2, 3, false)
+                .iter()
+                .all(|&p| p == a[0])
+        );
+        assert!(
+            split_composite(&a, &b, 3, 2, 2, true)
+                .iter()
+                .all(|&p| p == a[0])
         );
     }
 
