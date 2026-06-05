@@ -525,6 +525,18 @@ impl MaskToolsWidget {
 
             ui.add(egui::Slider::new(&mut self.level, 1..=255).text("Mask level"));
 
+            // Overlay transparency (silx `transparencySlider` -> `_setMaskColors`,
+            // _BaseMaskToolsWidget.py:554-577): the selected level renders at this
+            // alpha, other masked levels at half. Routed through `set_transparency`
+            // so the change clamps and re-renders the overlay LUT.
+            let mut alpha = self.alpha;
+            if ui
+                .add(egui::Slider::new(&mut alpha, 0.0..=1.0).text("Transparency"))
+                .changed()
+            {
+                self.set_transparency(alpha);
+            }
+
             if self.active_tool != MaskTool::None {
                 ui.add(egui::Slider::new(&mut self.brush_size, 1..=50).text("Brush size"));
             }
