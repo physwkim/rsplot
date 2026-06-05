@@ -217,7 +217,7 @@ as-of-sweep reference.
 | ✅ Done | M | M | StackView perspective selection | StackView.py:364-397 | `StackPerspective` {Axis0,Axis1,Axis2} + `set_perspective`/`perspective`/`perspective_ui` combo pick the browse dimension |
 | ✅ Done | M | M | StackView 3D transposition | StackView.py:409-441 | `set_volume([d0,d1,d2])` + `stack_frame` re-slice per perspective (silx transpose (1,0,2)/(2,0,1)); axis labels via `dimension_axis_labels` |
 | ✅ Done | M | S | StackView dimension labels | StackView.py:799-827 | `set_dimension_labels([&str;3])`/`dimension_labels()` (silx setLabels/getLabels); empty→default `"Dimension N"`; axis labels rotate with perspective |
-| ☐ Missing | M | M | CompareImages vline separator mode | CompareImages.py:124-133 | Modes OnlyA/OnlyB/HalfHalf/Subtract only; no draggable vertical-line separator mode |
+| ◐ Partial | M | M | CompareImages vline/hline separator modes | CompareImages.py:124-133, 422-445 | Wave 7: `HalfHalf` is the silx VERTICAL_LINE composite (A left / B right); added `CompareMode::SplitHorizontal` = HORIZONTAL_LINE (A top / B bottom) via the pure `split_composite` helper + toolbar button. Split position is a slider (`split` fraction). Remaining: an on-plot *draggable* separator line (silx `__separator` markers + `__separatorConstraint`) instead of the slider |
 | ☐ Missing | M | M | ComplexImageView amplitude-range dialog | ComplexImageView.py:50-155 | No dialog to set displayed max amplitude + log10 delta at runtime |
 | ☐ Missing | L | L | StackView 3D-profile toolbar | StackView.py:948-951 | No `Profile3DToolBar`; profiles not extracted across the stack dimension |
 | ☐ Missing | L | M | StackView calibration (per-axis scale/origin) | StackView.py:551-566 | No `Calibration` objects / axis-transform API |
