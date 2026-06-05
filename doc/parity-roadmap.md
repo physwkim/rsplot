@@ -202,7 +202,7 @@ as-of-sweep reference.
 | ☐ Missing | M | S | Mask transparency/alpha slider UI | _BaseMaskToolsWidget.py:554-577 | `alpha` field exists (0.8 default) but no slider UI to control overlay opacity |
 | ☐ Missing | M | S | Mask Mask/Unmask toggle + Ctrl modifier | _BaseMaskToolsWidget.py:790-810 | Pencil/eraser are separate tools; no Mask/Unmask radios or Ctrl-modifier toggle |
 | ◐ Partial | M | S | Mask invert per-level UI | _BaseMaskToolsWidget.py:207-218 | `invert()` exists but no UI button or Ctrl+I shortcut |
-| ☐ Missing | M | S | Mask not-finite (NaN/Inf) button | _BaseMaskToolsWidget.py:296-304 | No `updateNotFinite` method or "Mask not finite values" button |
+| ✅ Done | M | S | Mask not-finite (NaN/Inf) button | _BaseMaskToolsWidget.py:296-304 | `MaskToolsWidget::mask_not_finite` (silx `updateNotFinite`: stencil `!isfinite`, tested) + Wave 7 "mask non-finite" button in the ImageView mask-draw toolbar (masks the active image's NaN/Inf pixels at the current level, commits, re-uploads; enabled when mask geometry matches the image). Button/overlay GPU-unverified |
 | ☐ Missing | L | S | Mask per-level color override UI | _BaseMaskToolsWidget.py:394-398 | `overrides` field exists but no UI or get/`setMaskColors` API |
 
 ### composites
