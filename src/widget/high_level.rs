@@ -7612,17 +7612,22 @@ impl ImageView {
             let response = ui
                 .allocate_ui(egui::vec2(img_w, img_h), |ui| self.image_plot.show(ui))
                 .inner;
-            // Vertical histogram with the radar overview stacked below it.
+            // Vertical histogram with the radar overview stacked below it. The
+            // enclosing `ui.horizontal` makes child layouts horizontal by
+            // default, so an explicit `ui.vertical` is required here — otherwise
+            // the radar lands beside the histogram and overflows the column.
             ui.allocate_ui(egui::vec2(histo_v_w, img_h), |ui| {
-                ui.allocate_ui(egui::vec2(histo_v_w, img_h - radar_h), |ui| {
-                    self.histo_v.show(ui);
+                ui.vertical(|ui| {
+                    ui.allocate_ui(egui::vec2(histo_v_w, img_h - radar_h), |ui| {
+                        self.histo_v.show(ui);
+                    });
+                    let radar = self.radar.ui(ui, egui::vec2(histo_v_w, radar_h));
+                    if let Some((rx0, rx1, ry0, ry1)) = radar.dragged_limits {
+                        // Forward the dragged viewport to pan/zoom the image plot
+                        // (silx `plot.setLimits`, RadarView.py:326).
+                        self.image_plot.set_limits(rx0, rx1, ry0, ry1, None);
+                    }
                 });
-                let radar = self.radar.ui(ui, egui::vec2(histo_v_w, radar_h));
-                if let Some((rx0, rx1, ry0, ry1)) = radar.dragged_limits {
-                    // Forward the dragged viewport to pan/zoom the image plot
-                    // (silx `plot.setLimits`, RadarView.py:326).
-                    self.image_plot.set_limits(rx0, rx1, ry0, ry1, None);
-                }
             });
             // Colorbar column, synced to the active image's colormap limits.
             if colorbar_w > 0.0 {
