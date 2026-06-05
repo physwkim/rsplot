@@ -35,7 +35,10 @@ impl ScatterViewApp {
 impl eframe::App for ScatterViewApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.sv.show_toolbar(ui);
-        self.sv.show(ui);
+        let response = self.sv.show(ui);
+        // Position-info readout (silx ScatterView X/Y/Data/Index): hover a point
+        // and X/Y/value/index snap to it; off a point, Data/Index show "-".
+        self.sv.show_position_info(ui, &response);
     }
 }
 
