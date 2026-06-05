@@ -24,7 +24,8 @@ pub use crate::core::colormap::{
 };
 pub use crate::core::decimate::min_max_decimate;
 pub use crate::core::dtime_ticks::{
-    DateTime, DtUnit, best_unit, calc_ticks, calc_ticks_adaptive, format_tick, format_ticks,
+    DateTime, DtUnit, TimeZone, best_unit, calc_ticks, calc_ticks_adaptive, calc_ticks_adaptive_tz,
+    calc_ticks_tz, format_tick, format_tick_tz, format_ticks, format_ticks_tz,
 };
 pub use crate::core::fitting::{
     DEFAULT_DELTACHI, DEFAULT_MAX_ITER, FitError, FitFunction, FitResult, GaussianEstimateFit,

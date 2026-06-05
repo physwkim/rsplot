@@ -9,10 +9,16 @@
 //! <http://howardhinnant.github.io/date_algorithms.html>), so there is no
 //! `chrono`/timezone dependency.
 //!
-//! UTC-only: every conversion treats the timestamp as UTC. silx supports a
-//! per-axis `tzinfo` (`Axis.setTimeZone`); timezone handling is deferred (the
-//! chrome that would render these labels is also deferred, see the wave-4
-//! cluster notes).
+//! Per-axis time zone: every entry point has a `_tz` variant taking a
+//! [`TimeZone`], mirroring silx `Axis.setTimeZone`. The legacy non-`_tz`
+//! functions are [`TimeZone::Utc`] wrappers, so existing UTC callers are
+//! unchanged. A [`TimeZone`] supplies a constant UTC offset, so the supported
+//! zones are [`TimeZone::Utc`] and [`TimeZone::FixedOffset`] (the silx
+//! `datetime.timezone(timedelta(...))` and `"UTC"` cases). DST-aware *named*
+//! zones (silx accepting an arbitrary `dateutil.tz` tzinfo, or `None` for local
+//! time) need the IANA tz database for an instant-dependent offset and are not
+//! yet implemented — that extension fills the offset lookup behind
+//! [`TimeZone`] without changing this layout code.
 //!
 //! The two entry points mirror the Python module:
 //!
@@ -66,6 +72,39 @@ impl DtUnit {
             DtUnit::Minutes => &[1.0, 2.0, 3.0, 5.0, 10.0, 15.0, 30.0],
             DtUnit::Seconds => &[1.0, 2.0, 3.0, 5.0, 10.0, 15.0, 30.0],
             DtUnit::MicroSeconds => &[1.0, 2.0, 3.0, 4.0, 5.0, 10.0],
+        }
+    }
+}
+
+/// The time zone a date-time axis is laid out in (silx `Axis.setTimeZone`).
+///
+/// silx accepts any `datetime.tzinfo`, the string `"UTC"`, or `None` (local
+/// time). The faithful subset that needs no IANA tz database is a *constant*
+/// UTC offset: [`TimeZone::Utc`] (silx `"UTC"`) and [`TimeZone::FixedOffset`]
+/// (silx `datetime.timezone(timedelta(seconds=...))`). DST-aware named zones
+/// and `None`/local would need an instant-dependent offset; they are deferred
+/// and would slot in as further variants whose [`TimeZone::offset_seconds`]
+/// becomes instant-dependent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TimeZone {
+    /// Coordinated Universal Time — zero offset (silx `setTimeZone("UTC")`).
+    Utc,
+    /// A constant offset east of UTC, in seconds (silx
+    /// `setTimeZone(datetime.timezone(timedelta(seconds=seconds_east)))`).
+    /// Positive is east (e.g. `+32400` for UTC+09:00); negative is west.
+    FixedOffset {
+        /// Seconds east of UTC. The wall-clock time equals UTC plus this.
+        seconds_east: i32,
+    },
+}
+
+impl TimeZone {
+    /// The UTC offset in seconds (east positive). Constant for every current
+    /// variant; a future DST-aware variant would make this instant-dependent.
+    pub fn offset_seconds(self) -> i32 {
+        match self {
+            TimeZone::Utc => 0,
+            TimeZone::FixedOffset { seconds_east } => seconds_east,
         }
     }
 }
@@ -207,6 +246,23 @@ impl DateTime {
             + self.minute as i64 * 60
             + self.second as i64;
         secs as f64 + self.microsecond as f64 / MICROSECONDS_PER_SECOND
+    }
+
+    /// Decompose an epoch-seconds timestamp into the wall-clock civil
+    /// components of `tz` — silx `datetime.fromtimestamp(epoch, tz=...)`.
+    ///
+    /// The epoch is shifted east by the zone offset and then decomposed as a
+    /// UTC civil date-time, so the resulting fields read as the local wall
+    /// clock. [`TimeZone::Utc`] reduces to [`DateTime::from_epoch_seconds`].
+    pub fn from_epoch_seconds_tz(epoch: f64, tz: TimeZone) -> Self {
+        DateTime::from_epoch_seconds(epoch + tz.offset_seconds() as f64)
+    }
+
+    /// Convert a wall-clock civil date-time in `tz` back to epoch seconds —
+    /// silx `datetime.timestamp()` on a tz-aware datetime. Inverse of
+    /// [`DateTime::from_epoch_seconds_tz`] for a constant-offset zone.
+    pub fn to_epoch_seconds_tz(self, tz: TimeZone) -> f64 {
+        self.to_epoch_seconds() - tz.offset_seconds() as f64
     }
 
     /// The integer value of the date element for `unit` (silx
@@ -493,12 +549,21 @@ fn date_range(
 /// at or below `min` (rounded-down start) and the last is at or beyond `max`
 /// (the `include_first_beyond` tick).
 pub fn calc_ticks(min: f64, max: f64, n_ticks: usize) -> (Vec<f64>, f64, DtUnit) {
+    calc_ticks_tz(min, max, n_ticks, TimeZone::Utc)
+}
+
+/// As [`calc_ticks`] but laying the ticks out in the wall-clock calendar of
+/// `tz` (silx passes the tz-aware `dMin`/`dMax` into `calcTicks`). The endpoints
+/// are decomposed with the zone offset, all the nice-date arithmetic runs in
+/// that wall-clock space (identical to the UTC path), and each tick is converted
+/// back to epoch seconds with the offset. The returned ticks are epoch seconds.
+pub fn calc_ticks_tz(min: f64, max: f64, n_ticks: usize, tz: TimeZone) -> (Vec<f64>, f64, DtUnit) {
     let n_ticks = n_ticks.max(1);
-    let d_min = DateTime::from_epoch_seconds(min);
-    let d_max = DateTime::from_epoch_seconds(max);
+    let d_min = DateTime::from_epoch_seconds_tz(min, tz);
+    let d_max = DateTime::from_epoch_seconds_tz(max, tz);
     let (start, spacing, unit) = find_start_date(d_min, d_max, n_ticks);
     let dates = date_range(start, d_max, spacing, unit, true);
-    let ticks = dates.iter().map(|d| d.to_epoch_seconds()).collect();
+    let ticks = dates.iter().map(|d| d.to_epoch_seconds_tz(tz)).collect();
     (ticks, spacing, unit)
 }
 
@@ -510,9 +575,21 @@ pub fn calc_ticks_adaptive(
     axis_length: f64,
     tick_density: f64,
 ) -> (Vec<f64>, f64, DtUnit) {
+    calc_ticks_adaptive_tz(min, max, axis_length, tick_density, TimeZone::Utc)
+}
+
+/// As [`calc_ticks_adaptive`] but laying the ticks out in the wall-clock
+/// calendar of `tz` (silx `calcTicksAdaptive` on tz-aware datetimes).
+pub fn calc_ticks_adaptive_tz(
+    min: f64,
+    max: f64,
+    axis_length: f64,
+    tick_density: f64,
+    tz: TimeZone,
+) -> (Vec<f64>, f64, DtUnit) {
     let n = (tick_density * axis_length).round() as i64;
     let n = n.max(2) as usize;
-    calc_ticks(min, max, n)
+    calc_ticks_tz(min, max, n, tz)
 }
 
 /// Zero-pad an integer to `width` digits.
@@ -532,7 +609,14 @@ fn pad(value: i64, width: usize) -> String {
 /// tick set, so it is done in [`format_ticks`]. This single-tick helper returns
 /// the raw `%S.%f` form for microseconds.
 pub fn format_tick(epoch: f64, spacing: f64, unit: DtUnit) -> String {
-    let d = DateTime::from_epoch_seconds(epoch);
+    format_tick_tz(epoch, spacing, unit, TimeZone::Utc)
+}
+
+/// As [`format_tick`] but rendering the wall-clock label in `tz` (silx formats
+/// the tz-aware tick datetime). The epoch is decomposed with the zone offset
+/// before formatting.
+pub fn format_tick_tz(epoch: f64, spacing: f64, unit: DtUnit, tz: TimeZone) -> String {
+    let d = DateTime::from_epoch_seconds_tz(epoch, tz);
     let is_small = spacing < 1.0;
     match unit {
         DtUnit::Years => {
@@ -613,16 +697,21 @@ pub fn format_tick(epoch: f64, spacing: f64, unit: DtUnit) -> String {
 /// it finds the minimum number of trailing `'0'` shared by every label (capped
 /// at 5), drops a leading `'0'` per label, and trims that many trailing chars.
 pub fn format_ticks(ticks: &[f64], spacing: f64, unit: DtUnit) -> Vec<String> {
+    format_ticks_tz(ticks, spacing, unit, TimeZone::Utc)
+}
+
+/// As [`format_ticks`] but rendering the wall-clock labels in `tz`.
+pub fn format_ticks_tz(ticks: &[f64], spacing: f64, unit: DtUnit, tz: TimeZone) -> Vec<String> {
     if unit != DtUnit::MicroSeconds {
         return ticks
             .iter()
-            .map(|&t| format_tick(t, spacing, unit))
+            .map(|&t| format_tick_tz(t, spacing, unit, tz))
             .collect();
     }
 
     let texts: Vec<String> = ticks
         .iter()
-        .map(|&t| format_tick(t, spacing, unit))
+        .map(|&t| format_tick_tz(t, spacing, unit, tz))
         .collect();
     if texts.is_empty() {
         return texts;
@@ -829,5 +918,131 @@ mod tests {
         // Leading '0' dropped -> start at index 1; trim 5 from the end.
         // "00.100000"[1..len-5] = "0.100000"[.. ] => "0.1" .. let's assert content.
         assert_eq!(out, vec!["0.1".to_string(), "0.2".to_string()]);
+    }
+
+    #[test]
+    fn time_zone_offset_seconds() {
+        assert_eq!(TimeZone::Utc.offset_seconds(), 0);
+        assert_eq!(
+            TimeZone::FixedOffset {
+                seconds_east: 32400
+            }
+            .offset_seconds(),
+            32400
+        );
+        assert_eq!(
+            TimeZone::FixedOffset {
+                seconds_east: -18000
+            }
+            .offset_seconds(),
+            -18000
+        );
+    }
+
+    #[test]
+    fn from_to_epoch_tz_applies_offset_and_round_trips() {
+        // epoch 0 == 1970-01-01 00:00:00 UTC. In UTC+09:00 the wall clock reads
+        // 09:00 the same day; in UTC-05:00 it reads 19:00 the previous day.
+        let jst = TimeZone::FixedOffset {
+            seconds_east: 32400,
+        };
+        let est = TimeZone::FixedOffset {
+            seconds_east: -18000,
+        };
+
+        let d = DateTime::from_epoch_seconds_tz(0.0, jst);
+        assert_eq!(
+            (d.year, d.month, d.day, d.hour, d.minute, d.second),
+            (1970, 1, 1, 9, 0, 0)
+        );
+        // Round-trip back to the original epoch.
+        assert!(close(d.to_epoch_seconds_tz(jst), 0.0, 1e-6));
+
+        let d = DateTime::from_epoch_seconds_tz(0.0, est);
+        assert_eq!(
+            (d.year, d.month, d.day, d.hour, d.minute, d.second),
+            (1969, 12, 31, 19, 0, 0)
+        );
+        assert!(close(d.to_epoch_seconds_tz(est), 0.0, 1e-6));
+
+        // UTC is the identity case (matches the non-tz helpers).
+        let d = DateTime::from_epoch_seconds_tz(86_400.0, TimeZone::Utc);
+        assert_eq!(d, DateTime::from_epoch_seconds(86_400.0));
+        assert!(close(d.to_epoch_seconds_tz(TimeZone::Utc), 86_400.0, 1e-6));
+    }
+
+    #[test]
+    fn format_tick_tz_renders_wall_clock_in_zone() {
+        // 2021-03-09 13:05:00 UTC. Hours unit -> "%H:%M" of the zone wall clock.
+        let epoch = DateTime::from_civil(2021, 3, 9, 13, 5, 0, 0).to_epoch_seconds();
+        assert_eq!(
+            format_tick_tz(epoch, 1.0, DtUnit::Hours, TimeZone::Utc),
+            "13:05"
+        );
+        assert_eq!(
+            format_tick_tz(
+                epoch,
+                1.0,
+                DtUnit::Hours,
+                TimeZone::FixedOffset {
+                    seconds_east: 32400
+                }
+            ),
+            "22:05"
+        );
+        // UTC-05:00 rolls back across midnight to the previous calendar day.
+        assert_eq!(
+            format_tick_tz(
+                DateTime::from_civil(2021, 3, 9, 2, 5, 0, 0).to_epoch_seconds(),
+                1.0,
+                DtUnit::Hours,
+                TimeZone::FixedOffset {
+                    seconds_east: -18000
+                }
+            ),
+            "21:05"
+        );
+    }
+
+    #[test]
+    fn calc_ticks_tz_utc_matches_legacy() {
+        let min = DateTime::from_civil(2021, 1, 4, 0, 0, 0, 0).to_epoch_seconds();
+        let max = DateTime::from_civil(2021, 1, 11, 0, 0, 0, 0).to_epoch_seconds();
+        let (a_ticks, a_spacing, a_unit) = calc_ticks(min, max, 5);
+        let (b_ticks, b_spacing, b_unit) = calc_ticks_tz(min, max, 5, TimeZone::Utc);
+        assert_eq!(a_ticks, b_ticks);
+        assert_eq!(a_spacing, b_spacing);
+        assert_eq!(a_unit, b_unit);
+    }
+
+    #[test]
+    fn calc_ticks_tz_daily_ticks_land_on_zone_midnight() {
+        // A one-week window whose endpoints are local midnight in UTC+09:00.
+        let jst = TimeZone::FixedOffset {
+            seconds_east: 32400,
+        };
+        let min = DateTime::from_civil(2021, 1, 4, 0, 0, 0, 0).to_epoch_seconds_tz(jst);
+        let max = DateTime::from_civil(2021, 1, 11, 0, 0, 0, 0).to_epoch_seconds_tz(jst);
+        let (ticks, _spacing, unit) = calc_ticks_tz(min, max, 5, jst);
+        assert_eq!(unit, DtUnit::Days);
+        assert!(ticks.len() >= 2, "ticks={ticks:?}");
+        // Every daily tick is exactly local midnight in the zone.
+        for &t in &ticks {
+            let d = DateTime::from_epoch_seconds_tz(t, jst);
+            assert_eq!(
+                (d.hour, d.minute, d.second),
+                (0, 0, 0),
+                "tick {t} not at zone midnight: {d:?}"
+            );
+        }
+        // The first label is the zone-local date, and the ticks bracket [min,max].
+        let labels = format_ticks_tz(&ticks, _spacing, unit, jst);
+        assert_eq!(labels[0], "2021-01-04");
+        assert!(ticks[0] <= min + 1e-6);
+        assert!(*ticks.last().unwrap() >= max - 1e-6);
+        // The offset really moved the ticks: under UTC the same epochs lay out at
+        // a different set of positions (their wall clock is 15:00 the prior day).
+        let (utc_ticks, _, _) = calc_ticks_tz(min, max, 5, TimeZone::Utc);
+        assert_ne!(ticks, utc_ticks);
     }
 }
