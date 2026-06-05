@@ -186,6 +186,7 @@ impl RoiManagerWidget {
                 plot.add_roi(Roi::Ellipse {
                     center: (cx, cy),
                     radii: (dx.abs(), dy.abs()),
+                    orientation: 0.0,
                 });
             }
             if ui.button("+ Arc").clicked() {

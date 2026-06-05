@@ -866,26 +866,40 @@ pub fn draw_roi(
             outline(pts);
             Some(egui::pos2(c.x, c.y - rpx))
         }
-        Roi::Ellipse { center, radii } => {
-            let c = t.data_to_pixel(center.0, center.1);
-            let ex = t.data_to_pixel(center.0 + radii.0, center.1);
-            let ey = t.data_to_pixel(center.0, center.1 + radii.1);
-            let rx = (ex.x - c.x).abs();
-            let ry = (ey.y - c.y).abs();
-            // Approximate the ellipse outline with a polygon (silx draws it with
-            // 27 points; match that segment count).
+        Roi::Ellipse {
+            center,
+            radii,
+            orientation,
+        } => {
+            // 27-point outline (silx's segment count) built in DATA space with
+            // silx's rotated parametric form
+            //   X = r0·cos a·cosθ − r1·sin a·sinθ
+            //   Y = r0·cos a·sinθ + r1·sin a·cosθ
+            // then mapped through the data→pixel transform, so both the
+            // orientation and any non-uniform axis scaling are honored.
+            let (coso, sino) = (orientation.cos(), orientation.sin());
+            let (r0, r1) = *radii;
             let n = 27usize;
             let pts: Vec<Pos2> = (0..n)
                 .map(|i| {
-                    let a = i as f32 * std::f32::consts::TAU / n as f32;
-                    egui::pos2(c.x + rx * a.cos(), c.y + ry * a.sin())
+                    let a = i as f64 * std::f64::consts::TAU / n as f64;
+                    let (ca, sa) = (a.cos(), a.sin());
+                    let dx = r0 * ca * coso - r1 * sa * sino;
+                    let dy = r0 * ca * sino + r1 * sa * coso;
+                    t.data_to_pixel(center.0 + dx, center.1 + dy)
                 })
                 .collect();
             if let Some(fc) = fill {
                 painter.add(egui::Shape::convex_polygon(pts.clone(), fc, Stroke::NONE));
             }
+            // Label anchor at the visual-top (min-y pixel) outline point.
+            let anchor = pts
+                .iter()
+                .copied()
+                .min_by(|a, b| a.y.total_cmp(&b.y))
+                .unwrap_or_else(|| t.data_to_pixel(center.0, center.1));
             outline(pts);
-            Some(egui::pos2(c.x, c.y - ry))
+            Some(anchor)
         }
         Roi::Arc {
             center,

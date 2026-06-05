@@ -9887,9 +9887,17 @@ fn roi_description(roi: &Roi) -> String {
                 center.0, center.1
             )
         }
-        Roi::Ellipse { center, radii } => format!(
-            "Ellipse  c=({:.3}, {:.3})  r=({:.3}, {:.3})",
-            center.0, center.1, radii.0, radii.1
+        Roi::Ellipse {
+            center,
+            radii,
+            orientation,
+        } => format!(
+            "Ellipse  c=({:.3}, {:.3})  r=({:.3}, {:.3})  θ={:.1}°",
+            center.0,
+            center.1,
+            radii.0,
+            radii.1,
+            orientation.to_degrees()
         ),
         Roi::Arc {
             center,

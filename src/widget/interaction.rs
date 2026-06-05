@@ -1185,6 +1185,9 @@ pub fn roi_from_draw(kind: RoiDrawKind, params: &DrawParams) -> Option<Roi> {
         (RoiDrawKind::Ellipse, DrawParams::Ellipse { center, semi_axes }) => Some(Roi::Ellipse {
             center: *center,
             radii: *semi_axes,
+            // silx's `SelectEllipse` interaction produces an axis-aligned ellipse;
+            // rotation comes later from dragging an axis handle off-axis.
+            orientation: 0.0,
         }),
         // Circle: center = first point, radius = distance to the second
         // (silx CircleROI._setRay, items/roi.py:782).
@@ -2511,6 +2514,7 @@ mod tests {
             Some(Roi::Ellipse {
                 center: (1.0, 2.0),
                 radii: (4.0, 2.5),
+                orientation: 0.0,
             })
         );
     }

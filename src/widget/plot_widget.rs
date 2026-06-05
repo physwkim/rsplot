@@ -2244,6 +2244,7 @@ mod tests {
             .push(ManagedRoi::new(crate::core::roi::Roi::Ellipse {
                 center: (5.0, 5.0),
                 radii: (3.0, 2.0),
+                orientation: 0.0,
             }));
         let mode = PlotInteractionMode::Select;
         let screen = egui::vec2(200.0, 200.0);
@@ -2266,18 +2267,27 @@ mod tests {
         let (resp, _) = run_mode_frame(&ctx, &mut plot, mode, move_to(screen, target_px));
         assert_eq!(resp.roi_changed, Some(0), "axis-handle grab edits the ROI");
         match &plot.rois[0].roi {
-            crate::core::roi::Roi::Ellipse { center, radii } => {
+            crate::core::roi::Roi::Ellipse {
+                center,
+                radii,
+                orientation,
+            } => {
                 assert!(
                     (center.0 - 5.0).abs() < 1e-6 && (center.1 - 5.0).abs() < 1e-6,
                     "center unchanged: {center:?}"
                 );
                 assert!(
                     (radii.0 - 4.0).abs() < 1e-6,
-                    "x semi-axis grew to 4: {radii:?}"
+                    "axis0 semi-axis grew to 4: {radii:?}"
                 );
                 assert!(
                     (radii.1 - 2.0).abs() < 1e-6,
-                    "y semi-axis unchanged: {radii:?}"
+                    "axis1 semi-axis unchanged: {radii:?}"
+                );
+                // A purely horizontal drag keeps the ellipse axis-aligned.
+                assert!(
+                    orientation.abs() < 1e-6,
+                    "orientation stays 0 for an on-axis drag: {orientation}"
                 );
             }
             other => panic!("{other:?}"),

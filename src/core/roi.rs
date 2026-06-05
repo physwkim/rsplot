@@ -63,12 +63,17 @@ pub enum Roi {
     /// Circle with a movable center and a perimeter radius handle (silx
     /// `CircleROI`).
     Circle { center: (f64, f64), radius: f64 },
-    /// Axis-aligned ellipse with semi-axes `radii = (x_radius, y_radius)` (silx
-    /// `EllipseROI` with no orientation). Movable center plus one handle per
-    /// semi-axis.
+    /// An oriented ellipse (silx `EllipseROI`): `center`, two perpendicular
+    /// semi-axes `radii`, and `orientation` in radians. `radii.0` is the
+    /// semi-axis along the `orientation` direction and `radii.1` the one
+    /// perpendicular to it (`orientation + π/2`); `orientation == 0.0` is the
+    /// axis-aligned case where `radii = (x_radius, y_radius)`. Movable center
+    /// plus one perimeter handle per semi-axis, each of which also rotates the
+    /// ellipse when dragged off-axis (silx axis anchors set radius + orientation).
     Ellipse {
         center: (f64, f64),
         radii: (f64, f64),
+        orientation: f64,
     },
     /// An annular sector (silx `ArcROI`): the ring between `inner_radius` and
     /// `outer_radius` around `center`, swept from `start_angle` to `end_angle`
@@ -172,9 +177,14 @@ impl Roi {
                 let b = t.data_to_pixel(center.0 + radius, center.1 + radius);
                 Rect::from_two_pos(a, b)
             }
-            Roi::Ellipse { center, radii } => {
-                let a = t.data_to_pixel(center.0 - radii.0, center.1 - radii.1);
-                let b = t.data_to_pixel(center.0 + radii.0, center.1 + radii.1);
+            Roi::Ellipse {
+                center,
+                radii,
+                orientation,
+            } => {
+                let (hx, hy) = ellipse_aabb_half_extents(*radii, *orientation);
+                let a = t.data_to_pixel(center.0 - hx, center.1 - hy);
+                let b = t.data_to_pixel(center.0 + hx, center.1 + hy);
                 Rect::from_two_pos(a, b)
             }
             Roi::Arc {
@@ -263,14 +273,21 @@ impl Roi {
                 1 => (center.0 + radius, center.1),
                 _ => return None,
             },
-            Roi::Ellipse { center, radii } => match index {
-                0 => *center,
-                // x-axis handle at center + (x_radius, 0).
-                1 => (center.0 + radii.0, center.1),
-                // y-axis handle at center + (0, y_radius).
-                2 => (center.0, center.1 + radii.1),
-                _ => return None,
-            },
+            Roi::Ellipse {
+                center,
+                radii,
+                orientation,
+            } => {
+                let (c, s) = (orientation.cos(), orientation.sin());
+                match index {
+                    0 => *center,
+                    // axis0 handle at center + radii.0·(cosθ, sinθ).
+                    1 => (center.0 + radii.0 * c, center.1 + radii.0 * s),
+                    // axis1 handle, perpendicular: center + radii.1·(−sinθ, cosθ).
+                    2 => (center.0 - radii.1 * s, center.1 + radii.1 * c),
+                    _ => return None,
+                }
+            }
             // Arc shape vertices: 0=mid, 1=outer/weight, 2=start, 3=end.
             Roi::Arc { .. } => arc_vertex_pos(self, index)?,
             // Band shape vertices: 0=begin, 1=end, 2=width-up, 3=width-down.
@@ -562,12 +579,28 @@ impl Roi {
                 }
                 _ => {}
             },
-            Roi::Ellipse { center, radii } => match edge {
+            Roi::Ellipse {
+                center,
+                radii,
+                orientation,
+            } => match edge {
                 // Center handle translates the whole ellipse.
                 RoiEdge::Vertex(0) => *center = (dx, dy),
-                // x-axis handle sets the x semi-axis; y-axis handle the y one.
-                RoiEdge::Vertex(1) => radii.0 = (dx - center.0).abs(),
-                RoiEdge::Vertex(2) => radii.1 = (dy - center.1).abs(),
+                // axis0 handle: set semi-axis 0 to the cursor distance and rotate
+                // so axis0 points at the cursor (silx `EllipseROI.handleDragUpdated`
+                // axis anchors set both radius and orientation).
+                RoiEdge::Vertex(1) => {
+                    let (ex, ey) = (dx - center.0, dy - center.1);
+                    radii.0 = ex.hypot(ey);
+                    *orientation = ey.atan2(ex);
+                }
+                // axis1 handle: set semi-axis 1; axis1 is perpendicular to
+                // orientation, so orientation is the cursor angle minus π/2.
+                RoiEdge::Vertex(2) => {
+                    let (ex, ey) = (dx - center.0, dy - center.1);
+                    radii.1 = ex.hypot(ey);
+                    *orientation = ey.atan2(ex) - std::f64::consts::FRAC_PI_2;
+                }
                 _ => {}
             },
             // Arc handle drag — PolarMode editing, faithful to our polar
@@ -649,8 +682,10 @@ impl Roi {
     ///   is `pos` (`LineROI._intersects_unit_square`).
     /// - `Polygon`: even-odd ray-cast crossing test (`Polygon.is_inside`).
     /// - `Circle`: `dist(pos, center) <= radius` (`CircleROI`).
-    /// - `Ellipse`: `(dx/major)² + (dy/minor)² <= 1` with `major = max(radii)`,
-    ///   `minor = min(radii)` (`EllipseROI` at orientation 0).
+    /// - `Ellipse`: project `pos − center` onto the ellipse's own axes (rotate by
+    ///   `−orientation`) and test `(x'/radii.0)² + (y'/radii.1)² <= 1` — the
+    ///   oriented form of `EllipseROI.contains` (silx tests against the major-axis
+    ///   angle; here `radii.0`/`radii.1` already are the axis0/axis1 semi-axes).
     /// - `Arc`: inside the `[inner, outer]` radius ring AND within the angular
     ///   sweep (`ArcROI._arc_roi.py`).
     /// - `Band`: point-in-the-rotated-rectangle of the four band corners
@@ -673,14 +708,22 @@ impl Roi {
                 let (dx, dy) = (x - center.0, y - center.1);
                 (dx * dx + dy * dy).sqrt() <= *radius
             }
-            Roi::Ellipse { center, radii } => {
-                let major = radii.0.max(radii.1);
-                let minor = radii.0.min(radii.1);
-                if major <= 0.0 || minor <= 0.0 {
+            Roi::Ellipse {
+                center,
+                radii,
+                orientation,
+            } => {
+                let (a, b) = *radii;
+                if a <= 0.0 || b <= 0.0 {
                     return false;
                 }
                 let (dx, dy) = (x - center.0, y - center.1);
-                (dx * dx) / (major * major) + (dy * dy) / (minor * minor) <= 1.0
+                let (c, s) = (orientation.cos(), orientation.sin());
+                // Rotate into the ellipse's own frame: x' along axis0 (radii.0),
+                // y' along axis1 (radii.1).
+                let xr = dx * c + dy * s;
+                let yr = -dx * s + dy * c;
+                (xr * xr) / (a * a) + (yr * yr) / (b * b) <= 1.0
             }
             Roi::Arc {
                 center,
@@ -775,12 +818,21 @@ impl Roi {
             Roi::Circle { center: c, radius } => {
                 vec![v((c.0 + radius, c.1)), translate(*c)]
             }
-            // EllipseROI: two axis vertices + a translate center.
-            Roi::Ellipse { center: c, radii } => vec![
-                v((c.0 + radii.0, c.1)),
-                v((c.0, c.1 + radii.1)),
-                translate(*c),
-            ],
+            // EllipseROI: two axis vertices + a translate center. The axis
+            // vertices follow `orientation`: axis0 at radii.0·(cosθ, sinθ),
+            // axis1 (perpendicular) at radii.1·(−sinθ, cosθ).
+            Roi::Ellipse {
+                center: c,
+                radii,
+                orientation,
+            } => {
+                let (cs, sn) = (orientation.cos(), orientation.sin());
+                vec![
+                    v((c.0 + radii.0 * cs, c.1 + radii.0 * sn)),
+                    v((c.0 - radii.1 * sn, c.1 + radii.1 * cs)),
+                    translate(*c),
+                ]
+            }
             // ArcROI: mid/outer/start/end shape vertices + a translate move
             // handle at the circle center (silx mid/weight/start/end +
             // `addTranslateHandle`).
@@ -988,6 +1040,18 @@ fn band_normal(begin: (f64, f64), end: (f64, f64)) -> (f64, f64) {
     } else {
         (-vy / len, vx / len)
     }
+}
+
+/// Half-extents of the axis-aligned bounding box of an oriented ellipse with
+/// semi-axes `(a, b)` (`a` along `orientation`, `b` perpendicular). For the
+/// rotated parametric ellipse the per-axis maxima are
+/// `hx = sqrt((a·cosθ)² + (b·sinθ)²)` and `hy = sqrt((a·sinθ)² + (b·cosθ)²)`.
+fn ellipse_aabb_half_extents(radii: (f64, f64), orientation: f64) -> (f64, f64) {
+    let (a, b) = radii;
+    let (c, s) = (orientation.cos(), orientation.sin());
+    let hx = ((a * c).powi(2) + (b * s).powi(2)).sqrt();
+    let hy = ((a * s).powi(2) + (b * c).powi(2)).sqrt();
+    (hx, hy)
 }
 
 /// The four data-space corners of a band ROI, in silx order
@@ -1461,15 +1525,18 @@ mod tests {
         let mut roi = Roi::Ellipse {
             center: (0.0, 0.0),
             radii: (3.0, 4.0),
+            orientation: 0.0,
         };
-        roi.move_edge(RoiEdge::Vertex(1), (5.0, 0.0)); // x semi-axis -> 5
-        roi.move_edge(RoiEdge::Vertex(2), (0.0, 7.0)); // y semi-axis -> 7
+        // Axis-aligned drags (along +x, +y) keep orientation at 0.
+        roi.move_edge(RoiEdge::Vertex(1), (5.0, 0.0)); // axis0 semi-axis -> 5
+        roi.move_edge(RoiEdge::Vertex(2), (0.0, 7.0)); // axis1 semi-axis -> 7
         roi.move_edge(RoiEdge::Vertex(0), (2.0, 3.0)); // center
         assert_eq!(
             roi,
             Roi::Ellipse {
                 center: (2.0, 3.0),
                 radii: (5.0, 7.0),
+                orientation: 0.0,
             }
         );
     }
@@ -1712,19 +1779,137 @@ mod tests {
     fn ellipse_contains_inside_edge_outside() {
         let roi = Roi::Ellipse {
             center: (5.0, 5.0),
-            radii: (4.0, 2.0), // major=4 (x), minor=2 (y)
+            radii: (4.0, 2.0), // axis0=4 (x), axis1=2 (y), orientation 0
+            orientation: 0.0,
         };
         assert!(roi.contains((5.0, 5.0))); // center
-        assert!(roi.contains((9.0, 5.0))); // on the major-axis tip (x): 1.0 == 1.0
-        assert!(roi.contains((5.0, 7.0))); // on the minor-axis tip (y)
-        assert!(!roi.contains((5.0, 7.001))); // just past the minor tip
-        assert!(!roi.contains((9.001, 5.0))); // just past the major tip
+        assert!(roi.contains((9.0, 5.0))); // on the axis0 tip (x): 1.0 == 1.0
+        assert!(roi.contains((5.0, 7.0))); // on the axis1 tip (y)
+        assert!(!roi.contains((5.0, 7.001))); // just past the axis1 tip
+        assert!(!roi.contains((9.001, 5.0))); // just past the axis0 tip
         // Degenerate (zero radius) contains nothing.
         let degenerate = Roi::Ellipse {
             center: (0.0, 0.0),
             radii: (0.0, 1.0),
+            orientation: 0.0,
         };
         assert!(!degenerate.contains((0.0, 0.0)));
+    }
+
+    #[test]
+    fn ellipse_axis0_handle_drag_off_axis_rotates_and_resizes() {
+        use std::f64::consts::FRAC_PI_4;
+        // Drag the axis0 handle to a 45° direction at distance 5: silx's
+        // `EllipseROI.handleDragUpdated` axis anchor sets radii.0 = distance and
+        // orientation = the cursor angle.
+        let mut roi = Roi::Ellipse {
+            center: (0.0, 0.0),
+            radii: (3.0, 2.0),
+            orientation: 0.0,
+        };
+        let d = 5.0_f64;
+        roi.move_edge(
+            RoiEdge::Vertex(1),
+            (d * FRAC_PI_4.cos(), d * FRAC_PI_4.sin()),
+        );
+        match roi {
+            Roi::Ellipse {
+                center,
+                radii,
+                orientation,
+            } => {
+                assert!(center.0.abs() < 1e-9 && center.1.abs() < 1e-9, "{center:?}");
+                assert!((radii.0 - 5.0).abs() < 1e-9, "axis0 = cursor distance");
+                assert!((radii.1 - 2.0).abs() < 1e-9, "axis1 unchanged");
+                assert!(
+                    (orientation - FRAC_PI_4).abs() < 1e-9,
+                    "orientation = cursor angle: {orientation}"
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn ellipse_axis1_handle_drag_sets_perpendicular_orientation() {
+        use std::f64::consts::FRAC_PI_2;
+        // axis1 is perpendicular to orientation, so dragging it to +x (angle 0)
+        // makes orientation = 0 − π/2 = −π/2; the semi-axis becomes the distance.
+        let mut roi = Roi::Ellipse {
+            center: (0.0, 0.0),
+            radii: (3.0, 2.0),
+            orientation: 0.0,
+        };
+        roi.move_edge(RoiEdge::Vertex(2), (4.0, 0.0));
+        match roi {
+            Roi::Ellipse {
+                radii, orientation, ..
+            } => {
+                assert!((radii.1 - 4.0).abs() < 1e-9, "axis1 = 4: {radii:?}");
+                assert!(
+                    (orientation + FRAC_PI_2).abs() < 1e-9,
+                    "axis1→+x ⟹ θ = −π/2: {orientation}"
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn ellipse_contains_respects_orientation() {
+        use std::f64::consts::FRAC_PI_2;
+        // Rotated 90°: the long semi-axis (radii.0 = 4) now points along +y and
+        // the short one (radii.1 = 2) along ±x.
+        let roi = Roi::Ellipse {
+            center: (0.0, 0.0),
+            radii: (4.0, 2.0),
+            orientation: FRAC_PI_2,
+        };
+        assert!(roi.contains((0.0, 4.0))); // axis0 tip, now vertical
+        assert!(!roi.contains((0.0, 4.001)));
+        assert!(roi.contains((2.0, 0.0))); // axis1 tip, now horizontal
+        assert!(!roi.contains((2.001, 0.0)));
+        // The pre-rotation +x tip (4, 0) is now outside the rotated ellipse.
+        assert!(!roi.contains((4.0, 0.0)));
+    }
+
+    #[test]
+    fn ellipse_handles_follow_orientation() {
+        use std::f64::consts::FRAC_PI_2;
+        let roi = Roi::Ellipse {
+            center: (1.0, 1.0),
+            radii: (4.0, 2.0),
+            orientation: FRAC_PI_2,
+        };
+        let hs = roi.handles();
+        // axis0 handle: center + radii.0·(cos90°, sin90°) = (1, 5).
+        assert!(
+            (hs[0].pos[0] - 1.0).abs() < 1e-9 && (hs[0].pos[1] - 5.0).abs() < 1e-9,
+            "{:?}",
+            hs[0].pos
+        );
+        // axis1 handle: center + radii.1·(−sin90°, cos90°) = (−1, 1).
+        assert!(
+            (hs[1].pos[0] + 1.0).abs() < 1e-9 && (hs[1].pos[1] - 1.0).abs() < 1e-9,
+            "{:?}",
+            hs[1].pos
+        );
+        // translate handle stays at the center.
+        assert!((hs[2].pos[0] - 1.0).abs() < 1e-9 && (hs[2].pos[1] - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn ellipse_aabb_half_extents_axis_aligned_and_rotated() {
+        use std::f64::consts::{FRAC_PI_2, FRAC_PI_4};
+        // θ = 0: the bounding box half-extents are just the semi-axes.
+        let (hx, hy) = ellipse_aabb_half_extents((4.0, 2.0), 0.0);
+        assert!((hx - 4.0).abs() < 1e-9 && (hy - 2.0).abs() < 1e-9);
+        // θ = 90°: the axes swap.
+        let (hx, hy) = ellipse_aabb_half_extents((4.0, 2.0), FRAC_PI_2);
+        assert!((hx - 2.0).abs() < 1e-9 && (hy - 4.0).abs() < 1e-9);
+        // A circle's bounding box is orientation-invariant.
+        let (hx, hy) = ellipse_aabb_half_extents((3.0, 3.0), FRAC_PI_4);
+        assert!((hx - 3.0).abs() < 1e-9 && (hy - 3.0).abs() < 1e-9);
     }
 
     #[test]
@@ -1858,6 +2043,7 @@ mod tests {
                 &Roi::Ellipse {
                     center: (5.0, 5.0),
                     radii: (4.0, 2.0),
+                    orientation: 0.0,
                 }
                 .handles()
             ),
@@ -1889,6 +2075,7 @@ mod tests {
             Roi::Ellipse {
                 center: (5.0, 5.0),
                 radii: (4.0, 2.0),
+                orientation: 0.0,
             },
         ];
         let (dx, dy) = (1.5, -0.5);

@@ -86,9 +86,17 @@ impl eframe::App for RoiApp {
                             center.0, center.1
                         )
                     }
-                    Roi::Ellipse { center, radii } => format!(
-                        "ellipse #{i}  c=({:.2}, {:.2})  r=({:.2}, {:.2})",
-                        center.0, center.1, radii.0, radii.1
+                    Roi::Ellipse {
+                        center,
+                        radii,
+                        orientation,
+                    } => format!(
+                        "ellipse #{i}  c=({:.2}, {:.2})  r=({:.2}, {:.2})  θ={:.1}°",
+                        center.0,
+                        center.1,
+                        radii.0,
+                        radii.1,
+                        orientation.to_degrees()
                     ),
                     Roi::Arc {
                         center,
