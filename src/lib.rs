@@ -133,7 +133,9 @@ pub use crate::widget::stats_widget::{
     StatsInput, StatsWidget, UpdateMode, format_significant, format_stat,
 };
 pub use crate::widget::sync::SyncAxes;
-pub use crate::widget::tool_buttons::{ProfileToolButton, SymbolToolButton, SymbolToolChange};
+pub use crate::widget::tool_buttons::{
+    ProfileToolButton, RulerToolButton, SymbolToolButton, SymbolToolChange,
+};
 
 // Plotting-library convention: re-export so downstreams use the same
 // egui/egui-wgpu without version skew.

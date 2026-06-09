@@ -197,6 +197,74 @@ impl SymbolToolButton {
     }
 }
 
+/// silx `RulerToolButton` (`tools/RulerToolButton.py:83-181`): a **checkable**
+/// toolbar button that, while active, lets the user measure the distance between
+/// two points by drawing a line ROI whose label shows the distance.
+///
+/// Following the same split as the other [`tool_buttons`](self) widgets, this
+/// owns only the reusable pieces silx's `RulerToolButton` provides — the
+/// checked/active state (silx `setCheckable(True)`/`isChecked`) and the
+/// distance-label formatter (silx `buildDistanceText`) — and leaves the host to
+/// drive the line ROI: when [`is_active`](Self::is_active) the caller enters a
+/// line-ROI draw and names the drawn ROI with [`distance_text`](Self::distance_text).
+/// silx's `_RulerROI` maps onto siplot's existing line-ROI draw; siplot has no
+/// live-updating ROI format-function, so the host recomputes the label.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RulerToolButton {
+    active: bool,
+}
+
+impl RulerToolButton {
+    /// A ruler button, inactive by default (silx button starts unchecked).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Whether the ruler is active (silx `isChecked`). While active the host
+    /// drives a line-ROI measurement.
+    pub fn is_active(&self) -> bool {
+        self.active
+    }
+
+    /// Set the active state (silx `setChecked`).
+    pub fn set_active(&mut self, active: bool) {
+        self.active = active;
+    }
+
+    /// Flip the active state and return the new value (silx checkable `toggle`).
+    pub fn toggle(&mut self) -> bool {
+        self.active = !self.active;
+        self.active
+    }
+
+    /// The ruler label for a measured segment, mirroring silx
+    /// `RulerToolButton.buildDistanceText`: the Euclidean distance between the
+    /// two data-space endpoints, formatted `" {:.1}px"`. silx uses Python's
+    /// `f"{distance: .1f}px"`; the space flag prints a leading space for a
+    /// non-negative value, and the distance is a vector norm so it is always
+    /// ≥ 0 — hence the always-present leading space. Pure and deterministic, so
+    /// the formatting is unit-testable without a GPU backend.
+    pub fn distance_text(start: [f64; 2], end: [f64; 2]) -> String {
+        let dx = end[0] - start[0];
+        let dy = end[1] - start[1];
+        let distance = (dx * dx + dy * dy).sqrt();
+        format!(" {distance:.1}px")
+    }
+
+    /// Render the checkable ruler button (silx `RulerToolButton`, a checkable
+    /// `QToolButton`). Returns `Some(new_active)` when the user toggles it this
+    /// frame (silx `toggled`), else `None`. GPU/UI — not covered by the tests.
+    pub fn ui(&mut self, ui: &mut egui::Ui) -> Option<bool> {
+        let resp = ui
+            .selectable_label(self.active, "Ruler")
+            .on_hover_text("Measure the distance between two points of the plot");
+        if resp.clicked() {
+            return Some(self.toggle());
+        }
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -266,5 +334,41 @@ mod tests {
         let mut b = SymbolToolButton::new();
         b.set_symbol(Symbol::Diamond);
         assert_eq!(b.symbol(), Symbol::Diamond);
+    }
+
+    #[test]
+    fn ruler_button_defaults_inactive_and_toggles() {
+        let mut b = RulerToolButton::new();
+        assert!(!b.is_active(), "silx ruler button starts unchecked");
+        assert!(b.toggle(), "toggle activates");
+        assert!(b.is_active());
+        assert!(!b.toggle(), "toggle deactivates");
+        assert!(!b.is_active());
+        b.set_active(true);
+        assert!(b.is_active());
+    }
+
+    #[test]
+    fn ruler_distance_text_matches_silx_format() {
+        // 3-4-5 right triangle: norm == 5.0. silx `f"{5.0: .1f}px"` -> " 5.0px"
+        // (space flag => leading space for the non-negative norm).
+        assert_eq!(
+            RulerToolButton::distance_text([0.0, 0.0], [3.0, 4.0]),
+            " 5.0px"
+        );
+        // Zero-length segment.
+        assert_eq!(
+            RulerToolButton::distance_text([2.0, 7.0], [2.0, 7.0]),
+            " 0.0px"
+        );
+        // Direction-independent (norm), and rounds to one decimal.
+        assert_eq!(
+            RulerToolButton::distance_text([4.0, 4.0], [0.0, 1.0]),
+            " 5.0px"
+        );
+        assert_eq!(
+            RulerToolButton::distance_text([0.0, 0.0], [1.0, 1.0]),
+            " 1.4px"
+        );
     }
 }
