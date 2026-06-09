@@ -420,8 +420,10 @@ pub struct Plot {
     /// (silx `setDataMargins`). Zero by default.
     data_margins: DataMargins,
     /// Whether the axes (frame, ticks, labels) are displayed (silx
-    /// `setAxesDisplayed` / `isAxesDisplayed`). Defaults to `true`. State only;
-    /// chrome wiring (removing the axes' margins when hidden) is deferred.
+    /// `setAxesDisplayed` / `isAxesDisplayed`). Defaults to `true`. Wired: when
+    /// `false` the widget passes `axes_hidden` to `chrome::layout`, which
+    /// collapses the axis gutters to zero so the data area fills the rect
+    /// (silx `setAxesDisplayed(False)` -> `setAxesMargins(0,0,0,0)`).
     axes_displayed: bool,
     /// Redraw-dirty state (silx `_dirty`). Defaults to [`DirtyState::Clean`].
     dirty: DirtyState,
@@ -667,8 +669,9 @@ impl Plot {
         self.axes_displayed
     }
 
-    /// Show or hide the axes (silx `setAxesDisplayed`). State only — the chrome
-    /// that drops the axis margins when hidden is deferred. Marks the plot dirty
+    /// Show or hide the axes (silx `setAxesDisplayed`). When hidden, the widget
+    /// passes `axes_hidden` to `chrome::layout`, which drops the axis gutters to
+    /// zero (silx `setAxesMargins(0,0,0,0)`). Marks the plot dirty
     /// (full redraw) when the value changes, mirroring silx
     /// `setAxesDisplayed`'s `_setDirtyPlot()`.
     pub fn set_axes_displayed(&mut self, displayed: bool) {
@@ -808,9 +811,10 @@ impl Plot {
 
     /// Set (or clear, with `None`) the grid-line color override (silx
     /// `setGridColor`). Marks the plot dirty on change, mirroring silx's
-    /// `_foregroundColorsUpdated` -> `_setDirtyPlot()`. State only; the chrome
-    /// reads the foreground color today, so wiring this into the grid render is
-    /// deferred.
+    /// `_foregroundColorsUpdated` -> `_setDirtyPlot()`. Wired: the widget passes
+    /// this through `chrome::Theme::with_overrides(foreground, grid_color)`
+    /// (`plot_widget.rs`), so the grid renders with this color independently of
+    /// the foreground (axis/frame) color; see [`Self::effective_grid_color`].
     pub fn set_grid_color(&mut self, color: Option<Color32>) {
         if self.grid_color != color {
             self.grid_color = color;
