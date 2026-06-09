@@ -73,17 +73,29 @@ pub enum FitModelChoice {
     IterativeLorentzian,
     /// Iterative pseudo-Voigt.
     IterativePseudoVoigt,
+    /// Iterative step down (descending erf edge).
+    IterativeStepDown,
+    /// Iterative step up (ascending erf edge).
+    IterativeStepUp,
+    /// Iterative slit (rising then falling edges).
+    IterativeSlit,
+    /// Iterative arctan step up.
+    IterativeAtanStepUp,
 }
 
 impl FitModelChoice {
     /// All choices, in display order.
-    pub const ALL: [FitModelChoice; 6] = [
+    pub const ALL: [FitModelChoice; 10] = [
         FitModelChoice::Linear,
         FitModelChoice::GaussianEstimate,
         FitModelChoice::IterativeGaussian,
         FitModelChoice::IterativeGaussianArea,
         FitModelChoice::IterativeLorentzian,
         FitModelChoice::IterativePseudoVoigt,
+        FitModelChoice::IterativeStepDown,
+        FitModelChoice::IterativeStepUp,
+        FitModelChoice::IterativeSlit,
+        FitModelChoice::IterativeAtanStepUp,
     ];
 
     /// Display name for the combo box.
@@ -95,17 +107,25 @@ impl FitModelChoice {
             FitModelChoice::IterativeGaussianArea => "Gaussian Area (Iterative)",
             FitModelChoice::IterativeLorentzian => "Lorentzian (Iterative)",
             FitModelChoice::IterativePseudoVoigt => "Pseudo-Voigt (Iterative)",
+            FitModelChoice::IterativeStepDown => "Step Down (Iterative)",
+            FitModelChoice::IterativeStepUp => "Step Up (Iterative)",
+            FitModelChoice::IterativeSlit => "Slit (Iterative)",
+            FitModelChoice::IterativeAtanStepUp => "Arctan Step Up (Iterative)",
         }
     }
 
     /// The [`PeakModel`] this choice maps to, if it is one of the iterative
-    /// peak models.
+    /// models.
     pub fn peak_model(self) -> Option<PeakModel> {
         match self {
             FitModelChoice::IterativeGaussian => Some(PeakModel::Gaussian),
             FitModelChoice::IterativeGaussianArea => Some(PeakModel::GaussianArea),
             FitModelChoice::IterativeLorentzian => Some(PeakModel::Lorentzian),
             FitModelChoice::IterativePseudoVoigt => Some(PeakModel::PseudoVoigt),
+            FitModelChoice::IterativeStepDown => Some(PeakModel::StepDown),
+            FitModelChoice::IterativeStepUp => Some(PeakModel::StepUp),
+            FitModelChoice::IterativeSlit => Some(PeakModel::Slit),
+            FitModelChoice::IterativeAtanStepUp => Some(PeakModel::AtanStepUp),
             FitModelChoice::Linear | FitModelChoice::GaussianEstimate => None,
         }
     }
@@ -540,9 +560,16 @@ mod tests {
 
     #[test]
     fn all_choices_listed_once_in_order() {
-        assert_eq!(FitModelChoice::ALL.len(), 6);
+        assert_eq!(FitModelChoice::ALL.len(), 10);
         assert_eq!(FitModelChoice::ALL[0], FitModelChoice::Linear);
         assert_eq!(FitModelChoice::ALL[5], FitModelChoice::IterativePseudoVoigt);
+        assert_eq!(FitModelChoice::ALL[9], FitModelChoice::IterativeAtanStepUp);
+        // Every non-analytical choice maps to a fit model.
+        for choice in FitModelChoice::ALL {
+            let analytical =
+                matches!(choice, FitModelChoice::Linear | FitModelChoice::GaussianEstimate);
+            assert_eq!(choice.peak_model().is_some(), !analytical);
+        }
     }
 
     #[test]
