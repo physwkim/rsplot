@@ -7298,6 +7298,14 @@ pub enum CompareMode {
     SplitHorizontal,
     /// Pixel-wise A − B, normalised to `[-1, 1]` for display.
     Subtract,
+    /// RGB composite: A's normalised intensity in the red channel, B's in blue,
+    /// their half-sum in green (silx `VisualizationMode.COMPOSITE_RED_BLUE_GRAY`,
+    /// CompareImages.py:744-747).
+    RedBlueGray,
+    /// Negative RGB composite: each channel of [`Self::RedBlueGray`] inverted
+    /// (silx `VisualizationMode.COMPOSITE_RED_BLUE_GRAY_NEG`,
+    /// CompareImages.py:748-751).
+    RedBlueGrayNeg,
 }
 
 /// A retained widget that displays two co-registered images with a draggable
@@ -7429,6 +7437,16 @@ impl CompareImages {
                     CompareMode::SplitHorizontal,
                 ),
                 ("A-B", "Subtract: A minus B", CompareMode::Subtract),
+                (
+                    "R/B",
+                    "Composite: A in red, B in blue, half-sum in green",
+                    CompareMode::RedBlueGray,
+                ),
+                (
+                    "R/B⁻",
+                    "Negative composite: red-blue channels inverted",
+                    CompareMode::RedBlueGrayNeg,
+                ),
             ] {
                 if ui
                     .selectable_label(self.mode == m, label)
@@ -7558,6 +7576,12 @@ impl CompareImages {
                     }
                 })
                 .collect(),
+            CompareMode::RedBlueGray => {
+                red_blue_gray_composite(&self.data_a, &self.data_b, &self.colormap, false)
+            }
+            CompareMode::RedBlueGrayNeg => {
+                red_blue_gray_composite(&self.data_a, &self.data_b, &self.colormap, true)
+            }
         }
     }
 }
@@ -7618,6 +7642,37 @@ fn colormap_to_rgba(_width: u32, data: &[f32], colormap: &Colormap) -> Vec<[u8; 
             let t = colormap.normalize(v as f64);
             let idx = (t * 255.0).clamp(0.0, 255.0) as usize;
             colormap.lut[idx]
+        })
+        .collect()
+}
+
+/// Compose two scalar images into an RGB composite, mirroring silx CompareImages
+/// `__composeRgbImage` (CompareImages.py:744-751). Each image's value is
+/// normalised through the shared `colormap` to a `0..=255` intensity (`a` for A,
+/// `b` for B — the same `normalize`→byte step silx applies). The non-negative
+/// mode puts A in red, B in blue, and their half-sum (`a/2 + b/2`) in green; the
+/// negative mode inverts each channel (`255 - …`). `data_a` and `data_b` are
+/// row-major and the same length (siplot uploads both together). Pure, so the
+/// channel layout is unit-testable without a GPU.
+fn red_blue_gray_composite(
+    data_a: &[f32],
+    data_b: &[f32],
+    colormap: &Colormap,
+    neg: bool,
+) -> Vec<[u8; 4]> {
+    let byte = |v: f32| (colormap.normalize(v as f64) * 255.0).clamp(0.0, 255.0) as u8;
+    data_a
+        .iter()
+        .zip(data_b.iter())
+        .map(|(&va, &vb)| {
+            let a = byte(va);
+            let b = byte(vb);
+            let g = a / 2 + b / 2;
+            if neg {
+                [255 - b, 255 - g, 255 - a, 255]
+            } else {
+                [a, g, b, 255]
+            }
         })
         .collect()
 }
@@ -11500,6 +11555,30 @@ mod tests {
                 .iter()
                 .all(|&p| p == a[0])
         );
+    }
+
+    #[test]
+    fn red_blue_gray_composite_matches_silx_channel_layout() {
+        // silx __composeRgbImage: R=a, G=a//2+b//2, B=b; NEG inverts each.
+        // Assert the channel layout against the same normalize→byte step, so the
+        // test is about the composition, not the colormap's exact bytes.
+        let cm = Colormap::viridis(0.0, 1.0);
+        let data_a = vec![0.0f32, 1.0];
+        let data_b = vec![1.0f32, 0.0];
+        let byte = |v: f32| (cm.normalize(v as f64) * 255.0).clamp(0.0, 255.0) as u8;
+        let (a0, b0) = (byte(0.0), byte(1.0));
+        let (a1, b1) = (byte(1.0), byte(0.0));
+
+        let pos = red_blue_gray_composite(&data_a, &data_b, &cm, false);
+        assert_eq!(pos[0], [a0, a0 / 2 + b0 / 2, b0, 255]);
+        assert_eq!(pos[1], [a1, a1 / 2 + b1 / 2, b1, 255]);
+        // A drives red, B drives blue: pixel 0 (A=min, B=max) is blue-heavy.
+        assert!(pos[0][2] > pos[0][0]);
+        assert!(pos[1][0] > pos[1][2]);
+
+        let neg = red_blue_gray_composite(&data_a, &data_b, &cm, true);
+        assert_eq!(neg[0], [255 - b0, 255 - (a0 / 2 + b0 / 2), 255 - a0, 255]);
+        assert_eq!(neg[1], [255 - b1, 255 - (a1 / 2 + b1 / 2), 255 - a1, 255]);
     }
 
     #[test]
