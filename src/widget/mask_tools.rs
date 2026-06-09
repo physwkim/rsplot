@@ -449,6 +449,19 @@ impl MaskToolsWidget {
         self.is_dirty = true;
     }
 
+    /// The effective overlay color of the current mask [`level`](Self::level).
+    ///
+    /// Mirrors silx `getCurrentMaskColor`
+    /// (gui/plot/_BaseMaskToolsWidget.py:973-982): the per-level override if
+    /// one has been set ([`set_mask_colors`](Self::set_mask_colors)), else the
+    /// base overlay [`color`](Self::color) (silx `_defaultOverlayColor`).
+    pub fn current_mask_color(&self) -> Color32 {
+        match self.overrides.get(self.level as usize).copied().flatten() {
+            Some([r, g, b]) => Color32::from_rgb(r, g, b),
+            None => self.color,
+        }
+    }
+
     /// Apply the mask onto a `Plot2D`.
     ///
     /// This should be called every frame after handling interaction,
@@ -555,6 +568,30 @@ impl MaskToolsWidget {
                 .on_hover_text("Drawing unmasks with current level. Press Ctrl to mask");
 
             ui.add(egui::Slider::new(&mut self.level, 1..=255).text("Mask level"));
+
+            // Per-level overlay color override (silx `getCurrentMaskColor` /
+            // `setMaskColors` / `resetMaskColors`,
+            // _BaseMaskToolsWidget.py:973-1042): the swatch shows the current
+            // level's effective color (its override if set, else the base
+            // color) and editing it sets that level's override via the tested
+            // `set_mask_colors`; "Reset color" clears the override so the level
+            // falls back to the base color through `reset_mask_colors`.
+            let mut level_color = self.current_mask_color();
+            if ui
+                .color_edit_button_srgba(&mut level_color)
+                .on_hover_text("Overlay color for the current mask level")
+                .changed()
+            {
+                let [r, g, b, _] = level_color.to_srgba_unmultiplied();
+                self.set_mask_colors([r, g, b], Some(self.level));
+            }
+            if ui
+                .button("Reset color")
+                .on_hover_text("Reset the current level's color to the default")
+                .clicked()
+            {
+                self.reset_mask_colors(Some(self.level));
+            }
 
             // Overlay transparency (silx `transparencySlider` -> `_setMaskColors`,
             // _BaseMaskToolsWidget.py:554-577): the selected level renders at this
@@ -2269,6 +2306,30 @@ mod tests {
         // reset_mask_colors(None) clears every override (silx resetMaskColors()).
         w.reset_mask_colors(None);
         assert!(w.overrides.iter().all(|c| c.is_none()));
+    }
+
+    #[test]
+    fn current_mask_color_reports_override_then_falls_back_to_base() {
+        // silx getCurrentMaskColor (_BaseMaskToolsWidget.py:973-982): the
+        // current level's override if set, else the base overlay color. This is
+        // what the toolbar swatch reads/writes for the per-level color UI.
+        let mut w = MaskToolsWidget::new(2, 2);
+        w.level = 4;
+        // No override yet -> base color (the default gray).
+        assert_eq!(w.current_mask_color(), w.color);
+
+        // Set this level's override -> the swatch reflects it.
+        w.set_mask_colors([255, 0, 0], Some(4));
+        assert_eq!(w.current_mask_color(), Color32::from_rgb(255, 0, 0));
+
+        // A different level is unaffected and still shows the base color.
+        w.level = 5;
+        assert_eq!(w.current_mask_color(), w.color);
+
+        // Clearing the override drops level 4 back to the base color.
+        w.level = 4;
+        w.reset_mask_colors(Some(4));
+        assert_eq!(w.current_mask_color(), w.color);
     }
 
     #[test]
