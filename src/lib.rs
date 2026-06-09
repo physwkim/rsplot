@@ -45,6 +45,9 @@ pub use crate::core::marker::{
     DEFAULT_MARKER_SIZE, Marker, MarkerConstraint, MarkerKind, MarkerSymbol, TextAnchor,
     apply_constraint,
 };
+pub use crate::core::peaks::{
+    DEFAULT_PEAK_SENSITIVITY, Peak, guess_fwhm, peak_search, peak_search_range,
+};
 pub use crate::core::plot::{
     AxisConstraints, DataMargins, DataRange, DirtyState, GraphGrid, Plot, PlotId, TickMode,
     resolved_axis_label,

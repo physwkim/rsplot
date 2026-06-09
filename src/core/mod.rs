@@ -10,6 +10,7 @@ pub mod dtime_ticks;
 pub mod fitting;
 pub mod items;
 pub mod marker;
+pub mod peaks;
 pub mod plot;
 pub mod roi;
 pub mod scatter_viz;
