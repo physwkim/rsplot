@@ -566,8 +566,10 @@ mod tests {
         assert_eq!(FitModelChoice::ALL[9], FitModelChoice::IterativeAtanStepUp);
         // Every non-analytical choice maps to a fit model.
         for choice in FitModelChoice::ALL {
-            let analytical =
-                matches!(choice, FitModelChoice::Linear | FitModelChoice::GaussianEstimate);
+            let analytical = matches!(
+                choice,
+                FitModelChoice::Linear | FitModelChoice::GaussianEstimate
+            );
             assert_eq!(choice.peak_model().is_some(), !analytical);
         }
     }
