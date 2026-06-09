@@ -14,6 +14,7 @@
 //! pixels in its stats).
 
 use crate::core::roi::Roi;
+use crate::core::stats::ComCoord;
 
 /// Reduced statistics over the samples selected by a ROI (silx ROI stats).
 ///
@@ -35,41 +36,103 @@ pub struct RoiStats {
     /// Integral of the samples over the ROI. For an image this is
     /// `sum × pixel_area`; for a curve it is the same as `sum` (no area weight).
     pub integral: f64,
+    /// Center of mass in data coordinates (silx `StatCOM`, stats.py:881),
+    /// weighting each in-ROI sample's position by its value. Image: `(x, y)`;
+    /// curve: `(x, None)`. [`ComCoord::NONE`] when `count == 0` or `sum == 0`
+    /// (silx returns NaN for a zero-sum COM).
+    pub com: ComCoord,
+    /// Data coordinates of the first minimum in-ROI sample (silx `StatCoordMin`,
+    /// stats.py:841). Image: `(x, y)`; curve: `(x, None)`.
+    pub coord_min: ComCoord,
+    /// Data coordinates of the first maximum in-ROI sample (silx `StatCoordMax`,
+    /// stats.py:860). Image: `(x, y)`; curve: `(x, None)`.
+    pub coord_max: ComCoord,
 }
 
-/// Accumulate finite samples into running count / min / max / sum, skipping
-/// `NaN` (and any non-finite value), mirroring silx's NaN-ignoring stats.
+/// Accumulate finite samples into running count / min / max / sum plus the
+/// center-of-mass moments and first-extremum positions, skipping `NaN` (and any
+/// non-finite value), mirroring silx's NaN-ignoring stats. Each sample carries
+/// its data-space position `(x, y)`; `y` is `NaN` for a 1D curve sample (its COM
+/// and coords are then x-only).
 #[derive(Clone, Copy, Debug, Default)]
 struct Accumulator {
     count: usize,
     min: f64,
     max: f64,
     sum: f64,
+    com_x_num: f64,
+    com_y_num: f64,
+    min_pos: (f64, f64),
+    max_pos: (f64, f64),
 }
 
 impl Accumulator {
-    fn push(&mut self, v: f64) {
+    fn push(&mut self, v: f64, x: f64, y: f64) {
         if !v.is_finite() {
             return;
+        }
+        self.sum += v;
+        self.com_x_num += v * x;
+        if y.is_finite() {
+            self.com_y_num += v * y;
         }
         if self.count == 0 {
             self.min = v;
             self.max = v;
+            self.min_pos = (x, y);
+            self.max_pos = (x, y);
         } else {
-            self.min = self.min.min(v);
-            self.max = self.max.max(v);
+            // Strictly-less / strictly-greater keeps the *first* extremum,
+            // matching numpy argmin/argmax (silx stats.py:852, 873).
+            if v < self.min {
+                self.min = v;
+                self.min_pos = (x, y);
+            }
+            if v > self.max {
+                self.max = v;
+                self.max_pos = (x, y);
+            }
         }
-        self.sum += v;
         self.count += 1;
     }
 
     /// Finish into a [`RoiStats`], weighting the integral by `area_per_sample`
-    /// (the pixel area for an image; `1.0` for a curve).
-    fn finish(self, area_per_sample: f64) -> RoiStats {
+    /// (the pixel area for an image; `1.0` for a curve). `is_image` selects 2D
+    /// `(x, y)` coordinates vs. an x-only curve coordinate (silx maps the flat
+    /// index back through the axes; a curve has a single position axis).
+    fn finish(self, area_per_sample: f64, is_image: bool) -> RoiStats {
         if self.count == 0 {
             return RoiStats::default();
         }
         let mean = self.sum / self.count as f64;
+        let coord = |pos: (f64, f64)| {
+            if is_image {
+                ComCoord {
+                    x: Some(pos.0),
+                    y: Some(pos.1),
+                }
+            } else {
+                ComCoord {
+                    x: Some(pos.0),
+                    y: None,
+                }
+            }
+        };
+        // COM is undefined (silx returns NaN, stats.py:894) when the weight sum
+        // is zero; surface that as the empty coordinate.
+        let com = if self.sum == 0.0 {
+            ComCoord::NONE
+        } else if is_image {
+            ComCoord {
+                x: Some(self.com_x_num / self.sum),
+                y: Some(self.com_y_num / self.sum),
+            }
+        } else {
+            ComCoord {
+                x: Some(self.com_x_num / self.sum),
+                y: None,
+            }
+        };
         RoiStats {
             count: self.count,
             min: Some(self.min),
@@ -77,6 +140,9 @@ impl Accumulator {
             mean: Some(mean),
             sum: self.sum,
             integral: self.sum * area_per_sample,
+            com,
+            coord_min: coord(self.min_pos),
+            coord_max: coord(self.max_pos),
         }
     }
 }
@@ -113,12 +179,12 @@ pub fn image_roi_stats(
             };
             let cx = origin[0] + (col as f64 + 0.5) * scale[0];
             if roi.contains((cx, cy)) {
-                acc.push(value as f64);
+                acc.push(value as f64, cx, cy);
             }
         }
     }
     let pixel_area = (scale[0] * scale[1]).abs();
-    acc.finish(pixel_area)
+    acc.finish(pixel_area, /* is_image */ true)
 }
 
 /// Statistics over a curve's `y` values inside the `x`-span of `roi`.
@@ -136,11 +202,11 @@ pub fn curve_roi_stats(roi: &Roi, x: &[f64], y: &[f64]) -> RoiStats {
     if let Some((x0, x1)) = roi_x_span(roi) {
         for (&xi, &yi) in x.iter().zip(y.iter()) {
             if xi.is_finite() && xi >= x0 && xi <= x1 {
-                acc.push(yi);
+                acc.push(yi, xi, f64::NAN);
             }
         }
     }
-    acc.finish(1.0)
+    acc.finish(1.0, /* is_image */ false)
 }
 
 /// Curve-ROI raw/net counts and raw/net area, mirroring silx
@@ -351,6 +417,62 @@ mod tests {
         assert_eq!(s.sum, (0..16).sum::<i32>() as f64); // 120
         assert_eq!(s.mean, Some(120.0 / 16.0));
         assert_eq!(s.integral, 120.0);
+    }
+
+    #[test]
+    fn image_com_and_coords_are_value_weighted_in_data_space() {
+        // Full 4x4 ramp (value = 4*row+col, center (col+0.5, row+0.5)).
+        // COM_x = Σ v·(col+0.5) / Σ v = 260/120 = 13/6;
+        // COM_y = Σ v·(row+0.5) / Σ v = 320/120 = 8/3 (pulled toward the larger
+        // values, top-right). First min (value 0) at center (0.5, 0.5); first
+        // max (value 15) at center (3.5, 3.5).
+        let roi = Roi::Rect {
+            x: (0.0, 4.0),
+            y: (0.0, 4.0),
+        };
+        let s = image_roi_stats(&roi, &ramp_4x4(), 4, 4, [0.0, 0.0], [1.0, 1.0]);
+        assert!(
+            (s.com.x.unwrap() - 13.0 / 6.0).abs() < 1e-9,
+            "com.x = {:?}",
+            s.com.x
+        );
+        assert!(
+            (s.com.y.unwrap() - 8.0 / 3.0).abs() < 1e-9,
+            "com.y = {:?}",
+            s.com.y
+        );
+        assert_eq!(s.coord_min.x, Some(0.5));
+        assert_eq!(s.coord_min.y, Some(0.5));
+        assert_eq!(s.coord_max.x, Some(3.5));
+        assert_eq!(s.coord_max.y, Some(3.5));
+    }
+
+    #[test]
+    fn curve_com_and_coords_are_x_only() {
+        // x=[0,1,2,3], y=[1,2,3,4], VRange x∈[0,3] selects all four points.
+        // COM_x = Σ y·x / Σ y = (0+2+6+12)/10 = 2.0, y component undefined (1D).
+        // First min y=1 at x=0; first max y=4 at x=3.
+        let roi = Roi::VRange { x: (0.0, 3.0) };
+        let x = [0.0, 1.0, 2.0, 3.0];
+        let y = [1.0, 2.0, 3.0, 4.0];
+        let s = curve_roi_stats(&roi, &x, &y);
+        assert_eq!(s.count, 4);
+        assert_eq!(s.com.x, Some(2.0));
+        assert_eq!(s.com.y, None);
+        assert_eq!(
+            s.coord_min,
+            ComCoord {
+                x: Some(0.0),
+                y: None
+            }
+        );
+        assert_eq!(
+            s.coord_max,
+            ComCoord {
+                x: Some(3.0),
+                y: None
+            }
+        );
     }
 
     #[test]

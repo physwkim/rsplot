@@ -14,8 +14,20 @@
 //! [`PlotWidget::feed_roi_stats`]: crate::widget::high_level::PlotWidget::feed_roi_stats
 //! [`PlotWidget::show_roi_stats_widget`]: crate::widget::high_level::PlotWidget::show_roi_stats_widget
 
+use crate::core::stats::ComCoord;
 use crate::widget::roi_stats::RoiStats;
 use crate::widget::stats_widget::format_stat;
+
+/// Format a [`ComCoord`] for the stats table: `-` when undefined, the single
+/// `x` for a curve coordinate, or `(x, y)` for an image coordinate. Each
+/// component uses the shared [`format_stat`] significant-digit formatting.
+fn format_coord(c: ComCoord) -> String {
+    match (c.x, c.y) {
+        (None, _) => "-".to_string(),
+        (Some(_), None) => format_stat(c.x),
+        (Some(_), Some(_)) => format!("({}, {})", format_stat(c.x), format_stat(c.y)),
+    }
+}
 
 /// One ROI's row in the ROI-stats table: a display label plus the statistics
 /// reduced over the item inside that ROI.
@@ -61,8 +73,10 @@ impl RoiStatsWidget {
     }
 
     /// Render the ROI-stats table. Columns: `ROI | N | min | max | mean | sum |
-    /// integral`; numeric cells use the shared [`format_stat`] formatting
-    /// (silx-style significant digits, `-` for an empty selection).
+    /// integral | COM | coord min | coord max` (silx ROIStatsWidget stat
+    /// columns incl. `StatCOM`/`StatCoordMin`/`StatCoordMax`); numeric cells use
+    /// the shared [`format_stat`] formatting (silx-style significant digits, `-`
+    /// for an empty selection), coordinate cells use [`format_coord`].
     pub fn ui(&mut self, ui: &mut egui::Ui) {
         egui::Grid::new("roi_stats_grid")
             .striped(true)
@@ -74,6 +88,9 @@ impl RoiStatsWidget {
                 ui.strong("mean");
                 ui.strong("sum");
                 ui.strong("integral");
+                ui.strong("COM");
+                ui.strong("coord min");
+                ui.strong("coord max");
                 ui.end_row();
 
                 for row in &self.rows {
@@ -84,6 +101,9 @@ impl RoiStatsWidget {
                     ui.label(format_stat(row.stats.mean));
                     ui.label(format_stat(Some(row.stats.sum)));
                     ui.label(format_stat(Some(row.stats.integral)));
+                    ui.label(format_coord(row.stats.com));
+                    ui.label(format_coord(row.stats.coord_min));
+                    ui.label(format_coord(row.stats.coord_max));
                     ui.end_row();
                 }
             });
