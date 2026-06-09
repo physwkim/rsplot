@@ -224,6 +224,140 @@ pub fn snap_to_nearest(
     best
 }
 
+/// The snapping mode bitfield — silx `PositionInfo` `SNAPPING_*` flags
+/// (PositionInfo.py:322-337), combinable with `|`.
+///
+/// A data-kind flag ([`Self::CURVE`] and/or [`Self::SCATTER`]) selects which
+/// item kinds are snap candidates; the modifiers restrict that set:
+/// [`Self::ACTIVE_ONLY`] to the active item, [`Self::SYMBOLS_ONLY`] to items
+/// showing a symbol. [`Self::CROSSHAIR`] gates snapping on the crosshair being
+/// active (a live-cursor condition handled by the caller, not by
+/// [`snapping_candidates`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct SnappingMode(u8);
+
+impl SnappingMode {
+    /// No snapping (silx `SNAPPING_DISABLED`).
+    pub const DISABLED: Self = Self(0);
+    /// Snap only while the crosshair cursor is active (silx `SNAPPING_CROSSHAIR`).
+    pub const CROSSHAIR: Self = Self(1 << 0);
+    /// Restrict candidates to the active curve/scatter (silx `SNAPPING_ACTIVE_ONLY`).
+    pub const ACTIVE_ONLY: Self = Self(1 << 1);
+    /// Restrict candidates to items showing a symbol (silx `SNAPPING_SYMBOLS_ONLY`).
+    pub const SYMBOLS_ONLY: Self = Self(1 << 2);
+    /// Snap to curves (and histograms) (silx `SNAPPING_CURVE`).
+    pub const CURVE: Self = Self(1 << 3);
+    /// Snap to scatters (silx `SNAPPING_SCATTER`).
+    pub const SCATTER: Self = Self(1 << 4);
+
+    /// Whether every flag in `flag` is set in `self`.
+    #[must_use]
+    pub fn contains(self, flag: Self) -> bool {
+        self.0 & flag.0 == flag.0
+    }
+
+    /// The raw bits (silx integer mode value).
+    #[must_use]
+    pub fn bits(self) -> u8 {
+        self.0
+    }
+}
+
+impl std::ops::BitOr for SnappingMode {
+    type Output = Self;
+    fn bitor(self, rhs: Self) -> Self {
+        Self(self.0 | rhs.0)
+    }
+}
+
+/// The kind of a plot item as seen by snapping selection — the silx `isinstance`
+/// branches in `PositionInfo._updateStatusBar` (PositionInfo.py:217-246).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SnapItemKind {
+    /// A curve (silx `items.Curve`).
+    Curve,
+    /// A histogram (silx `items.Histogram`) — snapped under [`SnappingMode::CURVE`].
+    Histogram,
+    /// A scatter (silx `items.Scatter`) — snapped under [`SnappingMode::SCATTER`].
+    Scatter,
+    /// Any other item, never a snap candidate.
+    Other,
+}
+
+/// One plot item described for snapping candidate selection.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SnapItem {
+    /// The item's kind (silx `isinstance` test).
+    pub kind: SnapItemKind,
+    /// Whether the item is visible (silx `item.isVisible()`).
+    pub visible: bool,
+    /// Whether the item shows a symbol (silx `isinstance(item, SymbolMixIn) and
+    /// item.getSymbol()` truthy).
+    pub has_symbol: bool,
+    /// Whether the item is the active curve/scatter (silx `getActiveCurve()` /
+    /// `getActiveScatter()`).
+    pub active: bool,
+}
+
+/// Select the snap-candidate items for `mode`, porting silx
+/// `PositionInfo._updateStatusBar`'s item selection (PositionInfo.py:196-244).
+///
+/// Returns the indices into `items` that should be projected to pixels and fed
+/// to [`snap_to_nearest`]. Empty when neither [`SnappingMode::CURVE`] nor
+/// [`SnappingMode::SCATTER`] is set (silx engages snapping only then, :197).
+///
+/// Faithful asymmetry: in the all-items path silx's `CURVE` kind list is
+/// `(Curve, Histogram)` (:217-219) and the candidates are filtered by
+/// `isVisible()` (:225); the [`SnappingMode::ACTIVE_ONLY`] path instead takes
+/// `getActiveCurve()` (a `Curve`, never a histogram) and `getActiveScatter()`
+/// (:202-213) regardless of the visible flag. [`SnappingMode::SYMBOLS_ONLY`]
+/// then drops items without a symbol on either path (:240-244).
+///
+/// The [`SnappingMode::CROSSHAIR`] gate (:198) is a live-cursor precondition the
+/// caller applies; it does not affect which kinds are candidates.
+#[must_use]
+pub fn snapping_candidates(mode: SnappingMode, items: &[SnapItem]) -> Vec<usize> {
+    let want_curve = mode.contains(SnappingMode::CURVE);
+    let want_scatter = mode.contains(SnappingMode::SCATTER);
+    if !want_curve && !want_scatter {
+        return Vec::new();
+    }
+    let active_only = mode.contains(SnappingMode::ACTIVE_ONLY);
+    let symbols_only = mode.contains(SnappingMode::SYMBOLS_ONLY);
+
+    items
+        .iter()
+        .enumerate()
+        .filter(|(_, item)| {
+            let kind_match = match item.kind {
+                // The active-only path uses getActiveCurve (a Curve), so a
+                // histogram is a CURVE candidate only in the all-items path.
+                SnapItemKind::Curve => want_curve,
+                SnapItemKind::Histogram => want_curve && !active_only,
+                SnapItemKind::Scatter => want_scatter,
+                SnapItemKind::Other => false,
+            };
+            if !kind_match {
+                return false;
+            }
+            if active_only {
+                if !item.active {
+                    return false;
+                }
+            } else if !item.visible {
+                // All-items path filters by visibility (silx :225); the
+                // active-only path does not.
+                return false;
+            }
+            if symbols_only && !item.has_symbol {
+                return false;
+            }
+            true
+        })
+        .map(|(i, _)| i)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -364,5 +498,100 @@ mod tests {
         let snap = snap_to_nearest(cursor, &candidates, SNAP_THRESHOLD_DIST).unwrap();
         assert_eq!(snap.index, 1);
         assert_eq!(snap.data, [2.0, 2.0]);
+    }
+
+    fn item(kind: SnapItemKind, visible: bool, has_symbol: bool, active: bool) -> SnapItem {
+        SnapItem {
+            kind,
+            visible,
+            has_symbol,
+            active,
+        }
+    }
+
+    #[test]
+    fn snapping_disabled_without_a_kind_flag() {
+        // No CURVE / SCATTER bit -> silx never engages snapping (:197), even
+        // with the modifier bits set.
+        let items = [item(SnapItemKind::Curve, true, true, true)];
+        assert!(snapping_candidates(SnappingMode::DISABLED, &items).is_empty());
+        assert!(
+            snapping_candidates(
+                SnappingMode::ACTIVE_ONLY | SnappingMode::SYMBOLS_ONLY,
+                &items
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn snapping_curve_all_items_takes_visible_curves_and_histograms() {
+        // CURVE all-items path: visible Curve + Histogram, skipping Scatter,
+        // invisible items, and Other (silx kinds = (Curve, Histogram), :217-225).
+        let items = [
+            item(SnapItemKind::Curve, true, false, false),
+            item(SnapItemKind::Histogram, true, false, false),
+            item(SnapItemKind::Curve, false, false, false), // invisible
+            item(SnapItemKind::Scatter, true, false, false), // wrong kind
+            item(SnapItemKind::Other, true, false, false),
+        ];
+        assert_eq!(snapping_candidates(SnappingMode::CURVE, &items), vec![0, 1]);
+    }
+
+    #[test]
+    fn snapping_scatter_all_items_takes_visible_scatters_only() {
+        let items = [
+            item(SnapItemKind::Scatter, true, false, false),
+            item(SnapItemKind::Curve, true, false, false),
+            item(SnapItemKind::Scatter, false, false, false), // invisible
+        ];
+        assert_eq!(snapping_candidates(SnappingMode::SCATTER, &items), vec![0]);
+        // CURVE|SCATTER takes both kinds.
+        assert_eq!(
+            snapping_candidates(SnappingMode::CURVE | SnappingMode::SCATTER, &items),
+            vec![0, 1]
+        );
+    }
+
+    #[test]
+    fn snapping_active_only_ignores_visibility_and_excludes_histograms() {
+        // Active-only uses getActiveCurve/getActiveScatter: the active item is
+        // taken even when invisible, but a histogram is NOT an "active curve".
+        let items = [
+            item(SnapItemKind::Curve, false, false, true), // active, invisible -> kept
+            item(SnapItemKind::Curve, true, false, false), // not active -> skipped
+            item(SnapItemKind::Histogram, true, false, true), // active histogram -> excluded
+            item(SnapItemKind::Scatter, false, false, true), // active scatter -> kept
+        ];
+        assert_eq!(
+            snapping_candidates(
+                SnappingMode::CURVE | SnappingMode::SCATTER | SnappingMode::ACTIVE_ONLY,
+                &items
+            ),
+            vec![0, 3]
+        );
+    }
+
+    #[test]
+    fn snapping_symbols_only_drops_items_without_a_symbol() {
+        // SYMBOLS_ONLY filters on both paths (silx :240-244).
+        let items = [
+            item(SnapItemKind::Curve, true, true, false), // has symbol -> kept
+            item(SnapItemKind::Curve, true, false, false), // no symbol -> dropped
+        ];
+        assert_eq!(
+            snapping_candidates(SnappingMode::CURVE | SnappingMode::SYMBOLS_ONLY, &items),
+            vec![0]
+        );
+    }
+
+    #[test]
+    fn snapping_mode_bits_and_contains() {
+        let mode = SnappingMode::CURVE | SnappingMode::ACTIVE_ONLY;
+        assert!(mode.contains(SnappingMode::CURVE));
+        assert!(mode.contains(SnappingMode::ACTIVE_ONLY));
+        assert!(!mode.contains(SnappingMode::SCATTER));
+        // silx flag values: CURVE=1<<3, ACTIVE_ONLY=1<<1.
+        assert_eq!(mode.bits(), (1 << 3) | (1 << 1));
     }
 }
