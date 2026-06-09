@@ -1,12 +1,14 @@
 //! Shapes: polygon / rectangle / polyline / horizontal-line / vertical-line
 //! annotations drawn over the data area (silx `BackendBase.addShape`).
 //!
-//! Like [`crate::core::marker::Marker`], a shape is a data-space overlay with
+//! Like [`crate::core::marker::Marker`], a shape is a data-space annotation with
 //! pure screen-placement math (unit-testable); the widget's chrome draws the
 //! list each frame via [`crate::widget::chrome::draw_shapes`]. silx's `overlay`
-//! flag chooses between the data layer and a separate overlay layer; here every
-//! shape draws in the single overlay pass (over the chrome, like an ROI), so the
-//! flag is not modeled (`doc/design.md` §8).
+//! flag chooses between the data layer and a separate overlay layer
+//! (items/shape.py:54-73); [`Shape::is_overlay`] models it and the widget runs
+//! two `draw_shapes` passes: non-overlay shapes in the base data layer (under
+//! the overlay items), overlay shapes (the default) on top of the chrome like an
+//! ROI (`doc/design.md` §8).
 
 use egui::{Color32, Pos2};
 
@@ -57,14 +59,16 @@ pub struct Shape {
     /// Second color filling dash gaps in the outline (silx `gapcolor`); `None`
     /// leaves the gaps empty.
     pub gap_color: Option<Color32>,
-    /// Whether the shape draws in the overlay pass (silx `_OverlayItem.isOverlay`
-    /// / `setOverlay`, `shape.py:54-73`).
+    /// Whether the shape draws in the overlay layer (silx
+    /// `_OverlayItem.isOverlay` / `setOverlay`, `shape.py:54-73`).
     ///
-    /// Defaults to `true`, the port's current behavior: every shape draws in the
-    /// single overlay pass (over the chrome, like an ROI). This differs from
-    /// silx's `_OverlayItem` default of `False` (the data layer); the port has no
-    /// separate data layer for shapes, so the field is carried for parity and for
-    /// a future renderer that honors it without changing today's draw path.
+    /// Honored by the renderer's two-pass split: `true` draws in the overlay
+    /// layer on top of the chrome (like an ROI), `false` in the base data layer
+    /// under the overlay items (ROIs, markers, crosshair). Defaults to `true`
+    /// (the port's historical behavior); silx's `_OverlayItem` defaults to
+    /// `False`, but siplot's shape constructors are used as on-top annotations,
+    /// so the default is kept and callers opt into the data layer via
+    /// [`Shape::with_overlay`].
     pub is_overlay: bool,
 }
 
@@ -150,8 +154,8 @@ impl Shape {
         self
     }
 
-    /// Set whether the shape draws in the overlay pass (silx
-    /// `_OverlayItem.setOverlay`).
+    /// Set whether the shape draws in the overlay layer (`true`) or the base
+    /// data layer (`false`) — silx `_OverlayItem.setOverlay`.
     pub fn with_overlay(mut self, overlay: bool) -> Self {
         self.is_overlay = overlay;
         self

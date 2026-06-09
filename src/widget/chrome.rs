@@ -1216,15 +1216,22 @@ pub fn draw_triangles(painter: &Painter, t: &Transform, triangles: &[Triangles])
     }
 }
 
-/// Draw each shape over the data area (silx `addShape`): filled and/or outlined
-/// polygons and rectangles, open polylines, and full-span horizontal/vertical
-/// lines, in the shape's line style. Drawing is clipped to the data area. Fill
-/// is convex-only (egui's `convex_polygon`): correct for rectangles and convex
-/// polygons (`doc/design.md` §8).
-pub fn draw_shapes(painter: &Painter, t: &Transform, shapes: &[Shape]) {
+/// Draw the shapes whose [`Shape::is_overlay`] matches `overlay` over the data
+/// area (silx `addShape`): filled and/or outlined polygons and rectangles, open
+/// polylines, and full-span horizontal/vertical lines, in the shape's line
+/// style. Drawing is clipped to the data area. Fill is convex-only (egui's
+/// `convex_polygon`): correct for rectangles and convex polygons
+/// (`doc/design.md` §8).
+///
+/// The `overlay` filter is the silx `isOverlay` split (items/shape.py:54-73):
+/// non-overlay shapes (`overlay = false`) belong to the base data layer and are
+/// drawn under the overlay items (ROIs, markers, crosshair); overlay shapes
+/// (`overlay = true`) belong to the overlay layer drawn on top of the chrome
+/// (silx `_drawOverlays` / `set_animated`). The caller drives the two passes.
+pub fn draw_shapes(painter: &Painter, t: &Transform, shapes: &[Shape], overlay: bool) {
     let painter = painter.with_clip_rect(t.area);
     let area = t.area;
-    for s in shapes {
+    for s in shapes.iter().filter(|s| s.is_overlay == overlay) {
         match s.kind {
             ShapeKind::Polygon | ShapeKind::Rectangle => {
                 let pts = s.screen_points(t);
@@ -1296,15 +1303,18 @@ pub fn draw_shapes(painter: &Painter, t: &Transform, shapes: &[Shape]) {
     }
 }
 
-/// Draw each infinite line item over the data area (silx `Line`,
-/// `items/shape.py:289-393`). Per line, [`Line::clipped_segment`] computes the
-/// visible segment in data coordinates against the current viewport (the data
-/// `(x_min, x_max)` × `(y_min, y_max)` window from `t`); the two endpoints are
-/// then mapped data→pixel via the shared transform and drawn with the line's
-/// style. A line that does not cross the viewport produces no segment and is
-/// skipped (silx `__updatePoints` sets `coordinates = None`). Drawing is clipped
-/// to the data area.
-pub fn draw_lines(painter: &Painter, t: &Transform, lines: &[Line]) {
+/// Draw the infinite line items whose [`Line::is_overlay`] matches `overlay`
+/// over the data area (silx `Line`, `items/shape.py:289-393`). Per line,
+/// [`Line::clipped_segment`] computes the visible segment in data coordinates
+/// against the current viewport (the data `(x_min, x_max)` × `(y_min, y_max)`
+/// window from `t`); the two endpoints are then mapped data→pixel via the shared
+/// transform and drawn with the line's style. A line that does not cross the
+/// viewport produces no segment and is skipped (silx `__updatePoints` sets
+/// `coordinates = None`). Drawing is clipped to the data area.
+///
+/// `Line` is a silx `_OverlayItem` (items/shape.py:289), so the `overlay` filter
+/// is the same base-vs-overlay-layer split as [`draw_shapes`].
+pub fn draw_lines(painter: &Painter, t: &Transform, lines: &[Line], overlay: bool) {
     let painter = painter.with_clip_rect(t.area);
     // The data-space viewport window the line is clipped against (silx uses the
     // axes' current limits). `Rect::min` is (x_min, y_min), `max` is (x_max,
@@ -1315,7 +1325,7 @@ pub fn draw_lines(painter: &Painter, t: &Transform, lines: &[Line]) {
         pos2(t.x.min as f32, t.y.min as f32),
         pos2(t.x.max as f32, t.y.max as f32),
     );
-    for line in lines {
+    for line in lines.iter().filter(|l| l.is_overlay == overlay) {
         if let Some((a, b)) = line.clipped_segment(bounds) {
             // `a`/`b` are data coordinates; map to pixels.
             let pa = t.data_to_pixel(a.x as f64, a.y as f64);

@@ -420,22 +420,32 @@ impl PlotView {
             );
         }
 
+        // Non-overlay shapes/lines (silx `isOverlay() == False`) belong to the
+        // base data layer: drawn above the grid/chrome but UNDER the overlay
+        // items (ROIs, overlay shapes/lines, markers, crosshair), mirroring
+        // silx's base render vs `_drawOverlays` split (items/shape.py:54-73;
+        // `Line` is also an `_OverlayItem`). Bound to the main (left) axes.
+        if plot.shapes.iter().any(|s| !s.is_overlay) {
+            chrome::draw_shapes(painter, &transform, &plot.shapes, false);
+        }
+        if plot.lines().iter().any(|l| !l.is_overlay) {
+            chrome::draw_lines(painter, &transform, plot.lines(), false);
+        }
+
         // Regions of interest (per-ROI color/name/selection/width/style/fill,
         // border, edge handles) over the data layer.
         if !plot.rois.is_empty() {
             chrome::draw_rois(painter, &transform, &plot.rois, plot.roi_color, &style);
         }
 
-        // Shapes (polygons / rectangles / polylines / lines) over the data layer
-        // (silx addShape). Bound to the main (left) axes.
-        if !plot.shapes.is_empty() {
-            chrome::draw_shapes(painter, &transform, &plot.shapes);
+        // Overlay shapes/lines (silx `isOverlay() == True`, the default) sit in
+        // the overlay layer on top of the chrome and the base data layer (silx
+        // `_drawOverlays`). Bound to the main (left) axes.
+        if plot.shapes.iter().any(|s| s.is_overlay) {
+            chrome::draw_shapes(painter, &transform, &plot.shapes, true);
         }
-
-        // Infinite line items (silx Line), clipped to the viewport. Drawn right
-        // after shapes, on the main (left) axes.
-        if !plot.lines().is_empty() {
-            chrome::draw_lines(painter, &transform, plot.lines());
+        if plot.lines().iter().any(|l| l.is_overlay) {
+            chrome::draw_lines(painter, &transform, plot.lines(), true);
         }
 
         // Point / line markers over the data layer (silx addMarker).
