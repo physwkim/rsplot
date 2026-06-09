@@ -10140,6 +10140,14 @@ pub struct StackView {
     /// `[d0, d1, d2]`). Default identity. They place the displayed image
     /// (origin + scale) and compute the per-frame Z value.
     calibrations: [Calibration; 3],
+    /// Block aggregation applied to each displayed frame (silx StackView
+    /// `AggregationModeAction` -> `_stackItem.setAggregationMode`, the same
+    /// `ImageDataAggregated` max/mean/min as [`ImageView`]). Default
+    /// [`AggregationMode::None`].
+    aggregation: AggregationMode,
+    /// Per-axis block factors `(block_x, block_y)` for [`aggregation`] (silx
+    /// level-of-detail `(lodx, lody)`); each `>= 1`, `(1, 1)` is a no-op.
+    aggregation_block: (u32, u32),
 }
 
 impl StackView {
@@ -10165,6 +10173,8 @@ impl StackView {
                 default_dimension_label(2),
             ],
             calibrations: [Calibration::None; 3],
+            aggregation: AggregationMode::None,
+            aggregation_block: (1, 1),
         }
     }
 
@@ -10431,6 +10441,31 @@ impl StackView {
         self.set_perspective(selected);
     }
 
+    /// The current per-frame block aggregation mode (silx StackView
+    /// `getAggregationMode`).
+    pub fn aggregation(&self) -> AggregationMode {
+        self.aggregation
+    }
+
+    /// The current per-axis aggregation block factors `(block_x, block_y)`.
+    pub fn aggregation_block(&self) -> (u32, u32) {
+        self.aggregation_block
+    }
+
+    /// Set the per-frame block aggregation `mode` and per-axis block factors,
+    /// then re-upload the current frame (silx StackView `AggregationModeAction`
+    /// -> `_stackItem.setAggregationMode`). Each block factor is clamped to
+    /// `>= 1`; the aggregated frame's scale grows with the block so it covers
+    /// the same calibrated data extent (silx `ImageDataAggregated`).
+    pub fn set_aggregation(&mut self, mode: AggregationMode, block: (u32, u32)) {
+        let block = (block.0.max(1), block.1.max(1));
+        if mode != self.aggregation || block != self.aggregation_block {
+            self.aggregation = mode;
+            self.aggregation_block = block;
+            self.dirty = true;
+        }
+    }
+
     /// Show a compact frame-navigation row: ← slider → with frame counter.
     ///
     /// Typically called before [`Self::show`].
@@ -10459,6 +10494,40 @@ impl StackView {
                 self.dirty = true;
             }
             ui.label(format!("{}/{}", self.current_frame + 1, n));
+
+            // Per-frame aggregation selector (silx StackView
+            // `AggregationModeAction` -> `_stackItem.setAggregationMode`,
+            // mirroring [`ImageView::show_toolbar`]).
+            let mut aggregation = self.aggregation;
+            egui::ComboBox::from_label("agg")
+                .selected_text(match aggregation {
+                    AggregationMode::None => "none",
+                    AggregationMode::Max => "max",
+                    AggregationMode::Mean => "mean",
+                    AggregationMode::Min => "min",
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut aggregation, AggregationMode::None, "none");
+                    ui.selectable_value(&mut aggregation, AggregationMode::Max, "max");
+                    ui.selectable_value(&mut aggregation, AggregationMode::Mean, "mean");
+                    ui.selectable_value(&mut aggregation, AggregationMode::Min, "min");
+                });
+
+            // Per-axis block factors (silx level-of-detail (lodx, lody)).
+            let mut block = self.aggregation_block;
+            let bx = ui.add(
+                egui::DragValue::new(&mut block.0)
+                    .range(1..=64)
+                    .prefix("bx "),
+            );
+            let by = ui.add(
+                egui::DragValue::new(&mut block.1)
+                    .range(1..=64)
+                    .prefix("by "),
+            );
+            if aggregation != self.aggregation || bx.changed() || by.changed() {
+                self.set_aggregation(aggregation, block);
+            }
         });
     }
 
@@ -10466,37 +10535,20 @@ impl StackView {
     pub fn show(&mut self, ui: &mut egui::Ui) -> PlotResponse {
         if self.dirty && !self.frames.is_empty() {
             let frame = &self.frames[self.current_frame];
+            // The calibrated origin/scale (silx `_stackItem.setOrigin/setScale`
+            // from `_getImageOrigin/Scale`) and the per-frame block aggregation
+            // (silx `_stackItem.setAggregationMode`) both ride on the spec, so a
+            // calibration or aggregation-mode change re-applies on every frame.
+            let (origin, scale) = calibrated_image_geometry(self.perspective, &self.calibrations);
+            let mut spec = ImageSpec::scalar(self.width, self.height, frame, self.colormap.clone());
+            spec.origin = origin;
+            spec.scale = scale;
+            spec.aggregation = self.aggregation;
+            spec.aggregation_block = self.aggregation_block;
             if let Some(handle) = self.image_handle {
-                // Per-frame data update; the calibrated geometry is constant for
-                // a given perspective + calibration, so only the pixels change.
-                self.inner
-                    .try_update_image(
-                        handle,
-                        self.width,
-                        self.height,
-                        frame,
-                        self.colormap.clone(),
-                    )
-                    .ok();
+                self.inner.update_image_spec(handle, spec);
             } else {
-                // Fresh add applies the calibrated origin/scale (silx
-                // `_stackItem.setOrigin/setScale` from `_getImageOrigin/Scale`).
-                let (origin, scale) =
-                    calibrated_image_geometry(self.perspective, &self.calibrations);
-                let geometry = ImageGeometry {
-                    origin,
-                    scale,
-                    alpha: 1.0,
-                };
-                if let Ok(h) = self.inner.add_image_with_geometry(
-                    self.width,
-                    self.height,
-                    frame,
-                    self.colormap.clone(),
-                    geometry,
-                ) {
-                    self.image_handle = Some(h);
-                }
+                self.image_handle = Some(self.inner.add_image_spec(spec));
             }
             self.dirty = false;
         }
