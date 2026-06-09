@@ -17,6 +17,7 @@ use crate::core::backend::{
     Backend, CurveColor, CurveSpec, ImagePixelsSpec, ImageSpec, ItemHandle, MarkerSpec, PickResult,
     ShapeSpec, TriangleSpec,
 };
+use crate::core::calibration::Calibration;
 use crate::core::colormap::{AutoscaleMode, Colormap};
 use crate::core::items::{Baseline, LineStyle, ScalarMask, Symbol};
 use crate::core::marker::{Marker, MarkerKind, MarkerSymbol};
@@ -9865,6 +9866,49 @@ pub fn dimension_axis_labels(
     (labels[width_axis].clone(), labels[height_axis].clone())
 }
 
+/// Reorder the per-dimension `calibrations` (array order `[d0, d1, d2]`) into
+/// graph-axis order `(x, y, z)` for `perspective` — silx
+/// `StackView.getCalibrations(order="axes")`: X uses the higher-index non-browsed
+/// dimension (the width axis), Y the lower-index one (the height axis), Z the
+/// browsed dimension. silx additionally replaces any non-affine calibration with
+/// `NoCalibration` for the graph axes; that filter is a structural no-op here
+/// because every [`Calibration`] variant is affine.
+pub fn calibrations_axes_order(
+    perspective: StackPerspective,
+    calibrations: &[Calibration; 3],
+) -> (Calibration, Calibration, Calibration) {
+    let (height_axis, width_axis) = perspective.display_axes(); // (min, max) non-browsed
+    (
+        calibrations[width_axis],         // X = max non-browsed dim
+        calibrations[height_axis],        // Y = min non-browsed dim
+        calibrations[perspective.axis()], // Z = browsed dim
+    )
+}
+
+/// Data-space `(origin, scale)` of the displayed image for `perspective` under
+/// `calibrations` — silx `_getImageOrigin` (`xcalib(0), ycalib(0)`) and
+/// `_getImageScale` (`xcalib.get_slope(), ycalib.get_slope()`).
+pub fn calibrated_image_geometry(
+    perspective: StackPerspective,
+    calibrations: &[Calibration; 3],
+) -> ((f64, f64), (f64, f64)) {
+    let (xcalib, ycalib, _zcalib) = calibrations_axes_order(perspective, calibrations);
+    let origin = (xcalib.apply(0.0), ycalib.apply(0.0));
+    let scale = (xcalib.slope(), ycalib.slope());
+    (origin, scale)
+}
+
+/// Calibrated Z value for frame `index` under `perspective`/`calibrations` —
+/// silx `_getImageZ` (`zcalib(index)`), used for the per-frame title.
+pub fn calibrated_image_z(
+    index: usize,
+    perspective: StackPerspective,
+    calibrations: &[Calibration; 3],
+) -> f64 {
+    let (_xcalib, _ycalib, zcalib) = calibrations_axes_order(perspective, calibrations);
+    zcalib.apply(index as f64)
+}
+
 /// A 3D image stack viewer with a frame-selection slider, mirroring silx
 /// `StackView`.
 ///
@@ -9897,6 +9941,10 @@ pub struct StackView {
     /// Per-dimension labels (silx `setLabels`); the plot axis labels are chosen
     /// from these as the perspective rotates. Defaults to `"Dimension 0/1/2"`.
     dim_labels: [String; 3],
+    /// Per-dimension axis calibrations (silx `calibrations3D`, array order
+    /// `[d0, d1, d2]`). Default identity. They place the displayed image
+    /// (origin + scale) and compute the per-frame Z value.
+    calibrations: [Calibration; 3],
 }
 
 impl StackView {
@@ -9921,6 +9969,7 @@ impl StackView {
                 default_dimension_label(1),
                 default_dimension_label(2),
             ],
+            calibrations: [Calibration::None; 3],
         }
     }
 
@@ -10061,6 +10110,46 @@ impl StackView {
         self.inner.set_graph_y_label(y_label, YAxis::Left);
     }
 
+    /// The per-dimension axis calibrations in array order `[d0, d1, d2]` — silx
+    /// `StackView.getCalibrations(order="array")`. (silx's non-affine filter is a
+    /// no-op here: every [`Calibration`] is affine.)
+    pub fn calibrations(&self) -> &[Calibration; 3] {
+        &self.calibrations
+    }
+
+    /// The calibrations in graph-axis order `(x, y, z)` for the current
+    /// perspective — silx `StackView.getCalibrations(order="axes")`.
+    pub fn calibrations_axes(&self) -> (Calibration, Calibration, Calibration) {
+        calibrations_axes_order(self.perspective, &self.calibrations)
+    }
+
+    /// Set the per-dimension axis calibrations (array order `[d0, d1, d2]`) —
+    /// silx `StackView.setStack(calibrations=...)`. They place the displayed
+    /// image (data-space origin from `calib(0)`, pixel size from the slope) and
+    /// drive the per-frame Z value. Re-applies the image geometry and re-fits the
+    /// view so the calibrated extent is visible.
+    pub fn set_calibrations(&mut self, calibrations: [Calibration; 3]) {
+        if calibrations == self.calibrations {
+            return;
+        }
+        self.calibrations = calibrations;
+        // Geometry is applied at image-add time; drop the handle so the next
+        // show() re-adds with the new origin/scale.
+        if let Some(handle) = self.image_handle.take() {
+            self.inner.remove_image(handle);
+        }
+        self.dirty = true;
+        if !self.frames.is_empty() {
+            self.inner.reset_zoom();
+        }
+    }
+
+    /// Calibrated Z value for frame `index` under the current perspective and
+    /// calibrations — silx `_getImageZ` (`zcalib(index)`).
+    pub fn image_z(&self, index: usize) -> f64 {
+        calibrated_image_z(index, self.perspective, &self.calibrations)
+    }
+
     /// Number of frames in the stack.
     pub fn frame_count(&self) -> usize {
         self.frames.len()
@@ -10146,6 +10235,8 @@ impl StackView {
         if self.dirty && !self.frames.is_empty() {
             let frame = &self.frames[self.current_frame];
             if let Some(handle) = self.image_handle {
+                // Per-frame data update; the calibrated geometry is constant for
+                // a given perspective + calibration, so only the pixels change.
                 self.inner
                     .try_update_image(
                         handle,
@@ -10155,11 +10246,25 @@ impl StackView {
                         self.colormap.clone(),
                     )
                     .ok();
-            } else if let Ok(h) =
-                self.inner
-                    .try_add_image(self.width, self.height, frame, self.colormap.clone())
-            {
-                self.image_handle = Some(h);
+            } else {
+                // Fresh add applies the calibrated origin/scale (silx
+                // `_stackItem.setOrigin/setScale` from `_getImageOrigin/Scale`).
+                let (origin, scale) =
+                    calibrated_image_geometry(self.perspective, &self.calibrations);
+                let geometry = ImageGeometry {
+                    origin,
+                    scale,
+                    alpha: 1.0,
+                };
+                if let Ok(h) = self.inner.add_image_with_geometry(
+                    self.width,
+                    self.height,
+                    frame,
+                    self.colormap.clone(),
+                    geometry,
+                ) {
+                    self.image_handle = Some(h);
+                }
             }
             self.dirty = false;
         }
@@ -10329,6 +10434,67 @@ mod tests {
             dimension_axis_labels(StackPerspective::Axis2, &labels),
             ("y".to_string(), "z".to_string())
         );
+    }
+
+    #[test]
+    fn calibrations_axes_order_maps_x_to_width_y_to_height_z_to_browsed() {
+        // Distinct calibrations per dimension so the reorder is unambiguous.
+        let calibs = [
+            Calibration::linear(0.0, 1.0),   // dim0
+            Calibration::linear(10.0, 2.0),  // dim1
+            Calibration::linear(100.0, 3.0), // dim2
+        ];
+        // Axis0: non-browsed (1, 2) -> Y = min(=dim1), X = max(=dim2), Z = dim0.
+        let (x, y, z) = calibrations_axes_order(StackPerspective::Axis0, &calibs);
+        assert_eq!(x, calibs[2]);
+        assert_eq!(y, calibs[1]);
+        assert_eq!(z, calibs[0]);
+        // Axis1: non-browsed (0, 2) -> Y = dim0, X = dim2, Z = dim1.
+        let (x, y, z) = calibrations_axes_order(StackPerspective::Axis1, &calibs);
+        assert_eq!(x, calibs[2]);
+        assert_eq!(y, calibs[0]);
+        assert_eq!(z, calibs[1]);
+        // Axis2: non-browsed (0, 1) -> Y = dim0, X = dim1, Z = dim2.
+        let (x, y, z) = calibrations_axes_order(StackPerspective::Axis2, &calibs);
+        assert_eq!(x, calibs[1]);
+        assert_eq!(y, calibs[0]);
+        assert_eq!(z, calibs[2]);
+    }
+
+    #[test]
+    fn calibrated_image_geometry_uses_intercept_for_origin_and_slope_for_scale() {
+        // dim1 (Y for Axis0): 10 + 2x  -> origin.y = 10, scale.y = 2
+        // dim2 (X for Axis0): 100 + 3x -> origin.x = 100, scale.x = 3
+        let calibs = [
+            Calibration::None,
+            Calibration::linear(10.0, 2.0),
+            Calibration::linear(100.0, 3.0),
+        ];
+        let (origin, scale) = calibrated_image_geometry(StackPerspective::Axis0, &calibs);
+        assert_eq!(origin, (100.0, 10.0));
+        assert_eq!(scale, (3.0, 2.0));
+    }
+
+    #[test]
+    fn calibrated_image_geometry_defaults_to_identity() {
+        let calibs = [Calibration::None; 3];
+        let (origin, scale) = calibrated_image_geometry(StackPerspective::Axis0, &calibs);
+        assert_eq!(origin, (0.0, 0.0));
+        assert_eq!(scale, (1.0, 1.0));
+    }
+
+    #[test]
+    fn calibrated_image_z_applies_browsed_dim_calibration() {
+        // Browsed dim (Z) is dim0 for Axis0: z(index) = 5 + 0.5*index.
+        let calibs = [
+            Calibration::linear(5.0, 0.5),
+            Calibration::None,
+            Calibration::None,
+        ];
+        assert_eq!(calibrated_image_z(0, StackPerspective::Axis0, &calibs), 5.0);
+        assert_eq!(calibrated_image_z(4, StackPerspective::Axis0, &calibs), 7.0);
+        // Identity Z when the browsed dim is uncalibrated.
+        assert_eq!(calibrated_image_z(4, StackPerspective::Axis1, &calibs), 4.0);
     }
 
     #[test]

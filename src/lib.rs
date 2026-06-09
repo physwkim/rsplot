@@ -19,6 +19,7 @@ pub use crate::core::backend::{
     Backend, CurveColor, CurveSpec, ImagePixelsSpec, ImageSpec, ItemHandle, MarkerSpec, PickResult,
     ShapeSpec, TriangleSpec,
 };
+pub use crate::core::calibration::Calibration;
 pub use crate::core::colormap::{
     AutoscaleMode, Colormap, ColormapName, DEFAULT_PERCENTILES, Normalization,
 };
