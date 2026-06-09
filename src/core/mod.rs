@@ -1,6 +1,7 @@
 //! The `Plot` model, backend abstraction, and shared types.
 
 pub mod backend;
+pub mod background;
 pub mod calibration;
 pub mod color;
 pub mod colormap;

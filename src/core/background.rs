@@ -1,0 +1,412 @@
+//! Background estimation theories.
+//!
+//! Ported from silx `silx.math.fit.bgtheories` and the strip/snip filters in
+//! `silx.math.fit.filters` (C sources `strip.c` / `snip1d.c`). A background is a
+//! low-curvature signal subtracted from the data before fitting peaks. silx
+//! exposes these as a separate set of fit theories; here they are pure functions
+//! plus a [`Background`] selector that mirrors silx's `THEORY` dict.
+//!
+//! The whole module is CPU-only and unit-tested headlessly.
+
+use crate::core::fitting::invert_matrix;
+
+/// silx `CONFIG["StripWidth"]` default (operator half-distance, in samples).
+pub const DEFAULT_STRIP_WIDTH: usize = 2;
+/// silx `CONFIG["StripIterations"]` default.
+pub const DEFAULT_STRIP_ITERATIONS: usize = 5000;
+/// silx `CONFIG["StripThresholdFactor"]` default.
+pub const DEFAULT_STRIP_THRESHOLD_FACTOR: f64 = 1.0;
+/// silx `CONFIG["SnipWidth"]` default.
+pub const DEFAULT_SNIP_WIDTH: usize = 16;
+
+/// The strip background filter (silx `filters.strip`, C `strip.c`).
+///
+/// Iterative peak stripping: at each iteration, every channel `i` (away from the
+/// `width`-wide borders) whose value exceeds `factor *` the average of its
+/// neighbours `width` samples away, `0.5*(y[i-width] + y[i+width])`, is replaced
+/// by that average. Each iteration reads a frozen snapshot of the previous
+/// iteration (Jacobi update), exactly like the C `memcpy(input, output)` at the
+/// end of each pass. Channels listed in `anchors` (and the channels strictly
+/// within `width` of them) are never modified. The first/last `width` channels
+/// are left untouched. Returns a copy of `y` unchanged when it is shorter than
+/// `2*width + 1` (the C function's `-1` early return).
+pub fn strip_background(
+    y: &[f64],
+    width: usize,
+    niterations: usize,
+    factor: f64,
+    anchors: &[usize],
+) -> Vec<f64> {
+    let len = y.len();
+    let deltai = width.max(1); // C: `if (deltai <= 0) deltai = 1;`
+    let mut out = y.to_vec();
+    if len < 2 * deltai + 1 {
+        return out;
+    }
+    let mut cur = y.to_vec();
+    let near_anchor = |i: usize| -> bool {
+        anchors.iter().any(|&a| {
+            let (i, a, d) = (i as isize, a as isize, deltai as isize);
+            i > a - d && i < a + d
+        })
+    };
+    for _ in 0..niterations {
+        for i in deltai..(len - deltai) {
+            // Skipped/below-threshold channels keep their value: `out[i]` already
+            // equals `cur[i]` (the two buffers are synced at the end of each pass).
+            if near_anchor(i) {
+                continue;
+            }
+            let t_mean = 0.5 * (cur[i - deltai] + cur[i + deltai]);
+            if cur[i] > t_mean * factor {
+                out[i] = t_mean;
+            }
+        }
+        cur.copy_from_slice(&out);
+    }
+    out
+}
+
+/// The SNIP background filter in 1D (silx `filters.snip1d`, C `snip1d.c`).
+///
+/// For decreasing window `p` from `snip_width` down to `1`, every channel `i`
+/// (away from the `p`-wide borders) is replaced by
+/// `min(y[i], 0.5*(y[i-p] + y[i+p]))`, using a scratch buffer so the whole pass
+/// reads the previous values. Because each step can only lower a channel, the
+/// result never exceeds the input. silx's `snip1d` wrapper applies the filter to
+/// the raw data (no log-log-square transform), so neither is applied here.
+pub fn snip_background(y: &[f64], snip_width: usize) -> Vec<f64> {
+    let n = y.len();
+    let mut data = y.to_vec();
+    if n == 0 || snip_width == 0 {
+        return data;
+    }
+    let mut w = vec![0.0; n];
+    for p in (1..=snip_width).rev() {
+        if 2 * p >= n {
+            continue;
+        }
+        for i in p..(n - p) {
+            w[i] = data[i].min(0.5 * (data[i - p] + data[i + p]));
+        }
+        data[p..(n - p)].copy_from_slice(&w[p..(n - p)]);
+    }
+    data
+}
+
+/// Least-squares polynomial fit (silx uses `numpy.polyfit`).
+///
+/// Returns `degree + 1` coefficients highest-power-first (the `numpy.polyfit` /
+/// `numpy.poly1d` convention), solving the normal equations
+/// `(VᵀV) c = Vᵀy` over the Vandermonde matrix `V`. Returns `None` when the
+/// lengths differ, the data is empty, there are fewer than `degree + 1` points,
+/// or the normal-equation matrix is singular. Normal equations are adequate for
+/// the low degrees silx uses (2–5); they are more sensitive to conditioning than
+/// `numpy.polyfit`'s SVD for high degrees.
+pub fn polyfit(x: &[f64], y: &[f64], degree: usize) -> Option<Vec<f64>> {
+    let n = x.len();
+    if n != y.len() || n == 0 || n < degree + 1 {
+        return None;
+    }
+    let m = degree + 1;
+    // Vandermonde row, highest power first: [x^degree, …, x^1, x^0].
+    let vrow = |xi: f64| -> Vec<f64> {
+        let mut row = vec![0.0; m];
+        let mut p = 1.0;
+        for k in 0..m {
+            row[m - 1 - k] = p;
+            p *= xi;
+        }
+        row
+    };
+    let mut ata = vec![vec![0.0; m]; m];
+    let mut aty = vec![0.0; m];
+    for i in 0..n {
+        let v = vrow(x[i]);
+        for r in 0..m {
+            aty[r] += v[r] * y[i];
+            for c in 0..m {
+                ata[r][c] += v[r] * v[c];
+            }
+        }
+    }
+    let inv = invert_matrix(&ata)?;
+    let mut coeffs = vec![0.0; m];
+    for (r, coeff) in coeffs.iter_mut().enumerate() {
+        for c in 0..m {
+            *coeff += inv[r][c] * aty[c];
+        }
+    }
+    Some(coeffs)
+}
+
+/// Evaluate a polynomial given coefficients highest-power-first (`numpy.poly1d`).
+///
+/// `poly_eval(&[a, b, c], x) = a*x^2 + b*x + c` via Horner's method. Empty
+/// coefficients evaluate to zero everywhere.
+pub fn poly_eval(coeffs: &[f64], x: &[f64]) -> Vec<f64> {
+    x.iter()
+        .map(|&xi| coeffs.iter().fold(0.0, |acc, &c| acc * xi + c))
+        .collect()
+}
+
+/// A selectable background theory (silx `bgtheories.THEORY`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Background {
+    /// No background (silx "No Background"): zero everywhere.
+    None,
+    /// Constant background (silx "Constant"): `min(y)`.
+    Constant,
+    /// Linear background (silx "Linear"): a least-squares line fitted to the
+    /// strip background of the data.
+    Linear,
+    /// Strip filter background (silx "Strip"): see [`strip_background`].
+    Strip {
+        /// Operator half-distance in samples.
+        width: usize,
+        /// Number of stripping iterations.
+        niterations: usize,
+        /// Threshold scaling factor.
+        factor: f64,
+    },
+    /// SNIP filter background (silx "Snip"): see [`snip_background`].
+    Snip {
+        /// Snip operator width in samples.
+        width: usize,
+    },
+    /// Polynomial background (silx "Internal" poly theories): a least-squares
+    /// polynomial of `degree` fitted to the strip background of the data
+    /// (silx `EstimatePolyOnStrip = True`).
+    Polynomial {
+        /// Polynomial degree (silx ships 2–5).
+        degree: usize,
+    },
+}
+
+impl Background {
+    /// A strip background with silx's default parameters.
+    pub fn strip() -> Self {
+        Background::Strip {
+            width: DEFAULT_STRIP_WIDTH,
+            niterations: DEFAULT_STRIP_ITERATIONS,
+            factor: DEFAULT_STRIP_THRESHOLD_FACTOR,
+        }
+    }
+
+    /// A SNIP background with silx's default width.
+    pub fn snip() -> Self {
+        Background::Snip {
+            width: DEFAULT_SNIP_WIDTH,
+        }
+    }
+
+    /// Display name (silx theory name).
+    pub fn name(self) -> &'static str {
+        match self {
+            Background::None => "No Background",
+            Background::Constant => "Constant",
+            Background::Linear => "Linear",
+            Background::Strip { .. } => "Strip",
+            Background::Snip { .. } => "Snip",
+            Background::Polynomial { .. } => "Polynomial",
+        }
+    }
+
+    /// Compute the background curve sampled at `x` for the data `y`.
+    ///
+    /// `x` is used only by the `Linear` / `Polynomial` theories (which fit a
+    /// curve in `x`); the strip/snip/constant theories ignore it. Falls back to
+    /// zeros when a polynomial fit is not solvable (e.g. mismatched lengths).
+    pub fn compute(self, x: &[f64], y: &[f64]) -> Vec<f64> {
+        let n = y.len();
+        match self {
+            Background::None => vec![0.0; n],
+            Background::Constant => {
+                let c = y.iter().copied().fold(f64::INFINITY, f64::min);
+                vec![if c.is_finite() { c } else { 0.0 }; n]
+            }
+            Background::Linear => self.poly_on_strip(x, y, 1),
+            Background::Strip {
+                width,
+                niterations,
+                factor,
+            } => strip_background(y, width, niterations, factor, &[]),
+            Background::Snip { width } => snip_background(y, width),
+            Background::Polynomial { degree } => self.poly_on_strip(x, y, degree),
+        }
+    }
+
+    /// Subtract the background from `y`, returning `y - background(x, y)`.
+    pub fn subtract(self, x: &[f64], y: &[f64]) -> Vec<f64> {
+        let bg = self.compute(x, y);
+        y.iter().zip(bg).map(|(&yi, bi)| yi - bi).collect()
+    }
+
+    /// silx `estimate_poly`: strip the data, then least-squares-fit a polynomial
+    /// of `degree` over the strip background and evaluate it at `x`.
+    fn poly_on_strip(self, x: &[f64], y: &[f64], degree: usize) -> Vec<f64> {
+        let bg = strip_background(
+            y,
+            DEFAULT_STRIP_WIDTH,
+            DEFAULT_STRIP_ITERATIONS,
+            DEFAULT_STRIP_THRESHOLD_FACTOR,
+            &[],
+        );
+        match polyfit(x, &bg, degree) {
+            Some(coeffs) => poly_eval(&coeffs, x),
+            None => vec![0.0; y.len()],
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn linspace(a: f64, b: f64, n: usize) -> Vec<f64> {
+        (0..n)
+            .map(|i| a + (b - a) * (i as f64) / ((n - 1) as f64))
+            .collect()
+    }
+
+    #[test]
+    fn strip_removes_a_spike_and_keeps_flat_regions() {
+        let mut y = vec![1.0; 41];
+        y[20] = 11.0;
+        let bg = strip_background(&y, 1, 100, 1.0, &[]);
+        // Spike clipped to the neighbour average (1.0); flat regions unchanged.
+        assert!(
+            (bg[20] - 1.0).abs() < 1e-9,
+            "spike not stripped: {}",
+            bg[20]
+        );
+        assert!((bg[5] - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn strip_leaves_the_borders_untouched() {
+        let mut y = vec![1.0; 21];
+        y[0] = 7.0;
+        y[20] = 9.0;
+        let bg = strip_background(&y, 2, 50, 1.0, &[]);
+        // The first/last `width` channels are never modified.
+        assert_eq!(bg[0], 7.0);
+        assert_eq!(bg[20], 9.0);
+    }
+
+    #[test]
+    fn strip_anchor_preserves_the_anchored_channel() {
+        let mut y = vec![1.0; 41];
+        y[20] = 11.0;
+        // Anchoring index 20 keeps it (it is within `width` of the anchor).
+        let bg = strip_background(&y, 1, 100, 1.0, &[20]);
+        assert!((bg[20] - 11.0).abs() < 1e-12, "anchor not preserved");
+    }
+
+    #[test]
+    fn strip_too_short_returns_input_copy() {
+        let y = vec![3.0, 9.0, 3.0];
+        // len 3 < 2*width+1 = 5 → unchanged.
+        assert_eq!(strip_background(&y, 2, 10, 1.0, &[]), y);
+    }
+
+    #[test]
+    fn strip_preserves_a_linear_ramp() {
+        // A pure ramp has y[i] == mean(y[i-w], y[i+w]); never strictly greater,
+        // so the strip leaves it untouched.
+        let y: Vec<f64> = (0..30).map(|i| 2.0 + 0.5 * i as f64).collect();
+        let bg = strip_background(&y, 2, 100, 1.0, &[]);
+        for (a, b) in bg.iter().zip(&y) {
+            assert!((a - b).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn snip_clips_a_spike_and_never_exceeds_input() {
+        let mut y = vec![1.0; 41];
+        y[20] = 11.0;
+        let bg = snip_background(&y, 8);
+        assert!(bg.iter().zip(&y).all(|(&b, &yi)| b <= yi + 1e-9));
+        assert!((bg[20] - 1.0).abs() < 1e-9, "spike not snipped: {}", bg[20]);
+    }
+
+    #[test]
+    fn polyfit_recovers_known_quadratic() {
+        let x = linspace(-3.0, 3.0, 13);
+        let y: Vec<f64> = x.iter().map(|&xi| 2.0 + 3.0 * xi + xi * xi).collect();
+        let c = polyfit(&x, &y, 2).unwrap();
+        assert!((c[0] - 1.0).abs() < 1e-6, "x^2 coeff {}", c[0]);
+        assert!((c[1] - 3.0).abs() < 1e-6, "x^1 coeff {}", c[1]);
+        assert!((c[2] - 2.0).abs() < 1e-6, "x^0 coeff {}", c[2]);
+        for (a, b) in poly_eval(&c, &x).iter().zip(&y) {
+            assert!((a - b).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn polyfit_needs_enough_points() {
+        assert!(polyfit(&[1.0, 2.0], &[1.0, 2.0], 2).is_none());
+        assert!(polyfit(&[1.0, 2.0], &[1.0], 1).is_none());
+    }
+
+    #[test]
+    fn poly_eval_uses_horner_highest_first() {
+        // a*x^2 + b*x + c with [1, 3, 2] at x=2 = 4 + 6 + 2 = 12.
+        assert_eq!(poly_eval(&[1.0, 3.0, 2.0], &[2.0]), vec![12.0]);
+        // Empty coefficients → zero.
+        assert_eq!(poly_eval(&[], &[5.0, -1.0]), vec![0.0, 0.0]);
+    }
+
+    #[test]
+    fn background_none_and_constant() {
+        let y = vec![4.0, 2.0, 9.0, 3.0];
+        assert_eq!(Background::None.compute(&[], &y), vec![0.0; 4]);
+        assert_eq!(Background::Constant.compute(&[], &y), vec![2.0; 4]);
+    }
+
+    #[test]
+    fn background_linear_recovers_trend_under_a_peak() {
+        let x = linspace(0.0, 40.0, 41);
+        let mut y: Vec<f64> = x.iter().map(|&xi| 1.0 + 0.1 * xi).collect();
+        y[20] += 10.0; // a peak on top of the linear background
+        let bg = Background::Linear.compute(&x, &y);
+        assert!(
+            (bg[10] - (1.0 + 0.1 * 10.0)).abs() < 0.2,
+            "bg[10] {}",
+            bg[10]
+        );
+        assert!(
+            (bg[30] - (1.0 + 0.1 * 30.0)).abs() < 0.2,
+            "bg[30] {}",
+            bg[30]
+        );
+        // Subtraction leaves the peak in the residual.
+        let resid = Background::Linear.subtract(&x, &y);
+        assert!(resid[20] > 5.0, "peak not retained: {}", resid[20]);
+    }
+
+    #[test]
+    fn background_strip_and_snip_constructors_use_silx_defaults() {
+        assert_eq!(
+            Background::strip(),
+            Background::Strip {
+                width: 2,
+                niterations: 5000,
+                factor: 1.0,
+            }
+        );
+        assert_eq!(Background::snip(), Background::Snip { width: 16 });
+        assert_eq!(Background::strip().name(), "Strip");
+        assert_eq!(Background::snip().name(), "Snip");
+    }
+
+    #[test]
+    fn background_strip_subtract_isolates_a_peak() {
+        let mut y = vec![5.0; 51];
+        y[25] = 25.0;
+        let resid = Background::strip().subtract(&[], &y);
+        // The flat background is removed; the peak survives.
+        assert!(resid[25] > 15.0, "peak residual {}", resid[25]);
+        assert!(resid[5].abs() < 1e-6, "flat residual {}", resid[5]);
+    }
+}

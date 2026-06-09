@@ -19,6 +19,10 @@ pub use crate::core::backend::{
     Backend, CurveColor, CurveSpec, ImagePixelsSpec, ImageSpec, ItemHandle, MarkerSpec, PickResult,
     ShapeSpec, TriangleSpec,
 };
+pub use crate::core::background::{
+    Background, DEFAULT_SNIP_WIDTH, DEFAULT_STRIP_ITERATIONS, DEFAULT_STRIP_THRESHOLD_FACTOR,
+    DEFAULT_STRIP_WIDTH, poly_eval, polyfit, snip_background, strip_background,
+};
 pub use crate::core::calibration::Calibration;
 pub use crate::core::colormap::{
     AutoscaleMode, Colormap, ColormapName, DEFAULT_PERCENTILES, Normalization,
