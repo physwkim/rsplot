@@ -9021,10 +9021,12 @@ pub enum ScatterVisualization {
     /// collinear) nothing is drawn, matching silx's "Cannot display as solid
     /// surface" early-out.
     Solid,
-    /// `Visualization.IRREGULAR_GRID`: the Delaunay triangulation rasterized to
-    /// a value image by barycentric linear interpolation
-    /// ([`crate::core::scatter_viz::irregular_grid_image`]). Pixels outside the
-    /// convex hull are `NaN`.
+    /// `Visualization.IRREGULAR_GRID`: the points arranged onto the
+    /// auto-detected grid and rendered as a flat-shaded quadrilateral triangle
+    /// mesh — each point owns one cell carrying its colormap color
+    /// ([`crate::core::scatter_viz::irregular_grid_triangles`], silx
+    /// `_quadrilateral_grid_as_triangles`). A picked cell maps back to its
+    /// source point ([`crate::core::scatter_viz::irregular_grid_pick`]).
     IrregularGrid,
     /// `Visualization.REGULAR_GRID`: the points reshaped onto the auto-detected
     /// grid ([`crate::core::scatter_viz::detect_regular_grid`]). Trailing cells
@@ -9187,10 +9189,11 @@ fn binned_statistic_image(bs: &crate::core::scatter_viz::BinnedStatistic) -> Gri
 /// a grid visualization `mode`, dispatching to the matching
 /// [`crate::core::scatter_viz`] primitive (silx scatter.py render branches).
 ///
-/// `resolution` is the target `(rows, cols)` for the resolution-driven modes
-/// ([`ScatterVisualization::IrregularGrid`] and
-/// [`ScatterVisualization::BinnedStatistic`]); it is ignored by
+/// `resolution` is the target `(rows, cols)` for the resolution-driven
+/// [`ScatterVisualization::BinnedStatistic`] mode; it is ignored by
 /// [`ScatterVisualization::RegularGrid`], whose shape is auto-detected.
+/// [`ScatterVisualization::IrregularGrid`] no longer renders as an image — it
+/// goes through the triangle-mesh path ([`crate::core::scatter_viz::irregular_grid_triangles`]).
 ///
 /// Returns `None` for [`ScatterVisualization::Points`] (no image) and when the
 /// chosen primitive cannot produce a grid (e.g. un-triangulable points, no
@@ -9205,13 +9208,12 @@ fn scatter_grid_image(
 ) -> Option<GridImage> {
     let (rows, cols) = resolution;
     match mode {
-        // Neither the marker cloud nor the SOLID triangle surface produce a
-        // grid image — SOLID is rendered through the CPU triangle path, not the
-        // image path.
-        ScatterVisualization::Points | ScatterVisualization::Solid => None,
-        ScatterVisualization::IrregularGrid => {
-            crate::core::scatter_viz::irregular_grid_image(x, y, values, rows, cols)
-        }
+        // Points, SOLID, and IRREGULAR_GRID render through the CPU triangle path
+        // (marker cloud / `addTriangles`), not the image path — only the two
+        // genuinely image-like grid modes produce a grid image here.
+        ScatterVisualization::Points
+        | ScatterVisualization::Solid
+        | ScatterVisualization::IrregularGrid => None,
         ScatterVisualization::RegularGrid => regular_grid_image(x, y, values),
         ScatterVisualization::BinnedStatistic => {
             crate::core::scatter_viz::binned_statistic(x, y, values, rows, cols)
@@ -9360,9 +9362,15 @@ pub struct ScatterView {
     /// [`Points`]: ScatterVisualization::Points
     grid_handle: Option<ItemHandle>,
     /// Handle of the per-vertex-colored triangle mesh rendered for
-    /// [`ScatterVisualization::Solid`] (silx `backend.addTriangles`). `None`
-    /// outside `Solid` mode and when the points cannot be triangulated.
+    /// [`ScatterVisualization::Solid`] or [`ScatterVisualization::IrregularGrid`]
+    /// (silx `backend.addTriangles`). `None` outside those modes and when the
+    /// points cannot be triangulated / arranged onto a grid.
     triangles_handle: Option<ItemHandle>,
+    /// The IRREGULAR_GRID triangle mesh retained for picking (silx
+    /// `Scatter.pick` IRREGULAR_GRID branch maps a picked triangle to its source
+    /// point). `Some` only while [`ScatterVisualization::IrregularGrid`] is
+    /// displayed with a buildable grid; cleared on every other rebuild.
+    irregular_grid_mesh: Option<Triangles>,
     /// Colormap that maps the per-point `values` to marker colors, retained so
     /// the side colorbar (silx `ScatterView` `getColorBarWidget`,
     /// ScatterView.py:83-88) reflects the current value limits. `None` until
@@ -9407,6 +9415,7 @@ impl ScatterView {
             scatter_handle: None,
             grid_handle: None,
             triangles_handle: None,
+            irregular_grid_mesh: None,
             colormap: None,
             points: None,
             visualization: ScatterVisualization::Points,
@@ -9552,9 +9561,9 @@ impl ScatterView {
     }
 
     /// Set the target grid resolution `(rows, cols)` for the resolution-driven
-    /// grid modes ([`ScatterVisualization::IrregularGrid`] and
-    /// [`ScatterVisualization::BinnedStatistic`]); ignored by
-    /// [`ScatterVisualization::RegularGrid`] (auto-detected). Re-renders the
+    /// [`ScatterVisualization::BinnedStatistic`] mode; ignored by
+    /// [`ScatterVisualization::RegularGrid`] (auto-detected) and
+    /// [`ScatterVisualization::IrregularGrid`] (triangle mesh). Re-renders the
     /// current visualization.
     pub fn set_grid_resolution(&mut self, rows: usize, cols: usize) {
         self.grid_resolution = (rows, cols);
@@ -9562,8 +9571,11 @@ impl ScatterView {
     }
 
     /// The grid image produced for the current visualization mode from the
-    /// retained points, or `None` in [`ScatterVisualization::Points`] mode /
-    /// before any data is uploaded / when the points cannot form a grid.
+    /// retained points, or `None` for the non-image modes
+    /// ([`ScatterVisualization::Points`], [`ScatterVisualization::Solid`], and
+    /// [`ScatterVisualization::IrregularGrid`], which render through the marker
+    /// cloud / triangle-mesh paths) / before any data is uploaded / when the
+    /// points cannot form a grid.
     ///
     /// Exposed so callers (and tests) can inspect the converted grid that
     /// [`Self::show`] renders through the image path.
@@ -9574,12 +9586,15 @@ impl ScatterView {
 
     /// Render the retained points under the current visualization mode through
     /// the appropriate backend path: the marker cloud for
-    /// [`ScatterVisualization::Points`], the per-vertex-colored triangle surface
-    /// for [`ScatterVisualization::Solid`], otherwise the converted grid image.
+    /// [`ScatterVisualization::Points`], a per-vertex-colored triangle mesh for
+    /// [`ScatterVisualization::Solid`] (Delaunay) and
+    /// [`ScatterVisualization::IrregularGrid`] (quadrilateral grid), otherwise
+    /// the converted grid image.
     ///
-    /// Single owner of the scatter/grid/triangles item handles so the displayed
-    /// item always matches `self.visualization`. The non-active paths' items are
-    /// removed so they never overlap.
+    /// Single owner of the scatter/grid/triangles item handles (and the
+    /// IRREGULAR_GRID pick mesh) so the displayed item always matches
+    /// `self.visualization`. The non-active paths' items are removed so they
+    /// never overlap.
     fn rebuild_visualization(&mut self) {
         let Some((x, y, values)) = self.points.clone() else {
             return;
@@ -9587,6 +9602,10 @@ impl ScatterView {
         let Some(colormap) = self.colormap.clone() else {
             return;
         };
+
+        // Single owner of the IRREGULAR_GRID pick mesh: cleared on every
+        // rebuild, set only by the IrregularGrid arm below.
+        self.irregular_grid_mesh = None;
 
         match self.visualization {
             ScatterVisualization::Points => {
@@ -9655,6 +9674,45 @@ impl ScatterView {
                 let h = self.inner.add_triangles_data(&tri);
                 self.triangles_handle = Some(h);
                 self.inner.set_item_legend(h, "scatter solid");
+            }
+            ScatterVisualization::IrregularGrid => {
+                // Drop the marker cloud / grid image so neither shadows the
+                // triangle mesh (single owner: only the active arm keeps its
+                // handle).
+                if let Some(h) = self.scatter_handle.take() {
+                    self.inner.remove(h);
+                }
+                if let Some(h) = self.grid_handle.take() {
+                    self.inner.remove(h);
+                }
+                // Same per-point colormap+alpha colors as Points/Solid; silx
+                // flat-shades each grid cell with its point's color
+                // (scatter.py:788-797, `gridcolors[first::4]`).
+                let colors = point_colors(&values, &colormap, self.alpha.as_deref());
+
+                // Build the quadrilateral-grid triangle mesh (silx
+                // `_quadrilateral_grid_as_triangles`). `None` when the points do
+                // not form a guessable grid (or fewer than two): nothing is
+                // drawn, matching silx returning no item.
+                let Some(tri) = crate::core::scatter_viz::irregular_grid_triangles(&x, &y, &colors)
+                else {
+                    if let Some(h) = self.triangles_handle.take() {
+                        self.inner.remove(h);
+                    }
+                    return;
+                };
+
+                // No backend update_triangles primitive, so re-add the mesh from
+                // scratch each rebuild (remove the prior handle first).
+                // `triangles_handle` is Some iff a mesh is displayed;
+                // `irregular_grid_mesh` retains the geometry for `//4` picking.
+                if let Some(h) = self.triangles_handle.take() {
+                    self.inner.remove(h);
+                }
+                let h = self.inner.add_triangles_data(&tri);
+                self.triangles_handle = Some(h);
+                self.inner.set_item_legend(h, "scatter irregular grid");
+                self.irregular_grid_mesh = Some(tri);
             }
             mode => {
                 // Drop the marker cloud / triangle surface so neither shadows
@@ -9816,14 +9874,17 @@ impl ScatterView {
                     let candidates = bs.pick(xs, ys, cx, cy)?;
                     nearest_candidate_in_data(&candidates, xs, ys, cx, cy)?
                 }
+                // IRREGULAR_GRID: the cell (triangle pair) under the cursor maps
+                // back to its source point (silx scatter.py:810-813, picked
+                // vertex `// 4`). Pick against the retained quadrilateral mesh in
+                // data space — no pixel radius, the cell tiles the plane.
+                ScatterVisualization::IrregularGrid => {
+                    let mesh = self.irregular_grid_mesh.as_ref()?;
+                    scatter_viz::irregular_grid_pick(mesh, cx, cy)?
+                }
                 // POINTS/SOLID: top-most point under the cursor (scatter.py base
-                // pick → `indices[-1]`). IRREGULAR_GRID falls back here: silx maps
-                // a picked triangle vertex to its point, but siplot renders that
-                // mode as an interpolated image with no vertex→point map, so the
-                // nearest rendered point is the honest equivalent (row 1086).
-                ScatterVisualization::Points
-                | ScatterVisualization::Solid
-                | ScatterVisualization::IrregularGrid => {
+                // pick → `indices[-1]`).
+                ScatterVisualization::Points | ScatterVisualization::Solid => {
                     let cursor_px = response.transform.data_to_pixel(cx, cy);
                     let points_px: Vec<(f32, f32)> = xs
                         .iter()
@@ -12447,18 +12508,19 @@ mod tests {
     }
 
     #[test]
-    fn scatter_irregular_grid_mode_interpolates_inside_nan_outside() {
-        // Item 2: IRREGULAR_GRID converts (x,y,value) to a barycentric-
-        // interpolated value image; the value field z=x means cell (0,0)
-        // samples ~0.5 and the corner outside the triangle is NaN.
+    fn scatter_irregular_grid_mode_has_no_grid_image() {
+        // IRREGULAR_GRID now renders through the triangle-mesh path
+        // (`scatter_viz::irregular_grid_triangles`, silx
+        // `_quadrilateral_grid_as_triangles`), not the image path, so
+        // `scatter_grid_image` produces no grid image for it. The
+        // barycentric-interpolated-image core itself is still covered by
+        // `scatter_viz::irregular_grid_image_interpolates_inside_nan_outside`.
         let x = [0.0, 4.0, 0.0];
         let y = [0.0, 0.0, 4.0];
         let v = [0.0, 4.0, 0.0];
-        let img = scatter_grid_image(ScatterVisualization::IrregularGrid, &x, &y, &v, (4, 4))
-            .expect("triangulable");
-        assert_eq!(img.shape, (4, 4));
-        assert!((img.get(0, 0).unwrap() - 0.5).abs() < 1e-9);
-        assert!(img.get(3, 3).unwrap().is_nan(), "exterior pixel is NaN");
+        assert!(
+            scatter_grid_image(ScatterVisualization::IrregularGrid, &x, &y, &v, (4, 4)).is_none()
+        );
     }
 
     #[test]

@@ -308,6 +308,251 @@ pub fn solid_triangles(x: &[f64], y: &[f64], colors: &[Color32]) -> Option<Trian
     ))
 }
 
+/// Compute the `(dim0+1) × (dim1+1)` grid of quadrilateral cell corners for a
+/// `dim0 × dim1` row-major grid of points, faithful to silx
+/// `_quadrilateral_grid_coords` (items/scatter.py:191-235). Each interior
+/// corner is the mean of its four surrounding points; the edge midpoints and
+/// the four outer corners are linearly extrapolated so every input point sits
+/// inside its own cell. `points[r * dim1 + c]` is the point at grid row `r`,
+/// column `c`. Requires `dim0 >= 2` and `dim1 >= 2`.
+fn quadrilateral_grid_coords(points: &[[f64; 2]], dim0: usize, dim1: usize) -> Vec<[f64; 2]> {
+    debug_assert!(dim0 >= 2 && dim1 >= 2);
+    debug_assert_eq!(points.len(), dim0 * dim1);
+    let gw = dim1 + 1; // corner-grid width
+    let mut grid = vec![[0.0_f64; 2]; (dim0 + 1) * gw];
+    let p = |r: usize, c: usize| points[r * dim1 + c];
+    // Mean of the four points around interior corner (r+1, c+1) of the corner
+    // grid (silx inner_points); `r`,`c` index the dim0-1 × dim1-1 inner block.
+    let inner = |r: usize, c: usize| -> [f64; 2] {
+        let (a, b, d, e) = (p(r, c), p(r, c + 1), p(r + 1, c), p(r + 1, c + 1));
+        [
+            (a[0] + b[0] + d[0] + e[0]) / 4.0,
+            (a[1] + b[1] + d[1] + e[1]) / 4.0,
+        ]
+    };
+    for r in 0..dim0 - 1 {
+        for c in 0..dim1 - 1 {
+            grid[(r + 1) * gw + (c + 1)] = inner(r, c);
+        }
+    }
+    // Vertical sides: left corner column (index 0) and right (index dim1).
+    // silx: x = points[r][cc] + points[r+1][cc] - inner.x ; y = inner.y.
+    for r in 0..dim0 - 1 {
+        let il = inner(r, 0);
+        grid[(r + 1) * gw] = [p(r, 0)[0] + p(r + 1, 0)[0] - il[0], il[1]];
+        let ir = inner(r, dim1 - 2);
+        grid[(r + 1) * gw + dim1] = [p(r, dim1 - 1)[0] + p(r + 1, dim1 - 1)[0] - ir[0], ir[1]];
+    }
+    // Horizontal sides: top corner row (index 0) and bottom (index dim0).
+    // silx: x = inner.x ; y = points[rr][c] + points[rr][c+1] - inner.y.
+    for c in 0..dim1 - 1 {
+        let it = inner(0, c);
+        grid[c + 1] = [it[0], p(0, c)[1] + p(0, c + 1)[1] - it[1]];
+        let ib = inner(dim0 - 2, c);
+        grid[dim0 * gw + (c + 1)] = [ib[0], p(dim0 - 1, c)[1] + p(dim0 - 1, c + 1)[1] - ib[1]];
+    }
+    // Four outer corners: grid_corner = 2 * point_corner - inner_corner.
+    let corner = |pr: usize, pc: usize, ir: usize, ic: usize| -> [f64; 2] {
+        let (pp, ii) = (p(pr, pc), inner(ir, ic));
+        [2.0 * pp[0] - ii[0], 2.0 * pp[1] - ii[1]]
+    };
+    grid[0] = corner(0, 0, 0, 0);
+    grid[dim1] = corner(0, dim1 - 1, 0, dim1 - 2);
+    grid[dim0 * gw + dim1] = corner(dim0 - 1, dim1 - 1, dim0 - 2, dim1 - 2);
+    grid[dim0 * gw] = corner(dim0 - 1, 0, dim0 - 2, 0);
+    grid
+}
+
+/// Build the quadrilateral grid as triangles for a `dim0 × dim1` row-major grid
+/// of points, faithful to silx `_quadrilateral_grid_as_triangles`
+/// (items/scatter.py:238-263). Returns `(coords, indices)` with `4 * N` corner
+/// vertices and `2 * N` triangles (`N = dim0 * dim1`): point `k`'s quad owns
+/// vertices `4k..4k+4` and triangles `2k`/`2k+1`, so a picked triangle `t` maps
+/// to source point `t / 2` (silx's vertex `// 4`).
+fn quadrilateral_grid_as_triangles(
+    points: &[[f64; 2]],
+    dim0: usize,
+    dim1: usize,
+) -> (Vec<[f64; 2]>, Vec<[u32; 3]>) {
+    let nbpoints = dim0 * dim1;
+    let grid = quadrilateral_grid_coords(points, dim0, dim1);
+    let gw = dim1 + 1;
+    let mut coords = vec![[0.0_f64; 2]; 4 * nbpoints];
+    for r in 0..dim0 {
+        for c in 0..dim1 {
+            let k = r * dim1 + c;
+            coords[4 * k] = grid[r * gw + c];
+            coords[4 * k + 1] = grid[(r + 1) * gw + c];
+            coords[4 * k + 2] = grid[r * gw + (c + 1)];
+            coords[4 * k + 3] = grid[(r + 1) * gw + (c + 1)];
+        }
+    }
+    let mut indices = Vec::with_capacity(2 * nbpoints);
+    for k in 0..nbpoints {
+        let b = u32::try_from(4 * k).expect("vertex index fits in u32");
+        indices.push([b, b + 1, b + 2]);
+        indices.push([b + 1, b + 2, b + 3]);
+    }
+    (coords, indices)
+}
+
+/// Arrange unstructured `(x, y)` points onto a detected grid for
+/// `Visualization.IRREGULAR_GRID`, faithful to silx's points-array construction
+/// (items/scatter.py:682-775). Returns `(points, dim0, dim1, swap_xy)`: a flat
+/// row-major `dim0 × dim1` grid whose first `x.len()` entries are the input
+/// points in data order (later entries pad an incomplete grid), and `swap_xy`
+/// telling the caller to swap the resulting coordinates back (silx stores a
+/// column-major grid transposed as `(y, x)`).
+///
+/// Returns `None` when fewer than two points are given (silx renders a single
+/// point as a square marker, handled by the caller) or no grid can be guessed.
+fn arrange_irregular_grid_points(
+    x: &[f64],
+    y: &[f64],
+) -> Option<(Vec<[f64; 2]>, usize, usize, bool)> {
+    let nbpoints = x.len();
+    if nbpoints < 2 {
+        return None;
+    }
+    let grid = detect_regular_grid(x, y)?;
+    let (mut s0, mut s1) = grid.shape; // (rows, cols)
+    let order = grid.order;
+    // silx: grow the shape so it includes every point.
+    if nbpoints != s0 * s1 {
+        match order {
+            GridMajorOrder::Row => s0 = nbpoints.div_ceil(s1),
+            GridMajorOrder::Column => s1 = nbpoints.div_ceil(s0),
+        }
+    }
+
+    // Single-line case (silx 721-741): a grid dimension collapses to < 2.
+    if s0 < 2 || s1 < 2 {
+        let row_order = s0 == 1;
+        // First line in silx's (a, b) convention: (x, y) row, (y, x) column.
+        let line: Vec<[f64; 2]> = (0..nbpoints)
+            .map(|i| {
+                if row_order {
+                    [x[i], y[i]]
+                } else {
+                    [y[i], x[i]]
+                }
+            })
+            .collect();
+        // Second line: each point offset by the perpendicular of the local
+        // segment direction — silx's cross with the +z axis, (dx, dy) ↦ (dy, -dx)
+        // — so the swept cells have area. The last point reuses the prior step.
+        let mut points = Vec::with_capacity(2 * nbpoints);
+        points.extend_from_slice(&line);
+        for i in 0..nbpoints {
+            let (dx, dy) = if i + 1 < nbpoints {
+                (line[i + 1][0] - line[i][0], line[i + 1][1] - line[i][1])
+            } else {
+                (line[i][0] - line[i - 1][0], line[i][1] - line[i - 1][1])
+            };
+            points.push([line[i][0] + dy, line[i][1] - dx]);
+        }
+        return Some((points, 2, nbpoints, !row_order));
+    }
+
+    // Full / partial 2D grid (silx 743-775).
+    let total = s0 * s1;
+    let mut points = vec![[0.0_f64; 2]; total];
+    match order {
+        GridMajorOrder::Row => {
+            for i in 0..nbpoints {
+                points[i] = [x[i], y[i]];
+            }
+            if nbpoints != total {
+                // Pad the incomplete last row with a tail slice of x and the
+                // last y (silx 744-755).
+                let index = (nbpoints / s1) * s1; // start of last full row
+                let pad = total - nbpoints;
+                let last_y = y[nbpoints - 1];
+                for j in 0..pad {
+                    points[nbpoints + j] = [x[index - pad + j], last_y];
+                }
+            }
+            Some((points, s0, s1, false))
+        }
+        GridMajorOrder::Column => {
+            // silx stores column-major as (y, x) with dims transposed.
+            for i in 0..nbpoints {
+                points[i] = [y[i], x[i]];
+            }
+            if nbpoints != total {
+                let index = (nbpoints / s0) * s0; // start of last full column
+                let pad = total - nbpoints;
+                let last_x = x[nbpoints - 1];
+                for j in 0..pad {
+                    points[nbpoints + j] = [y[index - pad + j], last_x];
+                }
+            }
+            Some((points, s1, s0, true))
+        }
+    }
+}
+
+/// Build the per-vertex-colored [`Triangles`] for `Visualization.IRREGULAR_GRID`,
+/// faithful to silx's quadrilateral-grid render (items/scatter.py:682-797).
+///
+/// The points are arranged onto the detected grid
+/// ([`arrange_irregular_grid_points`]), expanded into a dual grid of cell
+/// corners, and emitted as `2` flat-shaded triangles per input point: every
+/// point owns four consecutive vertices carrying its colormapped `colors[k]`
+/// (silx `gridcolors[first::4] = rgbacolors[:nbpoints]`). The caller maps
+/// `value` through a colormap before calling, as silx's `__applyColormapToData`
+/// does.
+///
+/// `x`, `y`, and `colors` must have equal length. Returns `None` when the points
+/// do not form a guessable grid or fewer than two are given (silx renders a lone
+/// point as a square marker).
+#[must_use]
+pub fn irregular_grid_triangles(x: &[f64], y: &[f64], colors: &[Color32]) -> Option<Triangles> {
+    assert_eq!(x.len(), y.len(), "x and y must have the same length");
+    assert_eq!(
+        colors.len(),
+        x.len(),
+        "colors must have one entry per point"
+    );
+    let nbpoints = x.len();
+    let (points, dim0, dim1, swap_xy) = arrange_irregular_grid_points(x, y)?;
+    let (mut coords, mut indices) = quadrilateral_grid_as_triangles(&points, dim0, dim1);
+    // Keep only the real points' quads (silx coords[:4*nb], indices[:2*nb]).
+    coords.truncate(4 * nbpoints);
+    indices.truncate(2 * nbpoints);
+    let (vx, vy): (Vec<f64>, Vec<f64>) = if swap_xy {
+        coords.iter().map(|c| (c[1], c[0])).unzip()
+    } else {
+        coords.iter().map(|c| (c[0], c[1])).unzip()
+    };
+    // Flat-shade each cell: point k's four vertices share colors[k].
+    let mut vcolors = Vec::with_capacity(4 * nbpoints);
+    for &c in colors {
+        vcolors.extend_from_slice(&[c; 4]);
+    }
+    Some(Triangles::new(vx, vy, indices, vcolors))
+}
+
+/// The scatter point index for an `IRREGULAR_GRID` pick at data coordinates
+/// `(px, py)`, mirroring silx `Scatter.pick`'s IRREGULAR_GRID branch
+/// (items/scatter.py:810-813: picked vertex `// 4`).
+///
+/// `mesh` is the triangle mesh built by [`irregular_grid_triangles`]. The first
+/// triangle whose interior (with a tiny edge tolerance) contains the cursor maps
+/// to its source point via `triangle_index / 2` (each point owns two triangles).
+/// Returns `None` when the cursor lies outside every cell.
+#[must_use]
+pub fn irregular_grid_pick(mesh: &Triangles, px: f64, py: f64) -> Option<usize> {
+    for (t, tri) in mesh.indices.iter().enumerate() {
+        let v = |i: usize| [mesh.x[i], mesh.y[i]];
+        let (a, b, c) = (v(tri[0] as usize), v(tri[1] as usize), v(tri[2] as usize));
+        if barycentric(a, b, c, [px, py]).is_some() {
+            return Some(t / 2);
+        }
+    }
+    None
+}
+
 /// Barycentric coordinates of point `p` within triangle `(a, b, c)`.
 ///
 /// Returns `None` when `p` lies outside the triangle (any coordinate negative
@@ -1537,5 +1782,82 @@ mod tests {
             vec![Color32::RED, Color32::BLUE],
         )
         .with_alpha(vec![0.5]);
+    }
+
+    // --- IRREGULAR_GRID quadrilateral mesh ----------------------------------
+
+    #[test]
+    fn quadrilateral_grid_coords_unit_2x2_offsets_by_half() {
+        // Points on a unit grid: row 0 at y=0, row 1 at y=1; x fast.
+        let points = [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]];
+        let grid = quadrilateral_grid_coords(&points, 2, 2);
+        // 3x3 corner grid, each cell a unit square centered on its point.
+        let expect = [
+            [-0.5, -0.5],
+            [0.5, -0.5],
+            [1.5, -0.5],
+            [-0.5, 0.5],
+            [0.5, 0.5],
+            [1.5, 0.5],
+            [-0.5, 1.5],
+            [0.5, 1.5],
+            [1.5, 1.5],
+        ];
+        assert_eq!(grid.len(), 9);
+        for (got, want) in grid.iter().zip(&expect) {
+            assert!((got[0] - want[0]).abs() < 1e-12, "x: {got:?} vs {want:?}");
+            assert!((got[1] - want[1]).abs() < 1e-12, "y: {got:?} vs {want:?}");
+        }
+    }
+
+    #[test]
+    fn irregular_grid_triangles_builds_one_cell_per_point() {
+        let x = [0.0, 1.0, 0.0, 1.0];
+        let y = [0.0, 0.0, 1.0, 1.0];
+        let colors = [Color32::RED, Color32::GREEN, Color32::BLUE, Color32::WHITE];
+        let mesh = irregular_grid_triangles(&x, &y, &colors).expect("buildable grid");
+        // 4 points -> 16 vertices, 8 triangles (2 per point).
+        assert_eq!(mesh.x.len(), 16);
+        assert_eq!(mesh.colors.len(), 16);
+        assert_eq!(mesh.indices.len(), 8);
+        // silx flat-shades: each point's 4 vertices share its color.
+        for (k, &c) in colors.iter().enumerate() {
+            for v in 0..4 {
+                assert_eq!(mesh.colors[4 * k + v], c, "point {k} vertex {v}");
+            }
+        }
+    }
+
+    #[test]
+    fn irregular_grid_pick_maps_cursor_to_owning_cell() {
+        let x = [0.0, 1.0, 0.0, 1.0];
+        let y = [0.0, 0.0, 1.0, 1.0];
+        let mesh = irregular_grid_triangles(&x, &y, &[Color32::RED; 4]).expect("buildable grid");
+        // Each unit cell is centered on its data point (silx vertex // 4).
+        assert_eq!(irregular_grid_pick(&mesh, 0.0, 0.0), Some(0));
+        assert_eq!(irregular_grid_pick(&mesh, 1.0, 0.0), Some(1));
+        assert_eq!(irregular_grid_pick(&mesh, 0.0, 1.0), Some(2));
+        assert_eq!(irregular_grid_pick(&mesh, 1.0, 1.0), Some(3));
+        // Far outside every cell -> no pick.
+        assert_eq!(irregular_grid_pick(&mesh, 10.0, 10.0), None);
+    }
+
+    #[test]
+    fn irregular_grid_single_line_builds_one_cell_per_point_and_picks() {
+        // Collinear points fall back to silx's single-line grid (a 2xN strip).
+        let x = [0.0, 1.0, 2.0, 3.0];
+        let y = [0.0, 0.0, 0.0, 0.0];
+        let mesh = irregular_grid_triangles(&x, &y, &[Color32::RED; 4]).expect("buildable line");
+        assert_eq!(mesh.x.len(), 16, "4 points -> 16 vertices");
+        assert_eq!(mesh.indices.len(), 8, "4 points -> 8 triangles");
+        // Each data point lies inside its own cell.
+        assert_eq!(irregular_grid_pick(&mesh, 1.0, 0.0), Some(1));
+        assert_eq!(irregular_grid_pick(&mesh, 2.0, 0.0), Some(2));
+    }
+
+    #[test]
+    fn irregular_grid_triangles_none_for_too_few_points() {
+        // A single point cannot form a quadrilateral mesh (silx renders a square).
+        assert!(irregular_grid_triangles(&[0.0], &[0.0], &[Color32::RED]).is_none());
     }
 }

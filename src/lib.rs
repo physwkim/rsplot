@@ -60,7 +60,8 @@ pub use crate::core::roi::{BandLines, ManagedRoi, Roi, RoiEdge, RoiLineStyle};
 pub use crate::core::scatter_viz::{
     BinnedStatistic, BinnedStatisticFunction, GridImage, GridMajorOrder, PointsViz, RegularGrid,
     ScatterLineProfile, Triangulation, binned_statistic, delaunay, detect_regular_grid,
-    interpolate, irregular_grid_image, regular_grid_pick, scatter_line_profile, solid_triangles,
+    interpolate, irregular_grid_image, irregular_grid_pick, irregular_grid_triangles,
+    regular_grid_pick, scatter_line_profile, solid_triangles,
 };
 pub use crate::core::shape::{Line, Shape, ShapeKind};
 pub use crate::core::stats::{ComCoord, StatScope, Stats};
