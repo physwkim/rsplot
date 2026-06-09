@@ -1036,7 +1036,17 @@ fn apply_interaction(
                     plot.push_limits();
                     let (ax, ay) = view.pixel_to_data(start);
                     let (bx, by) = view.pixel_to_data(end);
-                    let next = interaction::box_zoom(ax, ay, bx, by);
+                    // Constrain to the axes enabled for zoom (silx
+                    // `ZoomEnabledAxesMenu`): a disabled axis keeps its current
+                    // displayed range. With both enabled (the default) this is
+                    // the box result unchanged.
+                    let current = (view.x.min, view.x.max, view.y.min, view.y.max);
+                    let next = interaction::constrain_zoom_axes(
+                        interaction::box_zoom(ax, ay, bx, by),
+                        current,
+                        plot.zoom_x_enabled(),
+                        plot.zoom_y_enabled(),
+                    );
                     commit(plot, next);
                 }
             }

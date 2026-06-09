@@ -475,6 +475,8 @@ pub struct ToolbarResponse {
     pub zoom_out: bool,
     /// Zoom-back button was clicked (silx `ZoomBackAction`).
     pub zoom_back: bool,
+    /// A zoom-enabled-axes menu item was toggled (silx `ZoomEnabledAxesMenu`).
+    pub zoom_axes_changed: bool,
     /// Save button was clicked (silx `SaveAction`).
     pub save: bool,
     /// Copy-to-clipboard button was clicked (silx `CopyAction`).
@@ -5490,6 +5492,22 @@ impl PlotWidget {
             self.set_interaction_mode(PlotInteractionMode::Zoom);
             out.interaction_mode_changed = true;
         }
+        // Zoom-axes menu (silx `ZoomEnabledAxesMenu`): choose which axes a box
+        // zoom affects. Both checked by default; unchecking one keeps that
+        // axis's range when a box zoom is applied. siplot's box zoom is left-axis
+        // only, so there is no y2 entry (unlike silx's three).
+        let mut zoom_x = self.plot().zoom_x_enabled();
+        let mut zoom_y = self.plot().zoom_y_enabled();
+        ui.menu_button("Zoom axes", |ui| {
+            let cx = ui.checkbox(&mut zoom_x, "X axis").changed();
+            let cy = ui.checkbox(&mut zoom_y, "Y axis").changed();
+            if cx || cy {
+                self.plot_mut().set_zoom_enabled_axes(zoom_x, zoom_y);
+                out.zoom_axes_changed = true;
+            }
+        })
+        .response
+        .on_hover_text("Choose which axes a box zoom affects");
         if toolbar_icon_button(
             ui,
             ToolbarIcon::Pan,

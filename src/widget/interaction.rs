@@ -209,6 +209,30 @@ pub fn box_zoom(ax: f64, ay: f64, bx: f64, by: f64) -> Limits {
     (ax.min(bx), ax.max(bx), ay.min(by), ay.max(by))
 }
 
+/// Constrain a box-zoom result to the axes enabled for zoom (silx
+/// `ZoomEnabledAxesMenu` / `Zoom._getAxesExtent`). A disabled axis keeps its
+/// `current` range while an enabled axis takes the `zoomed` range.
+///
+/// silx achieves this in pixel space — it replaces a disabled axis's selection
+/// extent with the full plot bounds before `pixelToData`, which yields the
+/// current displayed range for that axis. This is the equivalent substitution
+/// in data space: pass the currently displayed `current` limits and the box
+/// `zoomed` limits. With both axes enabled the result is `zoomed` unchanged.
+/// Pure and deterministic, so the axis gating is unit-testable without a GPU
+/// backend.
+pub fn constrain_zoom_axes(
+    zoomed: Limits,
+    current: Limits,
+    x_enabled: bool,
+    y_enabled: bool,
+) -> Limits {
+    let (zx0, zx1, zy0, zy1) = zoomed;
+    let (cx0, cx1, cy0, cy1) = current;
+    let (x0, x1) = if x_enabled { (zx0, zx1) } else { (cx0, cx1) };
+    let (y0, y1) = if y_enabled { (zy0, zy1) } else { (cy0, cy1) };
+    (x0, x1, y0, y1)
+}
+
 /// Convert an egui wheel delta (`smooth_scroll_delta.y`, pixels) to a zoom
 /// factor for [`zoom_about`]. Scrolling up (`> 0`) zooms in (`factor < 1`).
 pub fn wheel_zoom_factor(scroll_y: f32) -> f64 {
@@ -1927,6 +1951,32 @@ mod tests {
     fn box_zoom_orders_corners() {
         let out = box_zoom(8.0, 1.0, 2.0, 9.0);
         assert!(close(out, (2.0, 8.0, 1.0, 9.0)), "{out:?}");
+    }
+
+    #[test]
+    fn constrain_zoom_axes_keeps_disabled_axis_range() {
+        let zoomed = (2.0, 8.0, 1.0, 9.0);
+        let current = (0.0, 10.0, 0.0, 100.0);
+        // Both enabled: the box result is unchanged (silx default, all axes on).
+        assert!(close(
+            constrain_zoom_axes(zoomed, current, true, true),
+            zoomed
+        ));
+        // X disabled: keep current X, take zoomed Y.
+        assert!(close(
+            constrain_zoom_axes(zoomed, current, false, true),
+            (0.0, 10.0, 1.0, 9.0)
+        ));
+        // Y disabled: take zoomed X, keep current Y.
+        assert!(close(
+            constrain_zoom_axes(zoomed, current, true, false),
+            (2.0, 8.0, 0.0, 100.0)
+        ));
+        // Both disabled: a box zoom is a full no-op (keeps current view).
+        assert!(close(
+            constrain_zoom_axes(zoomed, current, false, false),
+            current
+        ));
     }
 
     #[test]

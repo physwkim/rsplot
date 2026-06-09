@@ -450,6 +450,17 @@ pub struct Plot {
     /// widget ignores arrow-key presses (silx gates the same handler on
     /// `if self._panWithArrowKeys` in `PlotWidget._handleArrowKey`).
     pan_with_arrow_keys: bool,
+    /// Whether a box zoom changes the X axis (silx `ZoomEnabledAxesMenu` /
+    /// `Zoom.enabledAxes.xaxis`). Defaults to `true`. When `false` a box zoom
+    /// keeps the current X range, matching silx `Zoom._getAxesExtent`, which
+    /// replaces a disabled axis's selection extent with the full plot bounds so
+    /// that axis is left unchanged.
+    zoom_x_enabled: bool,
+    /// Whether a box zoom changes the (left) Y axis (silx
+    /// `Zoom.enabledAxes.yaxis`). Defaults to `true`. silx also tracks the right
+    /// (y2) axis here, but siplot's box zoom operates on the left axes only, so
+    /// there is no y2 counterpart.
+    zoom_y_enabled: bool,
 }
 
 /// One snapshot in [`Plot::limits_history`]: the left-axes limits plus the
@@ -510,6 +521,8 @@ impl Plot {
             x_time_zone: TimeZone::Utc,
             lines: Vec::new(),
             pan_with_arrow_keys: true,
+            zoom_x_enabled: true,
+            zoom_y_enabled: true,
         }
     }
 
@@ -700,6 +713,27 @@ impl Plot {
     /// `setPanWithArrowKeys` sets the flag without `_setDirtyPlot`).
     pub fn set_pan_with_arrow_keys(&mut self, pan: bool) {
         self.pan_with_arrow_keys = pan;
+    }
+
+    /// Whether a box zoom changes the X axis (silx `Zoom.enabledAxes.xaxis`).
+    pub fn zoom_x_enabled(&self) -> bool {
+        self.zoom_x_enabled
+    }
+
+    /// Whether a box zoom changes the (left) Y axis (silx
+    /// `Zoom.enabledAxes.yaxis`).
+    pub fn zoom_y_enabled(&self) -> bool {
+        self.zoom_y_enabled
+    }
+
+    /// Choose which axes a box zoom affects (silx
+    /// `PlotInteraction.setZoomEnabledAxes`). A disabled axis keeps its current
+    /// range when a box zoom is applied. Like silx's setter this is a plain
+    /// flag set: it does not mark the plot dirty (it only changes how a future
+    /// box zoom is applied, not the current frame).
+    pub fn set_zoom_enabled_axes(&mut self, x_enabled: bool, y_enabled: bool) {
+        self.zoom_x_enabled = x_enabled;
+        self.zoom_y_enabled = y_enabled;
     }
 
     /// The current redraw-dirty state (silx `_getDirtyPlot`).
@@ -1432,6 +1466,26 @@ mod tests {
 
         plot.set_pan_with_arrow_keys(true);
         assert!(plot.pan_with_arrow_keys());
+        assert_eq!(plot.dirty(), DirtyState::Clean);
+    }
+
+    #[test]
+    fn zoom_enabled_axes_default_true_and_set_does_not_dirty() {
+        let mut plot = Plot::new(0);
+        // silx ZoomEnabledAxesMenu: all axes checked by default.
+        assert!(plot.zoom_x_enabled());
+        assert!(plot.zoom_y_enabled());
+
+        // setZoomEnabledAxes is a plain flag set (it only changes how a future
+        // box zoom applies), so it must not mark the plot dirty.
+        plot.set_zoom_enabled_axes(true, false);
+        assert!(plot.zoom_x_enabled());
+        assert!(!plot.zoom_y_enabled());
+        assert_eq!(plot.dirty(), DirtyState::Clean);
+
+        plot.set_zoom_enabled_axes(false, true);
+        assert!(!plot.zoom_x_enabled());
+        assert!(plot.zoom_y_enabled());
         assert_eq!(plot.dirty(), DirtyState::Clean);
     }
 
