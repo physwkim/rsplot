@@ -165,6 +165,12 @@ pub struct LeastSqResult {
     /// `n_param x n_param` (silx `cov0 = inv(alpha0)`). Standard errors are the
     /// square roots of the diagonal: `perr[i] = sqrt(cov[i][i])`.
     pub covariance: Vec<Vec<f64>>,
+    /// Per-parameter uncertainties propagated through the applied constraints
+    /// (silx `ddict["uncertainties"]` via `_get_sigma_parameters`). For an
+    /// unconstrained fit this equals [`LeastSqResult::std_errors`]; with
+    /// constraints it additionally carries the QUOTED `B·cos` factor and ties
+    /// FACTOR/DELTA/SUM uncertainties to their reference parameter.
+    pub uncertainties: Vec<f64>,
     /// The chi-square `sum( weight * (model - y)^2 )` at the optimum
     /// (silx `chisq0`).
     pub chisq: f64,
@@ -207,6 +213,133 @@ pub enum FitError {
     /// The curvature matrix `alpha0` is singular and cannot be inverted, so no
     /// covariance is available (silx `LinAlgError` from `inv(alpha0)`).
     SingularMatrix,
+    /// A QUOTED constraint has equal min/max (`B == 0`), so the `sin/arcsin`
+    /// reparametrisation is undefined (silx `raise ValueError("Invalid
+    /// parameter limits")`).
+    InvalidConstraint,
+    /// A FACTOR/DELTA/SUM constraint references a parameter index outside the
+    /// parameter vector.
+    BadConstraintReference,
+}
+
+/// A per-parameter fit constraint for [`leastsq_constrained`].
+///
+/// Faithful to silx `silx.math.fit.leastsq` constraint codes (`CFREE`=0 …
+/// `CIGNORED`=7). The constraint set has one entry per parameter; a parameter
+/// is either *fitted* (Free/Positive/Quoted), *held* (Fixed/Ignored), or
+/// *derived* from another parameter (Factor/Delta/Sum).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Constraint {
+    /// `CFREE` — varied with no restriction.
+    Free,
+    /// `CPOSITIVE` — varied but kept positive (silx takes `abs(value)` rather
+    /// than the commented-out square reparametrisation).
+    Positive,
+    /// `CQUOTED` — confined to `[min, max]` via silx's `A + B·sin(arcsin(...) +
+    /// Δ)` reparametrisation (`A = (max+min)/2`, `B = (max−min)/2`). A start
+    /// value outside `[min, max]` is held fixed at its start (silx warning
+    /// path).
+    Quoted {
+        /// Lower bound (silx `min(constraints[i][1], constraints[i][2])`).
+        min: f64,
+        /// Upper bound (silx `max(...)`).
+        max: f64,
+    },
+    /// `CFIXED` — held at its starting value; not fitted, gets 100 %
+    /// uncertainty in the covariance.
+    Fixed,
+    /// `CFACTOR` — `value = factor · params[reference]` (silx `CFACTOR`).
+    Factor {
+        /// Index of the parameter this one is tied to.
+        reference: usize,
+        /// Multiplicative factor.
+        factor: f64,
+    },
+    /// `CDELTA` — `value = delta + params[reference]` (silx `CDELTA`).
+    Delta {
+        /// Index of the parameter this one is tied to.
+        reference: usize,
+        /// Additive offset.
+        delta: f64,
+    },
+    /// `CSUM` — `value = sum − params[reference]` (silx `CSUM`).
+    Sum {
+        /// Index of the parameter this one is tied to.
+        reference: usize,
+        /// Constant the pair sums to.
+        sum: f64,
+    },
+    /// `CIGNORED` — set to 0 and stripped from the model call (silx `CIGNORED`;
+    /// the model must accept the reduced parameter count).
+    Ignored,
+}
+
+/// Apply the dependent-parameter relations to a full parameter vector (silx
+/// `_get_parameters`). Free parameters pass through, Positive is `abs`, Quoted
+/// passes through (its bounding is done at the step site), Factor/Delta/Sum are
+/// recomputed from their reference, Ignored becomes 0. Two passes so that the
+/// independent values are set before the dependent ones read them.
+fn get_parameters(params: &[f64], constraints: &[Constraint]) -> Vec<f64> {
+    let mut out: Vec<f64> = params
+        .iter()
+        .zip(constraints)
+        .map(|(&p, c)| match c {
+            Constraint::Positive => p.abs(),
+            _ => p,
+        })
+        .collect();
+    for (i, c) in constraints.iter().enumerate() {
+        match *c {
+            Constraint::Factor { reference, factor } => out[i] = factor * out[reference],
+            Constraint::Delta { reference, delta } => out[i] = delta + out[reference],
+            Constraint::Sum { reference, sum } => out[i] = sum - out[reference],
+            Constraint::Ignored => out[i] = 0.0,
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Propagate free-parameter sigmas back onto the full parameter vector through
+/// the constraints (silx `_get_sigma_parameters`). `sigma0` holds one entry per
+/// free parameter, in free-parameter order.
+fn get_sigma_parameters(
+    parameters: &[f64],
+    sigma0: &[f64],
+    constraints: &[Constraint],
+) -> Vec<f64> {
+    let mut sigma_par = vec![0.0_f64; parameters.len()];
+    let mut n_free = 0usize;
+    for (i, c) in constraints.iter().enumerate() {
+        match *c {
+            Constraint::Free | Constraint::Positive => {
+                sigma_par[i] = sigma0[n_free];
+                n_free += 1;
+            }
+            Constraint::Quoted { min, max } => {
+                let pmax = min.max(max);
+                let pmin = min.min(max);
+                let b = 0.5 * (pmax - pmin);
+                if b > 0.0 && parameters[i] < pmax && parameters[i] > pmin {
+                    sigma_par[i] = (b * parameters[i].cos() * sigma0[n_free]).abs();
+                    n_free += 1;
+                } else {
+                    sigma_par[i] = parameters[i];
+                }
+            }
+            Constraint::Fixed => sigma_par[i] = parameters[i],
+            _ => {}
+        }
+    }
+    for (i, c) in constraints.iter().enumerate() {
+        match *c {
+            Constraint::Factor { reference, .. }
+            | Constraint::Delta { reference, .. }
+            | Constraint::Sum { reference, .. } => sigma_par[i] = sigma_par[reference],
+            _ => {}
+        }
+    }
+    sigma_par
 }
 
 /// Invert a square row-major matrix via Gauss-Jordan elimination with partial
@@ -522,9 +655,479 @@ where
         None
     };
 
+    // silx: constraints is None => uncertainties = sigma0 = sqrt(abs(diag(cov0))).
+    let uncertainties: Vec<f64> = (0..n_param)
+        .map(|i| covariance[i][i].abs().sqrt())
+        .collect();
+
     Ok(LeastSqResult {
         parameters: fittedpar,
         covariance,
+        uncertainties,
+        chisq: chisq_final,
+        reduced_chisq,
+        niter: iteration_counter,
+        nfev,
+    })
+}
+
+/// Gather elements of `v` at the given indices (numpy `take`).
+fn take(v: &[f64], indices: &[usize]) -> Vec<f64> {
+    indices.iter().map(|&i| v[i]).collect()
+}
+
+/// Output of one constrained `chisq_alpha_beta` evaluation.
+struct CabOut {
+    /// `sum(weight * (y - yfit)^2)` at the current parameters.
+    chisq: f64,
+    /// Curvature matrix over the free parameters (`n_free x n_free`).
+    alpha: Vec<Vec<f64>>,
+    /// Gradient vector over the free parameters (`n_free`).
+    beta: Vec<f64>,
+    /// Number of free parameters this evaluation fitted.
+    n_free: usize,
+    /// Full-parameter index of each free parameter (silx `free_index`).
+    free_index: Vec<usize>,
+    /// Full-parameter indices passed to the model (silx `noigno`).
+    noigno: Vec<usize>,
+    /// Current values of the free parameters (silx `fitparam`).
+    fitparam: Vec<f64>,
+}
+
+/// One constrained curvature/gradient evaluation (silx `chisq_alpha_beta` with
+/// a non-None `constraints`). Builds the free-parameter set, the numerical
+/// forward-difference Jacobian scaled by each parameter's `derivfactor`, and the
+/// normal-equation matrices restricted to the free parameters.
+#[allow(clippy::too_many_arguments)]
+fn chisq_alpha_beta_constrained<F>(
+    model: &F,
+    parameters: &[f64],
+    xdata: &[f64],
+    ydata: &[f64],
+    weight0: &[f64],
+    constraints: &[Constraint],
+    sqrt_epsfcn: f64,
+    last_evaluation: Option<&[f64]>,
+    nfev: &mut usize,
+) -> CabOut
+where
+    F: Fn(&[f64], &[f64]) -> Vec<f64>,
+{
+    let m = ydata.len();
+
+    // Classify parameters into the free set (silx: CFREE/CPOSITIVE always free,
+    // CQUOTED free only when in bounds; others held/derived/ignored).
+    let mut fitparam: Vec<f64> = Vec::new();
+    let mut free_index: Vec<usize> = Vec::new();
+    let mut noigno: Vec<usize> = Vec::new();
+    let mut derivfactor: Vec<f64> = Vec::new();
+    for (i, c) in constraints.iter().enumerate() {
+        if !matches!(c, Constraint::Ignored) {
+            noigno.push(i);
+        }
+        match *c {
+            Constraint::Free => {
+                fitparam.push(parameters[i]);
+                derivfactor.push(1.0);
+                free_index.push(i);
+            }
+            Constraint::Positive => {
+                fitparam.push(parameters[i].abs());
+                derivfactor.push(1.0);
+                free_index.push(i);
+            }
+            Constraint::Quoted { min, max } => {
+                let pmax = min.max(max);
+                let pmin = min.min(max);
+                if (pmax - pmin) > 0.0 && parameters[i] <= pmax && parameters[i] >= pmin {
+                    let a = 0.5 * (pmax + pmin);
+                    let b = 0.5 * (pmax - pmin);
+                    fitparam.push(parameters[i]);
+                    derivfactor.push(b * ((parameters[i] - a) / b).asin().cos());
+                    free_index.push(i);
+                }
+                // Out of bounds: kept at its start value (not fitted).
+            }
+            _ => {}
+        }
+    }
+    let n_free = fitparam.len();
+
+    // delta[i] = (fitparam[i] + (fitparam[i]==0)) * sqrt(epsfcn).
+    let delta: Vec<f64> = fitparam
+        .iter()
+        .map(|&p| (p + if p == 0.0 { 1.0 } else { 0.0 }) * sqrt_epsfcn)
+        .collect();
+
+    // pwork is the full parameter vector with the free values substituted in.
+    let mut pwork = parameters.to_vec();
+    for (i, &fi) in free_index.iter().enumerate() {
+        pwork[fi] = fitparam[i];
+    }
+
+    // Base evaluation (silx f2 / yfit). We use one constraint-expanded base for
+    // both the derivative reference and the residual, so the forward difference
+    // is self-consistent; this matches silx's `model(*parameters)` exactly when
+    // nothing is ignored and the start is in-domain (the practical case).
+    let yfit: Vec<f64> = match last_evaluation {
+        Some(ev) => ev.to_vec(),
+        None => {
+            let base_in = take(&get_parameters(&pwork, constraints), &noigno);
+            let ev = model(xdata, &base_in);
+            *nfev += 1;
+            ev
+        }
+    };
+
+    // Numerical forward derivatives for each free parameter, scaled by
+    // derivfactor (CQUOTED `B·cos`, else 1).
+    let mut deriv: Vec<Vec<f64>> = Vec::with_capacity(n_free);
+    for i in 0..n_free {
+        let fi = free_index[i];
+        pwork[fi] = fitparam[i] + delta[i];
+        let newpar = take(&get_parameters(&pwork, constraints), &noigno);
+        let f1 = model(xdata, &newpar);
+        *nfev += 1;
+        let di = delta[i];
+        let df = derivfactor[i];
+        let row: Vec<f64> = f1
+            .iter()
+            .zip(yfit.iter())
+            .map(|(&a, &b)| (a - b) / di * df)
+            .collect();
+        deriv.push(row);
+        pwork[fi] = fitparam[i]; // restore
+    }
+
+    let deltay: Vec<f64> = ydata
+        .iter()
+        .zip(yfit.iter())
+        .map(|(&y, &f)| y - f)
+        .collect();
+    let help0: Vec<f64> = weight0
+        .iter()
+        .zip(deltay.iter())
+        .map(|(&w, &d)| w * d)
+        .collect();
+    let mut beta = vec![0.0_f64; n_free];
+    for (i, b) in beta.iter_mut().enumerate() {
+        let mut s = 0.0;
+        for j in 0..m {
+            s += help0[j] * deriv[i][j];
+        }
+        *b = s;
+    }
+    let mut alpha = vec![vec![0.0_f64; n_free]; n_free];
+    for i in 0..n_free {
+        for k in 0..n_free {
+            let mut s = 0.0;
+            for j in 0..m {
+                s += deriv[i][j] * weight0[j] * deriv[k][j];
+            }
+            alpha[i][k] = s;
+        }
+    }
+    let chisq = help0.iter().zip(deltay.iter()).map(|(&h, &d)| h * d).sum();
+
+    CabOut {
+        chisq,
+        alpha,
+        beta,
+        n_free,
+        free_index,
+        noigno,
+        fitparam,
+    }
+}
+
+/// Run a constrained Levenberg-Marquardt least-squares fit (silx `leastsq` with
+/// a non-`None` `constraints`).
+///
+/// `constraints` has one entry per parameter in `p0`. Free / Positive /
+/// in-bounds Quoted parameters are varied; Fixed parameters are held at their
+/// start (and receive 100 % uncertainty); Factor / Delta / Sum parameters are
+/// derived from another parameter each step; Ignored parameters are set to 0 and
+/// dropped from the model call (the model must accept the reduced count). When
+/// every entry is [`Constraint::Free`] this matches an unconstrained fit except
+/// that the covariance is recomputed at the final parameters (silx's second
+/// `chisq_alpha_beta` pass).
+///
+/// The non-finite check, weighting, LM damping and convergence test match
+/// [`leastsq`]; only the per-step parameter handling differs.
+#[allow(clippy::too_many_arguments)]
+pub fn leastsq_constrained<F>(
+    model: F,
+    xdata: &[f64],
+    ydata: &[f64],
+    p0: &[f64],
+    constraints: &[Constraint],
+    sigma: Option<&[f64]>,
+    max_iter: usize,
+    deltachi: f64,
+) -> Result<LeastSqResult, FitError>
+where
+    F: Fn(&[f64], &[f64]) -> Vec<f64>,
+{
+    if xdata.len() != ydata.len() {
+        return Err(FitError::LengthMismatch);
+    }
+    let n_param = p0.len();
+    if n_param == 0 {
+        return Err(FitError::NoFreeParameters);
+    }
+    if constraints.len() != n_param {
+        return Err(FitError::BadConstraintReference);
+    }
+    let m = ydata.len();
+    if m < 1 {
+        return Err(FitError::NotEnoughData);
+    }
+    if xdata.iter().chain(ydata.iter()).any(|v| !v.is_finite()) {
+        return Err(FitError::NonFinite);
+    }
+    // Validate Factor/Delta/Sum references and reject equal-bound Quoted.
+    for c in constraints {
+        match *c {
+            Constraint::Factor { reference, .. }
+            | Constraint::Delta { reference, .. }
+            | Constraint::Sum { reference, .. } => {
+                if reference >= n_param {
+                    return Err(FitError::BadConstraintReference);
+                }
+            }
+            Constraint::Quoted { min, max } => {
+                if (min.max(max) - min.min(max)) == 0.0 {
+                    return Err(FitError::InvalidConstraint);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let weight0: Vec<f64> = match sigma {
+        Some(s) => {
+            if s.len() != m {
+                return Err(FitError::LengthMismatch);
+            }
+            if s.iter().any(|v| !v.is_finite()) {
+                return Err(FitError::NonFinite);
+            }
+            s.iter()
+                .map(|&sv| {
+                    let denom = if sv == 0.0 { 1.0 } else { sv };
+                    let w = 1.0 / denom;
+                    w * w
+                })
+                .collect()
+        }
+        None => vec![1.0; m],
+    };
+
+    let epsfcn = f64::EPSILON;
+    let sqrt_epsfcn = epsfcn.sqrt();
+
+    // Count the initial free set so `alpha0` is sized even if no iteration runs
+    // (max_iter == 0); also enforces silx's "No free parameters to fit".
+    let n_free_initial = constraints
+        .iter()
+        .enumerate()
+        .filter(|(i, c)| match **c {
+            Constraint::Free | Constraint::Positive => true,
+            Constraint::Quoted { min, max } => {
+                let (pmax, pmin) = (min.max(max), min.min(max));
+                (pmax - pmin) > 0.0 && p0[*i] <= pmax && p0[*i] >= pmin
+            }
+            _ => false,
+        })
+        .count();
+    if n_free_initial == 0 {
+        return Err(FitError::NoFreeParameters);
+    }
+
+    let mut fittedpar = p0.to_vec();
+    let mut flambda = 0.001_f64;
+    let mut iiter = max_iter as i64;
+    let mut last_evaluation: Option<Vec<f64>> = None;
+    let mut iteration_counter: usize = 0;
+    let mut nfev: usize = 0;
+
+    let mut alpha0: Vec<Vec<f64>> = vec![vec![0.0; n_free_initial]; n_free_initial];
+    let mut n_free_final = n_free_initial;
+
+    loop {
+        if iiter <= 0 {
+            break;
+        }
+        iteration_counter += 1;
+
+        let cab = chisq_alpha_beta_constrained(
+            &model,
+            &fittedpar,
+            xdata,
+            ydata,
+            &weight0,
+            constraints,
+            sqrt_epsfcn,
+            last_evaluation.as_deref(),
+            &mut nfev,
+        );
+        let chisq0 = cab.chisq;
+        alpha0 = cab.alpha.clone();
+        n_free_final = cab.n_free;
+        let beta = &cab.beta;
+        let free_index = &cab.free_index;
+        let noigno = &cab.noigno;
+        let fitparam = &cab.fitparam;
+        if cab.n_free == 0 {
+            return Err(FitError::NoFreeParameters);
+        }
+
+        loop {
+            let mut alpha_lm = alpha0.clone();
+            for (d, row) in alpha_lm.iter_mut().enumerate() {
+                row[d] *= 1.0 + flambda;
+            }
+            let inv_alpha = match invert_matrix(&alpha_lm) {
+                Some(inv) => inv,
+                None => {
+                    flambda *= 10.0;
+                    if flambda > 1000.0 {
+                        iiter = 0;
+                        break;
+                    }
+                    continue;
+                }
+            };
+            // deltapar = beta · inv_alpha (free-parameter space).
+            let mut deltapar = vec![0.0_f64; cab.n_free];
+            for (k, dp) in deltapar.iter_mut().enumerate() {
+                let mut s = 0.0;
+                for (i, &b) in beta.iter().enumerate() {
+                    s += b * inv_alpha[i][k];
+                }
+                *dp = s;
+            }
+            // Rebuild the full parameter vector: Fixed/derived entries come from
+            // the original p0 template, free entries take the LM step (Quoted via
+            // the sin reparametrisation), then get_parameters applies the
+            // dependent relations.
+            let mut newpar = p0.to_vec();
+            for (i, &fi) in free_index.iter().enumerate() {
+                let pv = match constraints[fi] {
+                    Constraint::Quoted { min, max } => {
+                        let pmax = min.max(max);
+                        let pmin = min.min(max);
+                        let a = 0.5 * (pmax + pmin);
+                        let b = 0.5 * (pmax - pmin);
+                        a + b * (((fitparam[i] - a) / b).asin() + deltapar[i]).sin()
+                    }
+                    // Free and Positive both step additively; Positive's abs is
+                    // applied by get_parameters below.
+                    _ => fitparam[i] + deltapar[i],
+                };
+                newpar[fi] = pv;
+            }
+            let newpar = get_parameters(&newpar, constraints);
+            let workpar = take(&newpar, noigno);
+            let yfit = model(xdata, &workpar);
+            nfev += 1;
+            let chisq: f64 = weight0
+                .iter()
+                .zip(ydata.iter().zip(yfit.iter()))
+                .map(|(&w, (&y, &f))| {
+                    let r = y - f;
+                    w * r * r
+                })
+                .sum();
+            let absdeltachi = chisq0 - chisq;
+            if absdeltachi < 0.0 {
+                flambda *= 10.0;
+                if flambda > 1000.0 {
+                    iiter = 0;
+                    break;
+                }
+            } else {
+                fittedpar = newpar;
+                let lastdeltachi =
+                    100.0 * (absdeltachi / (chisq + if chisq == 0.0 { 1.0 } else { 0.0 }));
+                if iteration_counter >= 2 && (lastdeltachi < deltachi || absdeltachi < sqrt_epsfcn)
+                {
+                    iiter = 0;
+                }
+                flambda /= 10.0;
+                last_evaluation = Some(yfit);
+                break;
+            }
+        }
+        iiter -= 1;
+    }
+
+    // cov0 = inv(alpha0): the free-space covariance (silx).
+    let cov0 = invert_matrix(&alpha0).ok_or(FitError::SingularMatrix)?;
+
+    // Second pass: every non-fixed/ignored parameter becomes Free, recompute the
+    // curvature at the final parameters and invert for the reported covariance;
+    // fixed/ignored parameters get a zero row/col and a 100 % diagonal.
+    let new_constraints: Vec<Constraint> = constraints
+        .iter()
+        .map(|c| match c {
+            Constraint::Fixed | Constraint::Ignored => *c,
+            _ => Constraint::Free,
+        })
+        .collect();
+    let cab2 = chisq_alpha_beta_constrained(
+        &model,
+        &fittedpar,
+        xdata,
+        ydata,
+        &weight0,
+        &new_constraints,
+        sqrt_epsfcn,
+        last_evaluation.as_deref(),
+        &mut nfev,
+    );
+    let mut covariance = vec![vec![0.0_f64; n_param]; n_param];
+    if let Some(cov_free) = invert_matrix(&cab2.alpha) {
+        for (r, &pr) in cab2.free_index.iter().enumerate() {
+            for (cc, &pc) in cab2.free_index.iter().enumerate() {
+                covariance[pr][pc] = cov_free[r][cc];
+            }
+        }
+    }
+    for (idx, c) in constraints.iter().enumerate() {
+        if matches!(c, Constraint::Fixed | Constraint::Ignored) {
+            covariance[idx][idx] = fittedpar[idx] * fittedpar[idx];
+        }
+    }
+
+    // Uncertainties: sigma0 = sqrt(abs(diag(cov0))) over the free parameters,
+    // propagated through the constraints (silx _get_sigma_parameters).
+    let sigma0: Vec<f64> = (0..n_free_final).map(|i| cov0[i][i].abs().sqrt()).collect();
+    let uncertainties = get_sigma_parameters(&fittedpar, &sigma0, constraints);
+
+    // Final chi-square at the converged parameters.
+    let workpar = take(&get_parameters(&fittedpar, constraints), &cab2.noigno);
+    let yfit_final = model(xdata, &workpar);
+    nfev += 1;
+    let chisq_final: f64 = weight0
+        .iter()
+        .zip(ydata.iter().zip(yfit_final.iter()))
+        .map(|(&w, (&y, &f))| {
+            let r = y - f;
+            w * r * r
+        })
+        .sum();
+    let dof = m as i64 - n_free_final as i64;
+    let reduced_chisq = if dof > 0 {
+        Some(chisq_final / dof as f64)
+    } else {
+        None
+    };
+
+    Ok(LeastSqResult {
+        parameters: fittedpar,
+        covariance,
+        uncertainties,
         chisq: chisq_final,
         reduced_chisq,
         niter: iteration_counter,
@@ -1430,6 +2033,7 @@ mod tests {
                 vec![0.1, 9.0, 0.2],
                 vec![0.0, 0.2, 16.0],
             ],
+            uncertainties: vec![2.0, 3.0, 4.0],
             chisq: 0.0,
             reduced_chisq: Some(0.0),
             niter: 1,
@@ -1447,6 +2051,7 @@ mod tests {
         let res = LeastSqResult {
             parameters: vec![1.0],
             covariance: vec![vec![-1e-15]],
+            uncertainties: vec![0.0],
             chisq: 0.0,
             reduced_chisq: None,
             niter: 0,
@@ -1493,6 +2098,352 @@ mod tests {
         assert!((c - 8.0).abs() < 0.2, "center seed {}", c);
         assert!((f - 2.0).abs() < 0.5, "fwhm seed {}", f);
         assert!((bg - 0.5).abs() < 0.1, "bg seed {}", bg);
+    }
+
+    // --- Constrained leastsq (silx constraint codes) -----------------------
+
+    // Straight line y = p[0]*x + p[1].
+    fn line(x: &[f64], p: &[f64]) -> Vec<f64> {
+        x.iter().map(|&xi| p[0] * xi + p[1]).collect()
+    }
+    // Constant y = p[0].
+    fn constant(x: &[f64], p: &[f64]) -> Vec<f64> {
+        vec![p[0]; x.len()]
+    }
+
+    #[test]
+    fn constrained_all_free_matches_unconstrained() {
+        let xs = linspace(-5.0, 5.0, 21);
+        let ys: Vec<f64> = xs.iter().map(|&x| 2.5 * x - 1.0).collect();
+        let free = leastsq_constrained(
+            line,
+            &xs,
+            &ys,
+            &[0.0, 0.0],
+            &[Constraint::Free, Constraint::Free],
+            None,
+            DEFAULT_MAX_ITER,
+            DEFAULT_DELTACHI,
+        )
+        .unwrap();
+        let plain = leastsq(
+            line,
+            &xs,
+            &ys,
+            &[0.0, 0.0],
+            None,
+            DEFAULT_MAX_ITER,
+            DEFAULT_DELTACHI,
+        )
+        .unwrap();
+        assert!((free.parameters[0] - plain.parameters[0]).abs() < 1e-6);
+        assert!((free.parameters[1] - plain.parameters[1]).abs() < 1e-6);
+        assert!((free.parameters[0] - 2.5).abs() < 1e-6);
+        assert!((free.parameters[1] + 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn constrained_fixed_holds_parameter() {
+        let xs = linspace(-5.0, 5.0, 21);
+        let ys: Vec<f64> = xs.iter().map(|&x| 2.5 * x - 1.0).collect();
+        // b fixed at its true value -1.0; only a is fitted and must recover 2.5.
+        let res = leastsq_constrained(
+            line,
+            &xs,
+            &ys,
+            &[0.0, -1.0],
+            &[Constraint::Free, Constraint::Fixed],
+            None,
+            DEFAULT_MAX_ITER,
+            DEFAULT_DELTACHI,
+        )
+        .unwrap();
+        assert_eq!(res.parameters[1], -1.0, "fixed b must not move");
+        assert!(
+            (res.parameters[0] - 2.5).abs() < 1e-6,
+            "a {}",
+            res.parameters[0]
+        );
+    }
+
+    #[test]
+    fn constrained_fixed_gets_full_uncertainty() {
+        let xs = linspace(-5.0, 5.0, 21);
+        let ys: Vec<f64> = xs.iter().map(|&x| 2.5 * x - 1.0).collect();
+        let res = leastsq_constrained(
+            line,
+            &xs,
+            &ys,
+            &[0.0, -1.0],
+            &[Constraint::Free, Constraint::Fixed],
+            None,
+            DEFAULT_MAX_ITER,
+            DEFAULT_DELTACHI,
+        )
+        .unwrap();
+        // silx: fixed parameter gets covariance diag = value^2 and uncertainty = value.
+        assert_eq!(res.uncertainties[1], res.parameters[1]);
+        assert!((res.covariance[1][1] - res.parameters[1] * res.parameters[1]).abs() < 1e-12);
+    }
+
+    #[test]
+    fn constrained_positive_enforces_and_recovers() {
+        let xs = linspace(0.0, 10.0, 21);
+        // Negative target: the abs reparametrisation keeps the parameter
+        // non-negative, so it can never reach -3 and the residual stays large.
+        let neg: Vec<f64> = vec![-3.0; xs.len()];
+        let r_neg = leastsq_constrained(
+            constant,
+            &xs,
+            &neg,
+            &[1.0],
+            &[Constraint::Positive],
+            None,
+            DEFAULT_MAX_ITER,
+            DEFAULT_DELTACHI,
+        )
+        .unwrap();
+        assert!(
+            r_neg.parameters[0] >= 0.0,
+            "positive violated: {}",
+            r_neg.parameters[0]
+        );
+        assert!(
+            r_neg.chisq > 1.0,
+            "constraint should prevent fitting the negative target, chisq {}",
+            r_neg.chisq
+        );
+        // Positive target: behaves like a normal fit, recovering 4.
+        let pos: Vec<f64> = vec![4.0; xs.len()];
+        let r_pos = leastsq_constrained(
+            constant,
+            &xs,
+            &pos,
+            &[1.0],
+            &[Constraint::Positive],
+            None,
+            DEFAULT_MAX_ITER,
+            DEFAULT_DELTACHI,
+        )
+        .unwrap();
+        assert!(
+            (r_pos.parameters[0] - 4.0).abs() < 0.1,
+            "recover {}",
+            r_pos.parameters[0]
+        );
+    }
+
+    #[test]
+    fn constrained_quoted_clamps_to_bounds() {
+        let xs = linspace(0.0, 10.0, 21);
+        // Target 10 is above the [0,5] bound: the fit saturates near 5.
+        let high: Vec<f64> = vec![10.0; xs.len()];
+        let r_hi = leastsq_constrained(
+            constant,
+            &xs,
+            &high,
+            &[2.5],
+            &[Constraint::Quoted { min: 0.0, max: 5.0 }],
+            None,
+            DEFAULT_MAX_ITER,
+            DEFAULT_DELTACHI,
+        )
+        .unwrap();
+        assert!(
+            (0.0..=5.0).contains(&r_hi.parameters[0]),
+            "out of bounds: {}",
+            r_hi.parameters[0]
+        );
+        assert!(
+            r_hi.parameters[0] > 4.5,
+            "did not saturate near 5: {}",
+            r_hi.parameters[0]
+        );
+        // Target 3 is inside the bound and is recovered.
+        let mid: Vec<f64> = vec![3.0; xs.len()];
+        let r_mid = leastsq_constrained(
+            constant,
+            &xs,
+            &mid,
+            &[2.5],
+            &[Constraint::Quoted { min: 0.0, max: 5.0 }],
+            None,
+            DEFAULT_MAX_ITER,
+            DEFAULT_DELTACHI,
+        )
+        .unwrap();
+        assert!(
+            (r_mid.parameters[0] - 3.0).abs() < 0.05,
+            "recover {}",
+            r_mid.parameters[0]
+        );
+    }
+
+    #[test]
+    fn constrained_factor_ties_parameters() {
+        let xs = linspace(-5.0, 5.0, 21);
+        // y = a*x + b with b = 2*a; true a = 3 => b = 6.
+        let ys: Vec<f64> = xs.iter().map(|&x| 3.0 * x + 6.0).collect();
+        let res = leastsq_constrained(
+            line,
+            &xs,
+            &ys,
+            &[1.0, 0.0],
+            &[
+                Constraint::Free,
+                Constraint::Factor {
+                    reference: 0,
+                    factor: 2.0,
+                },
+            ],
+            None,
+            DEFAULT_MAX_ITER,
+            DEFAULT_DELTACHI,
+        )
+        .unwrap();
+        assert!(
+            (res.parameters[0] - 3.0).abs() < 1e-4,
+            "a {}",
+            res.parameters[0]
+        );
+        assert!(
+            (res.parameters[1] - 6.0).abs() < 1e-4,
+            "b {}",
+            res.parameters[1]
+        );
+        assert!(
+            (res.parameters[1] - 2.0 * res.parameters[0]).abs() < 1e-9,
+            "tie broken"
+        );
+    }
+
+    #[test]
+    fn constrained_delta_ties_parameters() {
+        let xs = linspace(-5.0, 5.0, 21);
+        // b = a + 5; true a = 2 => b = 7.
+        let ys: Vec<f64> = xs.iter().map(|&x| 2.0 * x + 7.0).collect();
+        let res = leastsq_constrained(
+            line,
+            &xs,
+            &ys,
+            &[0.0, 0.0],
+            &[
+                Constraint::Free,
+                Constraint::Delta {
+                    reference: 0,
+                    delta: 5.0,
+                },
+            ],
+            None,
+            DEFAULT_MAX_ITER,
+            DEFAULT_DELTACHI,
+        )
+        .unwrap();
+        assert!(
+            (res.parameters[0] - 2.0).abs() < 1e-4,
+            "a {}",
+            res.parameters[0]
+        );
+        assert!(
+            (res.parameters[1] - res.parameters[0] - 5.0).abs() < 1e-9,
+            "tie broken"
+        );
+    }
+
+    #[test]
+    fn constrained_sum_ties_parameters() {
+        let xs = linspace(-5.0, 5.0, 21);
+        // b = 10 - a; true a = 4 => b = 6.
+        let ys: Vec<f64> = xs.iter().map(|&x| 4.0 * x + 6.0).collect();
+        let res = leastsq_constrained(
+            line,
+            &xs,
+            &ys,
+            &[0.0, 0.0],
+            &[
+                Constraint::Free,
+                Constraint::Sum {
+                    reference: 0,
+                    sum: 10.0,
+                },
+            ],
+            None,
+            DEFAULT_MAX_ITER,
+            DEFAULT_DELTACHI,
+        )
+        .unwrap();
+        assert!(
+            (res.parameters[0] - 4.0).abs() < 1e-4,
+            "a {}",
+            res.parameters[0]
+        );
+        assert!(
+            (res.parameters[0] + res.parameters[1] - 10.0).abs() < 1e-9,
+            "tie broken"
+        );
+    }
+
+    #[test]
+    fn constrained_rejects_bad_spec() {
+        let xs = linspace(0.0, 4.0, 5);
+        let ys = vec![1.0; 5];
+        // constraints length mismatch.
+        assert_eq!(
+            leastsq_constrained(constant, &xs, &ys, &[1.0], &[], None, 10, DEFAULT_DELTACHI)
+                .unwrap_err(),
+            FitError::BadConstraintReference
+        );
+        // equal Quoted bounds (B == 0).
+        assert_eq!(
+            leastsq_constrained(
+                constant,
+                &xs,
+                &ys,
+                &[1.0],
+                &[Constraint::Quoted { min: 5.0, max: 5.0 }],
+                None,
+                10,
+                DEFAULT_DELTACHI,
+            )
+            .unwrap_err(),
+            FitError::InvalidConstraint
+        );
+        // Factor referencing a non-existent parameter.
+        assert_eq!(
+            leastsq_constrained(
+                line,
+                &xs,
+                &ys,
+                &[1.0, 0.0],
+                &[
+                    Constraint::Free,
+                    Constraint::Factor {
+                        reference: 9,
+                        factor: 2.0
+                    }
+                ],
+                None,
+                10,
+                DEFAULT_DELTACHI,
+            )
+            .unwrap_err(),
+            FitError::BadConstraintReference
+        );
+        // No free parameters at all.
+        assert_eq!(
+            leastsq_constrained(
+                line,
+                &xs,
+                &ys,
+                &[1.0, 2.0],
+                &[Constraint::Fixed, Constraint::Fixed],
+                None,
+                10,
+                DEFAULT_DELTACHI,
+            )
+            .unwrap_err(),
+            FitError::NoFreeParameters
+        );
     }
 
     // --- Non-peak theories: erf, step/slit/atan models, estimators ---------

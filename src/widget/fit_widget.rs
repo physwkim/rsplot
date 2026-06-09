@@ -521,6 +521,7 @@ mod tests {
         let res = LeastSqResult {
             parameters: vec![1.0, 2.0],
             covariance: vec![vec![9.0, 0.0], vec![0.0, 25.0]],
+            uncertainties: vec![3.0, 5.0],
             chisq: 0.0,
             reduced_chisq: Some(0.0),
             niter: 1,

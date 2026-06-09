@@ -33,12 +33,13 @@ pub use crate::core::dtime_ticks::{
     calc_ticks_tz, format_tick, format_tick_tz, format_ticks, format_ticks_tz,
 };
 pub use crate::core::fitting::{
-    DEFAULT_DELTACHI, DEFAULT_MAX_ITER, FitError, FitFunction, FitResult, GaussianEstimateFit,
-    IterativeFit, IterativeFitResult, LOG2, LeastSqResult, LinearFit, PeakModel, atan_stepup_model,
-    estimate_atan_stepup, estimate_gaussian, estimate_gaussian_area, estimate_height_position_fwhm,
-    estimate_lorentzian, estimate_pseudo_voigt, estimate_slit, estimate_stepdown, estimate_stepup,
-    fit_in_range, fwhm_to_sigma_factor, gaussian_area_model, gaussian_model, invert_matrix,
-    leastsq, lorentzian_model, pseudo_voigt_model, slit_model, stepdown_model, stepup_model,
+    Constraint, DEFAULT_DELTACHI, DEFAULT_MAX_ITER, FitError, FitFunction, FitResult,
+    GaussianEstimateFit, IterativeFit, IterativeFitResult, LOG2, LeastSqResult, LinearFit,
+    PeakModel, atan_stepup_model, estimate_atan_stepup, estimate_gaussian, estimate_gaussian_area,
+    estimate_height_position_fwhm, estimate_lorentzian, estimate_pseudo_voigt, estimate_slit,
+    estimate_stepdown, estimate_stepup, fit_in_range, fwhm_to_sigma_factor, gaussian_area_model,
+    gaussian_model, invert_matrix, leastsq, leastsq_constrained, lorentzian_model,
+    pseudo_voigt_model, slit_model, stepdown_model, stepup_model,
 };
 pub use crate::core::items::{Baseline, ErrorBars, LineStyle, ScalarMask, Symbol};
 pub use crate::core::marker::{
