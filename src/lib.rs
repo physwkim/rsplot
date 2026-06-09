@@ -57,6 +57,7 @@ pub use crate::core::plot::{
     resolved_axis_label,
 };
 pub use crate::core::roi::{BandLines, ManagedRoi, Roi, RoiEdge, RoiLineStyle};
+pub use crate::core::roi_io::{RoiIoError, decode_rois, encode_rois, load_rois, save_rois};
 pub use crate::core::scatter_viz::{
     BinnedStatistic, BinnedStatisticFunction, GridImage, GridMajorOrder, PointsViz, RegularGrid,
     ScatterLineProfile, Triangulation, binned_statistic, delaunay, detect_regular_grid,
