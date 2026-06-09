@@ -9849,6 +9849,99 @@ pub fn stack_frame(
     Some((width as u32, height as u32, pixels))
 }
 
+/// A profile extracted from every frame of a 3D stack — the 2D "profile over
+/// stack" of silx `ProfileImageStack*` ROIs (`tools/profile/rois.py:1058-1165`).
+///
+/// One 1D profile is taken from each frame along the browsed dimension and the
+/// rows are stacked, giving a 2D image of shape `(frame_count, profile_len)` in
+/// row-major order: `values[frame * profile_len + position]`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StackProfile {
+    /// Number of frames profiled (the browsed-dimension length).
+    pub frame_count: usize,
+    /// Samples per single-frame profile.
+    pub profile_len: usize,
+    /// Stacked profiles, row-major `[frame, position]`.
+    pub values: Vec<f64>,
+}
+
+/// Apply a single-frame profile extractor to every frame of a stack and stack
+/// the results — the pure core behind [`stack_aligned_profile`] /
+/// [`stack_line_profile`], mirroring silx `ProfileImageStack*`.
+///
+/// Returns `None` if `data` does not match `shape`, the stack is empty, any
+/// frame fails to slice/extract, or the per-frame profiles are not all the same
+/// length.
+fn stack_profile_with<F>(
+    data: &[f32],
+    shape: [usize; 3],
+    perspective: StackPerspective,
+    mut extract: F,
+) -> Option<StackProfile>
+where
+    F: FnMut(u32, u32, &[f32]) -> Option<Vec<f64>>,
+{
+    let frame_count = stack_frame_count(shape, perspective);
+    if frame_count == 0 {
+        return None;
+    }
+    let mut values: Vec<f64> = Vec::new();
+    let mut profile_len: Option<usize> = None;
+    for index in 0..frame_count {
+        let (w, h, pixels) = stack_frame(data, shape, perspective, index)?;
+        let profile = extract(w, h, &pixels)?;
+        match profile_len {
+            None => profile_len = Some(profile.len()),
+            Some(len) if len != profile.len() => return None,
+            _ => {}
+        }
+        values.extend(profile);
+    }
+    Some(StackProfile {
+        frame_count,
+        profile_len: profile_len.unwrap_or(0),
+        values,
+    })
+}
+
+/// Stack an axis-aligned band profile over every frame (silx
+/// `ProfileImageStackHorizontalLineROI` / `...VerticalLineROI`).
+///
+/// Each frame is profiled with [`aligned_profile_values`] (`position`,
+/// `roi_width`, `horizontal`, `method`); see that function for the band-placement
+/// rule. Returns `None` on a stack/shape mismatch.
+pub fn stack_aligned_profile(
+    data: &[f32],
+    shape: [usize; 3],
+    perspective: StackPerspective,
+    position: f64,
+    roi_width: u32,
+    horizontal: bool,
+    method: ProfileMethod,
+) -> Option<StackProfile> {
+    stack_profile_with(data, shape, perspective, |w, h, pixels| {
+        aligned_profile_values(w, h, pixels, position, roi_width, horizontal, method).ok()
+    })
+}
+
+/// Stack a line-segment profile over every frame (silx
+/// `ProfileImageStackLineROI`), using [`line_profile_values`] per frame.
+pub fn stack_line_profile(
+    data: &[f32],
+    shape: [usize; 3],
+    perspective: StackPerspective,
+    start: (f64, f64),
+    end: (f64, f64),
+) -> Option<StackProfile> {
+    stack_profile_with(data, shape, perspective, |w, h, pixels| {
+        // line_profile_values returns (arc positions, sampled values); stack the
+        // sampled values.
+        line_profile_values(w, h, pixels, start, end)
+            .ok()
+            .map(|(_positions, values)| values)
+    })
+}
+
 /// The default label for volume dimension `axis` — silx `"Dimension %d"`
 /// (with `_first_stack_dimension == 0`).
 pub fn default_dimension_label(axis: usize) -> String {
@@ -10418,6 +10511,84 @@ mod tests {
         assert!(stack_frame(&data[..23], shape, StackPerspective::Axis0, 0).is_none());
         // Index past the browsed dimension (d0 == 2, so index 2 is out of range).
         assert!(stack_frame(&data, shape, StackPerspective::Axis0, 2).is_none());
+    }
+
+    #[test]
+    fn stack_aligned_profile_horizontal_stacks_each_frame_row() {
+        let (data, shape) = sample_volume(); // [2,3,4], value = 100*i + 10*j + k
+        // Axis0: 2 frames (i), each 3 rows (j) × 4 cols (k). Row 1 of every frame.
+        let sp = stack_aligned_profile(
+            &data,
+            shape,
+            StackPerspective::Axis0,
+            1.0,
+            1,
+            true,
+            ProfileMethod::Mean,
+        )
+        .unwrap();
+        assert_eq!(sp.frame_count, 2);
+        assert_eq!(sp.profile_len, 4);
+        // Frame 0 row 1 = [10,11,12,13]; frame 1 row 1 = [110,111,112,113].
+        assert_eq!(
+            sp.values,
+            vec![10.0, 11.0, 12.0, 13.0, 110.0, 111.0, 112.0, 113.0]
+        );
+    }
+
+    #[test]
+    fn stack_line_profile_separates_frames() {
+        let (data, shape) = sample_volume();
+        // A segment along row 0 from col 0 to col 3, profiled over both frames.
+        let sp = stack_line_profile(
+            &data,
+            shape,
+            StackPerspective::Axis0,
+            (0.0, 0.0),
+            (3.0, 0.0),
+        )
+        .unwrap();
+        assert_eq!(sp.frame_count, 2);
+        assert!(sp.profile_len > 0);
+        assert_eq!(sp.values.len(), 2 * sp.profile_len);
+        // Frame 0 values come from the 0..23 block, frame 1 from 100..123.
+        let (frame0, frame1) = sp.values.split_at(sp.profile_len);
+        assert!(frame0.iter().all(|&v| v < 100.0), "frame0 {frame0:?}");
+        assert!(frame1.iter().all(|&v| v >= 100.0), "frame1 {frame1:?}");
+    }
+
+    #[test]
+    fn stack_profile_rejects_shape_mismatch() {
+        let (data, shape) = sample_volume();
+        assert!(
+            stack_aligned_profile(
+                &data[..23],
+                shape,
+                StackPerspective::Axis0,
+                1.0,
+                1,
+                true,
+                ProfileMethod::Mean,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn stack_profile_empty_stack_is_none() {
+        // A browsed dimension of length 0 yields no frames.
+        assert!(
+            stack_aligned_profile(
+                &[],
+                [0, 3, 4],
+                StackPerspective::Axis0,
+                0.0,
+                1,
+                true,
+                ProfileMethod::Mean,
+            )
+            .is_none()
+        );
     }
 
     #[test]
