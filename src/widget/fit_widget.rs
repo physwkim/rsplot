@@ -7,8 +7,9 @@ use crate::core::background::{
     DEFAULT_STRIP_WIDTH,
 };
 use crate::core::fitting::{
-    DEFAULT_DELTACHI, DEFAULT_MAX_ITER, FitFunction, FitResult, GaussianEstimateFit, IterativeFit,
-    IterativeFitResult, LinearFit, PeakModel, fit_multi_gaussian_full, fit_peak_with_background,
+    Constraint, DEFAULT_DELTACHI, DEFAULT_MAX_ITER, FitFunction, FitResult, GaussianEstimateFit,
+    IterativeFit, IterativeFitResult, LinearFit, PeakModel, fit_multi_gaussian_full,
+    fit_peak_constrained, fit_peak_with_background,
 };
 use crate::core::peaks::{DEFAULT_PEAK_SENSITIVITY, guess_fwhm};
 use crate::core::plot::PlotId;
@@ -93,6 +94,29 @@ fn background_label(background: Background) -> &'static str {
         .map(|(_, label)| *label)
         .unwrap_or_else(|| background.name())
 }
+
+/// silx `Parameters.code_options` display string for a [`Constraint`].
+fn constraint_label(constraint: Constraint) -> &'static str {
+    match constraint {
+        Constraint::Free => "FREE",
+        Constraint::Positive => "POSITIVE",
+        Constraint::Quoted { .. } => "QUOTED",
+        Constraint::Fixed => "FIXED",
+        Constraint::Factor { .. } => "FACTOR",
+        Constraint::Delta { .. } => "DELTA",
+        Constraint::Sum { .. } => "SUM",
+        Constraint::Ignored => "IGNORE",
+    }
+}
+
+/// The per-parameter constraints offered by the [`FitWidget`] constraint editor.
+///
+/// This is the silx subset that needs no extra input — `FREE` / `POSITIVE` /
+/// `FIXED`. `QUOTED` (min/max fields) and `FACTOR` / `DELTA` / `SUM` (a
+/// reference-parameter picker) are supported by `core::fitting::leastsq_constrained`
+/// but not yet exposed in this combo.
+const UI_CONSTRAINT_CHOICES: [Constraint; 3] =
+    [Constraint::Free, Constraint::Positive, Constraint::Fixed];
 
 /// The selectable fit model in [`FitWidget`].
 ///
@@ -205,6 +229,10 @@ pub struct FitWidget {
     /// Background theory subtracted before an iterative peak fit (silx
     /// `FitWidget` background combo). `None` fits the raw data unchanged.
     background: Background,
+    /// Per-parameter constraints for the current single-peak model (silx
+    /// `FitWidget` parameter table). Resynced (cleared to all-`Free`) whenever
+    /// the selected model's parameter count changes; empty until first synced.
+    constraints: Vec<Constraint>,
 }
 
 impl FitWidget {
@@ -230,6 +258,7 @@ impl FitWidget {
             iterative_result: None,
             fit_range: None,
             background: Background::None,
+            constraints: Vec::new(),
         }
     }
 
@@ -268,6 +297,30 @@ impl FitWidget {
     /// reconstructed total curve.
     pub fn set_fit_background(&mut self, background: Background) {
         self.background = background;
+    }
+
+    /// The per-parameter constraints applied to the current single-peak model
+    /// (silx `FitWidget` parameter table). Empty until first synced.
+    pub fn param_constraints(&self) -> &[Constraint] {
+        &self.constraints
+    }
+
+    /// Set the per-parameter constraints for the current single-peak model. The
+    /// vector is resynced to all-`Free` if its length stops matching the
+    /// selected model's parameter count.
+    pub fn set_param_constraints(&mut self, constraints: Vec<Constraint>) {
+        self.constraints = constraints;
+    }
+
+    /// Ensure `self.constraints` has exactly `n` entries, resetting to all-`Free`
+    /// when the length differs (silx clears the parameter table on theory
+    /// change). Returns `true` when every entry is `Free` (the unconstrained
+    /// default, so the fit can take the original byte-identical path).
+    fn ensure_constraints_len(&mut self, n: usize) -> bool {
+        if self.constraints.len() != n {
+            self.constraints = vec![Constraint::Free; n];
+        }
+        self.constraints.iter().all(|c| *c == Constraint::Free)
     }
 
     /// The most recent iterative-fit result (covariance / chi-square), if the
@@ -390,18 +443,34 @@ impl FitWidget {
                     .peak_model()
                     .expect("non-analytical choice has a peak model");
                 match self.background {
-                    // No background: the original path, unchanged.
-                    Background::None => match IterativeFit::new(peak_model).fit_full(&xs, &ys) {
-                        Some(ir) => {
-                            let fit = ir.fit.clone();
-                            self.iterative_result = Some(ir);
-                            Some(fit)
+                    // No background: apply per-parameter constraints if any are
+                    // set, else the original unconstrained path (byte-identical).
+                    Background::None => {
+                        let all_free = self.ensure_constraints_len(peak_model.param_names().len());
+                        let fitted = if all_free {
+                            IterativeFit::new(peak_model).fit_full(&xs, &ys)
+                        } else {
+                            fit_peak_constrained(
+                                peak_model,
+                                &xs,
+                                &ys,
+                                &self.constraints,
+                                DEFAULT_MAX_ITER,
+                                DEFAULT_DELTACHI,
+                            )
+                        };
+                        match fitted {
+                            Some(ir) => {
+                                let fit = ir.fit.clone();
+                                self.iterative_result = Some(ir);
+                                Some(fit)
+                            }
+                            None => {
+                                self.iterative_result = None;
+                                None
+                            }
                         }
-                        None => {
-                            self.iterative_result = None;
-                            None
-                        }
-                    },
+                    }
                     // Background theory selected: fit the peak on the
                     // background-subtracted residual and draw the reconstructed
                     // total curve, keeping the peak's solver diagnostics for the
@@ -551,6 +620,39 @@ impl FitWidget {
                         ui.add(egui::DragValue::new(xmax).speed(0.1));
                     }
                 });
+
+                // Per-parameter constraints (silx `FitWidget` parameter table),
+                // shown for the single-peak iterative models. The FREE/POSITIVE/
+                // FIXED subset needs no extra input; other silx codes are core-
+                // supported but not yet exposed (see `UI_CONSTRAINT_CHOICES`).
+                if let Some(peak_model) = self.selected_choice.peak_model() {
+                    let names = peak_model.param_names();
+                    self.ensure_constraints_len(names.len());
+                    ui.collapsing("Constraints", |ui| {
+                        egui::Grid::new("fit_constraints_grid")
+                            .num_columns(2)
+                            .show(ui, |ui| {
+                                ui.label("Parameter");
+                                ui.label("Constraint");
+                                ui.end_row();
+                                for (i, name) in names.iter().enumerate() {
+                                    ui.label(name);
+                                    egui::ComboBox::from_id_salt(("fit_constraint_combo", i))
+                                        .selected_text(constraint_label(self.constraints[i]))
+                                        .show_ui(ui, |ui| {
+                                            for choice in UI_CONSTRAINT_CHOICES {
+                                                ui.selectable_value(
+                                                    &mut self.constraints[i],
+                                                    choice,
+                                                    constraint_label(choice),
+                                                );
+                                            }
+                                        });
+                                    ui.end_row();
+                                }
+                            });
+                    });
+                }
 
                 ui.separator();
 
@@ -741,6 +843,45 @@ mod tests {
         // A non-default parameterisation falls back to the generic name.
         let custom = Background::Polynomial { degree: 9 };
         assert_eq!(background_label(custom), custom.name());
+    }
+
+    #[test]
+    fn constraint_labels_match_silx_code_options() {
+        // silx `Parameters.code_options` display strings.
+        assert_eq!(constraint_label(Constraint::Free), "FREE");
+        assert_eq!(constraint_label(Constraint::Positive), "POSITIVE");
+        assert_eq!(
+            constraint_label(Constraint::Quoted { min: 0.0, max: 1.0 }),
+            "QUOTED"
+        );
+        assert_eq!(constraint_label(Constraint::Fixed), "FIXED");
+        assert_eq!(
+            constraint_label(Constraint::Factor {
+                reference: 0,
+                factor: 2.0
+            }),
+            "FACTOR"
+        );
+        assert_eq!(
+            constraint_label(Constraint::Delta {
+                reference: 0,
+                delta: 1.0
+            }),
+            "DELTA"
+        );
+        assert_eq!(
+            constraint_label(Constraint::Sum {
+                reference: 0,
+                sum: 1.0
+            }),
+            "SUM"
+        );
+        assert_eq!(constraint_label(Constraint::Ignored), "IGNORE");
+        // The UI exposes only the no-extra-input subset.
+        assert_eq!(
+            UI_CONSTRAINT_CHOICES,
+            [Constraint::Free, Constraint::Positive, Constraint::Fixed]
+        );
     }
 
     #[test]

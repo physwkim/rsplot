@@ -2023,6 +2023,44 @@ pub fn fit_multi_gaussian_full(
     Some(IterativeFitResult { fit, solver })
 }
 
+/// Fit a single [`PeakModel`] under per-parameter [`Constraint`]s, mirroring the
+/// silx FitWidget parameter table feeding `leastsq_constrained`.
+///
+/// Initial parameters come from [`PeakModel::estimate`]; `constraints` must have
+/// exactly one entry per model parameter (the order of [`PeakModel::param_names`]).
+/// Returns `None` on estimate/solver failure or a constraint-count mismatch.
+pub fn fit_peak_constrained(
+    model: PeakModel,
+    x: &[f64],
+    y: &[f64],
+    constraints: &[Constraint],
+    max_iter: usize,
+    deltachi: f64,
+) -> Option<IterativeFitResult> {
+    let p0 = model.estimate(x, y)?;
+    if constraints.len() != p0.len() {
+        return None;
+    }
+    let solver = leastsq_constrained(
+        |xx, pp| model.eval(xx, pp),
+        x,
+        y,
+        &p0,
+        constraints,
+        None,
+        max_iter,
+        deltachi,
+    )
+    .ok()?;
+    let y_fit = model.eval(x, &solver.parameters);
+    let fit = FitResult {
+        y_fit,
+        parameters: solver.parameters.clone(),
+        param_names: model.param_names(),
+    };
+    Some(IterativeFitResult { fit, solver })
+}
+
 /// Outcome of [`fit_peak_with_background`]: the peak fit on the
 /// background-subtracted residual, the estimated background curve, and the
 /// total displayed curve.
@@ -2835,6 +2873,64 @@ mod tests {
         // Both peaks recovered.
         assert!((nearest_peak(&ir.fit.parameters, 30.0)[1] - 30.0).abs() < 1.0);
         assert!((nearest_peak(&ir.fit.parameters, 70.0)[1] - 70.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn fit_peak_constrained_all_free_recovers_peak() {
+        let xs = grid(100);
+        let ys = gaussian_model(&xs, &[60.0, 45.0, 7.0, 5.0]);
+        let cons = vec![Constraint::Free; 4];
+        let ir = fit_peak_constrained(
+            PeakModel::Gaussian,
+            &xs,
+            &ys,
+            &cons,
+            DEFAULT_MAX_ITER,
+            DEFAULT_DELTACHI,
+        )
+        .unwrap();
+        let p = &ir.fit.parameters;
+        assert!((p[1] - 45.0).abs() < 1.0, "centre {}", p[1]);
+        assert!((p[2] - 7.0).abs() < 1.0, "fwhm {}", p[2]);
+        assert_eq!(ir.fit.param_names, PeakModel::Gaussian.param_names());
+    }
+
+    #[test]
+    fn fit_peak_constrained_fixed_holds_param_at_estimate() {
+        let xs = grid(100);
+        let ys = gaussian_model(&xs, &[60.0, 45.0, 7.0, 5.0]);
+        // The fixed parameter must stay bit-identical to its estimate.
+        let p0 = PeakModel::Gaussian.estimate(&xs, &ys).unwrap();
+        let mut cons = vec![Constraint::Free; 4];
+        cons[1] = Constraint::Fixed; // hold the centre
+        let ir = fit_peak_constrained(
+            PeakModel::Gaussian,
+            &xs,
+            &ys,
+            &cons,
+            DEFAULT_MAX_ITER,
+            DEFAULT_DELTACHI,
+        )
+        .unwrap();
+        assert_eq!(ir.fit.parameters[1], p0[1]);
+    }
+
+    #[test]
+    fn fit_peak_constrained_rejects_count_mismatch() {
+        let xs = grid(50);
+        let ys = gaussian_model(&xs, &[60.0, 25.0, 7.0, 0.0]);
+        // Gaussian has 4 parameters; a 3-entry constraint vector is rejected.
+        assert!(
+            fit_peak_constrained(
+                PeakModel::Gaussian,
+                &xs,
+                &ys,
+                &[Constraint::Free; 3],
+                DEFAULT_MAX_ITER,
+                DEFAULT_DELTACHI,
+            )
+            .is_none()
+        );
     }
 
     #[test]
