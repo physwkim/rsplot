@@ -299,6 +299,104 @@ fn npy_shape_2d(header: &str) -> std::io::Result<(u32, u32)> {
     Ok((dims[0], dims[1]))
 }
 
+/// Encode a 2D `uint8` mask `(height, width)` (row-major / C-order) as an ESRF
+/// Data Format (EDF) byte stream.
+///
+/// Mirrors `fabio.edfimage` writing of a `uint8` image (silx
+/// `MaskToolsWidget.save(.., "edf")`): an ASCII header block opening with `{`,
+/// one `KEY = VALUE ;` line per field (`HeaderID`/`Image`/`ByteOrder`/
+/// `DataType`/`Dim_1`/`Dim_2`/`Size`), space-padded so the header block length
+/// (through the closing `}\n`) is a multiple of 512 bytes, then the raw C-order
+/// pixel bytes. `Dim_1` is the fast axis (width / columns) and `Dim_2` the slow
+/// axis (height / rows), so the byte layout matches the row-major mask directly
+/// with no transpose. Pure (no GPU / filesystem); `data` is expected to be
+/// `height * width` bytes long.
+pub fn encode_mask_edf(height: u32, width: u32, data: &[u8]) -> Vec<u8> {
+    const BLOCK: usize = 512;
+    let size = (height as usize) * (width as usize);
+    let mut header = String::from("{\n");
+    header.push_str("HeaderID = EH:000001:000000:000000 ;\n");
+    header.push_str("Image = 1 ;\n");
+    header.push_str("ByteOrder = LowByteFirst ;\n");
+    header.push_str("DataType = UnsignedByte ;\n");
+    header.push_str(&format!("Dim_1 = {width} ;\n"));
+    header.push_str(&format!("Dim_2 = {height} ;\n"));
+    header.push_str(&format!("Size = {size} ;\n"));
+    // Pad with spaces so the block (including the closing "}\n") is 512-aligned.
+    let unpadded = header.len() + 2; // + "}\n"
+    let pad = (BLOCK - (unpadded % BLOCK)) % BLOCK;
+    header.extend(std::iter::repeat_n(' ', pad));
+    header.push_str("}\n");
+
+    let mut out = Vec::with_capacity(header.len() + data.len());
+    out.extend_from_slice(header.as_bytes());
+    out.extend_from_slice(data);
+    out
+}
+
+/// Decode a 2D `uint8` EDF byte stream into `(height, width, data)` in C
+/// (row-major) order.
+///
+/// Accepts the `UnsignedByte` 2D layout that [`encode_mask_edf`] / fabio
+/// produce: the ASCII `{ … }` header supplies `Dim_1` (width), `Dim_2` (height)
+/// and `DataType`, and the pixel data is the `Dim_1 * Dim_2` bytes that begin
+/// immediately after the header's closing `}` (skipping the single `\n` the
+/// encoder writes there). Any other `DataType`, a missing/non-integer
+/// dimension, an unterminated header, or a body shorter than `Dim_1 * Dim_2` is
+/// an [`std::io::ErrorKind::InvalidData`] error. Pure over a byte stream so the
+/// round-trip is directly unit-testable.
+pub fn decode_mask_edf(bytes: &[u8]) -> std::io::Result<(u32, u32, Vec<u8>)> {
+    let invalid = |msg: &str| std::io::Error::new(std::io::ErrorKind::InvalidData, msg.to_string());
+    let open = bytes
+        .iter()
+        .position(|&b| b == b'{')
+        .ok_or_else(|| invalid("not an EDF file (no '{')"))?;
+    let close = bytes[open..]
+        .iter()
+        .position(|&b| b == b'}')
+        .ok_or_else(|| invalid("EDF header not terminated ('}' missing)"))?
+        + open;
+    let header = std::str::from_utf8(&bytes[open + 1..close])
+        .map_err(|_| invalid("EDF header is not UTF-8"))?;
+
+    let data_type = edf_header_field(header, "DataType")
+        .ok_or_else(|| invalid("EDF header missing 'DataType'"))?;
+    if data_type != "UnsignedByte" {
+        return Err(invalid("EDF mask must be UnsignedByte"));
+    }
+    let width: u32 = edf_header_field(header, "Dim_1")
+        .ok_or_else(|| invalid("EDF header missing 'Dim_1'"))?
+        .parse()
+        .map_err(|_| invalid("EDF 'Dim_1' is not an integer"))?;
+    let height: u32 = edf_header_field(header, "Dim_2")
+        .ok_or_else(|| invalid("EDF header missing 'Dim_2'"))?
+        .parse()
+        .map_err(|_| invalid("EDF 'Dim_2' is not an integer"))?;
+
+    // The body begins right after the closing brace; our encoder (and fabio)
+    // writes a single '\n' there before the block-aligned data.
+    let mut data_start = close + 1;
+    if bytes.get(data_start) == Some(&b'\n') {
+        data_start += 1;
+    }
+    let count = (height as usize) * (width as usize);
+    if bytes.len().saturating_sub(data_start) < count {
+        return Err(invalid("EDF body shorter than Dim_1 * Dim_2"));
+    }
+    let data = bytes[data_start..data_start + count].to_vec();
+    Ok((height, width, data))
+}
+
+/// Extract the value of `key` from an EDF ASCII header (the inside of the
+/// `{ … }` block): fields are `KEY = VALUE ;`-separated. Returns `None` if the
+/// key is absent.
+fn edf_header_field(header: &str, key: &str) -> Option<String> {
+    header.split(';').find_map(|entry| {
+        let (k, v) = entry.split_once('=')?;
+        (k.trim() == key).then(|| v.trim().to_string())
+    })
+}
+
 /// Standard base64 alphabet (RFC 4648), used by [`encode_svg`].
 const BASE64_ALPHABET: &[u8; 64] =
     b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -808,6 +906,61 @@ mod tests {
         let header = &header[..header_len];
         bytes.splice(10..10 + header_len, header.bytes());
         let err = decode_mask_npy(&bytes).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn mask_edf_round_trips_bytes_and_shape() {
+        // A small 2x3 uint8 mask round-trips through encode -> decode with
+        // identical shape and data. Note byte values 10 (b'\n') and 32 (b' ')
+        // appear in the body to prove the trailing-bytes split is not confused
+        // by header whitespace.
+        let data: Vec<u8> = vec![0, 10, 32, 250, 254, 255];
+        let bytes = encode_mask_edf(2, 3, &data);
+        let (h, w, out) = decode_mask_edf(&bytes).expect("decode");
+        assert_eq!((h, w), (2, 3));
+        assert_eq!(out, data);
+    }
+
+    #[test]
+    fn mask_edf_header_is_512_aligned_and_self_describing() {
+        let data = vec![7u8; 6];
+        let bytes = encode_mask_edf(2, 3, &data);
+        // The header block (everything before the raw body) is 512-aligned.
+        let body_start = bytes.len() - data.len();
+        assert_eq!(
+            body_start % 512,
+            0,
+            "header block {body_start} not 512-aligned"
+        );
+        let header = std::str::from_utf8(&bytes[..body_start]).expect("ascii header");
+        assert!(header.starts_with('{'));
+        assert!(header.contains("DataType = UnsignedByte ;"));
+        assert!(header.contains("Dim_1 = 3 ;")); // width = fast axis
+        assert!(header.contains("Dim_2 = 2 ;")); // height = slow axis
+        assert!(header.contains("Size = 6 ;"));
+        assert!(header.trim_end().ends_with('}'));
+        // The raw C-order body follows the aligned header exactly.
+        assert_eq!(&bytes[body_start..], data.as_slice());
+    }
+
+    #[test]
+    fn mask_edf_rejects_non_byte_type_and_truncated_body() {
+        // A float dtype is rejected.
+        let bytes = encode_mask_edf(1, 1, &[0]);
+        let header_end = bytes.len() - 1;
+        let header = std::str::from_utf8(&bytes[..header_end])
+            .unwrap()
+            .replace("UnsignedByte", "FloatValue ");
+        let mut tampered = header.into_bytes();
+        tampered.push(0);
+        let err = decode_mask_edf(&tampered).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+
+        // A body shorter than Dim_1 * Dim_2 is rejected.
+        let mut short = encode_mask_edf(4, 4, &[1u8; 16]);
+        short.truncate(short.len() - 8);
+        let err = decode_mask_edf(&short).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
     }
 

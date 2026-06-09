@@ -1078,15 +1078,27 @@ impl MaskToolsWidget {
     /// `Ok(false)` when it matched.
     pub fn read_npy(&mut self, r: impl Read) -> io::Result<bool> {
         let (height, width, data) = read_npy_u8(r)?;
+        Ok(self.apply_loaded_mask(height, width, data))
+    }
+
+    /// Apply a freshly-loaded 2D `uint8` mask, cropping or padding it to the
+    /// current image geometry and committing it to the undo history.
+    ///
+    /// Single owner of silx's crop/pad rule (`resizedMask[:h, :w] =
+    /// mask[:h, :w]`, gui/plot/MaskToolsWidget.py:350-368) shared by every
+    /// file-format loader ([`read_npy`](Self::read_npy),
+    /// [`read_edf`](Self::read_edf)). Returns `true` when the loaded shape
+    /// differed from the current image (silx raises `RuntimeWarning`).
+    fn apply_loaded_mask(&mut self, height: u32, width: u32, data: Vec<u8>) -> bool {
         let resized = height != self.height || width != self.width;
         if resized {
             // silx crop/pad: zero buffer of current shape, copy the overlap.
             let mut buf = vec![0u8; (self.width as usize) * (self.height as usize)];
             let copy_h = self.height.min(height) as usize;
             let copy_w = self.width.min(width) as usize;
-            for r in 0..copy_h {
-                let dst = r * self.width as usize;
-                let src = r * width as usize;
+            for row in 0..copy_h {
+                let dst = row * self.width as usize;
+                let src = row * width as usize;
                 buf[dst..dst + copy_w].copy_from_slice(&data[src..src + copy_w]);
             }
             self.mask = buf;
@@ -1095,7 +1107,33 @@ impl MaskToolsWidget {
         }
         self.commit();
         self.is_dirty = true;
-        Ok(resized)
+        resized
+    }
+
+    /// Write the current mask as an ESRF Data Format (EDF) stream.
+    ///
+    /// Mirrors silx `MaskToolsWidget.save(filename, "edf")` (the fabio
+    /// `edfimage` writer) for the `uint8` mask; the byte format lives in the
+    /// single-owner codec [`crate::render::save::encode_mask_edf`].
+    pub fn write_edf(&self, w: &mut impl Write) -> io::Result<()> {
+        w.write_all(&crate::render::save::encode_mask_edf(
+            self.height,
+            self.width,
+            &self.mask,
+        ))
+    }
+
+    /// Read a 2D `uint8` EDF mask and apply it, cropping or padding to the
+    /// current image geometry (silx `MaskToolsWidget.load`, EDF branch).
+    ///
+    /// Returns `Ok(true)` when the loaded shape differed from the current image
+    /// (a resize occurred), `Ok(false)` when it matched. Decoded by the
+    /// single-owner codec [`crate::render::save::decode_mask_edf`].
+    pub fn read_edf(&mut self, mut r: impl Read) -> io::Result<bool> {
+        let mut bytes = Vec::new();
+        r.read_to_end(&mut bytes)?;
+        let (height, width, data) = crate::render::save::decode_mask_edf(&bytes)?;
+        Ok(self.apply_loaded_mask(height, width, data))
     }
 
     /// Save the current mask to a `.npy` file.
@@ -1138,6 +1176,48 @@ impl MaskToolsWidget {
     /// single-owner codec [`crate::render::save::decode_mask_npy`].
     pub fn load_mask_npy(&mut self, path: &str) -> io::Result<bool> {
         self.load_npy(path)
+    }
+
+    /// Save the current mask to an `.edf` file.
+    ///
+    /// File wrapper over [`write_edf`](Self::write_edf); see it for the format.
+    pub fn save_edf(&self, path: impl AsRef<std::path::Path>) -> io::Result<()> {
+        let file = std::fs::File::create(path)?;
+        let mut writer = io::BufWriter::new(file);
+        self.write_edf(&mut writer)?;
+        writer.flush()
+    }
+
+    /// Load a mask from an `.edf` file, cropping/padding to the current image.
+    ///
+    /// File wrapper over [`read_edf`](Self::read_edf); returns `Ok(true)` when
+    /// the loaded shape differed from the current image (resize occurred).
+    pub fn load_edf(&mut self, path: impl AsRef<std::path::Path>) -> io::Result<bool> {
+        let file = std::fs::File::open(path)?;
+        let reader = io::BufReader::new(file);
+        self.read_edf(reader)
+    }
+
+    /// Save the current mask to an `.edf` file at the given in-app path string
+    /// (silx `MaskToolsWidget.save(filename, "edf")`).
+    ///
+    /// Takes a plain `&str` path entered in-app rather than opening a native
+    /// file dialog. The EDF bytes are produced by the single-owner codec
+    /// [`crate::render::save::encode_mask_edf`].
+    pub fn save_mask_edf(&self, path: &str) -> io::Result<()> {
+        self.save_edf(path)
+    }
+
+    /// Load a mask from an `.edf` file at the given in-app path string, cropping
+    /// or padding to the current image geometry (silx
+    /// `MaskToolsWidget.load(filename)`, EDF branch).
+    ///
+    /// Takes a plain `&str` path entered in-app rather than opening a native
+    /// file dialog. Returns `Ok(true)` when the loaded shape differed from the
+    /// current image. The bytes are decoded by the single-owner codec
+    /// [`crate::render::save::decode_mask_edf`].
+    pub fn load_mask_edf(&mut self, path: &str) -> io::Result<bool> {
+        self.load_edf(path)
     }
 }
 
@@ -2199,6 +2279,64 @@ mod tests {
         // The on-disk bytes are exactly what the single-owner encoder produces.
         let on_disk = std::fs::read(&path_str).expect("read back file");
         let expected = crate::render::save::encode_mask_npy(2, 3, &src.mask);
+        assert_eq!(on_disk, expected);
+
+        let _ = std::fs::remove_file(&path_str);
+    }
+
+    #[test]
+    fn edf_round_trips_via_read_write() {
+        // A same-shape EDF write -> read is bit-identical with no resize.
+        let mut src = MaskToolsWidget::new(3, 2); // width 3, height 2
+        src.mask = vec![0, 1, 2, 200, 254, 255];
+        let mut buf = Vec::new();
+        src.write_edf(&mut buf).unwrap();
+
+        let mut dst = MaskToolsWidget::new(3, 2);
+        let resized = dst.read_edf(buf.as_slice()).unwrap();
+        assert!(!resized, "same shape must not report a resize");
+        assert_eq!(dst.mask, vec![0, 1, 2, 200, 254, 255]);
+        assert!(dst.can_undo(), "load must commit to history");
+    }
+
+    #[test]
+    fn edf_load_crops_larger_mask() {
+        // Loaded 3x3 EDF mask into a 2x2 widget: crop to the top-left 2x2,
+        // report a resize (the shared apply_loaded_mask crop/pad owner).
+        let mut big = MaskToolsWidget::new(3, 3);
+        big.mask = vec![
+            1, 2, 3, //
+            4, 5, 6, //
+            7, 8, 9, //
+        ];
+        let mut buf = Vec::new();
+        big.write_edf(&mut buf).unwrap();
+
+        let mut small = MaskToolsWidget::new(2, 2);
+        let resized = small.read_edf(buf.as_slice()).unwrap();
+        assert!(resized, "shape mismatch must report a resize");
+        assert_eq!(small.mask, vec![1, 2, 4, 5]);
+    }
+
+    #[test]
+    fn save_mask_edf_then_load_mask_edf_round_trips_via_path_string() {
+        // The in-app path-string EDF API round-trips through a real file, and
+        // the on-disk bytes are exactly what the single-owner encoder produces.
+        let mut src = MaskToolsWidget::new(3, 2); // width 3, height 2
+        src.mask = vec![0, 1, 2, 200, 254, 255];
+
+        let mut path = std::env::temp_dir();
+        path.push(format!("siplot_mask_roundtrip_{}.edf", std::process::id()));
+        let path_str = path.to_str().expect("utf-8 temp path").to_string();
+
+        src.save_mask_edf(&path_str).expect("save");
+        let mut dst = MaskToolsWidget::new(3, 2);
+        let resized = dst.load_mask_edf(&path_str).expect("load");
+        assert!(!resized, "same shape must not report a resize");
+        assert_eq!(dst.mask, vec![0, 1, 2, 200, 254, 255]);
+
+        let on_disk = std::fs::read(&path_str).expect("read back file");
+        let expected = crate::render::save::encode_mask_edf(2, 3, &src.mask);
         assert_eq!(on_disk, expected);
 
         let _ = std::fs::remove_file(&path_str);
