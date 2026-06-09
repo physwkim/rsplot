@@ -9,7 +9,7 @@ use crate::core::background::{
 use crate::core::fitting::{
     Constraint, DEFAULT_DELTACHI, DEFAULT_MAX_ITER, FitFunction, FitResult, GaussianEstimateFit,
     IterativeFit, IterativeFitResult, LinearFit, PeakModel, fit_multi_gaussian_full,
-    fit_peak_constrained, fit_peak_with_background,
+    fit_peak_constrained, fit_peak_from, fit_peak_with_background,
 };
 use crate::core::peaks::{DEFAULT_PEAK_SENSITIVITY, guess_fwhm};
 use crate::core::plot::PlotId;
@@ -233,6 +233,11 @@ pub struct FitWidget {
     /// `FitWidget` parameter table). Resynced (cleared to all-`Free`) whenever
     /// the selected model's parameter count changes; empty until first synced.
     constraints: Vec<Constraint>,
+    /// Editable initial parameters for the current single-peak model (silx
+    /// `FitWidget` parameter table value column). `None` until the first fit
+    /// populates it; the next fit then starts from these (possibly edited)
+    /// values. Reset on data or model change.
+    initial_params: Option<Vec<f64>>,
 }
 
 impl FitWidget {
@@ -259,6 +264,7 @@ impl FitWidget {
             fit_range: None,
             background: Background::None,
             constraints: Vec::new(),
+            initial_params: None,
         }
     }
 
@@ -312,13 +318,29 @@ impl FitWidget {
         self.constraints = constraints;
     }
 
-    /// Ensure `self.constraints` has exactly `n` entries, resetting to all-`Free`
-    /// when the length differs (silx clears the parameter table on theory
-    /// change). Returns `true` when every entry is `Free` (the unconstrained
-    /// default, so the fit can take the original byte-identical path).
+    /// The editable initial parameters for the current single-peak model, once a
+    /// fit has populated them (silx `FitWidget` parameter table value column).
+    pub fn initial_params(&self) -> Option<&[f64]> {
+        self.initial_params.as_deref()
+    }
+
+    /// Set the initial parameters the next single-peak fit starts from. Dropped
+    /// if the length stops matching the selected model's parameter count.
+    pub fn set_initial_params(&mut self, params: Option<Vec<f64>>) {
+        self.initial_params = params;
+    }
+
+    /// Ensure the per-parameter state matches a model with `n` parameters:
+    /// `constraints` resets to all-`Free` when its length differs, and a stale
+    /// `initial_params` (wrong length) is dropped (silx clears the parameter
+    /// table on theory change). Returns `true` when every constraint is `Free`
+    /// (the unconstrained default, so the fit can take the byte-identical path).
     fn ensure_constraints_len(&mut self, n: usize) -> bool {
         if self.constraints.len() != n {
             self.constraints = vec![Constraint::Free; n];
+        }
+        if self.initial_params.as_ref().is_some_and(|p| p.len() != n) {
+            self.initial_params = None;
         }
         self.constraints.iter().all(|c| *c == Constraint::Free)
     }
@@ -363,6 +385,7 @@ impl FitWidget {
         }
         self.fit_result = None;
         self.iterative_result = None;
+        self.initial_params = None;
         self.plot.reset_zoom_to_data();
     }
 
@@ -443,25 +466,41 @@ impl FitWidget {
                     .peak_model()
                     .expect("non-analytical choice has a peak model");
                 match self.background {
-                    // No background: apply per-parameter constraints if any are
-                    // set, else the original unconstrained path (byte-identical).
+                    // No background: start from edited initial parameters and/or
+                    // apply per-parameter constraints when set, else the original
+                    // unconstrained estimate→fit path (byte-identical).
                     Background::None => {
                         let all_free = self.ensure_constraints_len(peak_model.param_names().len());
-                        let fitted = if all_free {
-                            IterativeFit::new(peak_model).fit_full(&xs, &ys)
-                        } else {
-                            fit_peak_constrained(
+                        let fitted = match (&self.initial_params, all_free) {
+                            // Default: no edited start, no constraints.
+                            (None, true) => IterativeFit::new(peak_model).fit_full(&xs, &ys),
+                            // Edited initial parameters → start the fit from them.
+                            (Some(p0), _) => fit_peak_from(
+                                peak_model,
+                                &xs,
+                                &ys,
+                                p0,
+                                &self.constraints,
+                                DEFAULT_MAX_ITER,
+                                DEFAULT_DELTACHI,
+                            ),
+                            // Constraints only → estimate then constrained fit.
+                            (None, false) => fit_peak_constrained(
                                 peak_model,
                                 &xs,
                                 &ys,
                                 &self.constraints,
                                 DEFAULT_MAX_ITER,
                                 DEFAULT_DELTACHI,
-                            )
+                            ),
                         };
                         match fitted {
                             Some(ir) => {
                                 let fit = ir.fit.clone();
+                                // Populate the editable value column with the
+                                // fitted parameters (silx: the table shows the
+                                // last fit; a re-fit starts from these).
+                                self.initial_params = Some(fit.parameters.clone());
                                 self.iterative_result = Some(ir);
                                 Some(fit)
                             }
@@ -621,22 +660,33 @@ impl FitWidget {
                     }
                 });
 
-                // Per-parameter constraints (silx `FitWidget` parameter table),
-                // shown for the single-peak iterative models. The FREE/POSITIVE/
-                // FIXED subset needs no extra input; other silx codes are core-
-                // supported but not yet exposed (see `UI_CONSTRAINT_CHOICES`).
+                // Per-parameter table (silx `FitWidget`), shown for the
+                // single-peak iterative models: an editable initial-value column
+                // (populated after the first fit; the next fit starts from it)
+                // plus a constraint combo. The FREE/POSITIVE/FIXED subset needs
+                // no extra input; other silx codes are core-supported but not yet
+                // exposed (see `UI_CONSTRAINT_CHOICES`).
                 if let Some(peak_model) = self.selected_choice.peak_model() {
                     let names = peak_model.param_names();
                     self.ensure_constraints_len(names.len());
-                    ui.collapsing("Constraints", |ui| {
-                        egui::Grid::new("fit_constraints_grid")
-                            .num_columns(2)
+                    ui.collapsing("Parameters", |ui| {
+                        egui::Grid::new("fit_params_input_grid")
+                            .num_columns(3)
                             .show(ui, |ui| {
                                 ui.label("Parameter");
+                                ui.label("Initial");
                                 ui.label("Constraint");
                                 ui.end_row();
                                 for (i, name) in names.iter().enumerate() {
                                     ui.label(name);
+                                    match self.initial_params.as_mut() {
+                                        Some(p0) => {
+                                            ui.add(egui::DragValue::new(&mut p0[i]).speed(0.1));
+                                        }
+                                        None => {
+                                            ui.label("—");
+                                        }
+                                    }
                                     egui::ComboBox::from_id_salt(("fit_constraint_combo", i))
                                         .selected_text(constraint_label(self.constraints[i]))
                                         .show_ui(ui, |ui| {

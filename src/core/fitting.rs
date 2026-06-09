@@ -2023,21 +2023,24 @@ pub fn fit_multi_gaussian_full(
     Some(IterativeFitResult { fit, solver })
 }
 
-/// Fit a single [`PeakModel`] under per-parameter [`Constraint`]s, mirroring the
-/// silx FitWidget parameter table feeding `leastsq_constrained`.
+/// Fit a single [`PeakModel`] from explicit initial parameters `p0` under
+/// per-parameter [`Constraint`]s (silx FitWidget parameter table → editable
+/// values + constraint codes feeding `leastsq_constrained`).
 ///
-/// Initial parameters come from [`PeakModel::estimate`]; `constraints` must have
-/// exactly one entry per model parameter (the order of [`PeakModel::param_names`]).
-/// Returns `None` on estimate/solver failure or a constraint-count mismatch.
-pub fn fit_peak_constrained(
+/// `p0` and `constraints` must each have exactly one entry per model parameter
+/// (the order of [`PeakModel::param_names`]). Returns `None` on a length
+/// mismatch or solver failure. This is the single owner of the
+/// constrained-fit-from-`p0` path; [`fit_peak_constrained`] estimates `p0` and
+/// delegates here.
+pub fn fit_peak_from(
     model: PeakModel,
     x: &[f64],
     y: &[f64],
+    p0: &[f64],
     constraints: &[Constraint],
     max_iter: usize,
     deltachi: f64,
 ) -> Option<IterativeFitResult> {
-    let p0 = model.estimate(x, y)?;
     if constraints.len() != p0.len() {
         return None;
     }
@@ -2045,7 +2048,7 @@ pub fn fit_peak_constrained(
         |xx, pp| model.eval(xx, pp),
         x,
         y,
-        &p0,
+        p0,
         constraints,
         None,
         max_iter,
@@ -2059,6 +2062,24 @@ pub fn fit_peak_constrained(
         param_names: model.param_names(),
     };
     Some(IterativeFitResult { fit, solver })
+}
+
+/// Fit a single [`PeakModel`] under per-parameter [`Constraint`]s, with the
+/// initial parameters estimated from the data ([`PeakModel::estimate`]).
+///
+/// `constraints` must have exactly one entry per model parameter. Returns `None`
+/// on estimate/solver failure or a constraint-count mismatch. Delegates to
+/// [`fit_peak_from`] once the estimate is in hand.
+pub fn fit_peak_constrained(
+    model: PeakModel,
+    x: &[f64],
+    y: &[f64],
+    constraints: &[Constraint],
+    max_iter: usize,
+    deltachi: f64,
+) -> Option<IterativeFitResult> {
+    let p0 = model.estimate(x, y)?;
+    fit_peak_from(model, x, y, &p0, constraints, max_iter, deltachi)
 }
 
 /// Outcome of [`fit_peak_with_background`]: the peak fit on the
@@ -2913,6 +2934,51 @@ mod tests {
         )
         .unwrap();
         assert_eq!(ir.fit.parameters[1], p0[1]);
+    }
+
+    #[test]
+    fn fit_peak_from_uses_explicit_p0_and_recovers() {
+        let xs = grid(100);
+        let ys = gaussian_model(&xs, &[60.0, 45.0, 7.0, 5.0]);
+        // A deliberately-off initial guess; LM should still converge.
+        let p0 = [20.0, 40.0, 12.0, 0.0];
+        let cons = vec![Constraint::Free; 4];
+        let ir = fit_peak_from(
+            PeakModel::Gaussian,
+            &xs,
+            &ys,
+            &p0,
+            &cons,
+            DEFAULT_MAX_ITER,
+            DEFAULT_DELTACHI,
+        )
+        .unwrap();
+        let p = &ir.fit.parameters;
+        assert!((p[1] - 45.0).abs() < 1.0, "centre {}", p[1]);
+        assert!((p[2] - 7.0).abs() < 1.0, "fwhm {}", p[2]);
+        // fit_peak_constrained estimates p0 then delegates here, so the two
+        // agree when started from the estimate.
+        let est = PeakModel::Gaussian.estimate(&xs, &ys).unwrap();
+        let via_estimate = fit_peak_from(
+            PeakModel::Gaussian,
+            &xs,
+            &ys,
+            &est,
+            &cons,
+            DEFAULT_MAX_ITER,
+            DEFAULT_DELTACHI,
+        )
+        .unwrap();
+        let direct = fit_peak_constrained(
+            PeakModel::Gaussian,
+            &xs,
+            &ys,
+            &cons,
+            DEFAULT_MAX_ITER,
+            DEFAULT_DELTACHI,
+        )
+        .unwrap();
+        assert_eq!(via_estimate.fit.parameters, direct.fit.parameters);
     }
 
     #[test]
