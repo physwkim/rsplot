@@ -1291,10 +1291,13 @@ pub fn roi_from_draw(kind: RoiDrawKind, params: &DrawParams) -> Option<Roi> {
 /// (clamped ≥ 0), `outer_radius = radius + weight/2`, `start_angle`, `end_angle`.
 ///
 /// `defaultCurvature = π/5`, `weightCoef = 0.20`
-/// (`items/_arc_roi.py:377-381`). For two coincident points the result is a
-/// degenerate zero-radius arc at the point (silx would special-case a closed
-/// circle; an on-plot drag never produces coincident diameter points, so this
-/// path is only a safe fallback).
+/// (`items/_arc_roi.py:377-381`). The fitted geometry is delegated to
+/// [`arc_from_three_points`] (silx's `setFirstShapePoints` likewise routes through
+/// `_createGeometryFromControlPoints`), which owns the closed-circle /
+/// collinear / general branches. Two coincident points feed that the
+/// closed-circle branch, yielding a degenerate zero-radius closed arc (silx's
+/// `allclose(start, end)` special case); an on-plot drag never produces
+/// coincident diameter points, so that path is only a safe fallback.
 pub fn arc_from_two_points(point0: (f64, f64), point1: (f64, f64)) -> Roi {
     // center of the diameter; normal rotated -90 deg (silx: (normal_y, -normal_x)).
     let mid_center = ((point0.0 + point1.0) * 0.5, (point0.1 + point1.1) * 0.5);
@@ -1306,13 +1309,62 @@ pub fn arc_from_two_points(point0: (f64, f64), point1: (f64, f64)) -> Roi {
         mid_center.0 - normal.0 * default_curvature,
         mid_center.1 - normal.1 * default_curvature,
     );
-    let distance = (point0.0 - point1.0).hypot(point0.1 - point1.1);
-    let weight = distance * weight_coef;
+    let weight = (point0.0 - point1.0).hypot(point0.1 - point1.1) * weight_coef;
+    arc_from_three_points(point0, mid, point1, weight)
+}
 
-    // Degenerate fallback: coincident points -> zero-radius arc at the point.
-    if distance == 0.0 {
+/// Build a [`Roi::Arc`] from three points on the arc plus a radial `weight` (the
+/// band thickness), the faithful port of silx
+/// `ArcROI._createGeometryFromControlPoints` (`items/_arc_roi.py:622-664`) — the
+/// geometry behind silx's default *ThreePointMode* sub-mode. `start` and `end`
+/// are the arc endpoints; `mid` is a point the arc passes through between them
+/// (the curvature control). `weight` is the full radial thickness, so
+/// `inner_radius = radius − weight/2` (clamped ≥ 0) and `outer_radius = radius +
+/// weight/2`.
+///
+/// Branches mirror silx exactly:
+/// - `start ≈ end` (silx `numpy.allclose`) → a closed circle through
+///   `start`/`mid` (silx `_ArcGeometry.createCircle`): center at the
+///   `start`–`mid` midpoint, swept the full `2π` from `start`'s angle.
+/// - `start`, `mid`, `end` collinear (`|cross| < 1e-5`) → silx builds a
+///   center-less "rect" intermediate, which siplot's [`Roi::Arc`] (always
+///   centered) cannot represent; this falls back to a degenerate zero-radius arc
+///   at the `start`–`end` midpoint. The transient rect editing shape is not
+///   modeled (deviation noted on the roadmap row).
+/// - otherwise → the circumscribed circle through the three points
+///   ([`circle_through`], silx `_circleEquation`) with the sweep direction
+///   disambiguated from the mid angle (silx `:652-660`).
+pub fn arc_from_three_points(
+    start: (f64, f64),
+    mid: (f64, f64),
+    end: (f64, f64),
+    weight: f64,
+) -> Roi {
+    let two_pi = std::f64::consts::TAU;
+    let angle = |p: (f64, f64), c: (f64, f64)| (p.1 - c.1).atan2(p.0 - c.0);
+    let radii = |radius: f64| ((radius - weight * 0.5).max(0.0), radius + weight * 0.5);
+
+    // Closed circle: silx `numpy.allclose(start, end)` (atol 1e-8, rtol 1e-5).
+    let close = |a: f64, b: f64| (a - b).abs() <= 1e-8 + 1e-5 * b.abs();
+    if close(start.0, end.0) && close(start.1, end.1) {
+        let center = ((start.0 + mid.0) * 0.5, (start.1 + mid.1) * 0.5);
+        let radius = (start.0 - center.0).hypot(start.1 - center.1);
+        let start_angle = angle(start, center);
+        let (inner_radius, outer_radius) = radii(radius);
         return Roi::Arc {
-            center: point0,
+            center,
+            inner_radius,
+            outer_radius,
+            start_angle,
+            end_angle: start_angle + two_pi,
+        };
+    }
+
+    // Collinear: silx makes a center-less rect; not representable by Roi::Arc.
+    let cross = (mid.0 - start.0) * (end.1 - start.1) - (mid.1 - start.1) * (end.0 - start.0);
+    if cross.abs() < 1e-5 {
+        return Roi::Arc {
+            center: ((start.0 + end.0) * 0.5, (start.1 + end.1) * 0.5),
             inner_radius: 0.0,
             outer_radius: 0.0,
             start_angle: 0.0,
@@ -1320,18 +1372,13 @@ pub fn arc_from_two_points(point0: (f64, f64), point1: (f64, f64)) -> Roi {
         };
     }
 
-    // Circle through (point0, mid, point1) — silx _circleEquation, ported from
-    // the complex-number form (items/_arc_roi.py:986-996).
-    let (center, radius) = circle_through(point0, mid, point1);
-
-    // Start/mid/end angles from the fitted center (silx numpy.angle).
-    let angle = |p: (f64, f64)| (p.1 - center.1).atan2(p.0 - center.0);
-    let start_angle = angle(point0);
-    let mid_angle = angle(mid);
-    let mut end_angle = angle(point1);
+    // Circle through (start, mid, end) — silx _circleEquation.
+    let (center, radius) = circle_through(start, mid, end);
+    let start_angle = angle(start, center);
+    let mid_angle = angle(mid, center);
+    let mut end_angle = angle(end, center);
 
     // Disambiguate sweep direction (silx items/_arc_roi.py:652-660).
-    let two_pi = std::f64::consts::TAU;
     let relative_mid = (end_angle - mid_angle + two_pi).rem_euclid(two_pi);
     let relative_end = (end_angle - start_angle + two_pi).rem_euclid(two_pi);
     if relative_mid < relative_end {
@@ -1342,8 +1389,7 @@ pub fn arc_from_two_points(point0: (f64, f64), point1: (f64, f64)) -> Roi {
         end_angle -= two_pi;
     }
 
-    let inner_radius = (radius - weight * 0.5).max(0.0);
-    let outer_radius = radius + weight * 0.5;
+    let (inner_radius, outer_radius) = radii(radius);
     Roi::Arc {
         center,
         inner_radius,
@@ -1351,6 +1397,75 @@ pub fn arc_from_two_points(point0: (f64, f64), point1: (f64, f64)) -> Roi {
         start_angle,
         end_angle,
     }
+}
+
+/// The three ThreePointMode control points of an arc, in `(start, mid, end)`
+/// order, each a data-space `(x, y)` (silx `ArcROI` `_handleStart` /
+/// `_handleMid` / `_handleEnd`).
+pub type ArcControlPoints = ((f64, f64), (f64, f64), (f64, f64));
+
+/// One of the three control points of an arc in silx ThreePointMode editing
+/// (silx `ArcROI` `_handleStart` / `_handleMid` / `_handleEnd`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ArcControlPoint {
+    /// The start-angle endpoint handle (silx `_handleStart`).
+    Start,
+    /// The mid/curvature handle on the angular bisector (silx `_handleMid`).
+    Mid,
+    /// The end-angle endpoint handle (silx `_handleEnd`).
+    End,
+}
+
+/// The three ThreePointMode control points `(start, mid, end)` of a polar
+/// [`Roi::Arc`], on its central radius (silx derives these in `_updateHandles` /
+/// `_updateMidHandle`, `items/_arc_roi.py:390-410`): the start/end handles sit at
+/// the sweep endpoints and the mid handle on the angular bisector. Returns
+/// `None` for a non-arc.
+pub fn arc_control_points(arc: &Roi) -> Option<ArcControlPoints> {
+    let Roi::Arc {
+        center,
+        inner_radius,
+        outer_radius,
+        start_angle,
+        end_angle,
+    } = arc
+    else {
+        return None;
+    };
+    let (cx, cy) = *center;
+    let radius = (*inner_radius + *outer_radius) * 0.5;
+    let at = |a: f64| (cx + radius * a.cos(), cy + radius * a.sin());
+    let mid_angle = (*start_angle + *end_angle) * 0.5;
+    Some((at(*start_angle), at(mid_angle), at(*end_angle)))
+}
+
+/// Reshape an arc in silx ThreePointMode by dragging one of its three control
+/// points to `to`, recomputing the circumcircle through the new triple (silx
+/// `ArcROI.handleDragUpdated` ThreePointMode branch → `_updateGeometry` via
+/// `_createGeometryFromControlPoints`). Unlike PolarMode editing
+/// ([`Roi::move_edge`](crate::core::roi::Roi::move_edge), which fixes the
+/// center), moving a control point re-fits both the center/radius and the sweep
+/// angles. The band thickness (`weight = outer − inner`) is preserved. Returns
+/// the input unchanged for a non-arc.
+pub fn arc_three_point_drag(arc: &Roi, point: ArcControlPoint, to: (f64, f64)) -> Roi {
+    let (
+        Some((start, mid, end)),
+        Roi::Arc {
+            inner_radius,
+            outer_radius,
+            ..
+        },
+    ) = (arc_control_points(arc), arc)
+    else {
+        return arc.clone();
+    };
+    let weight = *outer_radius - *inner_radius;
+    let (start, mid, end) = match point {
+        ArcControlPoint::Start => (to, mid, end),
+        ArcControlPoint::Mid => (start, to, end),
+        ArcControlPoint::End => (start, mid, to),
+    };
+    arc_from_three_points(start, mid, end, weight)
 }
 
 /// Center and radius of the circle through three points, porting silx
@@ -2765,6 +2880,118 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn arc_from_three_points_fits_the_circumcircle() {
+        // Three points on the unit circle: (1,0), (0,1), (-1,0). weight 0 -> a
+        // zero-thickness arc, center origin, radius 1, swept 0 -> pi through the
+        // mid at pi/2 (silx _createGeometryFromControlPoints general branch).
+        match arc_from_three_points((1.0, 0.0), (0.0, 1.0), (-1.0, 0.0), 0.0) {
+            Roi::Arc {
+                center,
+                inner_radius,
+                outer_radius,
+                start_angle,
+                end_angle,
+            } => {
+                assert!(
+                    center.0.abs() <= 1e-9 && center.1.abs() <= 1e-9,
+                    "{center:?}"
+                );
+                assert!((inner_radius - 1.0).abs() <= 1e-9, "inner={inner_radius}");
+                assert!((outer_radius - 1.0).abs() <= 1e-9, "outer={outer_radius}");
+                assert!(start_angle.abs() <= 1e-9, "start={start_angle}");
+                assert!(
+                    (end_angle - std::f64::consts::PI).abs() <= 1e-9,
+                    "end={end_angle}"
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn arc_from_three_points_closed_circle_when_start_equals_end() {
+        // start == end -> silx closed-circle branch: center at (start+mid)/2,
+        // full 2pi sweep.
+        match arc_from_three_points((2.0, 0.0), (-2.0, 0.0), (2.0, 0.0), 0.0) {
+            Roi::Arc {
+                center,
+                outer_radius,
+                start_angle,
+                end_angle,
+                ..
+            } => {
+                assert!(
+                    center.0.abs() <= 1e-9 && center.1.abs() <= 1e-9,
+                    "{center:?}"
+                );
+                assert!((outer_radius - 2.0).abs() <= 1e-9, "outer={outer_radius}");
+                assert!(
+                    (end_angle - start_angle - std::f64::consts::TAU).abs() <= 1e-9,
+                    "sweep={}",
+                    end_angle - start_angle
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn arc_from_three_points_collinear_degenerates() {
+        // Collinear triple -> silx makes a center-less rect; Roi::Arc can't hold
+        // that, so it degenerates to a zero-radius arc at the start-end midpoint.
+        match arc_from_three_points((0.0, 0.0), (1.0, 0.0), (2.0, 0.0), 0.5) {
+            Roi::Arc {
+                center,
+                inner_radius,
+                outer_radius,
+                ..
+            } => {
+                assert_eq!(center, (1.0, 0.0));
+                assert_eq!(inner_radius, 0.0);
+                assert_eq!(outer_radius, 0.0);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn arc_three_point_drag_refits_center_radius_and_keeps_weight() {
+        // Arc through (1,0),(0,1),(-1,0) with weight 0.4: center origin, radius 1.
+        let arc = arc_from_three_points((1.0, 0.0), (0.0, 1.0), (-1.0, 0.0), 0.4);
+        // Dragging the mid handle from (0,1) up to (0,2) re-fits the circle
+        // through (1,0),(0,2),(-1,0): center (0, 0.75), radius 1.25.
+        let reshaped = arc_three_point_drag(&arc, ArcControlPoint::Mid, (0.0, 2.0));
+        match reshaped {
+            Roi::Arc {
+                center,
+                inner_radius,
+                outer_radius,
+                ..
+            } => {
+                assert!(center.0.abs() <= 1e-9, "cx={}", center.0);
+                assert!((center.1 - 0.75).abs() <= 1e-9, "cy={}", center.1);
+                let radius_mid = (inner_radius + outer_radius) * 0.5;
+                assert!((radius_mid - 1.25).abs() <= 1e-9, "r={radius_mid}");
+                // weight (= outer - inner) is preserved across the reshape.
+                assert!((outer_radius - inner_radius - 0.4).abs() <= 1e-9);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn arc_three_point_drag_is_noop_on_non_arc() {
+        let rect = Roi::Rect {
+            x: (0.0, 1.0),
+            y: (0.0, 1.0),
+        };
+        assert_eq!(
+            arc_three_point_drag(&rect, ArcControlPoint::Start, (5.0, 5.0)),
+            rect
+        );
     }
 
     #[test]

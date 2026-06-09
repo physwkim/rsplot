@@ -90,9 +90,10 @@ pub use crate::widget::high_level::{
 };
 pub use crate::widget::image_stack::{Frame, ImageStack};
 pub use crate::widget::interaction::{
-    CursorShape, DrawEvent, DrawInput, DrawMode, DrawParams, DrawState, FillMode, MouseButton,
-    PanDirection, PlotPointerEvent, PointPick, RoiDrawKind, RoiGrab, SelectionStyle,
-    arc_from_two_points, cursor_for_edge, cursor_for_grab, ellipse_semi_axes, hatch_lines,
+    ArcControlPoint, ArcControlPoints, CursorShape, DrawEvent, DrawInput, DrawMode, DrawParams,
+    DrawState, FillMode, MouseButton, PanDirection, PlotPointerEvent, PointPick, RoiDrawKind,
+    RoiGrab, SelectionStyle, arc_control_points, arc_from_three_points, arc_from_two_points,
+    arc_three_point_drag, cursor_for_edge, cursor_for_grab, ellipse_semi_axes, hatch_lines,
     image_index, nearest_point, roi_draw_mode, roi_from_draw, roi_grab_at,
 };
 pub use crate::widget::items_selection_dialog::{
