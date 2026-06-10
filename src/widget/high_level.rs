@@ -3082,6 +3082,9 @@ pub struct PlotWidget {
     /// Open legend rename popup: the item being renamed and its edit buffer
     /// (silx `RenameCurveDialog`). `None` when no rename is in progress.
     rename_state: Option<(ItemHandle, String)>,
+    /// Printer-selection dialog opened by the toolbar Print button (silx
+    /// `PrintAction`'s `QPrintDialog` analogue).
+    print_dialog: crate::widget::print_dialog::PrintDialog,
 }
 
 impl PlotWidget {
@@ -3111,6 +3114,7 @@ impl PlotWidget {
             default_plot_points: false,
             events: Vec::new(),
             rename_state: None,
+            print_dialog: crate::widget::print_dialog::PrintDialog::new(),
         }
     }
 
@@ -5826,10 +5830,24 @@ impl PlotWidget {
             out.copy = true;
         }
         if toolbar_icon_button(ui, ToolbarIcon::Print, false, "Print figure").clicked() {
-            // GPU readback + printer submission are native shims; ignore the
-            // result here (the toolbar only reports the click).
-            let _ = self.print_graph(DEFAULT_SAVE_SIZE);
+            // silx `PrintAction` opens QPrintDialog; here the click opens the
+            // printer-selection dialog (printer list + "Save to file…"), and the
+            // dialog's choice is applied below.
+            self.print_dialog.open_with_system_printers();
             out.print = true;
+        }
+        // The print dialog only signals the choice; this owner performs it.
+        // GPU readback, printer submission, and the rfd file dialog are native
+        // shims; their results are ignored here (the toolbar only reports).
+        if let Some(action) = self.print_dialog.show(ui.ctx()) {
+            match action {
+                crate::widget::print_dialog::PrintDialogAction::Print { printer } => {
+                    let _ = self.print_graph_to(&printer, DEFAULT_SAVE_SIZE);
+                }
+                crate::widget::print_dialog::PrintDialogAction::SaveToFile => {
+                    let _ = self.save_dialog(DEFAULT_SAVE_SIZE);
+                }
+            }
         }
     }
 
@@ -6758,20 +6776,40 @@ impl PlotWidget {
     /// The GPU readback and the printer submission are untested native shims (a
     /// real printer / spooler is required); the rasterization step reuses the
     /// unit-tested [`crate::render::save`] encoders, and the temp-path naming is
-    /// unit-tested via [`print_temp_png_path`]. Print preview and printer-settings
-    /// dialogs (silx's `QPrintDialog`) are intentionally not implemented; this
-    /// prints to the default printer.
+    /// unit-tested via [`print_temp_png_path`]. The toolbar Print button opens a
+    /// printer-selection dialog ([`crate::widget::print_dialog::PrintDialog`])
+    /// that routes to [`Self::print_graph_to`]; this method is the
+    /// dialog-less direct path to the default printer.
     pub fn print_graph(&self, size: (u32, u32)) -> Result<bool, SaveError> {
+        let Some(printer) = printers::get_default_printer() else {
+            return Ok(false);
+        };
+        self.print_to_printer(&printer, size)
+    }
+
+    /// Print a `size` pixel snapshot of the figure to the system printer with
+    /// the given system name (the print dialog's chosen target). Returns
+    /// `Ok(false)` when no printer of that name exists (e.g. it disappeared
+    /// between the dialog opening and the click).
+    pub fn print_graph_to(&self, printer_name: &str, size: (u32, u32)) -> Result<bool, SaveError> {
+        let Some(printer) = printers::get_printer_by_name(printer_name) else {
+            return Ok(false);
+        };
+        self.print_to_printer(&printer, size)
+    }
+
+    /// Single submit owner for both print entry points: rasterize to a temp
+    /// PNG, hand the file to `printer`, and always remove the temp file.
+    fn print_to_printer(
+        &self,
+        printer: &printers::common::base::printer::Printer,
+        size: (u32, u32),
+    ) -> Result<bool, SaveError> {
         // Rasterize to a temp PNG, then hand the file to the printer. save_graph
         // is the only public figure-encoding entry point (it writes a PNG file),
         // and silx prints a PNG bitmap, so PNG is the faithful intermediate.
         let path = print_temp_png_path(&std::env::temp_dir(), std::process::id());
         self.save_graph(&path, size)?;
-
-        let Some(printer) = printers::get_default_printer() else {
-            let _ = std::fs::remove_file(&path);
-            return Ok(false);
-        };
         let submit = printer.print_file(
             &path.to_string_lossy(),
             printers::common::base::job::PrinterJobOptions::none(),
