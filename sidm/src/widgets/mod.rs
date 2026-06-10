@@ -16,6 +16,7 @@ pub mod enum_combo_box;
 pub mod label;
 pub mod line_edit;
 pub mod push_button;
+pub mod ring_buffer;
 pub mod slider;
 pub mod spinbox;
 
@@ -27,5 +28,6 @@ pub use enum_combo_box::PydmEnumComboBox;
 pub use label::PydmLabel;
 pub use line_edit::{PydmLineEdit, parse_input};
 pub use push_button::{DEFAULT_CONFIRM_MESSAGE, PydmPushButton, compute_send_value};
+pub use ring_buffer::{DEFAULT_BUFFER_SIZE, MINIMUM_BUFFER_SIZE, TimeSeriesBuffer};
 pub use slider::{DEFAULT_NUM_STEPS, PydmSlider};
 pub use spinbox::PydmSpinbox;
