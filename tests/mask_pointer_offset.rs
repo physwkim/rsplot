@@ -107,6 +107,33 @@ fn red_centroid(img: &[u8], width: u32, height: u32) -> Option<(f64, f64)> {
     (n > 0).then(|| (sx / n as f64, sy / n as f64))
 }
 
+/// Like [`red_centroid`] but only counts pixels inside the physical rect
+/// `(x0, y0, x1, y1)` — used to exclude toolbar chrome (e.g. the red mask-color
+/// swatch) from the measurement of the painted overlay cell.
+fn red_centroid_in(
+    img: &[u8],
+    width: u32,
+    height: u32,
+    (x0, y0, x1, y1): (f64, f64, f64, f64),
+) -> Option<(f64, f64)> {
+    let (mut sx, mut sy, mut n) = (0.0f64, 0.0f64, 0u64);
+    for y in 0..height {
+        for x in 0..width {
+            if (x as f64) < x0 || (x as f64) >= x1 || (y as f64) < y0 || (y as f64) >= y1 {
+                continue;
+            }
+            let i = ((y * width + x) * 4) as usize;
+            let (r, g, b) = (img[i], img[i + 1], img[i + 2]);
+            if r > 180 && g < 80 && b < 80 {
+                sx += x as f64;
+                sy += y as f64;
+                n += 1;
+            }
+        }
+    }
+    (n > 0).then(|| (sx / n as f64, sy / n as f64))
+}
+
 #[test]
 fn pencil_paints_under_the_click_not_left_of_it() {
     // ppp 1.0 (standard) and 2.0 (macOS Retina, the reporter's display): a HiDPI
@@ -195,6 +222,158 @@ fn run_case(ppp: f32) {
         off_x.abs() <= tol && off_y.abs() <= tol,
         "ppp={ppp}: rendered pencil overlay is offset from the click by ({off_x:.1},{off_y:.1}) px \
          (tolerance {tol:.1}); negative x means drawn LEFT of the click"
+    );
+}
+
+/// Faithful mirror of `examples/high_level_mask_tools.rs`: the real `ui()` body
+/// (`ui.vertical` → `show_toolbar` → `separator` → `show` → `handle_draw` →
+/// `apply`), the example's title + graph cursor, on a Retina (ppp 2.0) surface.
+/// Measures the painted overlay against the CHROME position the user actually
+/// compares it to (`data_to_pixel`), not the click — directly testing the report
+/// "the mask is drawn ~20px LEFT of the mouse / polygon points".
+struct MirrorApp {
+    plot: Plot2D,
+    mask: MaskToolsWidget,
+    last_transform: Option<Transform>,
+}
+
+impl MirrorApp {
+    fn new(rs: &RenderState) -> Self {
+        let mut plot = Plot2D::new(rs, 0);
+        plot.set_graph_title("Interactive Masking (Hover and Drag)");
+        plot.set_graph_cursor(true);
+        plot.set_default_colormap(Colormap::viridis(0.0, 1.0));
+        plot.try_add_default_image(W, H, &build_image())
+            .expect("image dims match");
+
+        let mut mask = MaskToolsWidget::new(W, H);
+        mask.active_tool = MaskTool::Pencil;
+        mask.color = egui::Color32::from_rgb(255, 0, 0);
+        mask.alpha = 1.0;
+
+        Self {
+            plot,
+            mask,
+            last_transform: None,
+        }
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui) {
+        ui.vertical(|ui| {
+            self.mask.show_toolbar(ui);
+            ui.separator();
+            let want = if self.mask.active_tool != MaskTool::None {
+                PlotInteractionMode::MaskDraw
+            } else {
+                PlotInteractionMode::Zoom
+            };
+            if self.plot.interaction_mode() != want {
+                self.plot.set_interaction_mode(want);
+            }
+            let resp = self.plot.show(ui);
+            self.mask.handle_draw(ui, &resp);
+            self.mask.apply(&mut self.plot);
+            self.last_transform = Some(resp.transform);
+        });
+    }
+}
+
+#[test]
+fn overlay_aligns_with_chrome_in_mirror_of_example() {
+    // Retina ppp (the reporter's display): the overlay drift only surfaced at
+    // ppp != 1.0 in the toolbar-overflow regime.
+    let ppp = 2.0f32;
+    let rs = create_render_state(default_wgpu_setup());
+    siplot::install(&rs);
+
+    let app = Rc::new(RefCell::new(MirrorApp::new(&rs)));
+    let renderer = WgpuTestRenderer::from_render_state(rs);
+
+    let app_ui = app.clone();
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(800.0, 600.0))
+        .with_pixels_per_point(ppp)
+        .renderer(renderer)
+        .build_ui(move |ui| app_ui.borrow_mut().ui(ui));
+
+    // Two frames: the wrapped toolbar's height settles, so the plot's data area
+    // is stable before we click.
+    harness.step();
+    harness.step();
+    let transform = app.borrow().last_transform.expect("transform captured");
+    let area = transform.area;
+    // The mask toolbar (`show_toolbar`) is far wider than the 800-pt window. A
+    // non-wrapping `ui.horizontal` grows the surrounding ui past the window, so
+    // the plot over-allocates and `area` exceeds the window; egui-wgpu then
+    // clamps the image viewport to the window while the chrome's `data_to_pixel`
+    // is unclamped, drifting the overlay LEFT of the cursor/polygon points.
+    // `horizontal_wrapped` keeps the toolbar (and thus `area`) within the window.
+    assert!(
+        area.max.x <= 800.0,
+        "data area right edge {:.0} exceeds the 800-pt window — the toolbar still \
+         overflows and the wgpu overlay will diverge from the chrome",
+        area.max.x
+    );
+
+    let click = area.center();
+    harness.hover_at(click);
+    harness.drag_at(click);
+    harness.step();
+    harness.drop_at(click);
+    harness.step();
+    harness.step();
+    harness.step();
+
+    let painted: Vec<usize> = app
+        .borrow()
+        .mask
+        .mask
+        .iter()
+        .enumerate()
+        .filter_map(|(i, &lvl)| (lvl != 0).then_some(i))
+        .collect();
+    assert!(!painted.is_empty(), "pencil click painted no mask cell");
+
+    let image = harness.render().expect("headless wgpu render");
+    let (iw, ih) = (image.width(), image.height());
+    // Restrict the red search to the physical data-area rect so the toolbar's
+    // red mask-colour swatch is not mistaken for the painted overlay cell.
+    let centroid = red_centroid_in(
+        image.as_raw(),
+        iw,
+        ih,
+        (
+            area.min.x as f64 * ppp as f64,
+            area.min.y as f64 * ppp as f64,
+            area.max.x as f64 * ppp as f64,
+            area.max.y as f64 * ppp as f64,
+        ),
+    )
+    .expect("painted red overlay cell must be visible in the data area");
+
+    // CHROME ground truth: the centre of the painted cell, projected to the
+    // screen the SAME way the chrome (axes, polygon points, crosshair) is —
+    // `data_to_pixel` (logical) × ppp. This is exactly what the user compares
+    // the overlay against ("the mouse / polygon point positions").
+    let idx = painted[0];
+    let (cell_col, cell_row) = ((idx as u32 % W) as f64, (idx as u32 / W) as f64);
+    let chrome_pt = transform.data_to_pixel(cell_col + 0.5, cell_row + 0.5);
+    let chrome_px = (
+        chrome_pt.x as f64 * ppp as f64,
+        chrome_pt.y as f64 * ppp as f64,
+    );
+
+    let off_x = centroid.0 - chrome_px.0;
+    let off_y = centroid.1 - chrome_px.1;
+    let cell_px = (area.width() as f64 / W as f64) * ppp as f64;
+
+    // The overlay cell centre must land on the chrome projection of that same
+    // cell centre, within AA + half-cell spread. A ~20px left drift fails here.
+    let tol = cell_px + 4.0;
+    assert!(
+        off_x.abs() <= tol && off_y.abs() <= tol,
+        "wgpu overlay is offset from the CHROME position by ({off_x:.1},{off_y:.1}) px \
+         (tol {tol:.1}); negative x = drawn LEFT of the chrome/mouse/polygon points"
     );
 }
 

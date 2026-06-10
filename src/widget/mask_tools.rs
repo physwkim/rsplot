@@ -544,7 +544,7 @@ impl MaskToolsWidget {
 
     /// Show the masking tools toolbar.
     pub fn show_toolbar(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label("Mask:");
 
             ui.selectable_value(&mut self.active_tool, MaskTool::None, "○")

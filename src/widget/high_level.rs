@@ -5468,7 +5468,7 @@ impl PlotWidget {
         let mut out = ToolbarResponse::default();
         ui.scope(|ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 self.show_toolbar_controls(ui, &mut out);
             });
         });
@@ -5526,7 +5526,7 @@ impl PlotWidget {
         let mut extra = None;
         ui.scope(|ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 self.show_toolbar_controls(ui, &mut out);
                 ui.separator();
                 extra = Some(add_contents(ui, self));
@@ -7476,7 +7476,7 @@ impl CompareImages {
     ///
     /// Call this before [`Self::show`].
     pub fn show_toolbar(&mut self, ui: &mut egui::Ui) -> CompareMode {
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
 
             for (label, tooltip, m) in [
@@ -8598,7 +8598,7 @@ impl ImageView {
     /// alpha slider (silx `ActiveImageAlphaSlider`, ImageView.py:513-517). Each
     /// change is propagated to the displayed image.
     pub fn show_toolbar(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             // Interpolation selector (silx image interpolation).
             let mut interpolation = self.interpolation;
             egui::ComboBox::from_label("interp")
