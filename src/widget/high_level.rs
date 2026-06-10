@@ -8001,10 +8001,6 @@ fn split_composite(
 /// the 25 pt gradient strip (silx `_ColorScale`) plus ticks and end labels.
 const COLORBAR_WIDTH: f32 = 70.0;
 
-/// Height in points of the radar overview in the bottom-right corner (silx
-/// `_radarView`, ImageView.py:486-490). Matches the histogram strip thickness.
-const RADAR_OVERVIEW_SIZE: f32 = 80.0;
-
 /// Build the side [`ColorBarWidget`](crate::widget::colorbar::ColorBarWidget)
 /// for an [`ImageView`], synced to `colormap`'s value limits (silx
 /// `ImageView.getColorBarWidget`, ImageView.py:501). Split out from
@@ -8926,52 +8922,53 @@ impl ImageView {
         // `ColorBarAction`).
         let colorbar_w = colorbar_column_width(self.show_colorbar, true);
 
-        // Top row: horizontal histogram (skipped when side histograms hidden).
+        // Top row: horizontal histogram on the left, radar overview filling the
+        // top-right corner (the histoV + colorbar column band above the image).
+        // Both are skipped when side histograms are hidden.
         if show_histos {
-            ui.allocate_ui(
-                egui::vec2(avail.x - histo_v_w - colorbar_w, histo_h_h),
-                |ui| {
-                    self.histo_h.show(ui);
-                },
-            );
+            ui.horizontal(|ui| {
+                // `ui.horizontal` inserts `item_spacing.x` between the two
+                // children; the histogram keeps the image's width (so it stays
+                // aligned above the image, x-axes synced) and the radar takes the
+                // rest minus that spacing, so the pair fills the row without
+                // overflowing the window's right edge.
+                let spacing = ui.spacing().item_spacing.x;
+                ui.allocate_ui(
+                    egui::vec2(avail.x - histo_v_w - colorbar_w, histo_h_h),
+                    |ui| {
+                        self.histo_h.show(ui);
+                    },
+                );
 
-            // Sync the radar viewport to the image plot's current limits before
-            // rendering (silx `__setVisibleRectFromPlot`). The radar is part of
-            // the side-histogram cluster, so it too is gated here.
-            let (xmin, xmax) = self.image_plot.x_limits();
-            if let Some((ymin, ymax)) = self.image_plot.y_limits(YAxis::Left) {
-                self.radar.set_viewport_limits(xmin, xmax, ymin, ymax);
-            }
+                // Sync the radar viewport to the image plot's current limits
+                // before rendering (silx `__setVisibleRectFromPlot`), then draw
+                // it in the previously empty top-right corner. A drag pans/zooms
+                // the image plot (silx `plot.setLimits`, RadarView.py:326).
+                let (xmin, xmax) = self.image_plot.x_limits();
+                if let Some((ymin, ymax)) = self.image_plot.y_limits(YAxis::Left) {
+                    self.radar.set_viewport_limits(xmin, xmax, ymin, ymax);
+                }
+                let radar = self.radar.ui(
+                    ui,
+                    egui::vec2((histo_v_w + colorbar_w - spacing).max(0.0), histo_h_h),
+                );
+                if let Some((rx0, rx1, ry0, ry1)) = radar.dragged_limits {
+                    self.image_plot.set_limits(rx0, rx1, ry0, ry1, None);
+                }
+            });
         }
 
-        // Bottom row: image + vertical histogram + colorbar side by side. The
-        // radar overview sits in the bottom-right corner under the vertical
-        // histogram (silx grid (1,1), ImageView.py:486-490).
+        // Bottom row: image + vertical histogram + colorbar side by side.
         let img_h = avail.y - histo_h_h;
-        let radar_h = RADAR_OVERVIEW_SIZE.min(img_h);
         let response = ui.horizontal(|ui| {
             let img_w = avail.x - histo_v_w - colorbar_w;
             let response = ui
                 .allocate_ui(egui::vec2(img_w, img_h), |ui| self.image_plot.show(ui))
                 .inner;
-            // Vertical histogram with the radar overview stacked below it
-            // (skipped when side histograms hidden). The enclosing
-            // `ui.horizontal` makes child layouts horizontal by default, so an
-            // explicit `ui.vertical` is required here — otherwise the radar lands
-            // beside the histogram and overflows the column.
+            // Vertical histogram (skipped when side histograms hidden).
             if show_histos {
                 ui.allocate_ui(egui::vec2(histo_v_w, img_h), |ui| {
-                    ui.vertical(|ui| {
-                        ui.allocate_ui(egui::vec2(histo_v_w, img_h - radar_h), |ui| {
-                            self.histo_v.show(ui);
-                        });
-                        let radar = self.radar.ui(ui, egui::vec2(histo_v_w, radar_h));
-                        if let Some((rx0, rx1, ry0, ry1)) = radar.dragged_limits {
-                            // Forward the dragged viewport to pan/zoom the image
-                            // plot (silx `plot.setLimits`, RadarView.py:326).
-                            self.image_plot.set_limits(rx0, rx1, ry0, ry1, None);
-                        }
-                    });
+                    self.histo_v.show(ui);
                 });
             }
             // Colorbar column, synced to the active image's colormap limits.
