@@ -9,11 +9,13 @@
 //! [`ChannelState`]: crate::ChannelState
 
 pub mod base;
+pub mod byte;
 pub mod display_format;
 pub mod label;
 pub mod line_edit;
 
 pub use base::{BorderStyle, ChannelBase, alarm_border, severity_color};
+pub use byte::{Orientation, PydmByteIndicator, extract_bits};
 pub use display_format::{DisplayFormat, FormatSpec, format_value};
 pub use label::PydmLabel;
 pub use line_edit::{PydmLineEdit, parse_input};
