@@ -14,25 +14,17 @@
 
 use siplot::egui::Color32;
 use siplot::egui_wgpu::RenderState;
-use siplot::{CurveSpec, ItemHandle, LineStyle, Plot1D, PlotId, PlotResponse, Symbol, egui};
+use siplot::{ItemHandle, Plot1D, PlotId, PlotResponse, Symbol, YAxis, egui};
 
 use crate::channel::{Channel, PvValue};
 use crate::engine::{Engine, EngineError};
+use crate::widgets::plot_style::CurveStyle;
 use crate::widgets::ring_buffer::{DEFAULT_BUFFER_SIZE, TimeSeriesBuffer};
 use crate::widgets::waveform_plot::{RedrawMode, mode_allows};
 
-/// Default marker size in points (matches siplot `add_scatter`).
-pub const DEFAULT_SYMBOL_SIZE: f32 = 7.0;
-
-/// Build a marker-only curve spec (no connecting line) for the scatter item.
-fn scatter_spec<'a>(xs: &'a [f64], ys: &'a [f64], color: Color32, size: f32) -> CurveSpec<'a> {
-    let mut spec = CurveSpec::new(xs, ys, color);
-    spec.line_style = LineStyle::None;
-    spec.line_width = 0.0;
-    spec.symbol = Some(Symbol::Circle);
-    spec.symbol_size = size;
-    spec
-}
+/// Default marker size in points; owned by [`crate::widgets::plot_style`] and
+/// re-exported here for the established public path.
+pub use crate::widgets::plot_style::DEFAULT_SYMBOL_SIZE;
 
 /// One scatter curve: paired X/Y scalar channels, the accumulated `(x, y)`
 /// buffer, and the arrival/commit bookkeeping the [`RedrawMode`] needs.
@@ -40,8 +32,7 @@ struct ScatterCurve {
     x_channel: Channel,
     y_channel: Channel,
     handle: ItemHandle,
-    color: Color32,
-    symbol_size: f32,
+    style: CurveStyle,
     mode: RedrawMode,
     buffer: TimeSeriesBuffer,
     last_x_stamp: u64,
@@ -100,10 +91,7 @@ impl ScatterCurve {
     /// Redraw the markers from the current buffer.
     fn redraw(&mut self, plot: &mut Plot1D) {
         self.buffer.ordered_into(&mut self.xs, &mut self.ys);
-        plot.update_curve_spec(
-            self.handle,
-            scatter_spec(&self.xs, &self.ys, self.color, self.symbol_size),
-        );
+        plot.update_curve_spec(self.handle, self.style.to_spec(&self.xs, &self.ys));
     }
 }
 
@@ -168,8 +156,7 @@ impl PydmScatterPlot {
             x_channel,
             y_channel,
             handle,
-            color,
-            symbol_size: DEFAULT_SYMBOL_SIZE,
+            style: CurveStyle::markers(color),
             mode: RedrawMode::default(),
             buffer: TimeSeriesBuffer::new(self.buffer_size),
             last_x_stamp: 0,
@@ -190,6 +177,23 @@ impl PydmScatterPlot {
         if let Some(curve) = self.curves.get_mut(index) {
             curve.mode = mode;
         }
+    }
+
+    /// Restyle curve `index` (PyDM `BasePlotCurveItem` properties: colour, marker
+    /// symbol/size, Y axis) and re-draw it immediately. Assigning the curve to
+    /// [`YAxis::Right`] enables the right (y2) axis' autoscale. Returns `false`
+    /// for an out-of-range index.
+    pub fn set_curve_style(&mut self, index: usize, style: CurveStyle) -> bool {
+        if index >= self.curves.len() {
+            return false;
+        }
+        let right = style.y_axis == YAxis::Right;
+        self.curves[index].style = style;
+        if right {
+            self.plot.plot_mut().set_y2_autoscale(true);
+        }
+        self.curves[index].redraw(&mut self.plot);
+        true
     }
 
     /// Inject an `(x, y)` pair directly into curve `index` and redraw (PyDM "you

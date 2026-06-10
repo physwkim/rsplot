@@ -39,10 +39,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use siplot::egui::Color32;
 use siplot::egui_wgpu::RenderState;
-use siplot::{CurveSpec, ItemHandle, Plot1D, PlotId, PlotResponse, egui};
+use siplot::{ItemHandle, Plot1D, PlotId, PlotResponse, YAxis, egui};
 
 use crate::channel::{Channel, ChannelState, PvValue};
 use crate::engine::{Engine, EngineError};
+use crate::widgets::plot_style::CurveStyle;
 use crate::widgets::ring_buffer::{DEFAULT_BUFFER_SIZE, TimeSeriesBuffer};
 
 /// PyDM `DEFAULT_TIME_SPAN`: the X window width in seconds.
@@ -142,7 +143,7 @@ struct TimeCurve {
     channel: Channel,
     feed: CurveFeed,
     handle: ItemHandle,
-    color: Color32,
+    style: CurveStyle,
     xs: Vec<f64>,
     ys: Vec<f64>,
 }
@@ -155,10 +156,7 @@ fn redraw_curve(plot: &mut Plot1D, curve: &mut TimeCurve, t0: f64) {
     for x in &mut curve.xs {
         *x -= t0;
     }
-    plot.update_curve_spec(
-        curve.handle,
-        CurveSpec::new(&curve.xs, &curve.ys, curve.color),
-    );
+    plot.update_curve_spec(curve.handle, curve.style.to_spec(&curve.xs, &curve.ys));
 }
 
 /// A scrolling strip chart of scalar PVs versus time (PyDM `PyDMTimePlot`).
@@ -260,11 +258,29 @@ impl PydmTimePlot {
             channel,
             feed: CurveFeed::new(self.buffer_size),
             handle,
-            color,
+            style: CurveStyle::line(color),
             xs: Vec::new(),
             ys: Vec::new(),
         });
         Ok(self.curves.len() - 1)
+    }
+
+    /// Restyle curve `index` (PyDM `BasePlotCurveItem` properties: colour, line
+    /// style/width, symbol, Y axis) and re-draw it immediately. Assigning the
+    /// curve to [`YAxis::Right`] enables the right (y2) axis' autoscale so it gets
+    /// its own scale. Returns `false` for an out-of-range index.
+    pub fn set_curve_style(&mut self, index: usize, style: CurveStyle) -> bool {
+        if index >= self.curves.len() {
+            return false;
+        }
+        let right = style.y_axis == YAxis::Right;
+        self.curves[index].style = style;
+        if right {
+            self.plot.plot_mut().set_y2_autoscale(true);
+        }
+        let t0 = self.t0;
+        redraw_curve(&mut self.plot, &mut self.curves[index], t0);
+        true
     }
 
     /// Inject a `(time, value)` sample (absolute epoch seconds) directly into

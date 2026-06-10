@@ -21,6 +21,7 @@ pub mod frame;
 pub mod image_view;
 pub mod label;
 pub mod line_edit;
+pub mod plot_style;
 pub mod push_button;
 pub mod ring_buffer;
 pub mod scale_indicator;
@@ -44,6 +45,7 @@ pub use frame::PydmFrame;
 pub use image_view::{PydmImageView, ReadingOrder, color_range, reshape_image, value_to_image};
 pub use label::PydmLabel;
 pub use line_edit::{PydmLineEdit, parse_input};
+pub use plot_style::{CurveStyle, DEFAULT_LINE_WIDTH};
 pub use push_button::{DEFAULT_CONFIRM_MESSAGE, PydmPushButton, compute_send_value};
 pub use ring_buffer::{DEFAULT_BUFFER_SIZE, MINIMUM_BUFFER_SIZE, TimeSeriesBuffer};
 pub use scale_indicator::{

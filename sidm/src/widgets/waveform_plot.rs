@@ -13,10 +13,11 @@
 
 use siplot::egui::Color32;
 use siplot::egui_wgpu::RenderState;
-use siplot::{CurveSpec, ItemHandle, Plot1D, PlotId, PlotResponse, egui};
+use siplot::{ItemHandle, Plot1D, PlotId, PlotResponse, YAxis, egui};
 
 use crate::channel::{Channel, PvValue};
 use crate::engine::{Engine, EngineError};
+use crate::widgets::plot_style::CurveStyle;
 
 /// When a waveform/scatter curve redraws relative to its X/Y channels (PyDM
 /// `redraw_mode`).
@@ -67,7 +68,7 @@ struct WaveformCurve {
     y_channel: Channel,
     x_channel: Option<Channel>,
     handle: ItemHandle,
-    color: Color32,
+    style: CurveStyle,
     mode: RedrawMode,
     last_y_stamp: u64,
     last_x_stamp: u64,
@@ -130,9 +131,15 @@ impl WaveformCurve {
                 self.xs.extend((0..y.len()).map(|i| i as f64));
             }
         }
-        plot.update_curve_spec(self.handle, CurveSpec::new(&self.xs, &self.ys, self.color));
+        plot.update_curve_spec(self.handle, self.style.to_spec(&self.xs, &self.ys));
         self.pending_x = false;
         self.pending_y = false;
+    }
+
+    /// Re-spec the curve from the already-committed data with the current style
+    /// (used when the style changes between data updates).
+    fn restyle(&self, plot: &mut Plot1D) {
+        plot.update_curve_spec(self.handle, self.style.to_spec(&self.xs, &self.ys));
     }
 }
 
@@ -200,7 +207,7 @@ impl PydmWaveformPlot {
             y_channel,
             x_channel,
             handle,
-            color,
+            style: CurveStyle::line(color),
             mode: RedrawMode::default(),
             last_y_stamp: 0,
             last_x_stamp: 0,
@@ -220,6 +227,23 @@ impl PydmWaveformPlot {
         if let Some(curve) = self.curves.get_mut(index) {
             curve.mode = mode;
         }
+    }
+
+    /// Restyle curve `index` (PyDM `BasePlotCurveItem` properties: colour, line
+    /// style/width, symbol, Y axis) and re-draw it immediately. Assigning the
+    /// curve to [`YAxis::Right`] enables the right (y2) axis' autoscale. Returns
+    /// `false` for an out-of-range index.
+    pub fn set_curve_style(&mut self, index: usize, style: CurveStyle) -> bool {
+        if index >= self.curves.len() {
+            return false;
+        }
+        let right = style.y_axis == YAxis::Right;
+        self.curves[index].style = style;
+        if right {
+            self.plot.plot_mut().set_y2_autoscale(true);
+        }
+        self.curves[index].restyle(&mut self.plot);
+        true
     }
 
     /// Poll every channel, redraw the curves whose redraw mode is satisfied, and
