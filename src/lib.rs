@@ -103,6 +103,9 @@ pub use crate::widget::high_level::{
     scatter_pick_pixels, scatter_position_info, stack_aligned_profile, stack_frame,
     stack_frame_count, stack_line_profile, vertical_profile_values,
 };
+pub use crate::widget::histogram_colorbar::{
+    Handle as HistogramColorBarHandle, HistogramColorBar, HistogramColorBarResponse,
+};
 pub use crate::widget::image_stack::{Frame, ImageStack};
 pub use crate::widget::interaction::{
     ArcControlPoint, ArcControlPoints, CursorShape, DrawEvent, DrawInput, DrawMode, DrawParams,

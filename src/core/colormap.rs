@@ -55,12 +55,29 @@ impl Normalization {
     /// [`Arcsinh`](Normalization::Arcsinh), identity otherwise. [`Gamma`] scales
     /// linearly here; its exponent is applied to the ratio afterwards, matching
     /// silx `GLPlotImage`.
-    fn transform(self, v: f64) -> f64 {
+    pub(crate) fn transform(self, v: f64) -> f64 {
         match self {
             Normalization::Linear | Normalization::Gamma => v,
             Normalization::Log => v.log10(),
             Normalization::Sqrt => v.sqrt(),
             Normalization::Arcsinh => v.asinh(),
+        }
+    }
+
+    /// Inverse of [`transform`](Self::transform): map a value back from the
+    /// transformed space to data space, so `inverse_transform(transform(v)) == v`
+    /// for every `v` in the transform's domain (`v > 0` for log, `v >= 0` for
+    /// sqrt; all `v` otherwise). Turns a dragged pixel position on the inline
+    /// `HistogramColorBar` back into a data value under any normalization.
+    /// [`Gamma`](Normalization::Gamma) is linear in this space (the exponent is
+    /// applied to the ratio, not the value), so its inverse is the identity —
+    /// matching [`transform`](Self::transform).
+    pub(crate) fn inverse_transform(self, t: f64) -> f64 {
+        match self {
+            Normalization::Linear | Normalization::Gamma => t,
+            Normalization::Log => 10f64.powf(t),
+            Normalization::Sqrt => t * t,
+            Normalization::Arcsinh => t.sinh(),
         }
     }
 }
@@ -1171,6 +1188,46 @@ mod tests {
         assert!((cmin as f64 - (-10.0f64).asinh()).abs() < 1e-6);
         let expected_oor = 1.0 / (10.0f64.asinh() - (-10.0f64).asinh());
         assert!((oor as f64 - expected_oor).abs() < 1e-6);
+    }
+
+    // --- inverse_transform round-trips -----------------------------------
+
+    #[test]
+    fn inverse_transform_round_trips_each_normalization() {
+        // inverse_transform(transform(v)) == v over each variant's domain.
+        for norm in [Normalization::Linear, Normalization::Gamma] {
+            for &v in &[-3.0, 0.0, 2.5, 100.0] {
+                let back = norm.inverse_transform(norm.transform(v));
+                assert!((back - v).abs() < 1e-9, "{norm:?} at v={v}: {back}");
+            }
+        }
+        // Arcsinh is finite/monotonic for all reals (sinh(asinh(v)) == v).
+        for &v in &[-50.0, -1.0, 0.0, 1.0, 50.0] {
+            let n = Normalization::Arcsinh;
+            let back = n.inverse_transform(n.transform(v));
+            assert!((back - v).abs() < 1e-6, "arcsinh at v={v}: {back}");
+        }
+        // Log is defined for v > 0; sqrt for v >= 0.
+        for &v in &[1e-3, 1.0, 10.0, 1000.0] {
+            let n = Normalization::Log;
+            let back = n.inverse_transform(n.transform(v));
+            assert!((back - v).abs() < 1e-6 * v.max(1.0), "log at v={v}: {back}");
+        }
+        for &v in &[0.0, 0.25, 4.0, 81.0] {
+            let n = Normalization::Sqrt;
+            let back = n.inverse_transform(n.transform(v));
+            assert!((back - v).abs() < 1e-9, "sqrt at v={v}: {back}");
+        }
+    }
+
+    #[test]
+    fn inverse_transform_maps_transformed_space_to_value() {
+        // Spot-check the closed forms (not via round-trip).
+        assert!((Normalization::Log.inverse_transform(2.0) - 100.0).abs() < 1e-9);
+        assert!((Normalization::Sqrt.inverse_transform(3.0) - 9.0).abs() < 1e-9);
+        assert!((Normalization::Arcsinh.inverse_transform(0.0)).abs() < 1e-12);
+        assert_eq!(Normalization::Linear.inverse_transform(7.5), 7.5);
+        assert_eq!(Normalization::Gamma.inverse_transform(7.5), 7.5);
     }
 
     // --- Catalog LUTs ----------------------------------------------------

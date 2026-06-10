@@ -15,6 +15,7 @@ pub mod curves_roi_widget;
 pub mod detached;
 pub mod fit_widget;
 pub mod high_level;
+pub mod histogram_colorbar;
 pub mod image_stack;
 pub mod interaction;
 pub mod items_selection_dialog;

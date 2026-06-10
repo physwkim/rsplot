@@ -625,8 +625,9 @@ fn arange(start: f64, stop: f64, step: f64) -> Vec<f64> {
 }
 
 /// silx `ColorScaleBar._updateMinMax` end-label format: `%.7g` when the value is
-/// 0 or `0 <= log10(abs(v)) < 7`, else `%.2e`.
-fn format_end_label(v: f64) -> String {
+/// 0 or `0 <= log10(abs(v)) < 7`, else `%.2e`. Shared with
+/// [`crate::widget::histogram_colorbar`] for its end/handle value labels.
+pub(crate) fn format_end_label(v: f64) -> String {
     if v == 0.0 {
         return format_g(0.0, 7);
     }
