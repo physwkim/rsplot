@@ -6716,6 +6716,7 @@ impl PlotWidget {
             .add_filter("PPM figure", &["ppm"])
             .add_filter("SVG figure", &["svg"])
             .add_filter("TIFF figure", &["tif", "tiff"])
+            .add_filter("JPEG figure", &["jpg", "jpeg"])
             .add_filter("EPS figure", &["eps"])
             .add_filter("PDF figure", &["pdf"])
             .add_filter("Curve CSV", &["csv"])
@@ -12244,9 +12245,13 @@ mod tests {
             SaveTarget::from_path(Path::new("/tmp/curve.csv")),
             Some(SaveTarget::CurveCsv)
         );
-        // Still-unsupported (jpeg) / extensionless paths are not save targets,
+        assert_eq!(
+            SaveTarget::from_path(Path::new("/tmp/fig.jpeg")),
+            Some(SaveTarget::Figure(SaveFormat::Jpeg))
+        );
+        // Still-unsupported (ps) / extensionless paths are not save targets,
         // so save_to_path returns Ok(false) for them.
-        assert_eq!(SaveTarget::from_path(Path::new("/tmp/fig.jpeg")), None);
+        assert_eq!(SaveTarget::from_path(Path::new("/tmp/fig.ps")), None);
         assert_eq!(SaveTarget::from_path(Path::new("/tmp/noext")), None);
     }
 

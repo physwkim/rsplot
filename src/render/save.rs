@@ -22,10 +22,10 @@
 //!
 //! DEFERRED (not implemented here): true *vector* export of plot primitives
 //! (the SVG/EPS/PDF embed the rendered raster rather than re-emitting geometry,
-//! which would require the backend to record draw ops); JPEG (needs a DCT
-//! encoder crate); and matplotlib-parity DPI scaling of the actual render (DPI
-//! is recorded in the TIFF resolution tags but does not rescale the rendered
-//! pixel grid).
+//! which would require the backend to record draw ops); and matplotlib-parity
+//! DPI scaling of the actual render (DPI is recorded in the TIFF resolution
+//! tags / JFIF density but does not rescale the rendered pixel grid). JPEG is
+//! covered by the hand-written baseline encoder in [`crate::render::jpeg`].
 
 use std::fmt;
 use std::path::Path;
@@ -711,8 +711,9 @@ fn axis_log_flags(t: &crate::core::transform::Transform) -> [f32; 2] {
 /// Faithful to silx `PlotWidget.saveGraph` / `PlotImageFile.saveImageToFile`,
 /// which support PNG, PPM, SVG, and TIFF over a raster snapshot, plus EPS and
 /// PDF as raster-embedding substitutes for silx's matplotlib-only vector EPS/
-/// PDF. JPEG and true vector export are not implemented (see the module-level
-/// Defer note).
+/// PDF and JPEG via the hand-written baseline encoder
+/// ([`crate::render::jpeg`]). True vector export is not implemented (see the
+/// module-level Defer note).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SaveFormat {
     /// PNG (RGBA), via [`encode_png`].
@@ -724,6 +725,9 @@ pub enum SaveFormat {
     /// Uncompressed baseline TIFF (RGB) with resolution tags, via
     /// [`encode_tiff`].
     Tiff,
+    /// Baseline JFIF JPEG (RGB, alpha dropped), via
+    /// [`crate::render::jpeg::encode_jpeg`].
+    Jpeg,
     /// Encapsulated PostScript embedding the raster (RGB), via [`encode_eps`].
     Eps,
     /// Single-page PDF embedding the raster (RGB), via [`encode_pdf`].
@@ -733,15 +737,16 @@ pub enum SaveFormat {
 impl SaveFormat {
     /// Map a file extension (case-insensitive, no leading dot) to a format.
     ///
-    /// Recognizes silx's raster extensions `png`, `ppm`, `svg`, `tif`/`tiff`
-    /// plus `eps`/`pdf` (raster-embedding). Returns `None` for still-unsupported
-    /// extensions (`ps`, `jpeg`, `jpg`).
+    /// Recognizes silx's raster extensions `png`, `ppm`, `svg`, `tif`/`tiff`,
+    /// `jpg`/`jpeg` plus `eps`/`pdf` (raster-embedding). Returns `None` for
+    /// still-unsupported extensions (`ps`).
     pub fn from_extension(ext: &str) -> Option<Self> {
         match ext.to_ascii_lowercase().as_str() {
             "png" => Some(SaveFormat::Png),
             "ppm" => Some(SaveFormat::Ppm),
             "svg" => Some(SaveFormat::Svg),
             "tif" | "tiff" => Some(SaveFormat::Tiff),
+            "jpg" | "jpeg" => Some(SaveFormat::Jpeg),
             "eps" => Some(SaveFormat::Eps),
             "pdf" => Some(SaveFormat::Pdf),
             _ => None,
@@ -854,6 +859,10 @@ pub fn save_graph_with_format(
             let bytes = encode_tiff(&rgba, w, h, dpi);
             std::fs::write(path, bytes)?;
         }
+        SaveFormat::Jpeg => {
+            let bytes = crate::render::jpeg::encode_jpeg(&rgba, w, h, dpi);
+            std::fs::write(path, bytes)?;
+        }
         SaveFormat::Eps => {
             let bytes = encode_eps(&rgba, w, h);
             std::fs::write(path, bytes)?;
@@ -933,15 +942,15 @@ mod tests {
         assert_eq!(SaveFormat::from_extension("EPS"), Some(SaveFormat::Eps));
         assert_eq!(SaveFormat::from_extension("pdf"), Some(SaveFormat::Pdf));
         assert_eq!(SaveFormat::from_extension("PDF"), Some(SaveFormat::Pdf));
+        assert_eq!(SaveFormat::from_extension("jpg"), Some(SaveFormat::Jpeg));
+        assert_eq!(SaveFormat::from_extension("JPEG"), Some(SaveFormat::Jpeg));
     }
 
     #[test]
     fn save_format_rejects_still_unsupported_and_unknown_extensions() {
-        // JPEG needs a DCT encoder crate, and PostScript (`ps`) is not wired →
-        // still unsupported. (EPS and PDF are now raster-embedded.)
+        // PostScript (`ps`) is not wired → still unsupported. (EPS, PDF, and
+        // JPEG are now covered by the hand-written encoders.)
         assert_eq!(SaveFormat::from_extension("ps"), None);
-        assert_eq!(SaveFormat::from_extension("jpeg"), None);
-        assert_eq!(SaveFormat::from_extension("jpg"), None);
         assert_eq!(SaveFormat::from_extension("bmp"), None);
         assert_eq!(SaveFormat::from_extension(""), None);
     }

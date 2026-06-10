@@ -179,8 +179,12 @@ mod tests {
             SaveTarget::from_extension("pdf"),
             Some(SaveTarget::Figure(SaveFormat::Pdf))
         );
+        assert_eq!(
+            SaveTarget::from_extension("jpeg"),
+            Some(SaveTarget::Figure(SaveFormat::Jpeg))
+        );
         // Still-unsupported / unknown extensions are rejected.
-        assert_eq!(SaveTarget::from_extension("jpeg"), None);
+        assert_eq!(SaveTarget::from_extension("ps"), None);
         assert_eq!(SaveTarget::from_extension("xyz"), None);
     }
 
