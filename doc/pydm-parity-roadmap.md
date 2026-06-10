@@ -43,7 +43,7 @@ Plan of record: `~/.claude/plans/deep-growing-balloon.md`.
 | E5 | `fake://` generators | ✅ | `fake_plugin.rs`, `tests/engine_fake.rs` |
 | E6 | `ca://` plugin + in-process IOC test | ✅ | `epics_plugins/ca_plugin.rs`, `tests/ca_ioc.rs`; feature `ca` (default-on), crates.io epics-ca-rs/epics-base-rs 0.18 |
 | E7 | Write path (`PvValue`→`EpicsValue`, string→enum) | ✅ | `ca_plugin.rs` `pv_to_epics` (native-type coercion, label→enum), disconnected-drop, no local echo; `CaPlugin::with_addresses`; enum-put IOC test |
-| E8 | `pva://` plugin (`ntscalar_to_state`) | ☐ | commit 7 |
+| E8 | `pva://` plugin (`apply_ntscalar`) | ✅ | `epics_plugins/pva_plugin.rs`, `tests/pva_ioc.rs`; feature `pva` (default-on), crates.io epics-pva-rs 0.18. Monitor-callback → NTScalar/NTEnum `apply_ntscalar` (value/alarm/timeStamp/display/control/valueAlarm); write path `pv_to_pva_put` (`.value` string PUT, NTEnum label→`value.index`). **Live path verified** via in-process `PvaServer::isolated` round-trip (not IOC-unverified) |
 | E9 | `calc://` (evalexpr) | ☐ | commit 8 |
 
 ## Widgets (`widgets/`)

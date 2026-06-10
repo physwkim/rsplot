@@ -15,15 +15,20 @@ repository = "https://github.com/physwkim/siplot"
 # core compiles with no network/runtime dependencies.
 
 [features]
-# `ca` is on by default (Channel Access is the common EPICS transport, and the
-# in-process `CaServer` round-trip test lives behind it). `pva`/`calc` join the
-# default set as they are wired in later commits. `loc://`/`fake://` are always
-# compiled, so `--no-default-features` gives the headless, dependency-light core.
-default = ["ca"]
+# `ca`/`pva` are on by default (Channel Access and pvAccess are the two EPICS
+# transports, and their in-process `CaServer`/`PvaServer` round-trip tests live
+# behind them). `calc` joins the default set when it is wired in a later commit.
+# `loc://`/`fake://` are always compiled, so `--no-default-features` gives the
+# headless, dependency-light core.
+default = ["ca", "pva"]
 # Channel Access backend (`ca://`). Pulls epics-ca-rs (client + in-process
 # CaServer for tests) and epics-base-rs (the `Snapshot`/`DbrClass`/`EpicsValue`
 # types the client returns, which epics-ca-rs does not re-export).
 ca = ["dep:epics-ca-rs", "dep:epics-base-rs"]
+# pvAccess backend (`pva://`). Pulls epics-pva-rs (client + in-process PvaServer
+# for tests); the NT value/structure types it returns live in epics-pva-rs
+# itself, so no extra epics-base-rs surface is needed beyond what `ca` shares.
+pva = ["dep:epics-pva-rs"]
 
 [dependencies]
 siplot = { path = ".." }
@@ -50,3 +55,10 @@ epics-ca-rs = { version = "0.18", optional = true }
 # epics-ca-rs, so this is a direct dependency. Unified to the same 0.18.6 that
 # epics-ca-rs pins, so there is one copy in the tree.
 epics-base-rs = { version = "0.18", optional = true }
+# pvAccess backend (feature `pva`). crates.io 0.18.x, same explicit deviation
+# from siplot's no-new-dependency rule, scoped to this crate. The client/monitor
+# API and the in-process `PvaServer` test harness are verified against the
+# 0.18.6 source at ~/codes/epics-rs (same version). The NT value/structure types
+# (`PvField`/`PvStructure`/`ScalarValue`/`NTScalar`) are re-exported by this
+# crate, so no extra epics-base-rs surface is pulled in for `pva` alone.
+epics-pva-rs = { version = "0.18", optional = true }

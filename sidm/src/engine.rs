@@ -114,6 +114,13 @@ impl Engine {
         engine.register_plugin(Arc::new(
             crate::data_plugins::epics_plugins::ca_plugin::CaPlugin::new(),
         ));
+        // EPICS pvAccess backend (feature `pva`). Replaceable via
+        // `register_plugin` (e.g. a test pointing the PVA client at a loopback
+        // server through `PvaPlugin::with_server`).
+        #[cfg(feature = "pva")]
+        engine.register_plugin(Arc::new(
+            crate::data_plugins::epics_plugins::pva_plugin::PvaPlugin::new(),
+        ));
         engine
     }
 
