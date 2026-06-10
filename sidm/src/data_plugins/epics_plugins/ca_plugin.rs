@@ -22,15 +22,18 @@
 //! `ca://` connection (one client per engine), mirroring PyDM's process-wide
 //! pyepics context.
 //!
-//! **Write path:** [`pv_to_epics_basic`] is the minimal scalar/array coercion
-//! used for the round-trip test; native-type-aware coercion (incl. string→enum)
-//! and write-while-disconnected handling are hardened in a follow-up commit.
+//! **Write path:** [`pv_to_epics`] coerces a queued [`PvValue`] to the record's
+//! native field type (string→enum label resolution, float→long, number→string),
+//! writes are dropped while disconnected, and there is no local echo — the value
+//! only changes when the IOC confirms through the monitor.
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
 use epics_base_rs::server::snapshot::{DbrClass, Snapshot};
-use epics_base_rs::types::EpicsValue;
+use epics_base_rs::types::{DbFieldType, EpicsValue};
+use epics_ca_rs::CaError;
 use epics_ca_rs::client::{CaChannel, CaClient, ConnectionEvent};
 use tokio::sync::{OnceCell, broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
@@ -43,14 +46,29 @@ use crate::engine::EngineError;
 /// [`CaClient`] (PyDM's process-wide pyepics context).
 pub struct CaPlugin {
     client: Arc<OnceCell<Arc<CaClient>>>,
+    /// Extra CA server addresses searched in addition to the environment's
+    /// `EPICS_CA_ADDR_LIST` (the programmatic equivalent of that variable).
+    /// Empty for the default plugin; tests point this at a loopback IOC.
+    addresses: Vec<SocketAddr>,
 }
 
 impl CaPlugin {
     /// Create the plugin. The CA client is not built until the first
-    /// `ca://` connection (so a plugin-less headless build pays nothing).
+    /// `ca://` connection (so a plugin-less headless build pays nothing),
+    /// and resolves servers via the standard EPICS environment.
     pub fn new() -> Self {
+        Self::with_addresses(Vec::new())
+    }
+
+    /// Like [`CaPlugin::new`], but the CA client also searches `addresses`
+    /// directly (`add_address`), in addition to the environment's
+    /// `EPICS_CA_ADDR_LIST`. The programmatic equivalent of that variable —
+    /// used to target a specific IOC / gateway / loopback test server without
+    /// touching process-global env.
+    pub fn with_addresses(addresses: Vec<SocketAddr>) -> Self {
         Self {
             client: Arc::new(OnceCell::new()),
+            addresses,
         }
     }
 }
@@ -76,7 +94,8 @@ impl DataPlugin for CaPlugin {
         } = ctx;
         let pv = address.full_address();
         let client = self.client.clone();
-        runtime.spawn(run_channel(client, pv, writer, writes, cancel));
+        let addresses = self.addresses.clone();
+        runtime.spawn(run_channel(client, addresses, pv, writer, writes, cancel));
         Ok(())
     }
 }
@@ -84,6 +103,7 @@ impl DataPlugin for CaPlugin {
 /// Service one CA connection until cancelled or the channel shuts down.
 async fn run_channel(
     client_cell: Arc<OnceCell<Arc<CaClient>>>,
+    addresses: Vec<SocketAddr>,
     pv: String,
     writer: StateWriter,
     mut writes: mpsc::UnboundedReceiver<PvValue>,
@@ -91,7 +111,13 @@ async fn run_channel(
 ) {
     // One CA client per engine, created on first use.
     let client = match client_cell
-        .get_or_try_init(|| async { CaClient::new().await.map(Arc::new) })
+        .get_or_try_init(|| async {
+            let client = CaClient::new().await?;
+            for addr in &addresses {
+                client.add_address(*addr);
+            }
+            Ok::<_, CaError>(Arc::new(client))
+        })
         .await
     {
         Ok(c) => c.clone(),
@@ -113,6 +139,10 @@ async fn run_channel(
     };
 
     let mut enum_cache: Option<Arc<[String]>> = None;
+    // Native field type, learned on connect and used to coerce writes to the
+    // record's type (e.g. string→enum index, float→long). `None` until the
+    // first metadata fetch; a write before then is coerced by value shape.
+    let mut native_type: Option<DbFieldType> = None;
     let mut connected_now = false;
 
     // Deterministic first-connect trigger. `connection_events` is a broadcast
@@ -132,7 +162,7 @@ async fn run_channel(
                 initial_done = true;
                 if res.is_ok() && !connected_now {
                     connected_now = true;
-                    on_connect(&ch, &writer, &mut enum_cache).await;
+                    on_connect(&ch, &writer, &mut enum_cache, &mut native_type).await;
                 }
             }
 
@@ -140,7 +170,7 @@ async fn run_channel(
                 Ok(ConnectionEvent::Connected) => {
                     if !connected_now {
                         connected_now = true;
-                        on_connect(&ch, &writer, &mut enum_cache).await;
+                        on_connect(&ch, &writer, &mut enum_cache, &mut native_type).await;
                     }
                 }
                 Ok(ConnectionEvent::Disconnected | ConnectionEvent::Unresponsive) => {
@@ -155,7 +185,7 @@ async fn run_channel(
                 Ok(ConnectionEvent::NativeTypeChanged { .. }) => {
                     // Record type changed under us — refetch metadata (units,
                     // enum strings, limits) against the new native type.
-                    on_connect(&ch, &writer, &mut enum_cache).await;
+                    on_connect(&ch, &writer, &mut enum_cache, &mut native_type).await;
                 }
                 Err(broadcast::error::RecvError::Lagged(_)) => {}
                 Err(broadcast::error::RecvError::Closed) => break,
@@ -173,7 +203,12 @@ async fn run_channel(
 
             maybe = writes.recv() => match maybe {
                 Some(value) => {
-                    if let Some(ev) = pv_to_epics_basic(&value) {
+                    // CA cannot honour a write on a disconnected channel
+                    // (PyDM logs and discards); drop it. No local echo — the
+                    // value only changes when the IOC confirms via the monitor.
+                    if connected_now
+                        && let Some(ev) = pv_to_epics(&value, native_type, enum_cache.as_deref())
+                    {
                         let _ = ch.put(&ev).await;
                     }
                 }
@@ -184,8 +219,16 @@ async fn run_channel(
 }
 
 /// Fetch full control metadata and publish it (plus the value/alarm) as one
-/// update. Caches enum strings for subsequent monitor label resolution.
-async fn on_connect(ch: &CaChannel, writer: &StateWriter, enum_cache: &mut Option<Arc<[String]>>) {
+/// update. Caches enum strings (for monitor label resolution) and the native
+/// field type (for write coercion).
+async fn on_connect(
+    ch: &CaChannel,
+    writer: &StateWriter,
+    enum_cache: &mut Option<Arc<[String]>>,
+    native_type: &mut Option<DbFieldType>,
+) {
+    // The native type is known once connected; cache it for the write path.
+    *native_type = ch.native_field_type().ok();
     match ch.get_with_metadata(DbrClass::Ctrl).await {
         Ok(snap) => {
             let strings: Option<Arc<[String]>> = snap
@@ -279,23 +322,116 @@ fn enum_label(enum_strings: Option<&[String]>, index: u16) -> Option<Arc<str>> {
         .map(|label| Arc::from(label.as_str()))
 }
 
-/// Minimal `PvValue` → `EpicsValue` coercion for the write path.
+/// Coerce a [`PvValue`] write to the record's native field type.
 ///
-/// This is the basic round-trip mapping: scalars/arrays map to the closest
-/// `EpicsValue` and the IOC coerces to the record's native type on write.
-/// Native-type-aware coercion (incl. string→enum lookup and
-/// write-while-disconnected handling) is hardened in a follow-up commit.
-fn pv_to_epics_basic(value: &PvValue) -> Option<EpicsValue> {
+/// Scalars are coerced to `native` (e.g. a label string or numeric string to an
+/// enum index, a float to a long, a number to the display string). Arrays pass
+/// through with their element type (the IOC coerces element types on write,
+/// exactly as it does for scalars over the wire). Returns `None` when the value
+/// cannot be represented as the target type (e.g. a non-numeric, non-label
+/// string written to an enum), in which case the write is dropped.
+fn pv_to_epics(
+    value: &PvValue,
+    native: Option<DbFieldType>,
+    enum_strings: Option<&[String]>,
+) -> Option<EpicsValue> {
+    match value {
+        // Waveforms keep their element type; the IOC coerces to the native FTVL.
+        PvValue::FloatArray(a) => Some(EpicsValue::DoubleArray(a.to_vec())),
+        PvValue::IntArray(a) => Some(EpicsValue::Int64Array(a.to_vec())),
+        PvValue::StrArray(a) => Some(EpicsValue::StringArray(a.to_vec())),
+        PvValue::Bytes(a) => Some(EpicsValue::CharArray(a.to_vec())),
+        scalar => scalar_to_native(scalar, native, enum_strings),
+    }
+}
+
+/// Coerce a scalar [`PvValue`] to the native field type (see [`pv_to_epics`]).
+fn scalar_to_native(
+    value: &PvValue,
+    native: Option<DbFieldType>,
+    enum_strings: Option<&[String]>,
+) -> Option<EpicsValue> {
+    match native {
+        Some(DbFieldType::Enum) => coerce_to_enum(value, enum_strings),
+        Some(DbFieldType::String) => Some(EpicsValue::String(scalar_to_string(value))),
+        Some(DbFieldType::Float) => scalar_f64(value).map(|v| EpicsValue::Float(v as f32)),
+        Some(DbFieldType::Short) => scalar_i64(value).map(|v| EpicsValue::Short(v as i16)),
+        Some(DbFieldType::Char) => scalar_i64(value).map(|v| EpicsValue::Char(v as u8)),
+        Some(DbFieldType::Long) => scalar_i64(value).map(|v| EpicsValue::Long(v as i32)),
+        Some(DbFieldType::Int64) => scalar_i64(value).map(EpicsValue::Int64),
+        Some(DbFieldType::UInt64) => scalar_i64(value).map(|v| EpicsValue::UInt64(v as u64)),
+        Some(DbFieldType::Double) => scalar_f64(value).map(EpicsValue::Double),
+        // Native type not yet known (write before metadata): pick the
+        // widest-fidelity representation for the value's shape.
+        None => untyped_scalar(value),
+    }
+}
+
+/// Resolve a scalar to an enum index: a label-string match first (PyDM
+/// `put` of a state name), then a numeric string / number as the index.
+fn coerce_to_enum(value: &PvValue, enum_strings: Option<&[String]>) -> Option<EpicsValue> {
+    match value {
+        PvValue::Str(s) => {
+            if let Some(idx) =
+                enum_strings.and_then(|labels| labels.iter().position(|label| label == s.as_ref()))
+            {
+                return Some(EpicsValue::Enum(idx as u16));
+            }
+            s.trim().parse::<u16>().ok().map(EpicsValue::Enum)
+        }
+        PvValue::Enum { index, .. } => Some(EpicsValue::Enum(*index)),
+        other => other.as_i64().map(|n| EpicsValue::Enum(n as u16)),
+    }
+}
+
+/// Float view of a scalar for a write, parsing a string value.
+fn scalar_f64(value: &PvValue) -> Option<f64> {
+    match value {
+        PvValue::Str(s) => s.trim().parse().ok(),
+        other => other.as_f64(),
+    }
+}
+
+/// Integer view of a scalar for a write, parsing a string value (a decimal
+/// string falls back through `f64` so `"2.0"` writes to a long as `2`).
+fn scalar_i64(value: &PvValue) -> Option<i64> {
+    match value {
+        PvValue::Str(s) => s
+            .trim()
+            .parse::<i64>()
+            .ok()
+            .or_else(|| s.trim().parse::<f64>().ok().map(|f| f as i64)),
+        other => other.as_i64(),
+    }
+}
+
+/// String form of a scalar for a write to a `DBF_STRING` field.
+fn scalar_to_string(value: &PvValue) -> String {
+    match value {
+        PvValue::Str(s) => s.to_string(),
+        PvValue::Int(n) => n.to_string(),
+        PvValue::Float(f) => f.to_string(),
+        PvValue::Bool(b) => i32::from(*b).to_string(),
+        PvValue::Enum {
+            label: Some(label), ..
+        } => label.to_string(),
+        PvValue::Enum { index, .. } => index.to_string(),
+        // Arrays do not reach here (handled in `pv_to_epics`).
+        _ => String::new(),
+    }
+}
+
+/// Best-effort coercion when the native type is not yet known, preferring the
+/// representation that loses the least (i64 over i32, f64 over f32).
+fn untyped_scalar(value: &PvValue) -> Option<EpicsValue> {
     Some(match value {
-        PvValue::Int(v) => EpicsValue::Long(*v as i32),
-        PvValue::Float(v) => EpicsValue::Double(*v),
-        PvValue::Bool(v) => EpicsValue::Long(i32::from(*v)),
+        PvValue::Int(n) => EpicsValue::Int64(*n),
+        PvValue::Float(f) => EpicsValue::Double(*f),
+        PvValue::Bool(b) => EpicsValue::Long(i32::from(*b)),
         PvValue::Str(s) => EpicsValue::String(s.to_string()),
         PvValue::Enum { index, .. } => EpicsValue::Enum(*index),
-        PvValue::FloatArray(a) => EpicsValue::DoubleArray(a.to_vec()),
-        PvValue::IntArray(a) => EpicsValue::LongArray(a.iter().map(|x| *x as i32).collect()),
-        PvValue::StrArray(a) => EpicsValue::StringArray(a.to_vec()),
-        PvValue::Bytes(a) => EpicsValue::CharArray(a.to_vec()),
+        // Arrays do not reach here (handled in `pv_to_epics`).
+        _ => return None,
     })
 }
 
@@ -453,29 +589,154 @@ mod tests {
     }
 
     #[test]
-    fn basic_write_coercions() {
+    fn write_coerces_scalar_to_native_numeric_type() {
+        // A float written to a LONG record truncates toward zero.
         assert_eq!(
-            pv_to_epics_basic(&PvValue::Float(2.5)),
+            pv_to_epics(&PvValue::Float(2.9), Some(DbFieldType::Long), None),
+            Some(EpicsValue::Long(2))
+        );
+        // An i64 written to an INT64 record keeps full width (a LONG would
+        // truncate at 2^31).
+        assert_eq!(
+            pv_to_epics(&PvValue::Int(1 << 40), Some(DbFieldType::Int64), None),
+            Some(EpicsValue::Int64(1 << 40))
+        );
+        // A float to a FLOAT record narrows to f32.
+        assert_eq!(
+            pv_to_epics(&PvValue::Float(0.5), Some(DbFieldType::Float), None),
+            Some(EpicsValue::Float(0.5))
+        );
+        // A double record takes the value verbatim.
+        assert_eq!(
+            pv_to_epics(&PvValue::Int(3), Some(DbFieldType::Double), None),
+            Some(EpicsValue::Double(3.0))
+        );
+    }
+
+    #[test]
+    fn write_parses_numeric_strings_for_numeric_records() {
+        assert_eq!(
+            pv_to_epics(
+                &PvValue::Str(Arc::from("2.5")),
+                Some(DbFieldType::Double),
+                None
+            ),
             Some(EpicsValue::Double(2.5))
         );
+        // A decimal string to a LONG falls through f64 then truncates.
         assert_eq!(
-            pv_to_epics_basic(&PvValue::Int(9)),
-            Some(EpicsValue::Long(9))
+            pv_to_epics(
+                &PvValue::Str(Arc::from("7.9")),
+                Some(DbFieldType::Long),
+                None
+            ),
+            Some(EpicsValue::Long(7))
+        );
+        // Non-numeric strings cannot be written to a numeric record.
+        assert_eq!(
+            pv_to_epics(
+                &PvValue::Str(Arc::from("nope")),
+                Some(DbFieldType::Double),
+                None
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn write_resolves_string_label_to_enum_index() {
+        let strings = vec!["Off".to_owned(), "On".to_owned()];
+        // A label string resolves to its index.
+        assert_eq!(
+            pv_to_epics(
+                &PvValue::Str(Arc::from("On")),
+                Some(DbFieldType::Enum),
+                Some(&strings)
+            ),
+            Some(EpicsValue::Enum(1))
+        );
+        // A numeric string is taken as the index directly when no label matches.
+        assert_eq!(
+            pv_to_epics(
+                &PvValue::Str(Arc::from("1")),
+                Some(DbFieldType::Enum),
+                Some(&strings)
+            ),
+            Some(EpicsValue::Enum(1))
+        );
+        // An index already carried through.
+        assert_eq!(
+            pv_to_epics(
+                &PvValue::Enum {
+                    index: 1,
+                    label: None
+                },
+                Some(DbFieldType::Enum),
+                Some(&strings)
+            ),
+            Some(EpicsValue::Enum(1))
+        );
+        // A string that is neither a label nor a number is unresolvable.
+        assert_eq!(
+            pv_to_epics(
+                &PvValue::Str(Arc::from("Bogus")),
+                Some(DbFieldType::Enum),
+                Some(&strings)
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn write_formats_scalar_for_string_record() {
+        assert_eq!(
+            pv_to_epics(&PvValue::Int(7), Some(DbFieldType::String), None),
+            Some(EpicsValue::String("7".to_owned()))
         );
         assert_eq!(
-            pv_to_epics_basic(&PvValue::Bool(true)),
-            Some(EpicsValue::Long(1))
+            pv_to_epics(
+                &PvValue::Str(Arc::from("hi")),
+                Some(DbFieldType::String),
+                None
+            ),
+            Some(EpicsValue::String("hi".to_owned()))
+        );
+    }
+
+    #[test]
+    fn write_without_known_native_type_uses_widest_representation() {
+        // i64 preserved (not narrowed to Long), f64 preserved.
+        assert_eq!(
+            pv_to_epics(&PvValue::Int(1 << 40), None, None),
+            Some(EpicsValue::Int64(1 << 40))
         );
         assert_eq!(
-            pv_to_epics_basic(&PvValue::Str(Arc::from("x"))),
-            Some(EpicsValue::String("x".to_owned()))
+            pv_to_epics(&PvValue::Float(1.5), None, None),
+            Some(EpicsValue::Double(1.5))
+        );
+    }
+
+    #[test]
+    fn write_arrays_pass_through_with_element_type() {
+        assert_eq!(
+            pv_to_epics(
+                &PvValue::FloatArray(Arc::from([1.0_f64, 2.0].as_slice())),
+                Some(DbFieldType::Double),
+                None
+            ),
+            Some(EpicsValue::DoubleArray(vec![1.0, 2.0]))
         );
         assert_eq!(
-            pv_to_epics_basic(&PvValue::Enum {
-                index: 2,
-                label: None
-            }),
-            Some(EpicsValue::Enum(2))
+            pv_to_epics(
+                &PvValue::IntArray(Arc::from([3_i64, 4].as_slice())),
+                Some(DbFieldType::Long),
+                None
+            ),
+            Some(EpicsValue::Int64Array(vec![3, 4]))
+        );
+        assert_eq!(
+            pv_to_epics(&PvValue::Bytes(Arc::from([1_u8, 2].as_slice())), None, None),
+            Some(EpicsValue::CharArray(vec![1, 2]))
         );
     }
 }
