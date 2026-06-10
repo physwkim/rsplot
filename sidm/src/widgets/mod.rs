@@ -19,6 +19,7 @@ pub mod push_button;
 pub mod ring_buffer;
 pub mod slider;
 pub mod spinbox;
+pub mod time_plot;
 
 pub use base::{BorderStyle, ChannelBase, alarm_border, control_range, severity_color};
 pub use byte::{Orientation, PydmByteIndicator, extract_bits};
@@ -31,3 +32,7 @@ pub use push_button::{DEFAULT_CONFIRM_MESSAGE, PydmPushButton, compute_send_valu
 pub use ring_buffer::{DEFAULT_BUFFER_SIZE, MINIMUM_BUFFER_SIZE, TimeSeriesBuffer};
 pub use slider::{DEFAULT_NUM_STEPS, PydmSlider};
 pub use spinbox::PydmSpinbox;
+pub use time_plot::{
+    DEFAULT_TIME_SPAN, DEFAULT_UPDATE_RATE_HZ, PydmTimePlot, UpdateMode, is_rate_due,
+    update_interval,
+};
