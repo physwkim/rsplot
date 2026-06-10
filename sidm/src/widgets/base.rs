@@ -55,6 +55,14 @@ pub fn alarm_border(severity: AlarmSeverity) -> Option<BorderStyle> {
     })
 }
 
+/// Resolve a numeric widget's range: the user override when set, otherwise the
+/// PV's control limits (`DRVL`/`DRVH`). `None` when neither is available — the
+/// widget then cannot establish a range (PyDM `reset_limits` /
+/// `userDefinedLimits`).
+pub fn control_range(state: &ChannelState, user_limits: Option<(f64, f64)>) -> Option<(f64, f64)> {
+    user_limits.or(state.ctrl_limits)
+}
+
 /// Border stroke width (PyDM `2px`).
 const BORDER_WIDTH: f32 = 2.0;
 /// Uniform inset reserved around content so the border has room and the content
