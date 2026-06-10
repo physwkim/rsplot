@@ -1,0 +1,17 @@
+[package]
+name = "sidm"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+license = "MIT OR Apache-2.0"
+description = "PyDM-style EPICS display widgets and data engine, built on siplot"
+repository = "https://github.com/physwkim/siplot"
+
+# `sidm` ports PyDM's core engine + widgets (Python/Qt EPICS display manager)
+# onto siplot's egui/wgpu plotting. egui/egui-wgpu are reached through siplot's
+# re-export (`siplot::egui`) to avoid a duplicate egui/wgpu, exactly as the
+# examples do. The EPICS backends (epics-ca-rs / epics-pva-rs) and the calc
+# evaluator are feature-gated and wired in later waves so the headless engine
+# core compiles with no network/runtime dependencies.
+[dependencies]
+siplot = { path = ".." }

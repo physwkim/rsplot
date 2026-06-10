@@ -8,6 +8,13 @@ description = "silx-style scientific plotting for egui, rendered with wgpu"
 repository = "https://github.com/physwkim/siplot"
 readme = "README.md"
 
+[workspace]
+# siplot is the root package and an implicit member; `sidm` (the PyDM-style
+# EPICS display layer, ported from ~/codes/pydm onto siplot + epics-rs) is the
+# second member. Resolver 3 matches the edition 2024 packages.
+members = ["sidm"]
+resolver = "3"
+
 # The library itself does not depend on eframe (windowing). It works purely as
 # an egui widget + egui-wgpu paint callback. wgpu types are reached through the
 # egui-wgpu re-export to avoid version skew (a duplicate wgpu).
