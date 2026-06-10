@@ -8,12 +8,19 @@
 //! mode GUI these collapse into one [`ChannelState`] snapshot that the tokio
 //! side updates and widgets read each frame.
 //!
-//! The live [`Channel`]/`Connection`/engine types that own and publish a
-//! [`ChannelState`] are added in a later commit (they require the async
-//! runtime); this module stays pure and headlessly testable.
+//! The pure value/state types ([`AlarmSeverity`], [`PvValue`],
+//! [`ChannelState`]) are headlessly testable on their own. The live
+//! [`Channel`] handle and its `Connection`/`StateWriter` machinery (which a
+//! plugin task drives over the async runtime) live at the bottom of the file.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::time::SystemTime;
+
+use siplot::egui;
+use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
+
+use crate::address::PvAddress;
 
 /// EPICS alarm severity. Variants 0..=3 are the wire severities
 /// (`NO_ALARM`/`MINOR`/`MAJOR`/`INVALID`); [`AlarmSeverity::Disconnected`] is a
@@ -195,6 +202,188 @@ impl ChannelState {
         } else {
             AlarmSeverity::Disconnected
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Live channel machinery (engine side).
+// ---------------------------------------------------------------------------
+
+/// A shared, settable handle to the GUI repaint context.
+///
+/// Cloned into every connection's shared state so the tokio side can wake the
+/// GUI when a value arrives. Engine-wide and late-settable: a connection
+/// created before [`crate::Engine::attach_repaint`] still gets repaints once a
+/// context is attached. `None` (the default) makes [`RepaintHook::notify`] a
+/// no-op, which is exactly what headless tests want.
+#[derive(Clone, Default)]
+pub struct RepaintHook(Arc<Mutex<Option<egui::Context>>>);
+
+impl RepaintHook {
+    /// Install (or replace) the GUI context to repaint on updates.
+    pub fn set(&self, ctx: egui::Context) {
+        *self.0.lock().expect("repaint hook poisoned") = Some(ctx);
+    }
+
+    /// Request a repaint if a context is attached. Cheap and thread-safe; the
+    /// context is cloned out so the lock is not held across the egui call.
+    pub fn notify(&self) {
+        let ctx = self.0.lock().expect("repaint hook poisoned").clone();
+        if let Some(ctx) = ctx {
+            ctx.request_repaint();
+        }
+    }
+}
+
+/// State shared between a [`Channel`] (GUI side) and its [`StateWriter`]
+/// (plugin side): the locked [`ChannelState`] plus the repaint hook.
+pub(crate) struct ConnShared {
+    state: RwLock<ChannelState>,
+    repaint: RepaintHook,
+}
+
+/// The plugin-side handle used to publish [`ChannelState`] updates.
+///
+/// Cloneable so one connection task can fan a single variable out to several
+/// internal updaters. Every [`StateWriter::update`] bumps
+/// [`ChannelState::stamp`] and requests a GUI repaint.
+#[derive(Clone)]
+pub struct StateWriter {
+    shared: Arc<ConnShared>,
+}
+
+impl StateWriter {
+    /// Apply `f` to the channel state under the write lock, bump the update
+    /// stamp, and request a repaint.
+    pub fn update(&self, f: impl FnOnce(&mut ChannelState)) {
+        {
+            let mut state = self.shared.state.write().expect("channel state poisoned");
+            f(&mut state);
+            state.stamp = state.stamp.wrapping_add(1);
+        }
+        self.shared.repaint.notify();
+    }
+}
+
+/// One per-PV connection: owns the shared state, the GUI→engine write queue,
+/// and the cancellation token that stops the plugin task. Created by the
+/// engine, referenced by [`Channel`]s (clone = add listener); dropping the last
+/// `Channel` drops this, which cancels the task and prunes the pool entry —
+/// the structural equivalent of PyDM's `remove_listener` refcount → `close()`.
+pub(crate) struct Connection {
+    shared: Arc<ConnShared>,
+    address: PvAddress,
+    writes_tx: mpsc::UnboundedSender<PvValue>,
+    cancel: CancellationToken,
+    pool: Weak<Mutex<std::collections::HashMap<String, Weak<Connection>>>>,
+    pool_key: String,
+}
+
+impl Connection {
+    /// Create a connection and the [`StateWriter`] / write-queue receiver /
+    /// cancellation token a plugin needs to drive it. The caller (engine) wires
+    /// the pool fields and spawns the plugin task.
+    pub(crate) fn new(
+        address: PvAddress,
+        repaint: RepaintHook,
+        pool: Weak<Mutex<std::collections::HashMap<String, Weak<Connection>>>>,
+        pool_key: String,
+    ) -> (
+        Arc<Connection>,
+        StateWriter,
+        mpsc::UnboundedReceiver<PvValue>,
+        CancellationToken,
+    ) {
+        let shared = Arc::new(ConnShared {
+            state: RwLock::new(ChannelState::default()),
+            repaint,
+        });
+        let (writes_tx, writes_rx) = mpsc::unbounded_channel();
+        let cancel = CancellationToken::new();
+        let conn = Arc::new(Connection {
+            shared: shared.clone(),
+            address,
+            writes_tx,
+            cancel: cancel.clone(),
+            pool,
+            pool_key,
+        });
+        let writer = StateWriter { shared };
+        (conn, writer, writes_rx, cancel)
+    }
+}
+
+impl Drop for Connection {
+    fn drop(&mut self) {
+        // Stop the plugin task.
+        self.cancel.cancel();
+        // Prune our pool entry — but only if it still points at *this* (now
+        // dying) connection. A concurrent reconnect for the same key inserts a
+        // fresh Weak with a non-zero strong count, which we must not evict.
+        if let Some(pool) = self.pool.upgrade() {
+            let mut map = pool.lock().expect("connection pool poisoned");
+            if let Some(entry) = map.get(&self.pool_key)
+                && entry.strong_count() == 0
+            {
+                map.remove(&self.pool_key);
+            }
+        }
+    }
+}
+
+/// A handle to a channel's live state, obtained from
+/// [`crate::Engine::connect`]. Cloning a `Channel` is PyDM's `add_listener`
+/// (refcount up); dropping the last clone closes the underlying connection.
+#[derive(Clone)]
+pub struct Channel {
+    conn: Arc<Connection>,
+}
+
+impl Channel {
+    pub(crate) fn new(conn: Arc<Connection>) -> Self {
+        Self { conn }
+    }
+
+    /// Read the channel state under a short-lived read lock and return whatever
+    /// `f` extracts (a zero-clone frame read).
+    pub fn read<R>(&self, f: impl FnOnce(&ChannelState) -> R) -> R {
+        f(&self
+            .conn
+            .shared
+            .state
+            .read()
+            .expect("channel state poisoned"))
+    }
+
+    /// Clone the full current state.
+    pub fn state(&self) -> ChannelState {
+        self.conn
+            .shared
+            .state
+            .read()
+            .expect("channel state poisoned")
+            .clone()
+    }
+
+    /// The current update stamp (monotonic per connection).
+    pub fn stamp(&self) -> u64 {
+        self.read(|s| s.stamp)
+    }
+
+    /// Whether the connection is currently established.
+    pub fn is_connected(&self) -> bool {
+        self.read(|s| s.connected)
+    }
+
+    /// Queue a value to write back to the source (non-blocking). Dropped
+    /// silently if the connection's task has already gone away.
+    pub fn put(&self, value: PvValue) {
+        let _ = self.conn.writes_tx.send(value);
+    }
+
+    /// The parsed address this channel connects to.
+    pub fn address(&self) -> &PvAddress {
+        &self.conn.address
     }
 }
 

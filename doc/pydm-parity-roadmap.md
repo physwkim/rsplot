@@ -39,7 +39,7 @@ Plan of record: `~/.claude/plans/deep-growing-balloon.md`.
 | E1 | Workspace + `sidm` crate scaffold | ✅ | scaffold commit |
 | E2 | `PvAddress` parse + macro substitution | ✅ | `address.rs`, `utilities/macros.rs` |
 | E3 | `PvValue` / `AlarmSeverity` / `ChannelState` core | ✅ | `channel.rs` |
-| E4 | `Engine` + `DataPlugin` registry + `loc://` | ☐ | commit 3 |
+| E4 | `Engine` + `DataPlugin` registry + `loc://` | ✅ | `engine.rs`, `channel.rs` live types, `local_plugin.rs` |
 | E5 | `fake://` generators | ☐ | commit 4 |
 | E6 | `ca://` plugin + in-process IOC test | ☐ | commit 5 |
 | E7 | Write path (`PvValue`→`EpicsValue`, string→enum) | ☐ | commit 6 |

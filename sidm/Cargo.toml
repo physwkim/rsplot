@@ -15,3 +15,16 @@ repository = "https://github.com/physwkim/siplot"
 # core compiles with no network/runtime dependencies.
 [dependencies]
 siplot = { path = ".." }
+# Async runtime for the data engine. The connection tasks live on a tokio
+# runtime the `Engine` owns; widgets read shared state on the GUI thread. `net`
+# is enabled so `enable_all()` (and the EPICS backends, later) work.
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "sync",
+    "time",
+    "macros",
+    "net",
+] }
+# CancellationToken — fired when the last Channel for a connection drops, to
+# stop that connection's task deterministically.
+tokio-util = "0.7"

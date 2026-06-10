@@ -25,13 +25,17 @@
 //!
 //! [`siplot`]: https://docs.rs/siplot
 //!
-//! The live engine (`Engine`, `Channel`, the `DataPlugin` registry) and the
-//! widgets land in subsequent commits; the pure address/value/macro cores are
-//! available now.
+//! The widgets land in subsequent commits; the engine (`Engine`, `Channel`,
+//! the `DataPlugin` registry with the `loc://` plugin) and the pure
+//! address/value/macro cores are available now.
 
 pub mod address;
 pub mod channel;
+pub mod data_plugins;
+pub mod engine;
 pub mod utilities;
 
 pub use address::PvAddress;
-pub use channel::{AlarmSeverity, ChannelState, PvValue};
+pub use channel::{AlarmSeverity, Channel, ChannelState, PvValue, RepaintHook, StateWriter};
+pub use data_plugins::{ConnectionCtx, DataPlugin};
+pub use engine::{Engine, EngineError};
