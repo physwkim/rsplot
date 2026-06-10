@@ -25,6 +25,13 @@
 //!
 //! [`siplot`]: https://docs.rs/siplot
 //!
-//! Scaffold only at this revision; modules land per the wave plan.
+//! The live engine (`Engine`, `Channel`, the `DataPlugin` registry) and the
+//! widgets land in subsequent commits; the pure address/value/macro cores are
+//! available now.
 
-// Engine + widget modules are introduced in subsequent commits (Waves A–E).
+pub mod address;
+pub mod channel;
+pub mod utilities;
+
+pub use address::PvAddress;
+pub use channel::{AlarmSeverity, ChannelState, PvValue};

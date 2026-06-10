@@ -36,9 +36,9 @@ Plan of record: `~/.claude/plans/deep-growing-balloon.md`.
 
 | # | Item | Status | Notes |
 |---|------|--------|-------|
-| E1 | Workspace + `sidm` crate scaffold | ✅ | this commit |
-| E2 | `PvAddress` parse + macro substitution | ☐ | commit 2 |
-| E3 | `PvValue` / `AlarmSeverity` / `ChannelState` core | ☐ | commit 2 |
+| E1 | Workspace + `sidm` crate scaffold | ✅ | scaffold commit |
+| E2 | `PvAddress` parse + macro substitution | ✅ | `address.rs`, `utilities/macros.rs` |
+| E3 | `PvValue` / `AlarmSeverity` / `ChannelState` core | ✅ | `channel.rs` |
 | E4 | `Engine` + `DataPlugin` registry + `loc://` | ☐ | commit 3 |
 | E5 | `fake://` generators | ☐ | commit 4 |
 | E6 | `ca://` plugin + in-process IOC test | ☐ | commit 5 |
