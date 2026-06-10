@@ -11,6 +11,7 @@
 pub mod base;
 pub mod byte;
 pub mod checkbox;
+pub mod datetime_label;
 pub mod display_format;
 pub mod enum_button;
 pub mod enum_choice;
@@ -30,6 +31,7 @@ pub mod waveform_plot;
 pub use base::{BorderStyle, ChannelBase, alarm_border, control_range, severity_color};
 pub use byte::{Orientation, PydmByteIndicator, extract_bits};
 pub use checkbox::PydmCheckbox;
+pub use datetime_label::{PydmDateTimeLabel, TimeBase, format_datetime_ms, value_epoch_ms};
 pub use display_format::{DisplayFormat, FormatSpec, format_value};
 pub use enum_button::{EnumButtonType, PydmEnumButton, order_indices};
 pub use enum_choice::{enum_current_index, enum_index_value, enum_options};
