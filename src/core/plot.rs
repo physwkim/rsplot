@@ -308,6 +308,17 @@ pub struct Plot {
     /// (handles move within it). `None` falls back to the colormap's
     /// `vmin`/`vmax`.
     pub colorbar_value_range: Option<(f64, f64)>,
+    /// Reserve the title gutter even when [`title`](Self::title) is `None`. Lets a
+    /// side panel (e.g. an `ImageView` profile) keep its data area aligned with a
+    /// reference plot that *does* carry a title, so the two data areas coincide
+    /// by construction. Defaults to `false`.
+    pub reserve_title_gutter: bool,
+    /// Reserve the X-axis-label gutter even when [`x_label`](Self::x_label) is
+    /// `None` (see [`reserve_title_gutter`](Self::reserve_title_gutter)).
+    pub reserve_x_label_gutter: bool,
+    /// Reserve the (left) Y-axis-label gutter even when [`y_label`](Self::y_label)
+    /// is `None` (see [`reserve_title_gutter`](Self::reserve_title_gutter)).
+    pub reserve_y_label_gutter: bool,
     /// Limits to restore via the Reset Zoom context-menu item. The widget
     /// captures the first observed `limits` here so the home view survives
     /// pan/zoom (`doc/design.md` §8·§11.6). `None` until the first frame.
@@ -498,6 +509,9 @@ impl Plot {
             colorbar_interactive: false,
             colorbar_histogram: None,
             colorbar_value_range: None,
+            reserve_title_gutter: false,
+            reserve_x_label_gutter: false,
+            reserve_y_label_gutter: false,
             home_limits: None,
             x_scale: Scale::Linear,
             y_scale: Scale::Linear,
@@ -875,6 +889,26 @@ impl Plot {
     pub fn displayed_y2_label(&self) -> Option<String> {
         let label = self.y2_axis_label(self.active_y2_label.as_deref());
         (!label.is_empty()).then_some(label)
+    }
+
+    /// Whether the title gutter must be reserved this frame: a title is present,
+    /// or [`reserve_title_gutter`](Self::reserve_title_gutter) forces it (e.g. an
+    /// `ImageView` profile aligning to a titled reference plot). Single source of
+    /// truth for the chrome request bool, so the three gutters stay parallel.
+    pub fn needs_title_gutter(&self) -> bool {
+        self.title.is_some() || self.reserve_title_gutter
+    }
+
+    /// Whether the X-axis-label gutter must be reserved this frame. See
+    /// [`needs_title_gutter`](Self::needs_title_gutter).
+    pub fn needs_x_label_gutter(&self) -> bool {
+        self.x_label.is_some() || self.reserve_x_label_gutter
+    }
+
+    /// Whether the (left) Y-axis-label gutter must be reserved this frame. See
+    /// [`needs_title_gutter`](Self::needs_title_gutter).
+    pub fn needs_y_label_gutter(&self) -> bool {
+        self.y_label.is_some() || self.reserve_y_label_gutter
     }
 
     /// The explicit grid-line color override (silx `getGridColor`). `None` means
@@ -1795,5 +1829,41 @@ mod tests {
         plot.clear_rois();
         assert_eq!(plot.current_roi(), None);
         assert!(plot.rois.is_empty());
+    }
+
+    #[test]
+    fn needs_gutter_defaults_false_without_label_or_reserve() {
+        let plot = Plot::new(0);
+        assert!(!plot.needs_title_gutter());
+        assert!(!plot.needs_x_label_gutter());
+        assert!(!plot.needs_y_label_gutter());
+    }
+
+    #[test]
+    fn needs_gutter_true_when_label_present() {
+        let mut plot = Plot::new(0);
+        plot.title = Some("T".into());
+        plot.x_label = Some("X".into());
+        plot.y_label = Some("Y".into());
+        assert!(plot.needs_title_gutter());
+        assert!(plot.needs_x_label_gutter());
+        assert!(plot.needs_y_label_gutter());
+    }
+
+    #[test]
+    fn needs_gutter_true_when_reserve_flag_set_without_label() {
+        // The ImageView-profile path: labels cleared (no text drawn), gutter
+        // still reserved so the data area aligns with the reference plot.
+        let mut plot = Plot::new(0);
+        assert!(plot.title.is_none() && plot.x_label.is_none() && plot.y_label.is_none());
+        plot.reserve_title_gutter = true;
+        plot.reserve_x_label_gutter = true;
+        plot.reserve_y_label_gutter = true;
+        assert!(plot.needs_title_gutter());
+        assert!(plot.needs_x_label_gutter());
+        assert!(plot.needs_y_label_gutter());
+        // Reservation must not synthesise label text.
+        assert!(plot.displayed_x_label().is_none());
+        assert!(plot.displayed_y_label().is_none());
     }
 }

@@ -285,9 +285,9 @@ impl PlotView {
             colorbar: with_colorbar,
             colorbar_interactive: plot.colorbar_interactive,
             y2: with_y2,
-            title: plot.title.is_some(),
-            x_label: plot.x_label.is_some(),
-            y_label: plot.y_label.is_some(),
+            title: plot.needs_title_gutter(),
+            x_label: plot.needs_x_label_gutter(),
+            y_label: plot.needs_y_label_gutter(),
             y2_label: plot.y2_label.is_some(),
             // Hidden axes zero the axis gutters (silx setAxesDisplayed(False)).
             axes_hidden: !axes_displayed,

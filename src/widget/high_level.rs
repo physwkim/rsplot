@@ -8449,6 +8449,10 @@ impl ImageView {
         histo_h.clear_graph_x_label();
         histo_h.clear_graph_y_label(YAxis::Left);
         histo_h.set_graph_grid(false);
+        // Reserve the (blank) y-label gutter the image carries ("Rows") so
+        // histo_h's data area starts at the same x as the image's — the column
+        // profile then lines up over the image columns (silx aligned grid).
+        histo_h.plot_mut().reserve_y_label_gutter = true;
         histo_h.plot_mut().set_data_margins(DataMargins {
             x_min: 0.0,
             x_max: 0.0,
@@ -8460,6 +8464,10 @@ impl ImageView {
         histo_v.clear_graph_x_label();
         histo_v.clear_graph_y_label(YAxis::Left);
         histo_v.set_graph_grid(false);
+        // Reserve the (blank) x-label gutter the image carries ("Columns") so
+        // histo_v's data-area bottom matches the image's; the top title gutter is
+        // mirrored per-frame in `show` since the image title is caller-set.
+        histo_v.plot_mut().reserve_x_label_gutter = true;
         histo_v.plot_mut().set_data_margins(DataMargins {
             x_min: 0.1,
             x_max: 0.1,
@@ -9025,6 +9033,12 @@ impl ImageView {
             .sync(&mut [self.image_plot.plot_mut(), self.histo_h.plot_mut()]);
         self.sync_y
             .sync(&mut [self.image_plot.plot_mut(), self.histo_v.plot_mut()]);
+
+        // Mirror the image's top title gutter onto histo_v so its data-area top
+        // tracks the image's. The image title is caller-set and may change at
+        // runtime, so this is re-evaluated each frame (unlike the static
+        // x/y-label gutters reserved once in `new`).
+        self.histo_v.plot_mut().reserve_title_gutter = self.image_plot.graph_title().is_some();
 
         let avail = ui.available_size();
 
