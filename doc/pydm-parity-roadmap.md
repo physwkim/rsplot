@@ -22,8 +22,10 @@ Plan of record: `~/.claude/plans/deep-growing-balloon.md`.
   `Arc<RwLock<ChannelState>>` (with a monotonic `stamp` for change detection)
   and calls `egui::Context::request_repaint()`. Writes (GUI → engine) flow the
   other way over an unbounded mpsc.
-- **Feature gating.** `ca`, `pva`, `calc` are features (`ca`/`pva` default-on
-  once wired); `loc://`/`fake://` are always compiled for headless tests.
+- **Feature gating.** `ca`, `pva`, `calc` are features, all default-on (`ca`/
+  `pva` pull the EPICS backends, `calc` pulls pure-Rust evalexpr); `loc://`/
+  `fake://` are always compiled, so `--no-default-features` is the headless,
+  dependency-light core.
 - **Deferred** (tracked, not dropped): rules engine, `.ui`/`.adl` display
   loading, `archiver://` + archiver time plot, embedded display / template
   repeater / related-display navigation / shell command / log display.
@@ -44,7 +46,7 @@ Plan of record: `~/.claude/plans/deep-growing-balloon.md`.
 | E6 | `ca://` plugin + in-process IOC test | ✅ | `epics_plugins/ca_plugin.rs`, `tests/ca_ioc.rs`; feature `ca` (default-on), crates.io epics-ca-rs/epics-base-rs 0.18 |
 | E7 | Write path (`PvValue`→`EpicsValue`, string→enum) | ✅ | `ca_plugin.rs` `pv_to_epics` (native-type coercion, label→enum), disconnected-drop, no local echo; `CaPlugin::with_addresses`; enum-put IOC test |
 | E8 | `pva://` plugin (`apply_ntscalar`) | ✅ | `epics_plugins/pva_plugin.rs`, `tests/pva_ioc.rs`; feature `pva` (default-on), crates.io epics-pva-rs 0.18. Monitor-callback → NTScalar/NTEnum `apply_ntscalar` (value/alarm/timeStamp/display/control/valueAlarm); write path `pv_to_pva_put` (`.value` string PUT, NTEnum label→`value.index`). **Live path verified** via in-process `PvaServer::isolated` round-trip (not IOC-unverified) |
-| E9 | `calc://` (evalexpr) | ☐ | commit 8 |
+| E9 | `calc://` (evalexpr) | ✅ | `calc_plugin.rs`, `tests/calc_derived.rs`; feature `calc` (default-on), crates.io evalexpr 13. PyDM `calc://name?expr=…&A=child&B=child&update=A,B`: pure `CalcConfig::parse` + `pv_to_evalexpr`/`evalexpr_to_pv`; engine injects a `Weak`-capturing `ChildConnector` (closes the plugin↔engine cycle); poll-based recompute (no async waker in the snapshot model); connected iff all children connected; scalar children only; `prev_res` supported |
 
 ## Widgets (`widgets/`)
 

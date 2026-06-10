@@ -16,11 +16,11 @@ repository = "https://github.com/physwkim/siplot"
 
 [features]
 # `ca`/`pva` are on by default (Channel Access and pvAccess are the two EPICS
-# transports, and their in-process `CaServer`/`PvaServer` round-trip tests live
-# behind them). `calc` joins the default set when it is wired in a later commit.
-# `loc://`/`fake://` are always compiled, so `--no-default-features` gives the
-# headless, dependency-light core.
-default = ["ca", "pva"]
+# transports, with in-process `CaServer`/`PvaServer` round-trip tests behind
+# them); `calc` is also default-on (pure-Rust evalexpr, no network). `loc://`/
+# `fake://` are always compiled, so `--no-default-features` gives the headless,
+# dependency-light core.
+default = ["ca", "pva", "calc"]
 # Channel Access backend (`ca://`). Pulls epics-ca-rs (client + in-process
 # CaServer for tests) and epics-base-rs (the `Snapshot`/`DbrClass`/`EpicsValue`
 # types the client returns, which epics-ca-rs does not re-export).
@@ -29,6 +29,10 @@ ca = ["dep:epics-ca-rs", "dep:epics-base-rs"]
 # for tests); the NT value/structure types it returns live in epics-pva-rs
 # itself, so no extra epics-base-rs surface is needed beyond what `ca` shares.
 pva = ["dep:epics-pva-rs"]
+# Derived-channel backend (`calc://`). Pulls evalexpr (a pure-Rust expression
+# evaluator) to compute one channel from an expression over other channels'
+# scalar values, porting PyDM's calc plugin. No network dependency.
+calc = ["dep:evalexpr"]
 
 [dependencies]
 siplot = { path = ".." }
@@ -62,3 +66,6 @@ epics-base-rs = { version = "0.18", optional = true }
 # (`PvField`/`PvStructure`/`ScalarValue`/`NTScalar`) are re-exported by this
 # crate, so no extra epics-base-rs surface is pulled in for `pva` alone.
 epics-pva-rs = { version = "0.18", optional = true }
+# Derived-channel expression evaluator (feature `calc`). Pure Rust, no network;
+# evaluates a PyDM-style `calc://` expression over child channels' scalar values.
+evalexpr = { version = "13", optional = true }

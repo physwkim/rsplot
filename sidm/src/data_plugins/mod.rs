@@ -12,6 +12,8 @@ use crate::channel::{PvValue, StateWriter};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+#[cfg(feature = "calc")]
+pub mod calc_plugin;
 pub mod epics_plugins;
 pub mod fake_plugin;
 pub mod local_plugin;

@@ -37,6 +37,8 @@ pub mod utilities;
 
 pub use address::PvAddress;
 pub use channel::{AlarmSeverity, Channel, ChannelState, PvValue, RepaintHook, StateWriter};
+#[cfg(feature = "calc")]
+pub use data_plugins::calc_plugin::{CalcPlugin, ChildConnector};
 #[cfg(feature = "ca")]
 pub use data_plugins::epics_plugins::ca_plugin::CaPlugin;
 #[cfg(feature = "pva")]

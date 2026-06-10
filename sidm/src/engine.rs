@@ -121,6 +121,24 @@ impl Engine {
         engine.register_plugin(Arc::new(
             crate::data_plugins::epics_plugins::pva_plugin::PvaPlugin::new(),
         ));
+        // Derived-channel backend (feature `calc`). The plugin opens its child
+        // channels through a connector capturing a `Weak<EngineInner>`, so the
+        // engine→plugin→connector chain holds no strong cycle and the engine
+        // still drops when its last clone does.
+        #[cfg(feature = "calc")]
+        {
+            let weak = Arc::downgrade(&engine.inner);
+            let connector: crate::data_plugins::calc_plugin::ChildConnector =
+                Arc::new(move |addr: &str| match weak.upgrade() {
+                    Some(inner) => Engine::connect_inner(&inner, addr),
+                    None => Err(EngineError::PluginError(
+                        "engine dropped before calc child connect".to_owned(),
+                    )),
+                });
+            engine.register_plugin(Arc::new(crate::data_plugins::calc_plugin::CalcPlugin::new(
+                connector,
+            )));
+        }
         engine
     }
 
@@ -162,12 +180,20 @@ impl Engine {
     /// Connect a channel by address, reusing an existing connection when one is
     /// already pooled for the same `scheme://full_address`.
     pub fn connect(&self, address: &str) -> Result<Channel, EngineError> {
-        let parsed = self.resolve_address(address)?;
+        Self::connect_inner(&self.inner, address)
+    }
+
+    /// The body of [`Engine::connect`], operating on the shared internals
+    /// directly so a `Weak<EngineInner>`-capturing connector (the `calc://`
+    /// plugin's child opener) can drive it without an owned [`Engine`] — which
+    /// would form a reference cycle through the plugin registry.
+    fn connect_inner(inner: &Arc<EngineInner>, address: &str) -> Result<Channel, EngineError> {
+        let parsed = Self::resolve_address(inner, address)?;
         let key = parsed.connection_id();
 
         // Fast path: reuse a live pooled connection.
         {
-            let pool = self.inner.pool.lock().expect("connection pool poisoned");
+            let pool = inner.pool.lock().expect("connection pool poisoned");
             if let Some(existing) = pool.get(&key).and_then(Weak::upgrade) {
                 return Ok(Channel::new(existing));
             }
@@ -177,8 +203,7 @@ impl Engine {
             .scheme()
             .expect("resolve_address guarantees a scheme")
             .to_owned();
-        let plugin = self
-            .inner
+        let plugin = inner
             .plugins
             .read()
             .expect("plugin registry poisoned")
@@ -188,8 +213,8 @@ impl Engine {
 
         let (conn, writer, writes, cancel) = Connection::new(
             parsed.clone(),
-            self.inner.repaint.clone(),
-            Arc::downgrade(&self.inner.pool),
+            inner.repaint.clone(),
+            Arc::downgrade(&inner.pool),
             key.clone(),
         );
 
@@ -197,12 +222,12 @@ impl Engine {
             writer,
             writes,
             cancel,
-            runtime: self.inner.handle.clone(),
+            runtime: inner.handle.clone(),
             address: parsed,
         })?;
 
         // Insert only after the plugin successfully started the task.
-        self.inner
+        inner
             .pool
             .lock()
             .expect("connection pool poisoned")
@@ -213,11 +238,10 @@ impl Engine {
 
     /// Parse `address`, applying the default protocol; error if it ends up with
     /// no scheme.
-    fn resolve_address(&self, address: &str) -> Result<PvAddress, EngineError> {
+    fn resolve_address(inner: &Arc<EngineInner>, address: &str) -> Result<PvAddress, EngineError> {
         let mut parsed = PvAddress::parse(address);
         if parsed.scheme().is_none()
-            && let Some(default) = self
-                .inner
+            && let Some(default) = inner
                 .default_protocol
                 .read()
                 .expect("default protocol poisoned")
