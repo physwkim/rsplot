@@ -25,7 +25,7 @@ use crate::core::plot::{DataMargins, DataRange, GraphGrid, Plot, PlotId};
 use crate::core::roi::{ManagedRoi, Roi, RoiLineStyle};
 use crate::core::scatter_viz::{GridImage, ScatterLineProfile};
 use crate::core::shape::{Shape, ShapeKind};
-use crate::core::transform::{Margins, Scale, YAxis};
+use crate::core::transform::{AxisSide, Margins, Scale, YAxis};
 use crate::core::triangles::Triangles;
 use crate::render::backend_wgpu::WgpuBackend;
 use crate::render::gpu_curve::CurveData;
@@ -5989,6 +5989,60 @@ impl PlotWidget {
                 }
             }
         }
+    }
+
+    /// Add an extra (stacked) Y axis on `side` and return its index, usable as
+    /// [`YAxis::Extra(index)`](YAxis::Extra) with [`set_curve_y_axis`],
+    /// [`set_graph_y_limits`], [`set_graph_y_label`], and the `extra_y_*` methods
+    /// below. The axis starts linear, autoscaling, with no range or label; bind
+    /// curves to it and either set an explicit range or let reset-zoom autoscale
+    /// fit it. Same-side extra axes stack outward in creation order
+    /// (silx-style multi-axis).
+    ///
+    /// [`set_curve_y_axis`]: Self::set_curve_y_axis
+    /// [`set_graph_y_limits`]: Self::set_graph_y_limits
+    /// [`set_graph_y_label`]: Self::set_graph_y_label
+    pub fn add_extra_y_axis(&mut self, side: AxisSide) -> usize {
+        self.backend.plot_mut().add_extra_axis(side)
+    }
+
+    /// The number of extra (stacked) Y axes (`Plot::extra` length).
+    pub fn extra_y_axis_count(&self) -> usize {
+        self.backend.plot().extra_axes().len()
+    }
+
+    /// Set whether extra axis `index` refits to its curves' data on reset-zoom
+    /// (silx per-axis `setAutoScale`). Returns `false` for an unknown index.
+    pub fn set_extra_y_autoscale(&mut self, index: usize, on: bool) -> bool {
+        match self.backend.plot_mut().extra_axis_mut(index) {
+            Some(ax) => {
+                ax.autoscale = on;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Enable or disable a log10 scale on extra axis `index` (its range must be
+    /// strictly positive when on). Returns `false` for an unknown index.
+    pub fn set_extra_y_log(&mut self, index: usize, on: bool) -> bool {
+        match self.backend.plot_mut().extra_axis_mut(index) {
+            Some(ax) => {
+                ax.scale = if on { Scale::Log10 } else { Scale::Linear };
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Return `true` if extra axis `index` is logarithmic (`false` for an unknown
+    /// index).
+    pub fn is_extra_y_log(&self, index: usize) -> bool {
+        self.backend
+            .plot()
+            .extra_axis(index)
+            .map(|ax| ax.scale == Scale::Log10)
+            .unwrap_or(false)
     }
 
     /// Enable or disable a log10 X axis.  Limits must be strictly positive when on.

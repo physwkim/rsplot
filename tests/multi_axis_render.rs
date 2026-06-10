@@ -68,6 +68,42 @@ fn render(bind_extra: bool) -> u32 {
 }
 
 #[test]
+fn extra_axis_api_autoscales_and_toggles() {
+    let rs = create_render_state(default_wgpu_setup());
+    siplot::install(&rs);
+    let mut plot = Plot1D::new(&rs, 0);
+
+    let idx = plot.add_extra_y_axis(AxisSide::Right);
+    assert_eq!(idx, 0);
+    assert_eq!(plot.extra_y_axis_count(), 1);
+
+    // Unknown index is rejected by the per-axis setters.
+    assert!(!plot.set_extra_y_autoscale(9, false));
+    assert!(!plot.set_extra_y_log(9, true));
+
+    // Log toggle round-trips on a known index.
+    assert!(plot.set_extra_y_log(idx, true));
+    assert!(plot.is_extra_y_log(idx));
+    assert!(plot.set_extra_y_log(idx, false));
+    assert!(!plot.is_extra_y_log(idx));
+
+    // With autoscale on (the default), binding a curve to the extra axis fits
+    // that axis to the curve's data through the high-level accumulation path
+    // (DataBounds.extra -> reset_extra_axes_to), with no explicit range set.
+    let xs: Vec<f64> = (0..=10).map(|i| i as f64).collect();
+    let ys: Vec<f64> = xs.iter().map(|&x| 140.0 + x).collect(); // 140..=150
+    let h = plot.add_curve(&xs, &ys, Color32::from_rgb(255, 0, 0));
+    assert!(plot.set_curve_y_axis(h, YAxis::Extra(idx)));
+    let (lo, hi) = plot
+        .get_graph_y_limits(YAxis::Extra(idx))
+        .expect("extra axis range autoscaled from its curve");
+    assert!(
+        lo <= 140.0 && hi >= 150.0,
+        "extra axis should fit its curve's 140..150 span; got {lo}..{hi}"
+    );
+}
+
+#[test]
 fn curve_on_extra_axis_renders_against_its_own_scale() {
     let with_extra = render(true);
     let without = render(false);
