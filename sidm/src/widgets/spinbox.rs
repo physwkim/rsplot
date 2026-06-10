@@ -8,7 +8,7 @@
 //! `step`, defaulting to `10^-precision` (one unit in the last displayed digit).
 //!
 //! The range resolution is the pure
-//! [`control_range`](crate::widgets::base::control_range); the write is
+//! [`control_range`]; the write is
 //! [`PydmSpinbox::set_value`]; [`PydmSpinbox::show`] is a thin egui shell.
 
 use siplot::egui;

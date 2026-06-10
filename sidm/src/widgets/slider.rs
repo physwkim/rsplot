@@ -10,7 +10,7 @@
 //! (`should_enable = write_access and connected and not needs_limit_info`).
 //!
 //! The range resolution is the pure
-//! [`control_range`](crate::widgets::base::control_range); the write is
+//! [`control_range`]; the write is
 //! [`PydmSlider::set_value`]; [`PydmSlider::show`] is a thin egui shell.
 
 use siplot::egui;

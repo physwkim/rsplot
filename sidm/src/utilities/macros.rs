@@ -45,7 +45,7 @@ const MAX_EXPAND_DEPTH: u32 = 100;
 ///
 /// A macro value that itself contains `${...}` is expanded recursively (the
 /// inserted value is scanned for further references), bounded by
-/// [`MAX_EXPAND_DEPTH`] so a self-referential macro terminates by emitting the
+/// `MAX_EXPAND_DEPTH` so a self-referential macro terminates by emitting the
 /// reference verbatim. This differs structurally from PyDM's
 /// "re-`Template` the whole string up to 100 times" loop in one way that
 /// matters: a `$` produced by the `$$` escape is **never re-scanned**, so `$$`

@@ -2,7 +2,8 @@
 //! XY markers.
 //!
 //! Ports `pydm/widgets/eventplot.py` (`PyDMEventPlot` + `EventPlotCurveItem`)
-//! onto a `siplot` [`Plot1D`] scatter item. Unlike [`PydmScatterPlot`] (which
+//! onto a `siplot` [`Plot1D`] scatter item. Unlike
+//! [`PydmScatterPlot`](crate::widgets::PydmScatterPlot) (which
 //! pairs two scalar channels), each event curve subscribes to **one** array
 //! channel: every update delivers an event array, and a fixed `(x_idx, y_idx)`
 //! pair selects the `(x, y)` sample to append to a capacity-bounded

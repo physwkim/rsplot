@@ -22,7 +22,7 @@
 //! `ca://` connection (one client per engine), mirroring PyDM's process-wide
 //! pyepics context.
 //!
-//! **Write path:** [`pv_to_epics`] coerces a queued [`PvValue`] to the record's
+//! **Write path:** `pv_to_epics` coerces a queued [`PvValue`] to the record's
 //! native field type (string→enum label resolution, float→long, number→string),
 //! writes are dropped while disconnected, and there is no local echo — the value
 //! only changes when the IOC confirms through the monitor.

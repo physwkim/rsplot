@@ -1,7 +1,7 @@
 //! `PydmLineEdit` — a writable text entry.
 //!
 //! Ports `pydm/widgets/line_edit.py`: a single-line text field that shows the
-//! channel value (formatted like [`PydmLabel`]) and, on Enter, parses the typed
+//! channel value (formatted like [`PydmLabel`](crate::widgets::PydmLabel)) and, on Enter, parses the typed
 //! text back into a [`PvValue`] and writes it. The parse is keyed on the current
 //! value's type (the PyDM `channeltype`) and the display format, mirroring
 //! `send_value`:
@@ -90,7 +90,7 @@ impl PydmLineEdit {
     }
 
     /// The text the field shows for `state`: the formatted value, or empty when
-    /// no value has arrived. Unlike [`PydmLabel`], a line edit keeps showing the
+    /// no value has arrived. Unlike [`PydmLabel`](crate::widgets::PydmLabel), a line edit keeps showing the
     /// last value while disconnected (the field is merely disabled).
     pub fn current_text(&self, state: &ChannelState) -> String {
         format_value(state.value.as_ref(), state, self.format_spec())

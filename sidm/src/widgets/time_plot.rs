@@ -31,7 +31,7 @@
 //! "plot by relative time" mode). Restoring an absolute datetime axis needs a
 //! siplot-side `f64` vertex rebase (out of scope for this port).
 //!
-//! The sample-feeding logic ([`CurveFeed`]) and the fixed-rate timing
+//! The sample-feeding logic (`CurveFeed`) and the fixed-rate timing
 //! ([`is_rate_due`] / [`update_interval`]) are pure and unit-tested; the GPU
 //! rendering is exercised by a headless wgpu readback test.
 

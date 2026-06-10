@@ -13,7 +13,7 @@
 //! - **cancellation** — fired when the last [`crate::Channel`] drops.
 //!
 //! Every `MonitorEvent::Data` carries the FULL cumulative NT structure (the
-//! client fills unmarked leaves from the prior value), so [`apply_ntscalar`]
+//! client fills unmarked leaves from the prior value), so `apply_ntscalar`
 //! extracts value + alarm + timestamp + display/control/valueAlarm metadata on
 //! every event without tracking deltas. `Connected` un-gates the widget before
 //! the first value; `Disconnected`/`Finished` flip `connected` to false while
@@ -24,7 +24,7 @@
 //! `pva://` connection (one client per engine), mirroring PyDM's process-wide
 //! p4p context.
 //!
-//! **Write path:** [`pv_to_pva_put`] routes a queued [`PvValue`] either to the
+//! **Write path:** `pv_to_pva_put` routes a queued [`PvValue`] either to the
 //! channel's `.value` field (an NTScalar string PUT) or, when the channel was
 //! seen to be an NTEnum (its monitor delivered `value.choices`), to
 //! `value.index` with the resolved index — a string label is matched against
