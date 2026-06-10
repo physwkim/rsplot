@@ -277,6 +277,9 @@ impl PlotView {
         let axes_displayed = plot.axes_displayed();
         let chrome_request = chrome::ChromeRequest {
             colorbar: with_colorbar,
+            // Wired to the interactive-colorbar flag in a later step; a static
+            // strip until then.
+            colorbar_interactive: false,
             y2: with_y2,
             title: plot.title.is_some(),
             x_label: plot.x_label.is_some(),

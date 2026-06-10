@@ -82,6 +82,11 @@ const GUTTER_RIGHT: f32 = 12.0;
 const GUTTER_Y2: f32 = 52.0;
 const CBAR_WIDTH: f32 = 16.0;
 const CBAR_LABELS: f32 = 46.0;
+// An interactive (histogram) colorbar reserves a wider gutter: the whole
+// HistogramColorBar (value histogram + gradient strip + level labels) is laid
+// out inside the colorbar rect, not just the strip with labels painted beside
+// it. Matches `INTERACTIVE_COLORBAR_WIDTH` in `high_level.rs`.
+const CBAR_INTERACTIVE_WIDTH: f32 = 175.0;
 // Extra gutter claimed by an axis title / label when present.
 const TITLE_H: f32 = 18.0;
 const LABEL_H: f32 = 16.0;
@@ -92,6 +97,10 @@ const LABEL_H: f32 = 16.0;
 pub struct ChromeRequest {
     /// A vertical colorbar in the right gutter.
     pub colorbar: bool,
+    /// The colorbar is an interactive histogram colorbar (drag-to-set levels),
+    /// which claims a wider gutter than a static strip. Only honored with
+    /// `colorbar`.
+    pub colorbar_interactive: bool,
     /// A secondary right (y2) axis with ticks in the right gutter.
     pub y2: bool,
     /// A graph title above the data area.
@@ -117,13 +126,22 @@ pub struct ChromeRequest {
 /// and a y2 axis both claim the right gutter; the colorbar takes precedence when
 /// both are requested. Titles and axis labels each grow their own gutter.
 pub fn layout(full: Rect, req: &ChromeRequest) -> ChromeLayout {
+    // An interactive colorbar lays the whole HistogramColorBar inside its rect, so
+    // its rect width == its reservation width; a static strip is `CBAR_WIDTH` wide
+    // with `CBAR_LABELS` painted beside it (rect is just the strip).
+    let (cbar_reserve, cbar_width) = if req.colorbar_interactive {
+        (CBAR_INTERACTIVE_WIDTH, CBAR_INTERACTIVE_WIDTH)
+    } else {
+        (CBAR_WIDTH + CBAR_LABELS, CBAR_WIDTH)
+    };
+
     // Axes hidden: collapse every axis gutter to zero so the data area fills the
     // whole rect (silx setAxesDisplayed(False) -> setAxesMargins(0,0,0,0)). A
     // colorbar still claims its right strip, matching silx where the colorbar is
     // a separate widget unaffected by the axes-margins toggle.
     if req.axes_hidden {
         let right = if req.colorbar {
-            GUTTER_RIGHT + CBAR_WIDTH + CBAR_LABELS
+            GUTTER_RIGHT + cbar_reserve
         } else {
             0.0
         };
@@ -135,7 +153,7 @@ pub fn layout(full: Rect, req: &ChromeRequest) -> ChromeLayout {
             let x0 = data_area.right() + GUTTER_RIGHT;
             Rect::from_min_max(
                 pos2(x0, data_area.top()),
-                pos2(x0 + CBAR_WIDTH, data_area.bottom()),
+                pos2(x0 + cbar_width, data_area.bottom()),
             )
         });
         return ChromeLayout {
@@ -145,7 +163,7 @@ pub fn layout(full: Rect, req: &ChromeRequest) -> ChromeLayout {
     }
 
     let right_axis = if req.colorbar {
-        GUTTER_RIGHT + CBAR_WIDTH + CBAR_LABELS
+        GUTTER_RIGHT + cbar_reserve
     } else if req.y2 {
         GUTTER_Y2
     } else {
@@ -165,7 +183,7 @@ pub fn layout(full: Rect, req: &ChromeRequest) -> ChromeLayout {
         let x0 = data_area.right() + GUTTER_RIGHT;
         Rect::from_min_max(
             pos2(x0, data_area.top()),
-            pos2(x0 + CBAR_WIDTH, data_area.bottom()),
+            pos2(x0 + cbar_width, data_area.bottom()),
         )
     });
     ChromeLayout {
@@ -1792,6 +1810,37 @@ mod tests {
         // The colorbar sits to the right of the (narrower) data area.
         assert!(bar.left() >= with_bar.data_area.right());
         assert!(with_bar.data_area.right() < no_bar.data_area.right());
+    }
+
+    #[test]
+    fn layout_interactive_colorbar_reserves_wider_gutter() {
+        let full = Rect::from_min_max(pos2(0.0, 0.0), pos2(600.0, 300.0));
+        let static_bar = layout(
+            full,
+            &ChromeRequest {
+                colorbar: true,
+                ..Default::default()
+            },
+        );
+        let interactive = layout(
+            full,
+            &ChromeRequest {
+                colorbar: true,
+                colorbar_interactive: true,
+                ..Default::default()
+            },
+        );
+        let s = static_bar.colorbar.expect("static colorbar rect");
+        let i = interactive.colorbar.expect("interactive colorbar rect");
+        // The interactive bar's rect spans the whole HistogramColorBar width
+        // (histogram + strip + labels), so it is much wider than the static strip
+        // and leaves a correspondingly narrower data area.
+        assert!(i.width() > s.width());
+        assert!((i.width() - CBAR_INTERACTIVE_WIDTH).abs() < 1e-3);
+        assert!(interactive.data_area.right() < static_bar.data_area.right());
+        // Both still pin the bar vertically to the data area (shared frame).
+        assert_eq!(i.top(), interactive.data_area.top());
+        assert_eq!(i.bottom(), interactive.data_area.bottom());
     }
 
     #[test]
