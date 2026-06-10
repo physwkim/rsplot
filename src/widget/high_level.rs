@@ -8367,6 +8367,16 @@ fn colorbar_column_width(show: bool, has_colorbar: bool) -> f32 {
     }
 }
 
+/// Width left for the flexible (plot/image) child of a `ui.horizontal` row
+/// after the fixed-width side columns: subtracts the columns AND the
+/// `item_spacing.x` gap egui inserts before each of the `gaps` trailing
+/// children. Sizing the flexible child to `avail.x - columns` without the
+/// gaps overflowed the row past the window's right edge, visually clipping
+/// the last column (e.g. the colorbar's value labels).
+fn row_content_width(avail_x: f32, side_columns: f32, gaps: u32, spacing: f32) -> f32 {
+    (avail_x - side_columns - gaps as f32 * spacing).max(0.0)
+}
+
 /// Finite `(min, max)` of a slice, or `None` when no value is finite. Used to
 /// derive the interactive colorbar's axis from the active image's pixels.
 fn finite_minmax(data: &[f64]) -> Option<(f64, f64)> {
@@ -9095,23 +9105,27 @@ impl ImageView {
             self.ensure_value_histogram();
         }
 
+        // The image (and histo_h, which must share its width so the x-synced
+        // pair stays aligned) gets what is left after the side columns AND the
+        // inter-child gaps `ui.horizontal` inserts — one gap per trailing
+        // bottom-row child (histo_v, colorbar). Without the gap term the row
+        // overflowed the window and the colorbar's value labels clipped at the
+        // window's right edge.
+        let spacing = ui.spacing().item_spacing.x;
+        let row_gaps = u32::from(show_histos) + u32::from(colorbar_w > 0.0);
+        let img_w = row_content_width(avail.x, histo_v_w + colorbar_w, row_gaps, spacing);
+
         // Top row: horizontal histogram on the left, radar overview filling the
         // top-right corner (the histoV + colorbar column band above the image).
         // Both are skipped when side histograms are hidden.
         if show_histos {
             ui.horizontal(|ui| {
-                // `ui.horizontal` inserts `item_spacing.x` between the two
-                // children; the histogram keeps the image's width (so it stays
-                // aligned above the image, x-axes synced) and the radar takes the
-                // rest minus that spacing, so the pair fills the row without
-                // overflowing the window's right edge.
-                let spacing = ui.spacing().item_spacing.x;
-                ui.allocate_ui(
-                    egui::vec2(avail.x - histo_v_w - colorbar_w, histo_h_h),
-                    |ui| {
-                        self.histo_h.show(ui);
-                    },
-                );
+                // The histogram keeps the image's width (aligned above the
+                // image, x-axes synced); the radar takes the rest minus this
+                // row's single inter-child gap.
+                ui.allocate_ui(egui::vec2(img_w, histo_h_h), |ui| {
+                    self.histo_h.show(ui);
+                });
 
                 // Sync the radar viewport to the image plot's current limits
                 // before rendering (silx `__setVisibleRectFromPlot`), then draw
@@ -9123,7 +9137,7 @@ impl ImageView {
                 }
                 let radar = self.radar.ui(
                     ui,
-                    egui::vec2((histo_v_w + colorbar_w - spacing).max(0.0), histo_h_h),
+                    egui::vec2((avail.x - img_w - spacing).max(0.0), histo_h_h),
                 );
                 if let Some((rx0, rx1, ry0, ry1)) = radar.dragged_limits {
                     self.image_plot.set_limits(rx0, rx1, ry0, ry1, None);
@@ -9138,7 +9152,6 @@ impl ImageView {
         // mirroring the radar drag above).
         let mut dragged_levels: Option<(f64, f64)> = None;
         let response = ui.horizontal(|ui| {
-            let img_w = avail.x - histo_v_w - colorbar_w;
             let response = ui
                 .allocate_ui(egui::vec2(img_w, img_h), |ui| self.image_plot.show(ui))
                 .inner;
@@ -10556,8 +10569,12 @@ impl ScatterView {
         let avail = ui.available_size();
         let colorbar = self.colorbar();
         let colorbar_w = colorbar_column_width(self.show_colorbar, colorbar.is_some());
+        // Subtract the inter-child gap `ui.horizontal` inserts before the
+        // colorbar, or the row overflows the window and the colorbar's value
+        // labels clip at the window's right edge (see `row_content_width`).
+        let spacing = ui.spacing().item_spacing.x;
+        let plot_w = row_content_width(avail.x, colorbar_w, u32::from(colorbar_w > 0.0), spacing);
         ui.horizontal(|ui| {
-            let plot_w = avail.x - colorbar_w;
             let response = ui
                 .allocate_ui(egui::vec2(plot_w, avail.y), |ui| self.inner.show(ui))
                 .inner;
@@ -12219,6 +12236,20 @@ mod tests {
         assert_eq!(colorbar_column_width(true, false), 0.0);
         // Hidden and unavailable: none.
         assert_eq!(colorbar_column_width(false, false), 0.0);
+    }
+
+    #[test]
+    fn row_content_width_subtracts_columns_and_gaps() {
+        // ImageView bottom row: histo_v + colorbar -> two gaps. The flexible
+        // child plus columns plus gaps must exactly fill the available width
+        // (sizing without the gaps overflowed the window and clipped the
+        // colorbar labels).
+        let w = row_content_width(1000.0, 200.0 + 175.0, 2, 8.0);
+        assert_eq!(w + 200.0 + 175.0 + 2.0 * 8.0, 1000.0);
+        // ScatterView row with the colorbar hidden: no columns, no gaps.
+        assert_eq!(row_content_width(1000.0, 0.0, 0, 8.0), 1000.0);
+        // Never negative, even when the columns exceed the available width.
+        assert_eq!(row_content_width(100.0, 375.0, 2, 8.0), 0.0);
     }
 
     #[test]
