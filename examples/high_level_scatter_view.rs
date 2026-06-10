@@ -34,11 +34,24 @@ impl ScatterViewApp {
 
 impl eframe::App for ScatterViewApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        self.sv.show_toolbar(ui);
-        let response = self.sv.show(ui);
-        // Position-info readout (silx ScatterView X/Y/Data/Index): hover a point
-        // and X/Y/value/index snap to it; off a point, Data/Index show "-".
-        self.sv.show_position_info(ui, &response);
+        egui::CentralPanel::default().show_inside(ui, |ui| {
+            self.sv.show_toolbar(ui);
+            // `ScatterView::show` fills all remaining height, so reserve one row
+            // at the bottom for the position-info readout before showing the
+            // plot — otherwise the readout is pushed below the window edge and
+            // is never visible.
+            let info_h = ui.spacing().interact_size.y + ui.spacing().item_spacing.y;
+            let plot_h = (ui.available_height() - info_h).max(0.0);
+            let response = ui
+                .allocate_ui(egui::vec2(ui.available_width(), plot_h), |ui| {
+                    self.sv.show(ui)
+                })
+                .inner;
+            // Position-info readout (silx ScatterView X/Y/Data/Index): hover a
+            // point and X/Y/value/index snap to it; off a point, Data/Index
+            // show "-".
+            self.sv.show_position_info(ui, &response);
+        });
     }
 }
 
