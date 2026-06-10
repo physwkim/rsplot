@@ -69,3 +69,11 @@ epics-pva-rs = { version = "0.18", optional = true }
 # Derived-channel expression evaluator (feature `calc`). Pure Rust, no network;
 # evaluates a PyDM-style `calc://` expression over child channels' scalar values.
 evalexpr = { version = "13", optional = true }
+
+[dev-dependencies]
+# Headless egui renderer for the widget render tests (alarm-border readback),
+# pinned to the same 0.34.3 the siplot crate's tests use so there is one egui in
+# the tree. The `wgpu` feature provides the GPU readback (`Harness::render`); the
+# tests read pixels back and assert colours, the same empirical-verification
+# pattern as siplot's `tests/mask_pointer_offset.rs` (no golden images).
+egui_kittest = { version = "0.34.3", features = ["wgpu"] }
