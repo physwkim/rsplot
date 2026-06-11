@@ -2,21 +2,27 @@
 //!
 //! Ports `pydm/widgets/scatterplot.py` (`PyDMScatterPlot` +
 //! `ScatterPlotCurveItem`) onto a `siplot` [`Plot1D`] scatter item. Each curve
-//! pairs an X scalar channel with a Y scalar channel; when a new pair is ready
-//! (per the [`RedrawMode`], and only once both channels have a value) the
-//! `(x, y)` pair is appended to a capacity-bounded [`TimeSeriesBuffer`] and the
-//! markers are redrawn (PyDM `update_buffer` rolling the `(2, bufferSize)`
-//! array).
+//! pairs an X scalar channel with a Y scalar channel; both channels' value-event
+//! streams are drained and merged into one arrival-ordered sequence, and a pair
+//! is appended whenever the [`RedrawMode`] is satisfied (and only once both
+//! channels have a value) to a capacity-bounded [`TimeSeriesBuffer`] (PyDM
+//! `receiveXValue`/`receiveYValue` → `update_buffer` rolling the
+//! `(2, bufferSize)` array). Draining the event streams (rather than polling the
+//! per-frame snapshot) means a burst arriving between two frames is paired
+//! event-by-event, and a curve on a hidden tab keeps accumulating up to the
+//! queue bound.
 //!
-//! The redraw gate is the shared [`mode_allows`]; the buffer is the shared
-//! [`TimeSeriesBuffer`]; both are unit-tested purely. The GPU rendering is
-//! exercised by a headless wgpu readback test.
+//! The redraw gate is the shared [`mode_allows`]; the pairing state machine
+//! ([`PairAccumulator`]) and the buffer ([`TimeSeriesBuffer`]) are unit-tested
+//! purely. The GPU rendering is exercised by a headless wgpu readback test.
+
+use std::time::SystemTime;
 
 use siplot::egui::Color32;
 use siplot::egui_wgpu::RenderState;
 use siplot::{DataMargins, ItemHandle, Plot1D, PlotId, PlotResponse, Symbol, egui};
 
-use crate::channel::{Channel, PvValue};
+use crate::channel::{Channel, ValueSubscription};
 use crate::engine::{Engine, EngineError};
 use crate::widgets::plot_menu::{
     YAxisMenu, enable_y_autoscale, set_y_range, show_with_y_axis_menu,
@@ -29,71 +35,110 @@ use crate::widgets::waveform_plot::{RedrawMode, mode_allows};
 /// re-exported here for the established public path.
 pub use crate::widgets::plot_style::DEFAULT_SYMBOL_SIZE;
 
-/// One scatter curve: paired X/Y scalar channels, the accumulated `(x, y)`
-/// buffer, and the arrival/commit bookkeeping the [`RedrawMode`] needs.
-struct ScatterCurve {
-    x_channel: Channel,
-    y_channel: Channel,
-    handle: ItemHandle,
-    style: CurveStyle,
-    mode: RedrawMode,
-    buffer: TimeSeriesBuffer,
-    last_x_stamp: u64,
-    last_y_stamp: u64,
-    /// New data arrived since the last redraw (inverse of PyDM `needs_new_*`).
-    pending_x: bool,
-    pending_y: bool,
-    latest_x: Option<f64>,
-    latest_y: Option<f64>,
-    /// Reusable render buffers.
-    xs: Vec<f64>,
-    ys: Vec<f64>,
+/// Which paired channel an arriving value belongs to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Axis {
+    X,
+    Y,
 }
 
-impl ScatterCurve {
-    /// Read both scalar channels, recording new arrivals (PyDM `receiveXValue` /
-    /// `receiveYValue`).
-    fn poll(&mut self) {
-        let xs = self.x_channel.state();
-        if xs.connected && xs.stamp != self.last_x_stamp {
-            self.last_x_stamp = xs.stamp;
-            if let Some(v) = xs.value.as_ref().and_then(PvValue::as_f64) {
-                self.latest_x = Some(v);
+/// The pure pairing state for one scatter curve: the latest X and Y scalar
+/// values, which side has new data since the last commit (`pending_*`, the
+/// inverse of PyDM `needs_new_*`), the [`RedrawMode`] gate, and the accumulated
+/// `(x, y)` buffer. Factored out of [`ScatterCurve`] — which also holds the
+/// channel / subscription / GPU handles — so the event-driven pairing is
+/// unit-testable without a render state.
+struct PairAccumulator {
+    mode: RedrawMode,
+    buffer: TimeSeriesBuffer,
+    latest_x: Option<f64>,
+    latest_y: Option<f64>,
+    pending_x: bool,
+    pending_y: bool,
+}
+
+impl PairAccumulator {
+    fn new(mode: RedrawMode, buffer_size: usize) -> Self {
+        Self {
+            mode,
+            buffer: TimeSeriesBuffer::new(buffer_size),
+            latest_x: None,
+            latest_y: None,
+            pending_x: false,
+            pending_y: false,
+        }
+    }
+
+    /// Record one X or Y value arrival (PyDM `receiveXValue` / `receiveYValue`).
+    fn apply(&mut self, axis: Axis, value: f64) {
+        match axis {
+            Axis::X => {
+                self.latest_x = Some(value);
                 self.pending_x = true;
             }
-        }
-        let ys = self.y_channel.state();
-        if ys.connected && ys.stamp != self.last_y_stamp {
-            self.last_y_stamp = ys.stamp;
-            if let Some(v) = ys.value.as_ref().and_then(PvValue::as_f64) {
-                self.latest_y = Some(v);
+            Axis::Y => {
+                self.latest_y = Some(value);
                 self.pending_y = true;
             }
         }
     }
 
-    /// Whether a new pair should be appended now: both channels have a value and
-    /// the redraw mode is satisfied (PyDM `update_buffer`).
+    /// Whether a pair should be appended now: both channels have a value and the
+    /// redraw mode is satisfied (PyDM `update_buffer`).
     fn ready(&self) -> bool {
         self.latest_x.is_some()
             && self.latest_y.is_some()
             && mode_allows(self.mode, self.pending_x, self.pending_y)
     }
 
-    /// Append the latest `(x, y)` pair and redraw (PyDM `update_buffer` roll).
-    fn commit(&mut self, plot: &mut Plot1D) {
-        let (Some(x), Some(y)) = (self.latest_x, self.latest_y) else {
-            return;
-        };
-        self.buffer.push(x, y);
-        self.redraw(plot);
-        self.pending_x = false;
-        self.pending_y = false;
+    /// Append the latest `(x, y)` pair and clear the pending flags (PyDM
+    /// `update_buffer` roll).
+    fn commit(&mut self) {
+        if let (Some(x), Some(y)) = (self.latest_x, self.latest_y) {
+            self.buffer.push(x, y);
+            self.pending_x = false;
+            self.pending_y = false;
+        }
     }
 
+    /// Process value events in arrival order, appending a pair whenever the
+    /// redraw mode is satisfied. Returns `true` when at least one pair was
+    /// appended (so the curve needs a redraw). Each event is one monitor
+    /// callback, so a burst arriving between two frames is paired event-by-event
+    /// — not coalesced into a single pair.
+    fn ingest(&mut self, events: impl IntoIterator<Item = (Axis, f64)>) -> bool {
+        let mut committed = false;
+        for (axis, value) in events {
+            self.apply(axis, value);
+            if self.ready() {
+                self.commit();
+                committed = true;
+            }
+        }
+        committed
+    }
+}
+
+/// One scatter curve: paired X/Y scalar channels (held to keep the connections
+/// alive), their value-event subscriptions, the pairing accumulator, and the GPU
+/// item handle plus reusable render scratch.
+struct ScatterCurve {
+    _x_channel: Channel,
+    _y_channel: Channel,
+    x_subscription: ValueSubscription,
+    y_subscription: ValueSubscription,
+    handle: ItemHandle,
+    style: CurveStyle,
+    pair: PairAccumulator,
+    /// Reusable render buffers.
+    xs: Vec<f64>,
+    ys: Vec<f64>,
+}
+
+impl ScatterCurve {
     /// Redraw the markers from the current buffer.
     fn redraw(&mut self, plot: &mut Plot1D) {
-        self.buffer.ordered_into(&mut self.xs, &mut self.ys);
+        self.pair.buffer.ordered_into(&mut self.xs, &mut self.ys);
         plot.update_curve_spec(self.handle, self.style.to_spec(&self.xs, &self.ys));
     }
 }
@@ -165,23 +210,23 @@ impl SidmScatterPlot {
     ) -> Result<usize, EngineError> {
         let x_channel = engine.connect(x_address)?;
         let y_channel = engine.connect(y_address)?;
+        // Subscribe to both value streams so paired samples accumulate
+        // event-by-event (every monitor callback), not from a per-frame snapshot:
+        // a burst between frames is preserved and a hidden tab keeps accumulating.
+        let x_subscription = x_channel.subscribe_values(self.buffer_size);
+        let y_subscription = y_channel.subscribe_values(self.buffer_size);
         let handle =
             self.plot
                 .add_scatter_with_symbol(&[], &[], color, Symbol::Circle, DEFAULT_SYMBOL_SIZE);
         self.plot.set_item_legend(handle, legend);
         self.curves.push(ScatterCurve {
-            x_channel,
-            y_channel,
+            _x_channel: x_channel,
+            _y_channel: y_channel,
+            x_subscription,
+            y_subscription,
             handle,
             style: CurveStyle::markers(color),
-            mode: RedrawMode::default(),
-            buffer: TimeSeriesBuffer::new(self.buffer_size),
-            last_x_stamp: 0,
-            last_y_stamp: 0,
-            pending_x: false,
-            pending_y: false,
-            latest_x: None,
-            latest_y: None,
+            pair: PairAccumulator::new(RedrawMode::default(), self.buffer_size),
             xs: Vec::new(),
             ys: Vec::new(),
         });
@@ -192,7 +237,7 @@ impl SidmScatterPlot {
     /// out-of-range index.
     pub fn set_redraw_mode(&mut self, index: usize, mode: RedrawMode) {
         if let Some(curve) = self.curves.get_mut(index) {
-            curve.mode = mode;
+            curve.pair.mode = mode;
         }
     }
 
@@ -219,19 +264,45 @@ impl SidmScatterPlot {
         if index >= self.curves.len() {
             return false;
         }
-        self.curves[index].buffer.push(x, y);
-        let curve = &mut self.curves[index];
-        curve.redraw(&mut self.plot);
+        self.curves[index].pair.buffer.push(x, y);
+        self.curves[index].redraw(&mut self.plot);
         true
     }
 
-    /// Poll every channel, append pairs whose redraw mode is satisfied, and
+    /// Drain both value streams of every curve, merge them into one
+    /// arrival-ordered list, append the pairs whose redraw mode is satisfied, and
     /// render the plot this frame.
+    ///
+    /// The queues are filled by the engine independent of repaint, so a scatter
+    /// plot on an inactive tab keeps accumulating (up to the queue bound), and a
+    /// burst arriving between two frames is paired event-by-event rather than
+    /// coalesced (PyDM processes each `receiveXValue` / `receiveYValue` callback
+    /// in order).
     pub fn show(&mut self, ui: &mut egui::Ui) -> PlotResponse {
         for curve in &mut self.curves {
-            curve.poll();
-            if curve.ready() {
-                curve.commit(&mut self.plot);
+            // Tag each drained event with its axis and engine receive time, then
+            // sort by time so X and Y events pair in their true arrival order even
+            // when several arrive between two frames.
+            let mut events: Vec<(Axis, f64, SystemTime)> = Vec::new();
+            curve.x_subscription.drain(|e| {
+                if let Some(v) = e.value.as_f64() {
+                    events.push((Axis::X, v, e.time));
+                }
+            });
+            curve.y_subscription.drain(|e| {
+                if let Some(v) = e.value.as_f64() {
+                    events.push((Axis::Y, v, e.time));
+                }
+            });
+            if events.is_empty() {
+                continue;
+            }
+            events.sort_by(|a, b| a.2.cmp(&b.2));
+            if curve
+                .pair
+                .ingest(events.iter().map(|&(axis, v, _)| (axis, v)))
+            {
+                curve.redraw(&mut self.plot);
             }
         }
         ui.ctx().request_repaint();
@@ -249,5 +320,64 @@ impl SidmScatterPlot {
     /// auto-range); same effect as the context menu's "Auto-scale".
     pub fn enable_y_autoscale(&mut self) {
         enable_y_autoscale(&mut self.plot);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn acc(mode: RedrawMode) -> PairAccumulator {
+        PairAccumulator::new(mode, 16)
+    }
+
+    #[test]
+    fn on_either_commits_for_every_event_once_both_have_a_value() {
+        let mut a = acc(RedrawMode::OnEither);
+        // Only X so far: Y has no value yet, so no pair is appendable.
+        a.ingest([(Axis::X, 1.0)]);
+        assert_eq!(a.buffer.len(), 0);
+        // Y arrives: both now have a value → pair (1.0, 2.0).
+        a.ingest([(Axis::Y, 2.0)]);
+        assert_eq!(a.buffer.newest(), Some((1.0, 2.0)));
+        // Three X events in one frame → three points (no coalescing), each
+        // pairing with the latest Y.
+        a.ingest([(Axis::X, 3.0), (Axis::X, 4.0), (Axis::X, 5.0)]);
+        assert_eq!(a.buffer.len(), 4);
+        assert_eq!(a.buffer.newest(), Some((5.0, 2.0)));
+    }
+
+    #[test]
+    fn on_both_commits_only_after_each_side_updates() {
+        let mut a = acc(RedrawMode::OnBoth);
+        // X twice with no Y since the last commit: still waiting for a Y.
+        a.ingest([(Axis::X, 1.0), (Axis::X, 2.0)]);
+        assert_eq!(a.buffer.len(), 0);
+        // Y arrives → both pending → one pair (2.0, 9.0), pending cleared.
+        a.ingest([(Axis::Y, 9.0)]);
+        assert_eq!(a.buffer.newest(), Some((2.0, 9.0)));
+        assert_eq!(a.buffer.len(), 1);
+        // Another Y with no new X since the commit: not both → no new pair.
+        a.ingest([(Axis::Y, 10.0)]);
+        assert_eq!(a.buffer.len(), 1);
+    }
+
+    #[test]
+    fn merged_events_pair_in_arrival_order() {
+        // Interleaved x, y, x, y, x produces arrival-ordered pairs (PyDM
+        // processes each callback in turn), not all-X-then-all-Y.
+        let mut a = acc(RedrawMode::OnEither);
+        a.ingest([
+            (Axis::X, 1.0),
+            (Axis::Y, 10.0), // (1, 10)
+            (Axis::X, 2.0),  // (2, 10)
+            (Axis::Y, 20.0), // (2, 20)
+            (Axis::X, 3.0),  // (3, 20)
+        ]);
+        let mut xs = Vec::new();
+        let mut ys = Vec::new();
+        a.buffer.ordered_into(&mut xs, &mut ys);
+        assert_eq!(xs, vec![1.0, 2.0, 2.0, 3.0]);
+        assert_eq!(ys, vec![10.0, 10.0, 20.0, 20.0]);
     }
 }

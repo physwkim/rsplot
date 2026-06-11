@@ -20,7 +20,7 @@ use siplot::egui::Color32;
 use siplot::egui_wgpu::RenderState;
 use siplot::{DataMargins, ItemHandle, Plot1D, PlotId, PlotResponse, Symbol, egui};
 
-use crate::channel::Channel;
+use crate::channel::{Channel, ValueEvent, ValueSubscription};
 use crate::engine::{Engine, EngineError};
 use crate::widgets::plot_menu::{
     YAxisMenu, enable_y_autoscale, set_y_range, show_with_y_axis_menu,
@@ -39,47 +39,49 @@ pub fn event_sample(wave: &[f64], x_idx: usize, y_idx: usize) -> Option<(f64, f6
     }
 }
 
-/// One event curve: an array channel, the `(x_idx, y_idx)` selectors, the
-/// accumulated `(x, y)` buffer, and the change-detection stamp.
+/// One event curve: an array channel (held to keep the connection alive), its
+/// value-event subscription, the `(x_idx, y_idx)` selectors, and the accumulated
+/// `(x, y)` buffer.
 struct EventCurve {
     channel: Channel,
+    subscription: ValueSubscription,
     x_idx: usize,
     y_idx: usize,
     handle: ItemHandle,
     style: CurveStyle,
     buffer: TimeSeriesBuffer,
-    last_stamp: u64,
     /// Reusable render buffers.
     xs: Vec<f64>,
     ys: Vec<f64>,
 }
 
 impl EventCurve {
-    /// Read the array channel; on a new connected snapshot, select the `(x, y)`
-    /// sample and append it, redrawing the markers (PyDM `receiveValue` +
-    /// `redrawCurve`). Returns `true` when a sample was appended. The stamp is
-    /// consumed as soon as a new connected snapshot is seen, so an out-of-range
-    /// array is not re-evaluated every frame (matching the sibling plot widgets).
-    fn poll_and_commit(&mut self, plot: &mut Plot1D) -> bool {
-        let state = self.channel.state();
-        if state.connected && state.stamp != self.last_stamp {
-            self.last_stamp = state.stamp;
-            if let Some(wave) = state.value.as_ref().and_then(value_to_waveform)
-                && let Some((x, y)) = event_sample(&wave, self.x_idx, self.y_idx)
-            {
-                self.buffer.push(x, y);
-                self.redraw(plot);
-                return true;
-            }
-        }
-        false
-    }
-
     /// Redraw the markers from the current buffer.
     fn redraw(&mut self, plot: &mut Plot1D) {
         self.buffer.ordered_into(&mut self.xs, &mut self.ys);
         plot.update_curve_spec(self.handle, self.style.to_spec(&self.xs, &self.ys));
     }
+}
+
+/// Select the `(x, y)` sample at `(x_idx, y_idx)` from one event's array value
+/// and append it to `buffer`; returns `true` when a sample was appended. Each
+/// [`ValueEvent`] is one monitor callback (PyDM `receiveValue`), so draining a
+/// burst that arrived between two frames appends one point per event — no
+/// coalescing. A non-array value or an out-of-range index is skipped (PyDM
+/// `len(new_data) <= idx → return`).
+fn ingest_event(
+    buffer: &mut TimeSeriesBuffer,
+    x_idx: usize,
+    y_idx: usize,
+    event: &ValueEvent,
+) -> bool {
+    if let Some(wave) = value_to_waveform(&event.value)
+        && let Some((x, y)) = event_sample(&wave, x_idx, y_idx)
+    {
+        buffer.push(x, y);
+        return true;
+    }
+    false
 }
 
 /// A plot accumulating `(x, y)` pairs selected from a single event array PV
@@ -160,18 +162,22 @@ impl SidmEventPlot {
         legend: impl Into<String>,
     ) -> Result<usize, EngineError> {
         let channel = engine.connect(address)?;
+        // Subscribe to the value-event stream so every event array is ingested
+        // (not a per-frame snapshot poll): a burst between frames is preserved,
+        // and a hidden tab keeps accumulating up to the queue bound.
+        let subscription = channel.subscribe_values(self.buffer_size);
         let handle =
             self.plot
                 .add_scatter_with_symbol(&[], &[], color, Symbol::Circle, DEFAULT_SYMBOL_SIZE);
         self.plot.set_item_legend(handle, legend);
         self.curves.push(EventCurve {
             channel,
+            subscription,
             x_idx,
             y_idx,
             handle,
             style: CurveStyle::markers(color),
             buffer: TimeSeriesBuffer::new(self.buffer_size),
-            last_stamp: 0,
             xs: Vec::new(),
             ys: Vec::new(),
         });
@@ -206,11 +212,28 @@ impl SidmEventPlot {
         true
     }
 
-    /// Poll every channel, append the selected samples, and render the plot this
+    /// Drain every channel's value-event queue, append each event's selected
+    /// `(x, y)` sample, redraw the curves that changed, and render the plot this
     /// frame.
+    ///
+    /// The queue is filled by the engine independent of repaint, so an event
+    /// plot on an inactive tab keeps accumulating (up to the queue bound) and
+    /// renders its recent history when shown again; a burst arriving between two
+    /// frames is appended event-by-event rather than coalesced (PyDM
+    /// `receiveValue` fires once per monitor callback).
     pub fn show(&mut self, ui: &mut egui::Ui) -> PlotResponse {
         for curve in &mut self.curves {
-            curve.poll_and_commit(&mut self.plot);
+            let buffer = &mut curve.buffer;
+            let (x_idx, y_idx) = (curve.x_idx, curve.y_idx);
+            let mut changed = false;
+            curve.subscription.drain(|event| {
+                if ingest_event(buffer, x_idx, y_idx, &event) {
+                    changed = true;
+                }
+            });
+            if changed {
+                curve.redraw(&mut self.plot);
+            }
         }
         ui.ctx().request_repaint();
         show_with_y_axis_menu(&mut self.plot, &mut self.y_menu, ui)
@@ -233,6 +256,18 @@ impl SidmEventPlot {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::channel::PvValue;
+    use std::sync::Arc;
+    use std::time::UNIX_EPOCH;
+
+    /// A value event carrying `value`; the event plot keys its buffer on the
+    /// selected `(x, y)`, not on the event time, so a fixed time suffices.
+    fn event(value: PvValue) -> ValueEvent {
+        ValueEvent {
+            value,
+            time: UNIX_EPOCH,
+        }
+    }
 
     #[test]
     fn event_sample_selects_indices_in_range() {
@@ -249,5 +284,42 @@ mod tests {
         assert_eq!(event_sample(&wave, 2, 0), None);
         assert_eq!(event_sample(&wave, 0, 5), None);
         assert_eq!(event_sample(&[], 0, 0), None);
+    }
+
+    #[test]
+    fn ingest_event_appends_one_sample_per_event_no_coalescing() {
+        let mut buffer = TimeSeriesBuffer::new(8);
+        for wave in [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]] {
+            assert!(ingest_event(
+                &mut buffer,
+                0,
+                1,
+                &event(PvValue::FloatArray(Arc::from(wave.as_slice()))),
+            ));
+        }
+        // Three event arrays between two frames → three accumulated points (a
+        // per-frame snapshot poll would have kept only the last array's sample).
+        assert_eq!(buffer.len(), 3);
+        assert_eq!(buffer.newest(), Some((5.0, 6.0)));
+    }
+
+    #[test]
+    fn ingest_event_skips_out_of_range_or_non_array() {
+        let mut buffer = TimeSeriesBuffer::new(8);
+        // y_idx out of range for a 2-element array.
+        assert!(!ingest_event(
+            &mut buffer,
+            0,
+            5,
+            &event(PvValue::FloatArray(Arc::from([1.0, 2.0].as_slice()))),
+        ));
+        // A non-numeric value yields no waveform.
+        assert!(!ingest_event(
+            &mut buffer,
+            0,
+            0,
+            &event(PvValue::Str("x".into()))
+        ));
+        assert!(buffer.is_empty());
     }
 }
