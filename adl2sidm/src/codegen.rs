@@ -453,9 +453,9 @@ fn emit_wheel_switch(b: &mut Builder, widget: &MedmWidget, options: &Options, z:
 }
 
 /// `byte` — a `SidmByteIndicator`. `sbit`/`ebit` give the bit count and shift;
-/// `direction` gives the orientation (`right`/`left` -> horizontal). Big-endian
-/// display order (`sbit < ebit`) has no `SidmByteIndicator` builder yet and is
-/// reported as a warning rather than silently dropped.
+/// `direction` gives the orientation (`right`/`left` -> horizontal). MEDM
+/// `sbit < ebit` is big-endian (MSB first; adl2pydm's `bigEndian`), applied via
+/// `with_big_endian(true)`.
 fn emit_byte(b: &mut Builder, widget: &MedmWidget, options: &Options, z: ZLayer) {
     let Some((geom, addr)) = resolve_channel(b, widget, options) else {
         return;
@@ -486,11 +486,11 @@ fn emit_byte(b: &mut Builder, widget: &MedmWidget, options: &Options, z: ZLayer)
     if let Some(orient) = direction_orientation(b, widget, true) {
         builders.push(orient);
     }
-    if sbit < ebit && num_bits > 1 {
-        b.warnings.push(format!(
-            "line {}: byte big-endian display order (sbit<ebit) not applied (SidmByteIndicator has no big-endian builder)",
-            widget.line
-        ));
+    // MEDM `sbit < ebit` is big-endian (MSB first), as adl2pydm maps to PyDM's
+    // `bigEndian`. SidmByteIndicator defaults to little-endian, so apply the
+    // builder only for the big-endian case.
+    if sbit < ebit {
+        builders.push(".with_big_endian(true)".to_string());
     }
     push_channel_widget(
         b,
@@ -1746,16 +1746,16 @@ byte {
             g.source
                 .contains(".with_orientation(Orientation::Horizontal)")
         );
-        // sbit > ebit, so NOT big-endian: no big-endian warning.
+        // sbit > ebit, so NOT big-endian: no big-endian builder.
         assert!(
-            !g.warnings.iter().any(|w| w.contains("big-endian")),
-            "unexpected big-endian warning: {:?}",
-            g.warnings
+            !g.source.contains(".with_big_endian"),
+            "little-endian byte must not emit a big-endian builder:\n{}",
+            g.source
         );
     }
 
     #[test]
-    fn byte_big_endian_warns_when_sbit_below_ebit() {
+    fn byte_big_endian_applied_when_sbit_below_ebit() {
         let adl = r#"
 "color map" {
 	colors {
@@ -1777,11 +1777,18 @@ byte {
 }
 "#;
         let g = generate(&parse(adl), &Options::default());
-        // sbit=0,ebit=3 -> num_bits 4, shift 0, big-endian (sbit<ebit).
+        // sbit=0,ebit=3 -> num_bits 4, shift 0, big-endian (sbit<ebit) applied
+        // (SidmByteIndicator's pub `big_endian` field honours the display order).
         assert!(g.source.contains(".with_num_bits(4)"));
         assert!(
-            g.warnings.iter().any(|w| w.contains("big-endian")),
-            "expected a big-endian warning: {:?}",
+            g.source.contains(".with_big_endian(true)"),
+            "expected big-endian to be applied:\n{}",
+            g.source
+        );
+        // It is now applied, not dropped — so no warning.
+        assert!(
+            !g.warnings.iter().any(|w| w.contains("big-endian")),
+            "big-endian must be applied, not warned: {:?}",
             g.warnings
         );
     }

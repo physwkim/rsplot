@@ -119,6 +119,13 @@ impl SidmByteIndicator {
         self
     }
 
+    /// Show the most-significant bit first in the display order (builder style;
+    /// PyDM `bigEndian`).
+    pub fn with_big_endian(mut self, big_endian: bool) -> Self {
+        self.big_endian = big_endian;
+        self
+    }
+
     /// Draw circles rather than squares (builder style).
     pub fn with_circles(mut self, circles: bool) -> Self {
         self.circles = circles;
