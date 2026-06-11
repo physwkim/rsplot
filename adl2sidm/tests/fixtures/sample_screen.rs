@@ -84,66 +84,71 @@ impl Screen {
         // Back-to-front: decoration (Background) -> monitor (Middle) -> control
         // (Foreground), so controls are never occluded or click-stolen.
         let Self { _engine: _, w1, w2, w3, w4, w5, w6, w7, w8, gate9, w10, w11, w12, w13, w14, w15, w16 } = self;
-        place(ui, egui::Order::Background, egui::Id::new(0u64), 10.0, 10.0, 200.0, 20.0, |ui| {
+        let __origin = ui.max_rect().min;
+        place(ui, __origin, egui::Order::Background, egui::Id::new(0u64), 10.0, 10.0, 200.0, 20.0, |ui| {
             ui.label(egui::RichText::new("Sample Panel").color(Color32::from_rgb(0, 0, 0)));
         });
         if gate9.read(|s| s.value.as_ref().and_then(|v| v.as_f64())) != Some(0.0) {
-            place(ui, egui::Order::Background, egui::Id::new(8u64), 210.0, 10.0, 180.0, 120.0, |ui| {
+            place(ui, __origin, egui::Order::Background, egui::Id::new(8u64), 210.0, 10.0, 180.0, 120.0, |ui| {
                 let _ = w8.show(ui);
             });
         }
-        place(ui, egui::Order::Background, egui::Id::new(10u64), 210.0, 140.0, 60.0, 60.0, |ui| {
+        place(ui, __origin, egui::Order::Background, egui::Id::new(10u64), 210.0, 140.0, 60.0, 60.0, |ui| {
             let _ = w10.show(ui);
         });
-        place(ui, egui::Order::Background, egui::Id::new(11u64), 290.0, 140.0, 60.0, 60.0, |ui| {
+        place(ui, __origin, egui::Order::Background, egui::Id::new(11u64), 290.0, 140.0, 60.0, 60.0, |ui| {
             let _ = w11.show(ui);
         });
-        place(ui, egui::Order::Background, egui::Id::new(12u64), 210.0, 210.0, 80.0, 24.0, |ui| {
+        place(ui, __origin, egui::Order::Background, egui::Id::new(12u64), 210.0, 210.0, 80.0, 24.0, |ui| {
             let _ = w12.show(ui);
         });
-        place(ui, egui::Order::Middle, egui::Id::new(1u64), 10.0, 40.0, 120.0, 20.0, |ui| {
+        place(ui, __origin, egui::Order::Middle, egui::Id::new(1u64), 10.0, 40.0, 120.0, 20.0, |ui| {
             let _ = w1.show(ui);
         });
-        place(ui, egui::Order::Middle, egui::Id::new(6u64), 10.0, 170.0, 120.0, 20.0, |ui| {
+        place(ui, __origin, egui::Order::Middle, egui::Id::new(6u64), 10.0, 170.0, 120.0, 20.0, |ui| {
             let _ = w6.show(ui);
         });
-        place(ui, egui::Order::Middle, egui::Id::new(7u64), 10.0, 200.0, 180.0, 24.0, |ui| {
+        place(ui, __origin, egui::Order::Middle, egui::Id::new(7u64), 10.0, 200.0, 180.0, 24.0, |ui| {
             let _ = w7.show(ui);
         });
-        place(ui, egui::Order::Middle, egui::Id::new(13u64), 10.0, 240.0, 380.0, 110.0, |ui| {
+        place(ui, __origin, egui::Order::Middle, egui::Id::new(13u64), 10.0, 240.0, 380.0, 110.0, |ui| {
             let _ = w13.show(ui);
         });
-        place(ui, egui::Order::Middle, egui::Id::new(14u64), 10.0, 360.0, 380.0, 110.0, |ui| {
+        place(ui, __origin, egui::Order::Middle, egui::Id::new(14u64), 10.0, 360.0, 380.0, 110.0, |ui| {
             let _ = w14.show(ui);
         });
-        place(ui, egui::Order::Middle, egui::Id::new(15u64), 210.0, 210.0, 180.0, 24.0, |ui| {
+        place(ui, __origin, egui::Order::Middle, egui::Id::new(15u64), 210.0, 210.0, 180.0, 24.0, |ui| {
+            let __frame_origin_15 = ui.max_rect().min;
             let _ = w15.show(ui, |ui| {
-                place(ui, egui::Order::Middle, egui::Id::new(16u64), 0.0, 0.0, 180.0, 24.0, |ui| {
+                place(ui, __frame_origin_15, egui::Order::Middle, egui::Id::new(16u64), 0.0, 0.0, 180.0, 24.0, |ui| {
                     let _ = w16.show(ui);
                 });
             });
         });
-        place(ui, egui::Order::Foreground, egui::Id::new(2u64), 10.0, 70.0, 120.0, 20.0, |ui| {
+        place(ui, __origin, egui::Order::Foreground, egui::Id::new(2u64), 10.0, 70.0, 120.0, 20.0, |ui| {
             let _ = w2.show(ui);
         });
-        place(ui, egui::Order::Foreground, egui::Id::new(3u64), 10.0, 100.0, 80.0, 24.0, |ui| {
+        place(ui, __origin, egui::Order::Foreground, egui::Id::new(3u64), 10.0, 100.0, 80.0, 24.0, |ui| {
             let _ = w3.show(ui);
         });
-        place(ui, egui::Order::Foreground, egui::Id::new(4u64), 100.0, 100.0, 100.0, 24.0, |ui| {
+        place(ui, __origin, egui::Order::Foreground, egui::Id::new(4u64), 100.0, 100.0, 100.0, 24.0, |ui| {
             let _ = w4.show(ui);
         });
-        place(ui, egui::Order::Foreground, egui::Id::new(5u64), 10.0, 140.0, 180.0, 24.0, |ui| {
+        place(ui, __origin, egui::Order::Foreground, egui::Id::new(5u64), 10.0, 140.0, 180.0, 24.0, |ui| {
             let _ = w5.show(ui);
         });
     }
 }
 
-/// Place `add` at an absolute MEDM position inside its own `egui::Area`. The
+/// Place `add` at an absolute MEDM position inside its own `egui::Area`.
+/// `origin` is the container's outer top-left (the screen origin, or a frame's
+/// pre-inset origin), so a frame's `BORDER_INSET` never shifts its children. The
 /// Area's `order` is the z-layer, so decoration (`Background`) renders and takes
 /// input below controls (`Foreground`) regardless of call order.
 #[allow(clippy::too_many_arguments)]
 fn place(
     ui: &mut egui::Ui,
+    origin: egui::Pos2,
     order: egui::Order,
     id: egui::Id,
     x: f32,
@@ -152,7 +157,6 @@ fn place(
     h: f32,
     add: impl FnOnce(&mut egui::Ui),
 ) {
-    let origin = ui.max_rect().min;
     let rect = egui::Rect::from_min_size(origin + egui::vec2(x, y), egui::vec2(w, h));
     egui::Area::new(id)
         .order(order)

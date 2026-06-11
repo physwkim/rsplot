@@ -973,10 +973,15 @@ fn emit_frame_container(
     child_placements.sort_by_key(|p| p.z);
 
     let (dx, dy) = child_origin;
+    // Capture the frame's OUTER top-left before `show` insets the interior by
+    // `BORDER_INSET`; children are positioned relative to this, so the inset never
+    // shifts them. Named per frame so nested frames keep distinct origins.
+    let origin = format!("__frame_origin_{frame_id}");
     let mut body = String::new();
+    let _ = writeln!(body, "let {origin} = ui.max_rect().min;");
     let _ = writeln!(body, "let _ = {frame_field}.show(ui, |ui| {{");
     for p in &child_placements {
-        write_placement(&mut body, p, dx, dy, "    ", options.use_layout);
+        write_placement(&mut body, p, dx, dy, "    ", options.use_layout, &origin);
     }
     let _ = write!(body, "}});");
 
@@ -2066,6 +2071,8 @@ fn emit_ui(s: &mut String, b: &Builder, screen: &MedmScreen) {
             "        // available area (adl2pydm grid_layout parity -- proportional reflow)."
         );
         let _ = writeln!(s, "        let avail = ui.max_rect();");
+        // The screen origin every top-level placement is measured from.
+        let _ = writeln!(s, "        let __origin = avail.min;");
         let _ = writeln!(
             s,
             "        let sx = avail.width() / {};",
@@ -2076,9 +2083,12 @@ fn emit_ui(s: &mut String, b: &Builder, screen: &MedmScreen) {
             "        let sy = avail.height() / {};",
             float_lit(native_h)
         );
+    } else {
+        // The screen origin every top-level placement is measured from.
+        let _ = writeln!(s, "        let __origin = ui.max_rect().min;");
     }
     for p in order {
-        write_placement(s, p, 0, 0, "        ", b.use_layout);
+        write_placement(s, p, 0, 0, "        ", b.use_layout, "__origin");
     }
     let _ = writeln!(s, "    }}");
 }
@@ -2113,12 +2123,16 @@ fn layout_native_size(b: &Builder, screen: &MedmScreen) -> (f64, f64) {
 
 /// Emit one `place(...)` call at `indent`, offsetting the geometry by `(dx, dy)`
 /// — `0, 0` at the top level; a composite's origin for its children so they land
-/// inside the frame's interior coordinates. The `body` may be several lines (a
-/// container's nested draws), each re-indented inside the closure. A `gate`
-/// wraps the whole call in `if <gate> { … }` for a dynamic visibility rule. In
-/// responsive (`use_layout`) mode the call takes the `sx`/`sy` scale bound by
-/// `emit_ui`; a frame's children scale by the same factors (the frame's interior
-/// already scaled by them), so the single pair threads through every nesting level.
+/// inside the frame's interior coordinates. `origin` is the expression for the
+/// container's *outer* top-left (`__origin` at the top level, a frame's captured
+/// pre-inset origin for its children); every child is positioned relative to it
+/// so no widget's inner margin (`SidmFrame`'s `BORDER_INSET`) can shift a child.
+/// The `body` may be several lines (a container's nested draws), each re-indented
+/// inside the closure. A `gate` wraps the whole call in `if <gate> { … }` for a
+/// dynamic visibility rule. In responsive (`use_layout`) mode the call takes the
+/// `sx`/`sy` scale bound by `emit_ui`; a frame's children scale by the same
+/// factors (the frame's interior already scaled by them), so the single pair
+/// threads through every nesting level.
 fn write_placement(
     s: &mut String,
     p: &Placement,
@@ -2126,6 +2140,7 @@ fn write_placement(
     dy: i32,
     indent: &str,
     use_layout: bool,
+    origin: &str,
 ) {
     let Geometry {
         x,
@@ -2142,11 +2157,11 @@ fn write_placement(
         }
         None => indent.to_string(),
     };
-    // Responsive mode passes the `(sx, sy)` scale as the first two arguments.
+    // Responsive mode passes the `(sx, sy)` scale after the origin.
     let scale = if use_layout { "sx, sy, " } else { "" };
     let _ = writeln!(
         s,
-        "{inner}place(ui, {scale}{}, egui::Id::new({}u64), {}.0, {}.0, {}.0, {}.0, |ui| {{",
+        "{inner}place(ui, {origin}, {scale}{}, egui::Id::new({}u64), {}.0, {}.0, {}.0, {}.0, |ui| {{",
         p.z.order_ident(),
         p.id,
         x - dx,
@@ -2172,12 +2187,15 @@ fn emit_place_helper(s: &mut String, use_layout: bool) {
         s.push_str(
             r#"/// Place `add` at a MEDM position scaled by `(sx, sy)` -- the per-axis
 /// `available / native` factors -- inside its own `egui::Area`, so the screen
-/// reflows to fill the window. The Area's `order` is the z-layer, so decoration
+/// reflows to fill the window. `origin` is the container's outer top-left (the
+/// screen origin, or a frame's pre-inset origin), so a frame's `BORDER_INSET`
+/// never shifts its children. The Area's `order` is the z-layer, so decoration
 /// (`Background`) renders and takes input below controls (`Foreground`) regardless
 /// of call order.
 #[allow(clippy::too_many_arguments)]
 fn place(
     ui: &mut egui::Ui,
+    origin: egui::Pos2,
     sx: f32,
     sy: f32,
     order: egui::Order,
@@ -2188,7 +2206,6 @@ fn place(
     h: f32,
     add: impl FnOnce(&mut egui::Ui),
 ) {
-    let origin = ui.max_rect().min;
     let rect =
         egui::Rect::from_min_size(origin + egui::vec2(x * sx, y * sy), egui::vec2(w * sx, h * sy));
     egui::Area::new(id)
@@ -2206,12 +2223,15 @@ fn place(
         return;
     }
     s.push_str(
-        r#"/// Place `add` at an absolute MEDM position inside its own `egui::Area`. The
+        r#"/// Place `add` at an absolute MEDM position inside its own `egui::Area`.
+/// `origin` is the container's outer top-left (the screen origin, or a frame's
+/// pre-inset origin), so a frame's `BORDER_INSET` never shifts its children. The
 /// Area's `order` is the z-layer, so decoration (`Background`) renders and takes
 /// input below controls (`Foreground`) regardless of call order.
 #[allow(clippy::too_many_arguments)]
 fn place(
     ui: &mut egui::Ui,
+    origin: egui::Pos2,
     order: egui::Order,
     id: egui::Id,
     x: f32,
@@ -2220,7 +2240,6 @@ fn place(
     h: f32,
     add: impl FnOnce(&mut egui::Ui),
 ) {
-    let origin = ui.max_rect().min;
     let rect = egui::Rect::from_min_size(origin + egui::vec2(x, y), egui::vec2(w, h));
     egui::Area::new(id)
         .order(order)
@@ -2489,8 +2508,17 @@ text {
             absolute.source
         );
         assert!(
-            !absolute.source.contains("place(ui, sx, sy,"),
+            !absolute.source.contains("place(ui, __origin, sx, sy,"),
             "absolute mode must not scale placements:\n{}",
+            absolute.source
+        );
+        // Both modes position every placement against an explicitly captured
+        // outer origin, so a frame's BORDER_INSET never shifts its children.
+        assert!(
+            absolute
+                .source
+                .contains("let __origin = ui.max_rect().min;"),
+            "absolute mode must capture the screen origin:\n{}",
             absolute.source
         );
 
@@ -2510,13 +2538,17 @@ text {
             "expected height scale against the 100px bounding box:\n{}",
             layout.source
         );
-        // Every placement scales by (sx, sy), and the place helper takes them.
-        assert!(layout.source.contains("place(ui, sx, sy, egui::Order::"));
+        // Every placement scales by (sx, sy), and the place helper takes them
+        // (after the explicit origin).
         assert!(
             layout
                 .source
-                .contains("fn place(\n    ui: &mut egui::Ui,\n    sx: f32,\n    sy: f32,")
+                .contains("place(ui, __origin, sx, sy, egui::Order::")
         );
+        assert!(layout.source.contains("let __origin = avail.min;"));
+        assert!(layout.source.contains(
+            "fn place(\n    ui: &mut egui::Ui,\n    origin: egui::Pos2,\n    sx: f32,\n    sy: f32,"
+        ));
         assert!(
             layout
                 .source
@@ -3165,6 +3197,31 @@ composite {
         );
         // The rectangle child at (120,10) == composite origin -> (0, 0).
         assert!(g.source.contains("0.0, 0.0, 80.0, 40.0"));
+    }
+
+    #[test]
+    fn composite_children_use_frame_outer_origin_immune_to_inset() {
+        // L1: SidmFrame::show insets its interior by BORDER_INSET; positioning
+        // children off the inner ui would shift them. Instead the frame captures
+        // its OUTER origin before `show`, and children place against that — so the
+        // inset never moves a child, and codegen never hardcodes BORDER_INSET.
+        let g = composite();
+        let capture = g
+            .source
+            .find("let __frame_origin_")
+            .expect("frame must capture its outer origin");
+        let show = g.source.find(".show(ui, |ui| {").expect("frame show");
+        assert!(
+            capture < show,
+            "the outer origin must be captured BEFORE show insets the interior:\n{}",
+            g.source
+        );
+        // Children position against the captured frame origin, not the screen one.
+        assert!(
+            g.source.contains("place(ui, __frame_origin_"),
+            "frame children must place against the captured frame origin:\n{}",
+            g.source
+        );
     }
 
     #[test]
@@ -4183,7 +4240,7 @@ composite {
         // The gated place() is the frame's Middle placement.
         let mid = g
             .source
-            .find("place(ui, egui::Order::Middle")
+            .find("place(ui, __origin, egui::Order::Middle")
             .expect("frame place");
         assert!(
             g.source[mid.saturating_sub(200)..mid].contains("if gate"),
