@@ -85,6 +85,10 @@ impl Screen {
         // (Foreground), so controls are never occluded or click-stolen.
         let Self { _engine: _, w1, w2, w3, w4, w5, w6, w7, w8, gate9, w10, w11, w12, w13, w14, w15, w16 } = self;
         let __origin = ui.max_rect().min;
+        place(ui, __origin, egui::Order::Background, egui::Id::new(18446744073709551615u64), 0.0, 0.0, 400.0, 500.0, |ui| {
+            let __sbg = ui.max_rect();
+            ui.painter().rect_filled(__sbg, egui::CornerRadius::ZERO, Color32::from_rgb(192, 192, 192));
+        });
         place(ui, __origin, egui::Order::Background, egui::Id::new(0u64), 10.0, 10.0, 200.0, 20.0, |ui| {
             ui.label(egui::RichText::new("Sample Panel").color(Color32::from_rgb(0, 0, 0)));
         });

@@ -158,6 +158,9 @@ pub fn generate(screen: &MedmScreen, options: &Options) -> Generated {
     for widget in &screen.widgets {
         emit_widget(&mut b, widget, options);
     }
+    // The screen's `bclr` background is painted in `ui()` with `color_expr`, so it
+    // needs the `Color32` import even when no widget carries a colour.
+    b.needs_color |= screen.background_color.is_some();
     Generated {
         source: assemble(&b, screen),
         warnings: b.warnings,
@@ -2162,9 +2165,11 @@ fn emit_ui(s: &mut String, b: &Builder, screen: &MedmScreen) {
     let mut order: Vec<&Placement> = b.placements.iter().collect();
     order.sort_by_key(|p| p.z); // stable: preserves MEDM order within a layer
 
-    if order.is_empty() {
-        // No placements: `sx`/`sy` would be unused, so skip them and just consume
-        // `ui` so the empty method is still warning-clean.
+    // The display block's `bclr` fills the whole screen behind every widget.
+    let screen_bg = screen.background_color;
+    if order.is_empty() && screen_bg.is_none() {
+        // No placements and no background: `sx`/`sy` would be unused, so skip them
+        // and just consume `ui` so the empty method is still warning-clean.
         let _ = writeln!(s, "        let _ = ui;");
     } else if b.use_layout {
         // Responsive layout: every place() scales its MEDM rect by (sx, sy) to fill
@@ -2195,6 +2200,25 @@ fn emit_ui(s: &mut String, b: &Builder, screen: &MedmScreen) {
     } else {
         // The screen origin every top-level placement is measured from.
         let _ = writeln!(s, "        let __origin = ui.max_rect().min;");
+    }
+    // Paint the screen background first, as the bottom-most Background-order Area,
+    // so it sits behind every widget (decoration included). Covers the native
+    // screen rect, scaled with the window in responsive mode like any placement.
+    if let Some(bg) = screen_bg {
+        let (native_w, native_h) = layout_native_size(b, screen);
+        let bg_geom = Geometry {
+            x: 0,
+            y: 0,
+            width: native_w as i32,
+            height: native_h as i32,
+        };
+        let body = format!(
+            "let __sbg = ui.max_rect();\nui.painter().rect_filled(__sbg, egui::CornerRadius::ZERO, {});",
+            color_expr(bg)
+        );
+        // `u64::MAX` is a fixed Area id that no widget index (0..N) can collide with.
+        let bg_place = Placement::drawn(ZLayer::Background, u64::MAX, bg_geom, body);
+        write_placement(s, &bg_place, 0, 0, "        ", b.use_layout, "__origin");
     }
     for p in order {
         write_placement(s, p, 0, 0, "        ", b.use_layout, "__origin");
@@ -2528,6 +2552,63 @@ text {
             "decimal text update should still be emitted:\n{}",
             g.source
         );
+    }
+
+    #[test]
+    fn display_background_color_is_painted_behind_everything() {
+        // The display block's bclr fills the whole screen, painted as the first
+        // (bottom-most) Background-order Area, before any widget.
+        let adl = r#"
+"color map" {
+	colors {
+		ffffff,
+		000000,
+		0000ff,
+	}
+}
+display {
+	object {
+		x=0
+		y=0
+		width=100
+		height=80
+	}
+	clr=0
+	bclr=2
+}
+text {
+	object {
+		x=10
+		y=10
+		width=60
+		height=18
+	}
+	"basic attribute" {
+		clr=1
+	}
+	textix="hi"
+}
+"#;
+        let g = generate(&parse(adl), &Options::default());
+        // The screen background fills the native 100x80 with bclr=2 (blue).
+        assert!(
+            g.source
+                .contains("ui.painter().rect_filled(__sbg, egui::CornerRadius::ZERO, Color32::from_rgb(0, 0, 255));"),
+            "display bclr must paint the screen background:\n{}",
+            g.source
+        );
+        // It is painted before the static text (the bg place() precedes the label).
+        let bg = g.source.find("__sbg").expect("screen bg");
+        let label = g.source.find("ui.label(").expect("static text");
+        assert!(
+            bg < label,
+            "the screen background must be painted before any widget:\n{}",
+            g.source
+        );
+        // It is a Background-order Area at the native screen size.
+        assert!(g.source.contains(
+            "place(ui, __origin, egui::Order::Background, egui::Id::new(18446744073709551615u64), 0.0, 0.0, 100.0, 80.0,"
+        ));
     }
 
     #[test]

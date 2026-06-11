@@ -68,6 +68,10 @@ impl Screen {
         let __origin = avail.min;
         let sx = avail.width() / 360.0;
         let sy = avail.height() / 460.0;
+        place(ui, __origin, sx, sy, egui::Order::Background, egui::Id::new(18446744073709551615u64), 0.0, 0.0, 360.0, 460.0, |ui| {
+            let __sbg = ui.max_rect();
+            ui.painter().rect_filled(__sbg, egui::CornerRadius::ZERO, Color32::from_rgb(255, 255, 255));
+        });
         place(ui, __origin, sx, sy, egui::Order::Background, egui::Id::new(0u64), 10.0, 10.0, 320.0, 22.0, |ui| {
             ui.label(egui::RichText::new("SiDM panel from .adl (no IOC)").color(Color32::from_rgb(0, 0, 0)));
         });
