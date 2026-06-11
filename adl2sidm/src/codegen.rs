@@ -198,7 +198,7 @@ fn emit_widget(b: &mut Builder, widget: &MedmWidget, options: &Options) {
     let z = map.category.z_layer();
     let start = b.placements.len();
     match widget.symbol.as_str() {
-        "text" => emit_static_text(b, widget, z),
+        "text" => emit_static_text(b, widget, options, z),
         "text update" => emit_text_update(b, widget, options, z),
         "text entry" => emit_text_entry(b, widget, options, z),
         "message button" => emit_message_button(b, widget, options, z),
@@ -382,7 +382,7 @@ fn replace_standalone_eq(s: &str) -> String {
 
 /// `text` — a static label (a fixed string, no channel). Drawn with a plain
 /// `ui.label`, so it needs no struct field.
-fn emit_static_text(b: &mut Builder, widget: &MedmWidget, z: ZLayer) {
+fn emit_static_text(b: &mut Builder, widget: &MedmWidget, options: &Options, z: ZLayer) {
     let Some(geom) = widget.geometry else {
         b.warnings.push(format!(
             "line {}: text has no geometry; skipped",
@@ -390,29 +390,21 @@ fn emit_static_text(b: &mut Builder, widget: &MedmWidget, z: ZLayer) {
         ));
         return;
     };
-    // Static text shows fixed glyphs, not a channel value, so a dynamic-attribute
-    // colour rule has no clean SiDM target (there is no "fixed text recoloured by a
-    // channel's alarm severity" widget). Keep the static colour and warn rather than
-    // silently dropping the rule. (Shapes get the rule wired — see drawing_alarm_builder.)
-    if let Some(mode) = dynamic_color_mode(widget).filter(|m| *m == "alarm" || *m == "discrete") {
-        b.warnings.push(format!(
-            "line {}: static text dynamic-attribute clr=\"{mode}\" colour rule not applied \
-             (no SiDM widget recolours fixed text by channel state; the static colour is kept)",
-            widget.line
-        ));
-    }
     let id = b.index();
     let text = widget.title.clone().unwrap_or_default();
     let color = widget.color.unwrap_or(Color { r: 0, g: 0, b: 0 });
     b.needs_color = true;
+    // The text colour is the static `clr` unless the MEDM dynamic attribute sets
+    // `clr="alarm"`, which recolours the fixed text by the channel's severity each
+    // frame (`alarm_setup` binds a `Channel` field and a `__c` colour local).
+    let (alarm_setup, color_token) = static_text_color(b, widget, options, color);
     // MEDM auto-sizes the font to the widget height; render the static text at
     // that size (egui resolves `RichText` without an explicit size against
     // `override_font_id` before `TextStyle::Body`).
     let font_px = font_px_from_height(geom.height);
     let label_call = format!(
-        "ui.label(egui::RichText::new({}).color({}));",
+        "ui.label(egui::RichText::new({}).color({color_token}));",
         rust_str(&text),
-        color_expr(color)
     );
     // MEDM `align` positions the text horizontally. Left (the default) keeps the
     // bare `ui.label`; centre/right wrap it in a top-down layout whose cross-axis
@@ -424,7 +416,7 @@ fn emit_static_text(b: &mut Builder, widget: &MedmWidget, z: ZLayer) {
         None => label_call,
     };
     let body = format!(
-        "{{\n    ui.style_mut().override_font_id = Some(egui::FontId::proportional({}));\n    {aligned}\n}}",
+        "{{\n    ui.style_mut().override_font_id = Some(egui::FontId::proportional({}));\n{alarm_setup}    {aligned}\n}}",
         float_lit(f64::from(font_px))
     );
     b.placements.push(Placement::drawn(z, id, geom, body));
@@ -2117,6 +2109,63 @@ fn drawing_alarm_builder(
     }
 }
 
+/// The colour token for a static `text` label plus any setup statement to precede
+/// it. Normally the static `clr` colour expression with no setup. When the MEDM
+/// dynamic attribute sets `clr="alarm"` with a channel, the fixed text is
+/// recoloured by that channel's alarm severity each frame: a `Channel` field is
+/// emitted (mirroring the visibility-gate pattern) and the setup binds a `__c`
+/// local = `severity_color(...)` falling back to the static colour for
+/// NoAlarm/disconnected. `clr="discrete"` has no faithful mapping — MEDM's
+/// discrete colour rule is defined only in the (locally-absent) MEDM source, so
+/// it is warned and the static colour is kept rather than fabricating a mapping.
+fn static_text_color(
+    b: &mut Builder,
+    widget: &MedmWidget,
+    options: &Options,
+    fallback: Color,
+) -> (String, String) {
+    let fallback_expr = color_expr(fallback);
+    match dynamic_color_mode(widget) {
+        Some("alarm") => {
+            let Some(chan) = widget
+                .attributes
+                .get("dynamic attribute")
+                .and_then(|a| a.get("chan"))
+                .filter(|c| !c.is_empty())
+            else {
+                b.warnings.push(format!(
+                    "line {}: static text clr=\"alarm\" has no channel; static colour kept",
+                    widget.line
+                ));
+                return (String::new(), fallback_expr);
+            };
+            let addr = apply_protocol(chan, options);
+            let id = b.index();
+            let field = format!("alarm{id}");
+            b.needs_channel = true;
+            b.ctors.push(format!(
+                "let {field} = engine\n            .connect({})\n            .expect({});",
+                rust_str(&addr),
+                rust_str(&format!("adl2sidm: connect alarm-colour source {addr}"))
+            ));
+            b.fields.push((field.clone(), "Channel".to_string()));
+            let setup = format!(
+                "    let __c = {field}.read(|s| severity_color(s.effective_severity())).unwrap_or({fallback_expr});\n"
+            );
+            (setup, "__c".to_string())
+        }
+        Some("discrete") => {
+            b.warnings.push(format!(
+                "line {}: static text clr=\"discrete\" colour rule not applied \
+                 (MEDM discrete colour mapping has no local reference; static colour kept)",
+                widget.line
+            ));
+            (String::new(), fallback_expr)
+        }
+        _ => (String::new(), fallback_expr),
+    }
+}
+
 /// The horizontal text alignment for a `text` / `text update`, as
 /// `(sidm TextAlign variant, egui Align variant)`, for the non-default cases.
 /// MEDM `horiz. left`, `justify`, and an absent `align` are the default left
@@ -3062,9 +3111,11 @@ rectangle {
     }
 
     #[test]
-    fn static_text_clr_alarm_warns_no_silent_drop() {
-        // A static text label has no clean SiDM target for a colour rule (it shows
-        // fixed glyphs, not a channel value), so clr="alarm" is warned, not dropped.
+    fn static_text_clr_alarm_recolours_fixed_text_by_severity() {
+        // A static `text` shows fixed glyphs, so clr="alarm" cannot reuse a
+        // value-display widget. Instead the converter binds a Channel field and
+        // recolours the fixed text by the channel's severity each frame, falling
+        // back to the static colour (mirroring the visibility-gate pattern).
         let adl = r#"
 "color map" {
 	colors {
@@ -3090,16 +3141,66 @@ text {
 }
 "#;
         let g = generate(&parse(adl), &Options::default());
+        // The fixed text is still emitted, coloured by the per-frame severity read.
         assert!(
-            !g.source.contains("alarm_sensitive"),
-            "static text keeps its static colour (no channel-value widget):\n{}",
             g.source
+                .contains("egui::RichText::new(\"STATUS\").color(__c)")
+        );
+        assert!(
+            g.source
+                .contains("read(|s| severity_color(s.effective_severity())).unwrap_or("),
+            "static text clr=alarm must read severity each frame:\n{}",
+            g.source
+        );
+        assert!(g.source.contains("ca://$(P)stat"));
+        // It is now wired, not a documented gap → no warning.
+        assert!(
+            !g.warnings.iter().any(|w| w.contains("clr=\"alarm\"")),
+            "static text clr=alarm is wired and must not warn: {:?}",
+            g.warnings
+        );
+    }
+
+    #[test]
+    fn static_text_clr_discrete_warns_keeps_static_colour() {
+        // discrete has no faithful mapping (MEDM-internal, no local reference), so a
+        // static text keeps its static colour and warns rather than fabricating one.
+        let adl = r#"
+"color map" {
+	colors {
+		ffffff,
+		000000,
+	}
+}
+text {
+	object {
+		x=0
+		y=0
+		width=80
+		height=20
+	}
+	"basic attribute" {
+		clr=1
+	}
+	"dynamic attribute" {
+		clr="discrete"
+		chan="$(P)mode"
+	}
+	textix="STATE"
+}
+"#;
+        let g = generate(&parse(adl), &Options::default());
+        // Keeps the static colour (no severity read, no alarm field).
+        assert!(!g.source.contains("severity_color"));
+        assert!(
+            g.source
+                .contains("egui::RichText::new(\"STATE\").color(Color32::")
         );
         assert!(
             g.warnings
                 .iter()
-                .any(|w| w.contains("static text") && w.contains("clr=\"alarm\"")),
-            "static text clr=alarm must warn: {:?}",
+                .any(|w| w.contains("static text") && w.contains("clr=\"discrete\"")),
+            "static text clr=discrete must warn: {:?}",
             g.warnings
         );
     }
