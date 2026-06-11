@@ -66,6 +66,7 @@ pub use time_plot::{
 };
 pub use waveform_plot::{RedrawMode, SidmWaveformPlot, mode_allows, value_to_waveform};
 
-// The siplot data-margin type accepted by `SidmTimePlot::with_data_margins`,
-// re-exported so callers configure plot padding without reaching into `siplot`.
+// The siplot data-margin type accepted by every plot widget's
+// `with_data_margins` (time / waveform / scatter / event), re-exported so callers
+// configure plot padding without reaching into `siplot`.
 pub use siplot::DataMargins;

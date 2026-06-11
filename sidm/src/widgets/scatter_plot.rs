@@ -14,7 +14,7 @@
 
 use siplot::egui::Color32;
 use siplot::egui_wgpu::RenderState;
-use siplot::{ItemHandle, Plot1D, PlotId, PlotResponse, Symbol, egui};
+use siplot::{DataMargins, ItemHandle, Plot1D, PlotId, PlotResponse, Symbol, egui};
 
 use crate::channel::{Channel, PvValue};
 use crate::engine::{Engine, EngineError};
@@ -124,6 +124,17 @@ impl SidmScatterPlot {
     /// style; PyDM `bufferSize`).
     pub fn with_buffer_size(mut self, buffer_size: usize) -> Self {
         self.buffer_size = buffer_size;
+        self
+    }
+
+    /// Add a per-side data margin around the autoscaled data (builder style; silx
+    /// `setDataMargins` / pyqtgraph autorange `padding`). Each ratio expands that
+    /// side of an autoscaled axis by `ratio * range` when it refits, so the data
+    /// keeps a gap from the axis edge instead of touching it. Only axes that
+    /// autoscale are padded; a pinned (manually ranged) axis is unaffected.
+    /// Default is no margin (the data fits the axes exactly).
+    pub fn with_data_margins(mut self, margins: DataMargins) -> Self {
+        self.plot.plot_mut().set_data_margins(margins);
         self
     }
 
