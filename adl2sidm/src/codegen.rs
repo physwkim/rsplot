@@ -662,6 +662,17 @@ fn emit_byte(b: &mut Builder, widget: &MedmWidget, options: &Options, z: ZLayer)
     if sbit < ebit {
         builders.push(".with_big_endian(true)".to_string());
     }
+    // MEDM `clr`/`bclr` are the on/off bit colours (adl2pydm maps them to PyDM's
+    // `onColor`/`offColor`). The byte draws its own bits, so these go through the
+    // widget's colour builders, not the text/fill `WidgetColors` path.
+    if let Some(on) = widget.color {
+        builders.push(format!(".with_on_color({})", color_expr(on)));
+        b.needs_color = true;
+    }
+    if let Some(off) = widget.background_color {
+        builders.push(format!(".with_off_color({})", color_expr(off)));
+        b.needs_color = true;
+    }
     push_channel_widget(
         b,
         z,
@@ -3173,6 +3184,57 @@ valuator {
         assert!(
             !g.source.contains(".with_big_endian"),
             "little-endian byte must not emit a big-endian builder:\n{}",
+            g.source
+        );
+        // The CONTROLS byte has no clr/bclr, so no on/off colour builders.
+        assert!(
+            !g.source.contains(".with_on_color(") && !g.source.contains(".with_off_color("),
+            "a colourless byte must not force on/off colours:\n{}",
+            g.source
+        );
+    }
+
+    #[test]
+    fn byte_on_off_colors_follow_medm_clr_and_bclr() {
+        // MEDM byte `clr`/`bclr` are the on/off bit colours (adl2pydm onColor/
+        // offColor). The parser hoists them into widget.color/background_color;
+        // codegen emits with_on_color/with_off_color so the bits match MEDM
+        // instead of sidm's default green/grey.
+        let adl = r#"
+"color map" {
+	colors {
+		ffffff,
+		ff0000,
+		0000ff,
+	}
+}
+byte {
+	object {
+		x=0
+		y=0
+		width=120
+		height=20
+	}
+	monitor {
+		chan="BYT"
+		clr=1
+		bclr=2
+	}
+	sbit=3
+	ebit=0
+}
+"#;
+        let g = generate(&parse(adl), &Options::default());
+        assert!(
+            g.source
+                .contains(".with_on_color(Color32::from_rgb(255, 0, 0))"),
+            "byte clr=1 (ff0000) must drive with_on_color:\n{}",
+            g.source
+        );
+        assert!(
+            g.source
+                .contains(".with_off_color(Color32::from_rgb(0, 0, 255))"),
+            "byte bclr=2 (0000ff) must drive with_off_color:\n{}",
             g.source
         );
     }

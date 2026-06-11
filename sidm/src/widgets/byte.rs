@@ -144,6 +144,18 @@ impl SidmByteIndicator {
         self
     }
 
+    /// Set the colour drawn for an on bit (builder style; PyDM `onColor`).
+    pub fn with_on_color(mut self, on_color: Color32) -> Self {
+        self.on_color = on_color;
+        self
+    }
+
+    /// Set the colour drawn for an off bit (builder style; PyDM `offColor`).
+    pub fn with_off_color(mut self, off_color: Color32) -> Self {
+        self.off_color = off_color;
+        self
+    }
+
     /// The underlying channel.
     pub fn channel(&self) -> &Channel {
         self.base.channel()
