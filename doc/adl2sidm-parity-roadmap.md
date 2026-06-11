@@ -56,15 +56,15 @@ Category drives the z-layer: `static` = decoration (back), `monitor` = read-only
 
 | MEDM widget | category | SiDM target | status |
 |---|---|---|---|
-| text | static | `SidmLabel` | ⬜ |
-| text update | monitor | `SidmLabel` | ⬜ |
-| text entry | controller | `SidmLineEdit` | ⬜ |
-| menu | controller | `SidmEnumComboBox` | ⬜ |
-| choice button | controller | `SidmEnumButton` | ⬜ |
-| message button | controller | `SidmPushButton` | ⬜ |
-| valuator | controller | `SidmSlider` | ⬜ |
-| wheel switch | controller | `SidmSpinbox` | ⬜ |
-| byte | monitor | `SidmByteIndicator` | ⬜ |
+| text | static | `SidmLabel` | ✅ |
+| text update | monitor | `SidmLabel` | ✅ |
+| text entry | controller | `SidmLineEdit` | ✅ |
+| menu | controller | `SidmEnumComboBox` | ✅ |
+| choice button | controller | `SidmEnumButton` | ✅ |
+| message button | controller | `SidmPushButton` | ✅ |
+| valuator | controller | `SidmSlider` | ✅ |
+| wheel switch | controller | `SidmSpinbox` | ✅ |
+| byte | monitor | `SidmByteIndicator` | ✅ |
 | bar | monitor | `SidmScaleIndicator` | ⬜ |
 | indicator | monitor | `SidmScaleIndicator` | ⬜ |
 | meter | monitor | `SidmScaleIndicator` | ⬜ |
@@ -111,7 +111,22 @@ not silently dropped (SiDM has no rules engine yet).
   warning-clean. 4 codegen tests; the generated screen was smoke-checked to
   `cargo check` clean against real sidm/siplot/eframe (confirming the forked
   `eframe::App::ui(ui, frame)` shape the C11 example will wrap).
-- ⬜ B5 — emitter batch: controls (message button, menu, choice button, valuator, wheel switch, byte).
+- ✅ B5 — emitter batch: controls (message button, menu, choice button, valuator,
+  wheel switch, byte). `message button` → `SidmPushButton` (label = MEDM `label`,
+  `press_msg`/`release_msg` → press/release values); `menu` → `SidmEnumComboBox`;
+  `choice button` → `SidmEnumButton` (`stacking="column"` → horizontal; `row` =
+  default vertical); `valuator` → `SidmSlider` (user-defined `*Src="default"`
+  limits → `with_limits`, `dPrecision` → `with_precision`, parsed as float to
+  match adl2pydm's `1.000000` form); `wheel switch` → `SidmSpinbox` (limits +
+  precision from MEDM `format`, falling back to the `limits` block's `precDefault`
+  that real wheel-switch screens carry); `byte` → `SidmByteIndicator`
+  (`sbit`/`ebit` → `num_bits` = `1+|ebit-sbit|`, `shift` = `min(sbit,ebit)`;
+  `direction` `right`/`left` → horizontal). Big-endian display order (`sbit<ebit`)
+  has no `SidmByteIndicator` builder yet — reported as a warning, not dropped.
+  A single `push_channel_widget` owner emits every channel widget's ctor + field +
+  placement, so `let _ = self.wN.show(ui);` and the back-to-front layering are
+  uniform. 7 new codegen tests; the full 6-control screen was smoke-checked to
+  `cargo check` clean (no warnings) against real sidm.
 - ⬜ B6 — emitter batch: indicators + shapes (bar/indicator/meter, composite, rectangle/oval).
 - ⬜ B7 — emitter batch: plots + image (strip chart, cartesian plot, image).
 - ⬜ B8 — stubs + warnings for the deferred 6 + CALC `// TODO` comments.
