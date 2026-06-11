@@ -62,49 +62,54 @@ impl Screen {
         // Back-to-front: decoration (Background) -> monitor (Middle) -> control
         // (Foreground), so controls are never occluded or click-stolen.
         let Self { _engine: _, w1, w2, w3, w4, w5, w6, w7, w8, w13, w15 } = self;
-        place(ui, egui::Order::Background, egui::Id::new(0u64), 10.0, 10.0, 320.0, 22.0, |ui| {
+        // Responsive layout: scale each MEDM rect by (sx, sy) to fill the
+        // available area (adl2pydm grid_layout parity -- proportional reflow).
+        let avail = ui.max_rect();
+        let sx = avail.width() / 360.0;
+        let sy = avail.height() / 460.0;
+        place(ui, sx, sy, egui::Order::Background, egui::Id::new(0u64), 10.0, 10.0, 320.0, 22.0, |ui| {
             ui.label(egui::RichText::new("SiDM panel from .adl (no IOC)").color(Color32::from_rgb(0, 0, 0)));
         });
-        place(ui, egui::Order::Background, egui::Id::new(3u64), 6.0, 200.0, 348.0, 160.0, |ui| {
+        place(ui, sx, sy, egui::Order::Background, egui::Id::new(3u64), 6.0, 200.0, 348.0, 160.0, |ui| {
             let _ = w3.show(ui);
         });
-        place(ui, egui::Order::Middle, egui::Id::new(1u64), 10.0, 42.0, 150.0, 20.0, |ui| {
+        place(ui, sx, sy, egui::Order::Middle, egui::Id::new(1u64), 10.0, 42.0, 150.0, 20.0, |ui| {
             let _ = w1.show(ui);
         });
-        place(ui, egui::Order::Middle, egui::Id::new(2u64), 10.0, 70.0, 340.0, 120.0, |ui| {
+        place(ui, sx, sy, egui::Order::Middle, egui::Id::new(2u64), 10.0, 70.0, 340.0, 120.0, |ui| {
             let _ = w2.show(ui);
         });
-        place(ui, egui::Order::Middle, egui::Id::new(5u64), 170.0, 214.0, 120.0, 20.0, |ui| {
+        place(ui, sx, sy, egui::Order::Middle, egui::Id::new(5u64), 170.0, 214.0, 120.0, 20.0, |ui| {
             let _ = w5.show(ui);
         });
-        place(ui, egui::Order::Middle, egui::Id::new(7u64), 20.0, 300.0, 140.0, 20.0, |ui| {
+        place(ui, sx, sy, egui::Order::Middle, egui::Id::new(7u64), 20.0, 300.0, 140.0, 20.0, |ui| {
             let _ = w7.show(ui);
         });
-        place(ui, egui::Order::Middle, egui::Id::new(13u64), 20.0, 400.0, 160.0, 40.0, |ui| {
+        place(ui, sx, sy, egui::Order::Middle, egui::Id::new(13u64), 20.0, 400.0, 160.0, 40.0, |ui| {
             let _ = w13.show(ui, |ui| {
-                place(ui, egui::Order::Background, egui::Id::new(14u64), 4.0, 2.0, 152.0, 14.0, |ui| {
+                place(ui, sx, sy, egui::Order::Background, egui::Id::new(14u64), 4.0, 2.0, 152.0, 14.0, |ui| {
                     ui.label(egui::RichText::new("embedded child").color(Color32::from_rgb(0, 0, 0)));
                 });
-                place(ui, egui::Order::Middle, egui::Id::new(15u64), 4.0, 20.0, 152.0, 16.0, |ui| {
+                place(ui, sx, sy, egui::Order::Middle, egui::Id::new(15u64), 4.0, 20.0, 152.0, 16.0, |ui| {
                     let _ = w15.show(ui);
                 });
             });
         });
-        place(ui, egui::Order::Foreground, egui::Id::new(4u64), 20.0, 214.0, 140.0, 22.0, |ui| {
+        place(ui, sx, sy, egui::Order::Foreground, egui::Id::new(4u64), 20.0, 214.0, 140.0, 22.0, |ui| {
             let _ = w4.show(ui);
         });
-        place(ui, egui::Order::Foreground, egui::Id::new(6u64), 20.0, 246.0, 320.0, 24.0, |ui| {
+        place(ui, sx, sy, egui::Order::Foreground, egui::Id::new(6u64), 20.0, 246.0, 320.0, 24.0, |ui| {
             let _ = w6.show(ui);
         });
-        place(ui, egui::Order::Foreground, egui::Id::new(8u64), 170.0, 300.0, 120.0, 22.0, |ui| {
+        place(ui, sx, sy, egui::Order::Foreground, egui::Id::new(8u64), 170.0, 300.0, 120.0, 22.0, |ui| {
             let _ = w8.show(ui);
         });
-        place(ui, egui::Order::Foreground, egui::Id::new(9u64), 20.0, 332.0, 130.0, 22.0, |ui| {
+        place(ui, sx, sy, egui::Order::Foreground, egui::Id::new(9u64), 20.0, 332.0, 130.0, 22.0, |ui| {
             if ui.button("Echo").clicked() {
                 let _ = std::process::Command::new("sh").arg("-c").arg("echo hello from adl2sidm").spawn();
             }
         });
-        place(ui, egui::Order::Foreground, egui::Id::new(10u64), 170.0, 332.0, 170.0, 22.0, |ui| {
+        place(ui, sx, sy, egui::Order::Foreground, egui::Id::new(10u64), 170.0, 332.0, 170.0, 22.0, |ui| {
             ui.menu_button("Shell Command", |ui| {
                 if ui.button("Date").clicked() {
                     let _ = std::process::Command::new("sh").arg("-c").arg("date").spawn();
@@ -116,12 +121,12 @@ impl Screen {
                 }
             });
         });
-        place(ui, egui::Order::Foreground, egui::Id::new(11u64), 20.0, 366.0, 130.0, 22.0, |ui| {
+        place(ui, sx, sy, egui::Order::Foreground, egui::Id::new(11u64), 20.0, 366.0, 130.0, 22.0, |ui| {
             if ui.button("Detail").clicked() {
                 eprintln!("related display: open detail.adl");
             }
         });
-        place(ui, egui::Order::Foreground, egui::Id::new(12u64), 170.0, 366.0, 170.0, 22.0, |ui| {
+        place(ui, sx, sy, egui::Order::Foreground, egui::Id::new(12u64), 170.0, 366.0, 170.0, 22.0, |ui| {
             ui.menu_button("Screens", |ui| {
                 if ui.button("Overview").clicked() {
                     eprintln!("related display: open overview.adl");
@@ -136,12 +141,16 @@ impl Screen {
     }
 }
 
-/// Place `add` at an absolute MEDM position inside its own `egui::Area`. The
-/// Area's `order` is the z-layer, so decoration (`Background`) renders and takes
-/// input below controls (`Foreground`) regardless of call order.
+/// Place `add` at a MEDM position scaled by `(sx, sy)` -- the per-axis
+/// `available / native` factors -- inside its own `egui::Area`, so the screen
+/// reflows to fill the window. The Area's `order` is the z-layer, so decoration
+/// (`Background`) renders and takes input below controls (`Foreground`) regardless
+/// of call order.
 #[allow(clippy::too_many_arguments)]
 fn place(
     ui: &mut egui::Ui,
+    sx: f32,
+    sy: f32,
     order: egui::Order,
     id: egui::Id,
     x: f32,
@@ -151,7 +160,8 @@ fn place(
     add: impl FnOnce(&mut egui::Ui),
 ) {
     let origin = ui.max_rect().min;
-    let rect = egui::Rect::from_min_size(origin + egui::vec2(x, y), egui::vec2(w, h));
+    let rect =
+        egui::Rect::from_min_size(origin + egui::vec2(x * sx, y * sy), egui::vec2(w * sx, h * sy));
     egui::Area::new(id)
         .order(order)
         .fixed_pos(rect.min)

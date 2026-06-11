@@ -4,7 +4,7 @@
 //! This module is local to the binary (`mod cli` in `main.rs`), so the library
 //! crate stays free of the `clap` dependency. It is the analogue of
 //! `adl2pydm`'s CLI: `.adl` in → `.rs` out, with `--protocol` / `--macro` /
-//! `--out` / `--use-scatterplot` mirroring adl2pydm's options.
+//! `--out` / `--use-scatterplot` / `--use-layout` mirroring adl2pydm's options.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -36,6 +36,11 @@ pub struct Cli {
     /// Convert `cartesian plot` as a scatter plot rather than a waveform plot.
     #[arg(long)]
     pub use_scatterplot: bool,
+
+    /// Emit a responsive layout that scales widgets to fill the window
+    /// (adl2pydm `grid_layout` parity) instead of fixed absolute MEDM pixels.
+    #[arg(long)]
+    pub use_layout: bool,
 }
 
 /// Parse a `NAME=VALUE` macro definition.
@@ -85,6 +90,7 @@ fn run(cli: Cli) -> Result<Vec<String>, String> {
         protocol: cli.protocol,
         macros: cli.macros,
         use_scatterplot: cli.use_scatterplot,
+        use_layout: cli.use_layout,
         // Embedded displays name a `composite file` relative to this `.adl`, so
         // resolve it against the input's directory (`.` when the input is bare).
         source_dir: Some(

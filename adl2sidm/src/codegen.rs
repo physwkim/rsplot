@@ -44,6 +44,15 @@ pub struct Options {
     /// default, e.g. converting from stdin or in headless tests) disables
     /// inlining — an embedded display then falls back to a placeholder.
     pub source_dir: Option<PathBuf>,
+    /// Emit a responsive layout: scale every widget's MEDM rect proportionally to
+    /// fill the available area instead of placing it at fixed absolute pixels.
+    /// This is the egui realization of adl2pydm's `grid_layout` (`--use-layout`):
+    /// a weighted grid whose stretch factors are the pixel gaps between widget
+    /// edges reduces, edge-for-edge, to per-axis proportional reflow — there is no
+    /// spanning weighted-grid widget in egui, so the faithful realization places
+    /// each widget at its native rect scaled by `available / native` on each axis.
+    /// Default `false` keeps faithful absolute MEDM positioning.
+    pub use_layout: bool,
 }
 
 impl Default for Options {
@@ -53,6 +62,7 @@ impl Default for Options {
             macros: Vec::new(),
             use_scatterplot: false,
             source_dir: None,
+            use_layout: false,
         }
     }
 }
@@ -115,6 +125,12 @@ struct Builder {
     /// display recursion), newest last. Guards against include cycles; its length
     /// is the current nesting depth (capped at [`MAX_EMBED_DEPTH`]).
     embed_stack: Vec<PathBuf>,
+    /// When `true`, placements scale to fill the available area (the responsive
+    /// `--use-layout` mode) rather than using fixed absolute MEDM pixels. Mirrors
+    /// [`Options::use_layout`]; cached here so both placement writers (top-level
+    /// `emit_ui` and the nested-children path in `emit_frame_container`) can read
+    /// it without threading `Options` through every call.
+    use_layout: bool,
 }
 
 impl Builder {
@@ -135,7 +151,10 @@ impl Builder {
 
 /// Generate the SiDM Rust source for a parsed MEDM screen.
 pub fn generate(screen: &MedmScreen, options: &Options) -> Generated {
-    let mut b = Builder::default();
+    let mut b = Builder {
+        use_layout: options.use_layout,
+        ..Default::default()
+    };
     for widget in &screen.widgets {
         emit_widget(&mut b, widget, options);
     }
@@ -954,7 +973,7 @@ fn emit_frame_container(
     let mut body = String::new();
     let _ = writeln!(body, "let _ = {frame_field}.show(ui, |ui| {{");
     for p in &child_placements {
-        write_placement(&mut body, p, dx, dy, "    ");
+        write_placement(&mut body, p, dx, dy, "    ", options.use_layout);
     }
     let _ = write!(body, "}});");
 
@@ -1937,10 +1956,10 @@ fn assemble(b: &Builder, screen: &MedmScreen) -> String {
     let _ = writeln!(s, "impl Screen {{");
     emit_new(&mut s, b);
     s.push('\n');
-    emit_ui(&mut s, b);
+    emit_ui(&mut s, b, screen);
     let _ = writeln!(s, "}}\n");
 
-    emit_place_helper(&mut s);
+    emit_place_helper(&mut s, b.use_layout);
     s
 }
 
@@ -1968,8 +1987,11 @@ fn emit_new(s: &mut String, b: &Builder) {
     let _ = writeln!(s, "    }}");
 }
 
-/// Emit the `ui()` draw method: placements sorted back-to-front.
-fn emit_ui(s: &mut String, b: &Builder) {
+/// Emit the `ui()` draw method: placements sorted back-to-front. In responsive
+/// (`use_layout`) mode it first binds `sx`/`sy` — the per-axis `available /
+/// native` scale every `place(...)` multiplies its MEDM rect by, so the screen
+/// reflows with the window (adl2pydm `grid_layout` parity, see [`Options::use_layout`]).
+fn emit_ui(s: &mut String, b: &Builder, screen: &MedmScreen) {
     let _ = writeln!(s, "    pub fn ui(&mut self, ui: &mut egui::Ui) {{");
     let _ = writeln!(
         s,
@@ -1996,20 +2018,84 @@ fn emit_ui(s: &mut String, b: &Builder) {
     order.sort_by_key(|p| p.z); // stable: preserves MEDM order within a layer
 
     if order.is_empty() {
+        // No placements: `sx`/`sy` would be unused, so skip them and just consume
+        // `ui` so the empty method is still warning-clean.
         let _ = writeln!(s, "        let _ = ui;");
+    } else if b.use_layout {
+        // Responsive layout: every place() scales its MEDM rect by (sx, sy) to fill
+        // the available area. The native size is the `display` block's geometry
+        // (the bounding box of placed widgets when a screen carries none).
+        let (native_w, native_h) = layout_native_size(b, screen);
+        let _ = writeln!(
+            s,
+            "        // Responsive layout: scale each MEDM rect by (sx, sy) to fill the"
+        );
+        let _ = writeln!(
+            s,
+            "        // available area (adl2pydm grid_layout parity -- proportional reflow)."
+        );
+        let _ = writeln!(s, "        let avail = ui.max_rect();");
+        let _ = writeln!(
+            s,
+            "        let sx = avail.width() / {};",
+            float_lit(native_w)
+        );
+        let _ = writeln!(
+            s,
+            "        let sy = avail.height() / {};",
+            float_lit(native_h)
+        );
     }
     for p in order {
-        write_placement(s, p, 0, 0, "        ");
+        write_placement(s, p, 0, 0, "        ", b.use_layout);
     }
     let _ = writeln!(s, "    }}");
+}
+
+/// The native screen size responsive layout scales against: the `display` block's
+/// geometry, or — when a screen carries none (headless/malformed input) — the
+/// bounding box of the placed widgets so the scale still fills the area. Both
+/// dimensions are clamped to at least 1 so the generated divisor is never zero.
+fn layout_native_size(b: &Builder, screen: &MedmScreen) -> (f64, f64) {
+    if let Some(g) = screen.geometry
+        && g.width > 0
+        && g.height > 0
+    {
+        return (f64::from(g.width), f64::from(g.height));
+    }
+    let max_x = b
+        .placements
+        .iter()
+        .map(|p| p.geom.x + p.geom.width)
+        .max()
+        .unwrap_or(1)
+        .max(1);
+    let max_y = b
+        .placements
+        .iter()
+        .map(|p| p.geom.y + p.geom.height)
+        .max()
+        .unwrap_or(1)
+        .max(1);
+    (f64::from(max_x), f64::from(max_y))
 }
 
 /// Emit one `place(...)` call at `indent`, offsetting the geometry by `(dx, dy)`
 /// — `0, 0` at the top level; a composite's origin for its children so they land
 /// inside the frame's interior coordinates. The `body` may be several lines (a
 /// container's nested draws), each re-indented inside the closure. A `gate`
-/// wraps the whole call in `if <gate> { … }` for a dynamic visibility rule.
-fn write_placement(s: &mut String, p: &Placement, dx: i32, dy: i32, indent: &str) {
+/// wraps the whole call in `if <gate> { … }` for a dynamic visibility rule. In
+/// responsive (`use_layout`) mode the call takes the `sx`/`sy` scale bound by
+/// `emit_ui`; a frame's children scale by the same factors (the frame's interior
+/// already scaled by them), so the single pair threads through every nesting level.
+fn write_placement(
+    s: &mut String,
+    p: &Placement,
+    dx: i32,
+    dy: i32,
+    indent: &str,
+    use_layout: bool,
+) {
     let Geometry {
         x,
         y,
@@ -2025,9 +2111,11 @@ fn write_placement(s: &mut String, p: &Placement, dx: i32, dy: i32, indent: &str
         }
         None => indent.to_string(),
     };
+    // Responsive mode passes the `(sx, sy)` scale as the first two arguments.
+    let scale = if use_layout { "sx, sy, " } else { "" };
     let _ = writeln!(
         s,
-        "{inner}place(ui, {}, egui::Id::new({}u64), {}.0, {}.0, {}.0, {}.0, |ui| {{",
+        "{inner}place(ui, {scale}{}, egui::Id::new({}u64), {}.0, {}.0, {}.0, {}.0, |ui| {{",
         p.z.order_ident(),
         p.id,
         x - dx,
@@ -2044,8 +2132,48 @@ fn write_placement(s: &mut String, p: &Placement, dx: i32, dy: i32, indent: &str
     }
 }
 
-/// Emit the shared absolute-placement helper.
-fn emit_place_helper(s: &mut String) {
+/// Emit the shared placement helper. The absolute variant places `add` at fixed
+/// MEDM pixels; the responsive (`use_layout`) variant scales the position and
+/// size by the per-axis `(sx, sy)` factors `emit_ui` binds, so the screen reflows
+/// with the window.
+fn emit_place_helper(s: &mut String, use_layout: bool) {
+    if use_layout {
+        s.push_str(
+            r#"/// Place `add` at a MEDM position scaled by `(sx, sy)` -- the per-axis
+/// `available / native` factors -- inside its own `egui::Area`, so the screen
+/// reflows to fill the window. The Area's `order` is the z-layer, so decoration
+/// (`Background`) renders and takes input below controls (`Foreground`) regardless
+/// of call order.
+#[allow(clippy::too_many_arguments)]
+fn place(
+    ui: &mut egui::Ui,
+    sx: f32,
+    sy: f32,
+    order: egui::Order,
+    id: egui::Id,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    add: impl FnOnce(&mut egui::Ui),
+) {
+    let origin = ui.max_rect().min;
+    let rect =
+        egui::Rect::from_min_size(origin + egui::vec2(x * sx, y * sy), egui::vec2(w * sx, h * sy));
+    egui::Area::new(id)
+        .order(order)
+        .fixed_pos(rect.min)
+        .constrain(false)
+        .show(ui.ctx(), |ui| {
+            ui.set_clip_rect(rect);
+            ui.set_max_size(rect.size());
+            add(ui);
+        });
+}
+"#,
+        );
+        return;
+    }
     s.push_str(
         r#"/// Place `add` at an absolute MEDM position inside its own `egui::Area`. The
 /// Area's `order` is the z-layer, so decoration (`Background`) renders and takes
@@ -2188,6 +2316,104 @@ text {
         assert!(
             deco < ctrl,
             "decoration must be laid out before the control:\n{}",
+            g.source
+        );
+    }
+
+    #[test]
+    fn use_layout_scales_placements_to_fill_the_area() {
+        // Responsive mode binds the per-axis scale and threads it into every
+        // place() call; the absolute default does neither (regression guard so
+        // the new mode stays opt-in).
+        let absolute = build(&Options::default());
+        assert!(
+            !absolute.source.contains("let sx = avail.width()"),
+            "absolute mode must not emit a scale:\n{}",
+            absolute.source
+        );
+        assert!(
+            !absolute.source.contains("place(ui, sx, sy,"),
+            "absolute mode must not scale placements:\n{}",
+            absolute.source
+        );
+
+        let layout = build(&Options {
+            use_layout: true,
+            ..Options::default()
+        });
+        // The OVERLAP fixture has no `display` block, so the native size is the
+        // bounding box of its widgets (max right edge 200, max bottom edge 100).
+        assert!(
+            layout.source.contains("let sx = avail.width() / 200.0;"),
+            "expected width scale against the 200px bounding box:\n{}",
+            layout.source
+        );
+        assert!(
+            layout.source.contains("let sy = avail.height() / 100.0;"),
+            "expected height scale against the 100px bounding box:\n{}",
+            layout.source
+        );
+        // Every placement scales by (sx, sy), and the place helper takes them.
+        assert!(layout.source.contains("place(ui, sx, sy, egui::Order::"));
+        assert!(
+            layout
+                .source
+                .contains("fn place(\n    ui: &mut egui::Ui,\n    sx: f32,\n    sy: f32,")
+        );
+        assert!(
+            layout
+                .source
+                .contains("egui::vec2(x * sx, y * sy), egui::vec2(w * sx, h * sy)")
+        );
+    }
+
+    #[test]
+    fn use_layout_takes_native_size_from_the_display_block() {
+        // A screen WITH a `display` block scales against that geometry, not the
+        // widget bounding box.
+        let adl = r#"
+"color map" {
+	colors {
+		ffffff,
+		000000,
+	}
+}
+display {
+	object {
+		x=0
+		y=0
+		width=640
+		height=480
+	}
+}
+text {
+	object {
+		x=10
+		y=10
+		width=80
+		height=18
+	}
+	"basic attribute" {
+		clr=1
+	}
+	textix="hi"
+}
+"#;
+        let g = generate(
+            &parse(adl),
+            &Options {
+                use_layout: true,
+                ..Options::default()
+            },
+        );
+        assert!(
+            g.source.contains("let sx = avail.width() / 640.0;"),
+            "expected the display block width (640):\n{}",
+            g.source
+        );
+        assert!(
+            g.source.contains("let sy = avail.height() / 480.0;"),
+            "expected the display block height (480):\n{}",
             g.source
         );
     }

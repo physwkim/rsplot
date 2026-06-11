@@ -66,6 +66,10 @@ fn example_screen_matches_the_committed_module() {
         // the embedded display inlines exactly as the CLI produced the committed
         // module (the CLI sets `source_dir` to the input's directory).
         source_dir: Some(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples")),
+        // The example is generated in responsive layout mode (`--use-layout`) so
+        // the runnable panel reflows to fill its window; this also compile-gates
+        // the layout-mode emission path against the real sidm APIs.
+        use_layout: true,
         ..Options::default()
     };
     let generated = generate(&parse(adl), &options);
@@ -75,7 +79,7 @@ fn example_screen_matches_the_committed_module() {
         "example output drifted from adl2sidm/examples/local_panel_screen.rs — \
          regenerate it with: cargo run -p adl2sidm -- \
          adl2sidm/examples/local_panel.adl -o \
-         adl2sidm/examples/local_panel_screen.rs --protocol \"\""
+         adl2sidm/examples/local_panel_screen.rs --protocol \"\" --use-layout"
     );
 }
 
