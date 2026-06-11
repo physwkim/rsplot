@@ -39,7 +39,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use siplot::egui::Color32;
 use siplot::egui_wgpu::RenderState;
-use siplot::{ItemHandle, Plot1D, PlotId, PlotResponse, egui};
+use siplot::{DataMargins, ItemHandle, Plot1D, PlotId, PlotResponse, egui};
 
 use crate::channel::{Channel, ChannelState, PvValue};
 use crate::engine::{Engine, EngineError};
@@ -233,6 +233,19 @@ impl SidmTimePlot {
     /// style; PyDM `bufferSize`).
     pub fn with_buffer_size(mut self, buffer_size: usize) -> Self {
         self.buffer_size = buffer_size;
+        self
+    }
+
+    /// Add a per-side data margin around the autoscaled data (builder style;
+    /// silx `setDataMargins` / pyqtgraph autorange `padding`). Each ratio expands
+    /// that side of the axis by `ratio * range` whenever the axis refits, so the
+    /// curve no longer touches the axis edge. For a strip chart the `y_min` /
+    /// `y_max` ratios are what matter — they pad the live Y autoscale top and
+    /// bottom; the `x_min` / `x_max` ratios are inert while the X axis is the
+    /// scrolling time window (X autoscale is off). Default is no margin (the data
+    /// fits the axes exactly).
+    pub fn with_data_margins(mut self, margins: DataMargins) -> Self {
+        self.plot.plot_mut().set_data_margins(margins);
         self
     }
 

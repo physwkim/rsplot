@@ -37,12 +37,23 @@
 use eframe::egui;
 use sidm::Engine;
 use sidm::widgets::{
-    SidmEnumComboBox, SidmImageView, SidmLabel, SidmLineEdit, SidmPushButton, SidmSlider,
-    SidmTimePlot, SidmWaveformPlot,
+    DataMargins, SidmEnumComboBox, SidmImageView, SidmLabel, SidmLineEdit, SidmPushButton,
+    SidmSlider, SidmTimePlot, SidmWaveformPlot,
 };
 
 // Every PV lives under the IOC's `mini:` prefix (st.cmd `epicsEnvSet PREFIX`).
 const PREFIX: &str = "ca://mini:";
+
+// A 5% top/bottom data margin for the strip charts, so the autoscaled curve
+// keeps a gap from the axis edges instead of touching them (silx
+// `setDataMargins` / pyqtgraph autorange padding). X is left at 0 — the X axis
+// is the scrolling time window, not autoscaled.
+const STRIP_MARGINS: DataMargins = DataMargins {
+    x_min: 0.0,
+    x_max: 0.0,
+    y_min: 0.05,
+    y_max: 0.05,
+};
 
 /// Full `ca://` address for a PV under the `mini:` prefix.
 fn pv(suffix: &str) -> String {
@@ -98,7 +109,9 @@ impl MiniBeamline {
             .expect("connect beam current label")
             .with_precision(2)
             .with_show_units(true);
-        let mut beam_plot = SidmTimePlot::new(rs, 0).with_time_span(30.0);
+        let mut beam_plot = SidmTimePlot::new(rs, 0)
+            .with_time_span(30.0)
+            .with_data_margins(STRIP_MARGINS);
         beam_plot
             .add_channel(
                 &engine,
@@ -128,7 +141,9 @@ impl MiniBeamline {
             SidmEnumComboBox::new(&engine, &pv("KohzuModeBO")).expect("connect Kohzu mode");
 
         // --- Point detectors: three readouts on one strip chart ---
-        let mut detectors_plot = SidmTimePlot::new(rs, 1).with_time_span(30.0);
+        let mut detectors_plot = SidmTimePlot::new(rs, 1)
+            .with_time_span(30.0)
+            .with_data_margins(STRIP_MARGINS);
         detectors_plot
             .add_channel(
                 &engine,
