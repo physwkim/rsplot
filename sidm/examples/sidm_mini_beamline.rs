@@ -244,7 +244,8 @@ impl MiniBeamline {
             ui.label("Value:");
             self.beam_label.show(ui);
         });
-        ui.allocate_ui(egui::vec2(ui.available_width(), 180.0), |ui| {
+        // Fill the rest of the tab so the strip chart grows with the window.
+        ui.allocate_ui(ui.available_size(), |ui| {
             self.beam_plot.show(ui);
         });
     }
@@ -279,19 +280,21 @@ impl MiniBeamline {
     /// Point-detectors tab: the three-pen strip chart and PinHole exposure.
     fn detectors_tab(&mut self, ui: &mut egui::Ui) {
         ui.label("Point detectors (PinHole / Edge / Slit):");
-        ui.allocate_ui(egui::vec2(ui.available_width(), 200.0), |ui| {
-            self.detectors_plot.show(ui);
-        });
         ui.horizontal(|ui| {
             ui.label("PinHole exposure (s):");
             self.exposure_edit.show(ui);
+        });
+        // Plot drawn last so it fills the remaining height (exposure sits above it).
+        ui.allocate_ui(ui.available_size(), |ui| {
+            self.detectors_plot.show(ui);
         });
     }
 
     /// Bulk-waveform tab: the 10k-point array plot.
     fn waveform_tab(&mut self, ui: &mut egui::Ui) {
         ui.label("Bulk waveform (mini:wf1, 10000 pts @ 1 Hz):");
-        ui.allocate_ui(egui::vec2(ui.available_width(), 200.0), |ui| {
+        // Fill the rest of the tab so the array plot grows with the window.
+        ui.allocate_ui(ui.available_size(), |ui| {
             self.waveform_plot.show(ui);
         });
     }
@@ -305,7 +308,8 @@ impl MiniBeamline {
             ui.label("Image mode:");
             self.image_mode.show(ui);
         });
-        ui.allocate_ui(egui::vec2(ui.available_width(), 360.0), |ui| {
+        // Fill the rest of the tab so the camera image grows with the window.
+        ui.allocate_ui(ui.available_size(), |ui| {
             self.image_view.show(ui);
         });
     }
@@ -331,15 +335,17 @@ impl eframe::App for MiniBeamline {
         });
         ui.separator();
 
-        // Each tab still scrolls on its own when the window is shorter than its
-        // content.
-        egui::ScrollArea::vertical().show(ui, |ui| match self.tab {
+        // Fill the remaining height: each tab's plot/image expands vertically (and
+        // horizontally) to the window, so resizing grows the graph instead of
+        // leaving dead space below it. No outer ScrollArea — a vertical scroll area
+        // hands its child infinite height, which would defeat the vertical fill.
+        match self.tab {
             Tab::BeamCurrent => self.beam_current_tab(ui),
             Tab::Dcm => self.dcm_tab(ui),
             Tab::Detectors => self.detectors_tab(ui),
             Tab::Waveform => self.waveform_tab(ui),
             Tab::Camera => self.camera_tab(ui),
-        });
+        }
     }
 }
 
