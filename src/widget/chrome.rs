@@ -10,7 +10,7 @@ use egui::epaint::TextShape;
 use egui::{Align2, Color32, FontId, Painter, Pos2, Rect, Stroke, Visuals, pos2, vec2};
 
 use crate::core::colormap::{Colormap, Normalization};
-use crate::core::dtime_ticks::{self, TimeZone};
+use crate::core::dtime_ticks::{self, DateTime, TimeZone};
 use crate::core::items::LineStyle;
 use crate::core::marker::{Marker, MarkerKind, MarkerSymbol, TextAnchor};
 use crate::core::plot::{GraphGrid, TickMode};
@@ -1565,20 +1565,76 @@ pub fn draw_lines(painter: &Painter, t: &Transform, lines: &[Line], overlay: boo
     }
 }
 
+/// Format the cursor's wall-clock time for the crosshair readout: the epoch
+/// `epoch` decomposed in `tz` as `YYYY-MM-DD HH:MM:SS.mmm`. Used when the X axis
+/// is in [`TickMode::TimeSeries`] so the readout reads the same absolute time the
+/// X tick labels do (silx `setTimeZone`), not the raw relative axis coordinate.
+fn format_crosshair_time(epoch: f64, tz: TimeZone) -> String {
+    let dt = DateTime::from_epoch_seconds_tz(epoch, tz);
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:03}",
+        dt.year,
+        dt.month,
+        dt.day,
+        dt.hour,
+        dt.minute,
+        dt.second,
+        dt.microsecond / 1000
+    )
+}
+
+/// The crosshair readout label `"<x>, <y>"` for cursor data coordinates `(x, y)`.
+///
+/// The X half honors the X-axis [`TickMode`]: [`TickMode::Numeric`] formats with
+/// span-scaled decimals ([`format_coord`]); [`TickMode::TimeSeries`] formats the
+/// wall-clock time of `x + x_time_offset` in `x_time_zone`, so the readout stays
+/// consistent with the X tick labels (which are laid out over the same offset
+/// epoch window). Y is always numeric.
+fn crosshair_label(
+    x: f64,
+    y: f64,
+    x_range: (f64, f64),
+    y_range: (f64, f64),
+    x_tick_mode: TickMode,
+    x_time_offset: f64,
+    x_time_zone: TimeZone,
+) -> String {
+    let x_str = match x_tick_mode {
+        TickMode::TimeSeries => format_crosshair_time(x + x_time_offset, x_time_zone),
+        TickMode::Numeric => format_coord(x, x_range.0, x_range.1),
+    };
+    format!("{}, {}", x_str, format_coord(y, y_range.0, y_range.1))
+}
+
 /// Draw a crosshair through `pos` (clipped to the data area) and a readout box
 /// with the data coordinates under the pointer (`doc/design.md` §13 C1). `pos`
-/// is expected to lie within `t.area`.
-pub fn draw_crosshair(painter: &Painter, t: &Transform, pos: Pos2, style: &Style) {
+/// is expected to lie within `t.area`. The X coordinate is formatted per
+/// `x_tick_mode` (numeric, or wall-clock time of `x + x_time_offset` in
+/// `x_time_zone` under [`TickMode::TimeSeries`]) so the readout agrees with the X
+/// tick labels.
+pub fn draw_crosshair(
+    painter: &Painter,
+    t: &Transform,
+    pos: Pos2,
+    style: &Style,
+    x_tick_mode: TickMode,
+    x_time_offset: f64,
+    x_time_zone: TimeZone,
+) {
     let area = t.area;
     let line = Stroke::new(1.0, style.axis);
     painter.vline(pos.x, area.y_range(), line);
     painter.hline(area.x_range(), pos.y, line);
 
     let (x, y) = t.pixel_to_data(pos);
-    let label = format!(
-        "{}, {}",
-        format_coord(x, t.x.min, t.x.max),
-        format_coord(y, t.y.min, t.y.max),
+    let label = crosshair_label(
+        x,
+        y,
+        (t.x.min, t.x.max),
+        (t.y.min, t.y.max),
+        x_tick_mode,
+        x_time_offset,
+        x_time_zone,
     );
     let font = FontId::proportional(11.0);
     let galley = painter.layout_no_wrap(label, font, style.text);
@@ -1787,6 +1843,59 @@ mod tests {
         assert_eq!(format_coord(0.012345, 0.0, 0.1), "0.012");
         // Degenerate span falls back to 3 decimals.
         assert_eq!(format_coord(1.5, 5.0, 5.0), "1.500");
+    }
+
+    #[test]
+    fn crosshair_label_numeric_uses_span_scaled_decimals() {
+        // Numeric X axis: both halves go through format_coord; the time offset and
+        // zone are inert.
+        let label = crosshair_label(
+            1.2345,
+            0.012345,
+            (0.0, 10.0),
+            (0.0, 0.1),
+            TickMode::Numeric,
+            1_600_000_000.0, // ignored under Numeric
+            TimeZone::Utc,
+        );
+        assert_eq!(label, "1.2, 0.012");
+    }
+
+    #[test]
+    fn crosshair_label_time_series_reads_wall_clock_of_x_plus_offset() {
+        // TimeSeries X axis: the readout shows the absolute wall-clock time of the
+        // relative cursor X plus the epoch offset (the f32-safe strip-chart path),
+        // so it matches the X tick labels. Y stays numeric.
+        let offset = DateTime::from_civil(2021, 1, 4, 9, 30, 0, 0).to_epoch_seconds();
+        // 125.5 s into the window -> 09:32:05.500.
+        let label = crosshair_label(
+            125.5,
+            42.0,
+            (0.0, 300.0),
+            (0.0, 100.0),
+            TickMode::TimeSeries,
+            offset,
+            TimeZone::Utc,
+        );
+        assert_eq!(label, "2021-01-04 09:32:05.500, 42");
+    }
+
+    #[test]
+    fn crosshair_label_time_series_applies_time_zone() {
+        // A +9h fixed-offset zone (KST) shifts the displayed wall clock east by 9h.
+        let offset = DateTime::from_civil(2021, 1, 4, 0, 0, 0, 0).to_epoch_seconds();
+        let label = crosshair_label(
+            0.0,
+            1.0,
+            (0.0, 60.0),
+            (0.0, 100.0),
+            TickMode::TimeSeries,
+            offset,
+            TimeZone::FixedOffset {
+                seconds_east: 32400,
+            },
+        );
+        assert_eq!(label, "2021-01-04 09:00:00.000, 1");
     }
 
     #[test]

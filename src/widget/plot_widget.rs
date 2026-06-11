@@ -545,12 +545,22 @@ impl<'a> PlotView<'a> {
             chrome::draw_markers(painter, &transform, transform_right.as_ref(), &plot.markers);
         }
 
-        // Hover crosshair + coordinate readout over the data area.
+        // Hover crosshair + coordinate readout over the data area. The X readout
+        // honors the X tick mode (numeric, or wall-clock under TimeSeries) so it
+        // reads the same as the X tick labels.
         if plot.crosshair
             && let Some(p) = response.hover_pos()
             && area.contains(p)
         {
-            chrome::draw_crosshair(painter, &transform, p, &style);
+            chrome::draw_crosshair(
+                painter,
+                &transform,
+                p,
+                &style,
+                plot.x_tick_mode(),
+                plot.x_time_offset(),
+                plot.x_time_zone(),
+            );
         }
 
         // Box-zoom selection rectangle (drawn last, on top of everything).
