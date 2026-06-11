@@ -103,7 +103,10 @@ impl Screen {
             let _ = w12.show(ui);
         });
         place(ui, __origin, egui::Order::Middle, egui::Id::new(1u64), 10.0, 40.0, 120.0, 20.0, |ui| {
-            let _ = w1.show(ui);
+            {
+                ui.style_mut().visuals.override_text_color = Some(Color32::from_rgb(255, 255, 255));
+                let _ = w1.show(ui);
+            }
         });
         place(ui, __origin, egui::Order::Middle, egui::Id::new(6u64), 10.0, 170.0, 120.0, 20.0, |ui| {
             let _ = w6.show(ui);
@@ -121,7 +124,10 @@ impl Screen {
             let __frame_origin_15 = ui.max_rect().min;
             let _ = w15.show(ui, |ui| {
                 place(ui, __frame_origin_15, egui::Order::Middle, egui::Id::new(16u64), 0.0, 0.0, 180.0, 24.0, |ui| {
-                    let _ = w16.show(ui);
+                    {
+                        ui.style_mut().visuals.override_text_color = Some(Color32::from_rgb(255, 255, 255));
+                        let _ = w16.show(ui);
+                    }
                 });
             });
         });

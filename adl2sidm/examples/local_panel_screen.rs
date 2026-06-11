@@ -75,13 +75,19 @@ impl Screen {
             let _ = w3.show(ui);
         });
         place(ui, __origin, sx, sy, egui::Order::Middle, egui::Id::new(1u64), 10.0, 42.0, 150.0, 20.0, |ui| {
-            let _ = w1.show(ui);
+            {
+                ui.style_mut().visuals.override_text_color = Some(Color32::from_rgb(0, 0, 0));
+                let _ = w1.show(ui);
+            }
         });
         place(ui, __origin, sx, sy, egui::Order::Middle, egui::Id::new(2u64), 10.0, 70.0, 340.0, 120.0, |ui| {
             let _ = w2.show(ui);
         });
         place(ui, __origin, sx, sy, egui::Order::Middle, egui::Id::new(5u64), 170.0, 214.0, 120.0, 20.0, |ui| {
-            let _ = w5.show(ui);
+            {
+                ui.style_mut().visuals.override_text_color = Some(Color32::from_rgb(0, 0, 0));
+                let _ = w5.show(ui);
+            }
         });
         place(ui, __origin, sx, sy, egui::Order::Middle, egui::Id::new(7u64), 20.0, 300.0, 140.0, 20.0, |ui| {
             let _ = w7.show(ui);

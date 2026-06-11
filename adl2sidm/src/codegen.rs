@@ -396,10 +396,13 @@ fn emit_text_update(b: &mut Builder, widget: &MedmWidget, options: &Options, z: 
         b,
         z,
         geom,
-        "SidmLabel",
-        &new_call,
-        &format!("adl2sidm: connect {addr} (text update)"),
-        &builders,
+        ChannelWidget {
+            ty: "SidmLabel",
+            new_call: &new_call,
+            connect_desc: &format!("adl2sidm: connect {addr} (text update)"),
+            builders: &builders,
+            colors: WidgetColors::from_widget(widget),
+        },
     );
 }
 
@@ -415,10 +418,13 @@ fn emit_text_entry(b: &mut Builder, widget: &MedmWidget, options: &Options, z: Z
         b,
         z,
         geom,
-        "SidmLineEdit",
-        &new_call,
-        &format!("adl2sidm: connect {addr}"),
-        &builders,
+        ChannelWidget {
+            ty: "SidmLineEdit",
+            new_call: &new_call,
+            connect_desc: &format!("adl2sidm: connect {addr}"),
+            builders: &builders,
+            colors: WidgetColors::from_widget(widget),
+        },
     );
 }
 
@@ -448,10 +454,13 @@ fn emit_message_button(b: &mut Builder, widget: &MedmWidget, options: &Options, 
         b,
         z,
         geom,
-        "SidmPushButton",
-        &new_call,
-        &format!("adl2sidm: connect {addr} (message button)"),
-        &builders,
+        ChannelWidget {
+            ty: "SidmPushButton",
+            new_call: &new_call,
+            connect_desc: &format!("adl2sidm: connect {addr} (message button)"),
+            builders: &builders,
+            colors: WidgetColors::from_widget(widget),
+        },
     );
 }
 
@@ -465,10 +474,13 @@ fn emit_menu(b: &mut Builder, widget: &MedmWidget, options: &Options, z: ZLayer)
         b,
         z,
         geom,
-        "SidmEnumComboBox",
-        &new_call,
-        &format!("adl2sidm: connect {addr} (menu)"),
-        &[],
+        ChannelWidget {
+            ty: "SidmEnumComboBox",
+            new_call: &new_call,
+            connect_desc: &format!("adl2sidm: connect {addr} (menu)"),
+            builders: &[],
+            colors: WidgetColors::from_widget(widget),
+        },
     );
 }
 
@@ -499,10 +511,13 @@ fn emit_choice_button(b: &mut Builder, widget: &MedmWidget, options: &Options, z
         b,
         z,
         geom,
-        "SidmEnumButton",
-        &new_call,
-        &format!("adl2sidm: connect {addr} (choice button)"),
-        &builders,
+        ChannelWidget {
+            ty: "SidmEnumButton",
+            new_call: &new_call,
+            connect_desc: &format!("adl2sidm: connect {addr} (choice button)"),
+            builders: &builders,
+            colors: WidgetColors::from_widget(widget),
+        },
     );
 }
 
@@ -532,10 +547,13 @@ fn emit_valuator(b: &mut Builder, widget: &MedmWidget, options: &Options, z: ZLa
         b,
         z,
         geom,
-        "SidmSlider",
-        &new_call,
-        &format!("adl2sidm: connect {addr} (valuator)"),
-        &builders,
+        ChannelWidget {
+            ty: "SidmSlider",
+            new_call: &new_call,
+            connect_desc: &format!("adl2sidm: connect {addr} (valuator)"),
+            builders: &builders,
+            colors: WidgetColors::default(),
+        },
     );
 }
 
@@ -571,10 +589,13 @@ fn emit_wheel_switch(b: &mut Builder, widget: &MedmWidget, options: &Options, z:
         b,
         z,
         geom,
-        "SidmSpinbox",
-        &new_call,
-        &format!("adl2sidm: connect {addr} (wheel switch)"),
-        &builders,
+        ChannelWidget {
+            ty: "SidmSpinbox",
+            new_call: &new_call,
+            connect_desc: &format!("adl2sidm: connect {addr} (wheel switch)"),
+            builders: &builders,
+            colors: WidgetColors::default(),
+        },
     );
 }
 
@@ -622,10 +643,13 @@ fn emit_byte(b: &mut Builder, widget: &MedmWidget, options: &Options, z: ZLayer)
         b,
         z,
         geom,
-        "SidmByteIndicator",
-        &new_call,
-        &format!("adl2sidm: connect {addr} (byte)"),
-        &builders,
+        ChannelWidget {
+            ty: "SidmByteIndicator",
+            new_call: &new_call,
+            connect_desc: &format!("adl2sidm: connect {addr} (byte)"),
+            builders: &builders,
+            colors: WidgetColors::default(),
+        },
     );
 }
 
@@ -676,10 +700,13 @@ fn emit_scale_indicator(
         b,
         z,
         geom,
-        "SidmScaleIndicator",
-        &new_call,
-        &format!("adl2sidm: connect {addr} (scale indicator)"),
-        &builders,
+        ChannelWidget {
+            ty: "SidmScaleIndicator",
+            new_call: &new_call,
+            connect_desc: &format!("adl2sidm: connect {addr} (scale indicator)"),
+            builders: &builders,
+            colors: WidgetColors::default(),
+        },
     );
 }
 
@@ -704,10 +731,13 @@ fn emit_drawing(b: &mut Builder, widget: &MedmWidget, options: &Options, z: ZLay
         b,
         z,
         geom,
-        "SidmDrawing",
-        &new_call,
-        &format!("adl2sidm: connect {addr} (drawing)"),
-        &builders,
+        ChannelWidget {
+            ty: "SidmDrawing",
+            new_call: &new_call,
+            connect_desc: &format!("adl2sidm: connect {addr} (drawing)"),
+            builders: &builders,
+            colors: WidgetColors::default(),
+        },
     );
 }
 
@@ -786,10 +816,13 @@ fn emit_arc(b: &mut Builder, widget: &MedmWidget, options: &Options, z: ZLayer) 
         b,
         z,
         geom,
-        "SidmDrawing",
-        &new_call,
-        &format!("adl2sidm: connect {addr} (arc)"),
-        &builders,
+        ChannelWidget {
+            ty: "SidmDrawing",
+            new_call: &new_call,
+            connect_desc: &format!("adl2sidm: connect {addr} (arc)"),
+            builders: &builders,
+            colors: WidgetColors::default(),
+        },
     );
 }
 
@@ -850,10 +883,13 @@ fn emit_polyshape(
         b,
         z,
         geom,
-        "SidmDrawing",
-        &new_call,
-        &format!("adl2sidm: connect {addr} ({kind})"),
-        &builders,
+        ChannelWidget {
+            ty: "SidmDrawing",
+            new_call: &new_call,
+            connect_desc: &format!("adl2sidm: connect {addr} ({kind})"),
+            builders: &builders,
+            colors: WidgetColors::default(),
+        },
     );
 }
 
@@ -1699,19 +1735,96 @@ fn resolve_channel(
     Some((geom, addr))
 }
 
+/// A value/control widget's static MEDM colours: `clr` (foreground/text) and
+/// `bclr` (background). Applied for the widgets whose `clr`/`bclr` genuinely mean
+/// "text colour / fill" (label, line edit, push button, combo box, enum button);
+/// NOT for shapes (which colour themselves through drawing builders) or for byte/
+/// scale widgets (whose `clr`/`bclr` are on/off and bar/background colours with
+/// their own rendering).
+#[derive(Clone, Copy, Default)]
+struct WidgetColors {
+    /// MEDM `clr` — the foreground/text colour.
+    fg: Option<Color>,
+    /// MEDM `bclr` — the background fill.
+    bg: Option<Color>,
+}
+
+impl WidgetColors {
+    /// The widget's resolved `clr`/`bclr` (the parser folds attribute-block
+    /// colours into `widget.color`/`background_color`).
+    fn from_widget(widget: &MedmWidget) -> Self {
+        Self {
+            fg: widget.color,
+            bg: widget.background_color,
+        }
+    }
+
+    fn is_set(self) -> bool {
+        self.fg.is_some() || self.bg.is_some()
+    }
+}
+
+/// The draw body for a channel widget, optionally applying static MEDM colours
+/// before `show`. The background is painted as a filled rect behind the widget;
+/// the foreground is set as `override_text_color`, which the widget's text honours
+/// unless it is alarm-driven (alarm colouring sets the text colour explicitly and
+/// so still wins, matching MEDM `clrmod="alarm"` overriding the static `clr`).
+fn colored_show_body(b: &mut Builder, field: &str, colors: WidgetColors) -> String {
+    if !colors.is_set() {
+        return format!("let _ = {field}.show(ui);");
+    }
+    b.needs_color = true;
+    let mut body = String::from("{\n");
+    if let Some(bg) = colors.bg {
+        let _ = writeln!(body, "    let __bg = ui.max_rect();");
+        let _ = writeln!(
+            body,
+            "    ui.painter().rect_filled(__bg, egui::CornerRadius::ZERO, {});",
+            color_expr(bg)
+        );
+    }
+    if let Some(fg) = colors.fg {
+        let _ = writeln!(
+            body,
+            "    ui.style_mut().visuals.override_text_color = Some({});",
+            color_expr(fg)
+        );
+    }
+    let _ = writeln!(body, "    let _ = {field}.show(ui);");
+    body.push('}');
+    body
+}
+
+/// The per-widget inputs to [`push_channel_widget`]: how to name, construct,
+/// configure, and colour one channel-bound widget. Grouped into one spec so the
+/// emitter stays under the argument-count lint while `b`/`z`/`geom` remain the
+/// separate placement context.
+struct ChannelWidget<'a> {
+    /// The sidm widget type (the `Screen` field's type).
+    ty: &'a str,
+    /// The `Type::new(...)` constructor call.
+    new_call: &'a str,
+    /// The `.expect(...)` connection-failure message.
+    connect_desc: &'a str,
+    /// `.with_*` builder calls applied after construction.
+    builders: &'a [String],
+    /// Static MEDM `clr`/`bclr` colours; `default()` (none) for widgets that
+    /// colour themselves or have no text/fill semantics.
+    colors: WidgetColors,
+}
+
 /// Emit a stateful, channel-bound widget: store it as a `Screen` field, build it
 /// in `new()` (`new_call.expect(connect_desc)` then the `.with_*` `builders`),
 /// and draw it back-to-front in `ui()`. The single owner of channel-widget
 /// emission, so every widget is placed and drawn the same way.
-fn push_channel_widget(
-    b: &mut Builder,
-    z: ZLayer,
-    geom: Geometry,
-    ty: &str,
-    new_call: &str,
-    connect_desc: &str,
-    builders: &[String],
-) {
+fn push_channel_widget(b: &mut Builder, z: ZLayer, geom: Geometry, w: ChannelWidget) {
+    let ChannelWidget {
+        ty,
+        new_call,
+        connect_desc,
+        builders,
+        colors,
+    } = w;
     let id = b.index();
     let field = format!("w{id}");
     b.needs_widgets = true;
@@ -1730,12 +1843,8 @@ fn push_channel_widget(
     // The body references the field's `&mut` local (bound by `ui()`'s `let Self {
     // .. }` destructure), not `self.field`, so a container's draw closure can hold
     // disjoint borrows of the frame and its siblings.
-    b.placements.push(Placement::drawn(
-        z,
-        id,
-        geom,
-        format!("let _ = {field}.show(ui);"),
-    ));
+    let body = colored_show_body(b, &field, colors);
+    b.placements.push(Placement::drawn(z, id, geom, body));
 }
 
 /// Like [`push_channel_widget`] but for a fielded widget whose constructor is
@@ -2417,6 +2526,71 @@ text {
             g.source
                 .contains("SidmLabel::new(&engine, \"ca://$(P)rbv\")"),
             "decimal text update should still be emitted:\n{}",
+            g.source
+        );
+    }
+
+    #[test]
+    fn static_colors_tint_text_widgets_but_not_shapes() {
+        // MEDM clr (foreground) -> override_text_color; bclr (background) -> a
+        // filled rect behind the widget. Applied to text/control widgets where
+        // clr/bclr mean text+fill; NOT to shapes (which colour themselves via
+        // drawing builders, not override_text_color).
+        let adl = r#"
+"color map" {
+	colors {
+		ffffff,
+		000000,
+		ff0000,
+	}
+}
+"text update" {
+	object {
+		x=0
+		y=0
+		width=80
+		height=18
+	}
+	monitor {
+		chan="$(P)rbv"
+		clr=2
+		bclr=1
+	}
+}
+rectangle {
+	object {
+		x=0
+		y=30
+		width=40
+		height=40
+	}
+	"basic attribute" {
+		clr=2
+	}
+}
+"#;
+        let g = generate(&parse(adl), &Options::default());
+        // The text update tints its text (clr=2 -> red) and fills its background
+        // (bclr=1 -> black).
+        assert!(
+            g.source.contains(
+                "ui.style_mut().visuals.override_text_color = Some(Color32::from_rgb(255, 0, 0));"
+            ),
+            "text update must tint via override_text_color:\n{}",
+            g.source
+        );
+        assert!(
+            g.source
+                .contains("ui.painter().rect_filled(__bg, egui::CornerRadius::ZERO, Color32::from_rgb(0, 0, 0));"),
+            "text update must paint its bclr background:\n{}",
+            g.source
+        );
+        // Exactly one override_text_color — the shape must NOT get one (it colours
+        // itself through with_fill/with_border, not text tinting).
+        assert_eq!(
+            g.source.matches("override_text_color").count(),
+            1,
+            "only the text widget should tint text; the shape self-colours:\n{}",
             g.source
         );
     }
