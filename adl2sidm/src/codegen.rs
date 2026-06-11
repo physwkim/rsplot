@@ -691,6 +691,15 @@ fn emit_scale_indicator(
     if bar {
         builders.push(".with_bar_indicator(true)".to_string());
     }
+    // MEDM's foreground `clr` colours the bar fill / pointer line; sidm's scale
+    // indicator otherwise uses its own default blue. Reproduce the MEDM colour.
+    // `clrmod="alarm"` would track severity instead, but `SidmScaleIndicator`
+    // exposes no public alarm-sensitivity builder, so only the static colour is
+    // carried (the severity override is a sidm-side gap, not done here).
+    if let Some(c) = widget.color {
+        builders.push(format!(".with_bar_color({})", color_expr(c)));
+        b.needs_color = true;
+    }
     if let Some((lo, hi)) = user_defined_limits(widget) {
         builders.push(format!(
             ".with_limits({}, {})",
@@ -3237,6 +3246,46 @@ indicator {
         );
         // Neither is a bar: exactly one `.with_bar_indicator(true)` (the bar).
         assert_eq!(g.source.matches(".with_bar_indicator(true)").count(), 1);
+    }
+
+    #[test]
+    fn scale_indicator_bar_color_follows_medm_clr() {
+        // A bar's `monitor` block `clr` is its bar/pointer colour. The parser
+        // hoists it into `widget.color`; codegen must emit `.with_bar_color(...)`
+        // so the bar matches MEDM instead of sidm's default blue.
+        let adl = r#"
+"color map" {
+	colors {
+		ffffff,
+		00ff00,
+	}
+}
+bar {
+	object {
+		x=0
+		y=0
+		width=20
+		height=100
+	}
+	monitor {
+		chan="BAR"
+		clr=1
+	}
+}
+"#;
+        let g = generate(&parse(adl), &Options::default());
+        assert!(
+            g.source
+                .contains(".with_bar_color(Color32::from_rgb(0, 255, 0))"),
+            "bar clr=1 (00ff00) must drive with_bar_color:\n{}",
+            g.source
+        );
+        // A scale with no `clr` keeps sidm's default bar colour (no override).
+        assert!(
+            !scales().source.contains(".with_bar_color("),
+            "a clr-less scale must not force a bar colour:\n{}",
+            scales().source
+        );
     }
 
     #[test]
