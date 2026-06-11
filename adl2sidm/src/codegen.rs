@@ -74,6 +74,9 @@ struct Builder {
     warnings: Vec<String>,
     /// Running widget index → unique field names and Area ids.
     next_index: u64,
+    /// Running plot index → distinct `PlotId`s for GPU plot/image widgets, which
+    /// siplot uses to key their GPU resources (must be unique within a screen).
+    next_plot_id: u64,
     /// Whether any emitted code references `Color32` / `sidm::widgets`.
     needs_color: bool,
     needs_widgets: bool,
@@ -84,6 +87,13 @@ impl Builder {
     fn index(&mut self) -> u64 {
         let i = self.next_index;
         self.next_index += 1;
+        i
+    }
+
+    /// Allocate the next distinct `PlotId` for a GPU plot/image widget.
+    fn plot_id(&mut self) -> u64 {
+        let i = self.next_plot_id;
+        self.next_plot_id += 1;
         i
     }
 }
@@ -129,6 +139,8 @@ fn emit_widget(b: &mut Builder, widget: &MedmWidget, options: &Options) {
         "rectangle" => emit_drawing(b, widget, options, z, "Rectangle"),
         "oval" => emit_drawing(b, widget, options, z, "Ellipse"),
         "composite" => emit_composite(b, widget, options, z),
+        "strip chart" => emit_strip_chart(b, widget, options, z),
+        "cartesian plot" => emit_cartesian_plot(b, widget, options, z),
         _ => b.warnings.push(format!(
             "line {}: {:?} -> {} not emitted yet (skipped)",
             widget.line, widget.symbol, map.sidm_widget
@@ -574,6 +586,253 @@ fn emit_composite(b: &mut Builder, widget: &MedmWidget, options: &Options, z: ZL
         id: frame_id,
         geom,
         body,
+    });
+}
+
+/// `strip chart` → `SidmTimePlot`: each MEDM `pen` is a time-series curve. A pen
+/// with no `chan` is skipped (nothing to plot); a strip chart with no pens at all
+/// is dropped with a warning. MEDM `period` (scaled by `units` to seconds) sets
+/// the displayed time span; absent, sidm's own default span stands.
+fn emit_strip_chart(b: &mut Builder, widget: &MedmWidget, options: &Options, z: ZLayer) {
+    let Some(geom) = widget.geometry else {
+        skip_no_geometry(b, widget);
+        return;
+    };
+    let pens = widget.records.get("pens").map(Vec::as_slice).unwrap_or(&[]);
+    if pens.is_empty() {
+        b.warnings.push(format!(
+            "line {}: strip chart has no pens; skipped",
+            widget.line
+        ));
+        return;
+    }
+
+    let mut adds = Vec::new();
+    for pen in pens {
+        let Some(chan) = pen.get("chan").filter(|c| !c.is_empty()) else {
+            b.warnings.push(format!(
+                "line {}: strip chart pen has no chan; skipped",
+                widget.line
+            ));
+            continue;
+        };
+        let addr = apply_protocol(chan, options);
+        adds.push(format!(
+            "add_channel(&engine, {}, {}, {}).expect({});",
+            rust_str(&addr),
+            record_color(pen.get("color")),
+            rust_str(chan),
+            rust_str(&format!("adl2sidm: add strip-chart curve {chan}")),
+        ));
+    }
+    if adds.is_empty() {
+        return; // every pen lacked a channel; warnings already recorded
+    }
+
+    let mut with = Vec::new();
+    if let Some(span) = strip_chart_span(widget) {
+        with.push(format!(".with_time_span({})", float_lit(span)));
+    }
+    b.needs_color = true;
+    let plot_id = b.plot_id();
+    push_plot_widget(
+        b,
+        z,
+        geom,
+        "SidmTimePlot",
+        &format!("SidmTimePlot::new(rs, {plot_id})"),
+        &with,
+        &adds,
+    );
+}
+
+/// `cartesian plot` → `SidmWaveformPlot` (default) or `SidmScatterPlot`
+/// (`--use-scatterplot`). Each MEDM `trace` is one curve.
+///
+/// Waveform: a trace needs `ydata` (else it is skipped, as adl2pydm requires a
+/// `y_channel`); `xdata` plots Y against an X array, its absence against the
+/// array index. Scatter: a trace needs *both* `xdata` and `ydata` (sidm's
+/// scatter pairs two scalar channels); a trace missing either is warned and
+/// skipped. MEDM `count` (point budget) maps to the scatter buffer size; the
+/// waveform plot has no per-curve budget, so `count` does not apply there.
+fn emit_cartesian_plot(b: &mut Builder, widget: &MedmWidget, options: &Options, z: ZLayer) {
+    let Some(geom) = widget.geometry else {
+        skip_no_geometry(b, widget);
+        return;
+    };
+    let traces = widget
+        .records
+        .get("traces")
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    if traces.is_empty() {
+        b.warnings.push(format!(
+            "line {}: cartesian plot has no traces; skipped",
+            widget.line
+        ));
+        return;
+    }
+
+    let scatter = options.use_scatterplot;
+    let mut adds = Vec::new();
+    for (i, trace) in traces.iter().enumerate() {
+        let legend = format!("curve {}", i + 1);
+        let color = record_color(trace.get("color"));
+        let xdata = trace
+            .get("xdata")
+            .filter(|c| !c.is_empty())
+            .map(|c| apply_protocol(c, options));
+        let ydata = trace.get("ydata").filter(|c| !c.is_empty());
+
+        if scatter {
+            // Scatter pairs two scalar channels — both axes are required.
+            let (Some(x), Some(y)) = (&xdata, ydata) else {
+                b.warnings.push(format!(
+                    "line {}: cartesian plot trace {} needs both xdata and ydata for a scatter plot; skipped",
+                    widget.line,
+                    i + 1
+                ));
+                continue;
+            };
+            let y = apply_protocol(y, options);
+            adds.push(format!(
+                "add_xy_channel(&engine, {}, {}, {}, {}).expect({});",
+                rust_str(x),
+                rust_str(&y),
+                color,
+                rust_str(&legend),
+                rust_str(&format!("adl2sidm: add scatter {legend}")),
+            ));
+        } else {
+            let Some(y) = ydata else {
+                b.warnings.push(format!(
+                    "line {}: cartesian plot trace {} has no ydata; skipped",
+                    widget.line,
+                    i + 1
+                ));
+                continue;
+            };
+            let y = apply_protocol(y, options);
+            // sidm waveform `add_xy_channel(y, Option<x>)`: X array optional.
+            adds.push(match &xdata {
+                Some(x) => format!(
+                    "add_xy_channel(&engine, {}, Some({}), {}, {}).expect({});",
+                    rust_str(&y),
+                    rust_str(x),
+                    color,
+                    rust_str(&legend),
+                    rust_str(&format!("adl2sidm: add waveform {legend}")),
+                ),
+                None => format!(
+                    "add_channel(&engine, {}, {}, {}).expect({});",
+                    rust_str(&y),
+                    color,
+                    rust_str(&legend),
+                    rust_str(&format!("adl2sidm: add waveform {legend}")),
+                ),
+            });
+        }
+    }
+    if adds.is_empty() {
+        return; // no usable traces; warnings already recorded
+    }
+
+    let ty = if scatter {
+        "SidmScatterPlot"
+    } else {
+        "SidmWaveformPlot"
+    };
+    // `count` budgets the scatter buffer (PyDM bufferSize); waveform has none.
+    let mut with = Vec::new();
+    if scatter
+        && let Some(count) = widget
+            .assignments
+            .get("count")
+            .and_then(|c| c.parse::<usize>().ok())
+    {
+        with.push(format!(".with_buffer_size({count})"));
+    }
+    b.needs_color = true;
+    let plot_id = b.plot_id();
+    push_plot_widget(
+        b,
+        z,
+        geom,
+        ty,
+        &format!("{ty}::new(rs, {plot_id})"),
+        &with,
+        &adds,
+    );
+}
+
+/// The strip chart's displayed time span in seconds: `period` scaled by `units`
+/// (`"minute"` → 60, `"hour"` → 3600, `"second"`/absent → 1), or `None` when no
+/// `period` is given. This converts MEDM's unit-tagged period to sidm's
+/// seconds-based `with_time_span`, where adl2pydm passes `period` through raw.
+fn strip_chart_span(widget: &MedmWidget) -> Option<f64> {
+    let period = widget.assignments.get("period")?.parse::<f64>().ok()?;
+    let scale = match widget.assignments.get("units").map(String::as_str) {
+        Some("minute") => 60.0,
+        Some("hour") => 3600.0,
+        _ => 1.0,
+    };
+    Some(period * scale)
+}
+
+/// `Color32::from_rgb(...)` for a trace/pen record's resolved `color` (the
+/// `"r,g,b"` the parser stored from `data_clr`/`clr`), white when absent or
+/// malformed (so a curve always has a colour).
+fn record_color(color: Option<&String>) -> String {
+    let (r, g, b) = color.and_then(|s| parse_rgb(s)).unwrap_or((255, 255, 255));
+    format!("Color32::from_rgb({r}, {g}, {b})")
+}
+
+/// Parse a `"r,g,b"` triple back into bytes.
+fn parse_rgb(s: &str) -> Option<(u8, u8, u8)> {
+    let mut it = s.split(',');
+    let r = it.next()?.trim().parse().ok()?;
+    let g = it.next()?.trim().parse().ok()?;
+    let b = it.next()?.trim().parse().ok()?;
+    Some((r, g, b))
+}
+
+/// Emit a GPU plot widget: a `let mut <field> = <new_call><with builders>;`
+/// constructor (the plot takes `rs` + a `PlotId`) followed by one
+/// `<field>.<add>` statement per curve (each `add` is the method call after the
+/// field, e.g. `add_channel(&engine, …).expect(…);`). Stores the field, builds
+/// it in `new()`, and draws it back-to-front in `ui()`. Distinct from
+/// [`push_channel_widget`]: a plot needs `&mut` plus follow-up `add_*` calls, not
+/// a single builder expression.
+fn push_plot_widget(
+    b: &mut Builder,
+    z: ZLayer,
+    geom: Geometry,
+    ty: &str,
+    new_call: &str,
+    with_builders: &[String],
+    adds: &[String],
+) {
+    let id = b.index();
+    let field = format!("w{id}");
+    b.needs_widgets = true;
+
+    let mut ctor = format!("let mut {field} = {new_call}");
+    for bld in with_builders {
+        let _ = write!(ctor, "{bld}");
+    }
+    ctor.push(';');
+    b.ctors.push(ctor);
+    for add in adds {
+        b.ctors.push(format!("{field}.{add}"));
+    }
+    b.fields.push((field.clone(), ty.to_string()));
+    // Reference the field's `&mut` local (bound by `ui()`'s `let Self { .. }`
+    // destructure), matching every other widget's draw.
+    b.placements.push(Placement {
+        z,
+        id,
+        geom,
+        body: format!("let _ = {field}.show(ui);"),
     });
 }
 
@@ -1799,5 +2058,164 @@ composite {
             "deepest control must sit inside the inner frame closure:\n{}",
             g.source
         );
+    }
+
+    // A strip chart (two pens) over a cartesian plot whose first trace has both
+    // X and Y arrays and whose second has only Y. Colour map: 2 = red, 3 =
+    // green, 4 = blue.
+    const PLOTS: &str = r#"
+"color map" {
+	colors {
+		ffffff,
+		000000,
+		ff0000,
+		00ff00,
+		0000ff,
+	}
+}
+"strip chart" {
+	object {
+		x=33
+		y=27
+		width=309
+		height=191
+	}
+	period=2
+	units="minute"
+	pen[0] {
+		chan="DEV:H1"
+		clr=2
+	}
+	pen[1] {
+		chan="DEV:H2"
+		clr=3
+	}
+}
+"cartesian plot" {
+	object {
+		x=9
+		y=230
+		width=304
+		height=159
+	}
+	count=500
+	trace[0] {
+		xdata="DEV:X"
+		ydata="DEV:Y1"
+		data_clr=2
+	}
+	trace[1] {
+		ydata="DEV:Y2"
+		data_clr=4
+	}
+}
+"#;
+
+    fn plots(opts: &Options) -> Generated {
+        generate(&parse(PLOTS), opts)
+    }
+
+    #[test]
+    fn strip_chart_becomes_a_time_plot_with_a_curve_per_pen() {
+        let g = plots(&Options::default());
+        assert!(g.source.contains(": SidmTimePlot,"), "{}", g.source);
+        // period 2 * units "minute" (60) -> 120 s time span.
+        assert!(
+            g.source
+                .contains("SidmTimePlot::new(rs, 0).with_time_span(120.0)"),
+            "strip-chart span not period*units:\n{}",
+            g.source
+        );
+        // One add_channel per pen, with the pen colour resolved from the table.
+        assert!(g.source.contains(
+            "add_channel(&engine, \"ca://DEV:H1\", Color32::from_rgb(255, 0, 0), \"DEV:H1\")"
+        ));
+        assert!(g.source.contains(
+            "add_channel(&engine, \"ca://DEV:H2\", Color32::from_rgb(0, 255, 0), \"DEV:H2\")"
+        ));
+    }
+
+    #[test]
+    fn cartesian_plot_defaults_to_a_waveform_plot() {
+        let g = plots(&Options::default());
+        assert!(g.source.contains(": SidmWaveformPlot,"), "{}", g.source);
+        // trace[0] has X and Y -> add_xy_channel(y, Some(x)); blue from data_clr=2
+        // is red (255,0,0).
+        assert!(
+            g.source.contains(
+                "add_xy_channel(&engine, \"ca://DEV:Y1\", Some(\"ca://DEV:X\"), Color32::from_rgb(255, 0, 0), \"curve 1\")"
+            ),
+            "x/y trace not add_xy_channel:\n{}",
+            g.source
+        );
+        // trace[1] has only Y -> add_channel (plotted against index).
+        assert!(
+            g.source.contains(
+                "add_channel(&engine, \"ca://DEV:Y2\", Color32::from_rgb(0, 0, 255), \"curve 2\")"
+            ),
+            "y-only trace not add_channel:\n{}",
+            g.source
+        );
+        // The waveform plot has no per-curve buffer; `count` must not appear.
+        assert!(
+            !g.source.contains("with_buffer_size"),
+            "count must not map to a waveform buffer:\n{}",
+            g.source
+        );
+    }
+
+    #[test]
+    fn cartesian_plot_uses_scatter_with_use_scatterplot() {
+        let opts = Options {
+            use_scatterplot: true,
+            ..Options::default()
+        };
+        let g = plots(&opts);
+        assert!(g.source.contains(": SidmScatterPlot,"), "{}", g.source);
+        // count -> scatter buffer size.
+        assert!(
+            g.source
+                .contains("SidmScatterPlot::new(rs, 1).with_buffer_size(500)"),
+            "count not mapped to scatter buffer:\n{}",
+            g.source
+        );
+        // Scatter pairs X and Y in (x, y) order.
+        assert!(
+            g.source.contains(
+                "add_xy_channel(&engine, \"ca://DEV:X\", \"ca://DEV:Y1\", Color32::from_rgb(255, 0, 0), \"curve 1\")"
+            ),
+            "scatter trace not (x, y):\n{}",
+            g.source
+        );
+        // trace[1] lacks xdata, which scatter requires -> warned and skipped.
+        assert!(
+            g.warnings
+                .iter()
+                .any(|w| w.contains("trace 2 needs both xdata and ydata")),
+            "missing-xdata scatter trace not warned:\n{:?}",
+            g.warnings
+        );
+        assert!(!g.source.contains("DEV:Y2"), "{}", g.source);
+    }
+
+    #[test]
+    fn plots_are_middle_layer_monitors_with_distinct_ids() {
+        let g = plots(&Options::default());
+        // Both plots are monitors -> Middle layer, never Background/Foreground.
+        assert!(
+            !g.source.contains("egui::Order::Background"),
+            "{}",
+            g.source
+        );
+        assert!(
+            !g.source.contains("egui::Order::Foreground"),
+            "{}",
+            g.source
+        );
+        let middles = g.source.matches("egui::Order::Middle").count();
+        assert_eq!(middles, 2, "two Middle-layer placements:\n{}", g.source);
+        // Distinct PlotIds keep their GPU resources separate.
+        assert!(g.source.contains("SidmTimePlot::new(rs, 0)"));
+        assert!(g.source.contains("SidmWaveformPlot::new(rs, 1)"));
     }
 }

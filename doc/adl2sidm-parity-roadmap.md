@@ -46,7 +46,9 @@ dropped).
 - **Deferred** (tracked, not dropped): runtime `.adl`/display-file loader;
   proportional/grid scaling; SiDM-side `DrawingShape` Arc/Pie/Polygon/Polyline;
   a rules engine for MEDM dynamic-attribute CALC; related-display navigation,
-  shell-command, embedded display (matching `sidm`'s own deferred set).
+  shell-command, embedded display (matching `sidm`'s own deferred set); the MEDM
+  `image` static GIF/TIFF-file display (SiDM has only `SidmImageView`, a live
+  array-data viewer — no file-image widget to map onto).
 
 ## MEDM widget coverage
 
@@ -71,9 +73,9 @@ Category drives the z-layer: `static` = decoration (back), `monitor` = read-only
 | composite | container | `SidmFrame` (children re-layered inside) | ✅ |
 | rectangle | static | `SidmDrawing(Rectangle)` | ✅ |
 | oval | static | `SidmDrawing(Ellipse)` | ✅ |
-| strip chart | monitor | `SidmTimePlot` | ⬜ |
-| cartesian plot | monitor | `SidmWaveformPlot` / `SidmScatterPlot` | ⬜ |
-| image | monitor | `SidmImageView` | ⬜ |
+| strip chart | monitor | `SidmTimePlot` | ✅ |
+| cartesian plot | monitor | `SidmWaveformPlot` / `SidmScatterPlot` | ✅ |
+| image | monitor | ⏸ stub + warning (static GIF/TIFF file, no array channel) | ⬜ |
 | arc | static | ⏸ stub + warning (no `DrawingShape::Arc`) | ⬜ |
 | polygon | static | ⏸ stub + warning (no `DrawingShape::Polygon`) | ⬜ |
 | polyline | static | ⏸ stub + warning (no `DrawingShape::Polyline`) | ⬜ |
@@ -166,8 +168,35 @@ not silently dropped (SiDM has no rules engine yet).
     single- and nested-composite screens were generated and `cargo check`'d clean
     (no warnings) against real sidm. Gate: clippy -p adl2sidm clean, nextest
     39/39.
-- ⬜ B7 — emitter batch: plots + image (strip chart, cartesian plot, image).
-- ⬜ B8 — stubs + warnings for the deferred 6 + CALC `// TODO` comments.
+- ✅ B7 — emitter batch: plots (strip chart, cartesian plot). `strip chart` →
+  `SidmTimePlot`, one `add_channel` per MEDM `pen`; `period` scaled by `units`
+  (`minute`→60, `hour`→3600) sets `with_time_span` (converting MEDM's unit-tagged
+  period to sidm's seconds, where adl2pydm passes it through raw). `cartesian
+  plot` → `SidmWaveformPlot` (default) or `SidmScatterPlot` (`--use-scatterplot`):
+  each `trace` is a curve. Waveform — a trace needs `ydata` (else skipped, as
+  adl2pydm requires a `y_channel`); `xdata` present → `add_xy_channel(y, Some(x))`,
+  absent → `add_channel(y)` (Y vs index). Scatter — a trace needs *both* `xdata`
+  and `ydata` (sidm's scatter pairs two scalar channels in `(x, y)` order); a
+  trace missing either is warned and skipped, and `count` maps to the scatter
+  buffer size (waveform has no per-curve budget, so `count` is dropped there).
+  Pen/trace colours resolve from `clr`/`data_clr` against the table. A new
+  `push_plot_widget` owner emits the `let mut <field> = …::new(rs, <PlotId>)…;`
+  constructor plus a follow-up `add_*` per curve and the back-to-front placement,
+  so plots layer uniformly with the other widgets; each plot gets a distinct
+  `PlotId`. 4 new codegen tests (strip-chart pens + unit-scaled span; waveform
+  x/y vs y-only traces, count dropped; scatter buffer + (x,y) order + missing-x
+  skip-warning; both plots Middle-layer with distinct ids). The waveform- and
+  scatter-mode screens were generated and `cargo check`'d clean (no warnings)
+  against real sidm. Gate: clippy -p adl2sidm clean, nextest 43/43.
+  - **`image` moved to the B8 stub set.** The plan slotted `image →
+    SidmImageView` here, but the MEDM `image` widget is a *static GIF/TIFF file*
+    display (`type="gif"`, `"image name"="apple.gif"`) with no channel, whereas
+    `SidmImageView` is a live array-data viewer that *requires* an
+    `image_address` channel. There is no faithful mapping — forcing one would
+    fabricate a channel that the `.adl` never names — so `image` becomes a
+    stub + warning alongside the deferred 6, not a plot emitter. (`image` still
+    warns through the default dispatch arm until B8 lands its dedicated stub.)
+- ⬜ B8 — stubs + warnings for the deferred 6 + `image` + CALC `// TODO` comments.
 - ⬜ C9 — CLI (`--protocol` / `--macro` / `--out` / `--use-scatterplot`).
 - ⬜ C10 — `tests/compiles.rs` fidelity gate (generated `.rs` `cargo check`s against `sidm`).
 - ⬜ C11 — runnable end-to-end example (sample `.adl` + generated `Screen` + tiny `eframe` main).
