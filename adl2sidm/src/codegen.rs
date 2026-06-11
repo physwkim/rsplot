@@ -171,14 +171,7 @@ fn emit_widget(b: &mut Builder, widget: &MedmWidget, options: &Options) {
             "Related Display",
             "navigation deferred",
         ),
-        "shell command" => emit_deferred_button(
-            b,
-            widget,
-            z,
-            "commands",
-            "Shell Command",
-            "shell execution deferred",
-        ),
+        "shell command" => emit_shell_command(b, widget, z),
         // Unreachable: every `ADL_WIDGET_SYMBOLS` entry has an arm above. Kept as
         // a defensive backstop so a future symbol can't be silently dropped.
         _ => b.warnings.push(format!(
@@ -1122,6 +1115,128 @@ fn emit_marker_placeholder(
     ));
     b.warnings
         .push(format!("line {}: {warn}; placeholder emitted", widget.line));
+}
+
+/// `shell command` — a real control that runs MEDM shell commands. Each MEDM
+/// `command[N]` carries a `label`, a `name` (the program), and optional `args`;
+/// the executed string is `"<name> <args>"` (adl2pydm's `command_list`), spawned
+/// via `sh -c` so shell syntax (pipes, redirection, background `&`) behaves as in
+/// MEDM. A single command becomes a plain button; several become an
+/// `egui::menu_button` listing each. The widget is channel-less and Engine-less,
+/// so it is emitted inline in `ui()` with no struct field. It still layers
+/// Foreground (the control z-layer), so the z-order rule holds.
+fn emit_shell_command(b: &mut Builder, widget: &MedmWidget, z: ZLayer) {
+    let Some(geom) = widget.geometry else {
+        skip_no_geometry(b, widget);
+        return;
+    };
+    let entries = shell_command_entries(b, widget);
+    if entries.is_empty() {
+        emit_marker_placeholder(
+            b,
+            widget,
+            z,
+            "shell command (no commands)",
+            "shell command has no runnable commands; nothing to spawn",
+        );
+        return;
+    }
+
+    let id = b.index();
+    let body = if let [(_, command)] = entries.as_slice() {
+        // Exactly one command: the button caption is the widget/command label.
+        let label = deferred_button_label(widget, "commands", "Shell Command");
+        format!(
+            "if ui.button({}).clicked() {{\n    {}\n}}",
+            rust_str(&label),
+            spawn_command_stmt(command),
+        )
+    } else {
+        // Several commands: a menu whose items each run one command, then close.
+        let title = menu_title(widget, "Shell Command");
+        let mut body = format!("ui.menu_button({}, |ui| {{", rust_str(&title));
+        for (label, command) in &entries {
+            let _ = write!(
+                body,
+                "\n    if ui.button({}).clicked() {{\n        {}\n        ui.close();\n    }}",
+                rust_str(label),
+                spawn_command_stmt(command),
+            );
+        }
+        body.push_str("\n});");
+        body
+    };
+    b.placements.push(Placement::drawn(z, id, geom, body));
+    b.warnings.push(format!(
+        "line {}: shell command emitted as a live button/menu (spawns via `sh -c`)",
+        widget.line
+    ));
+}
+
+/// The `(label, command)` pairs for a shell-command widget: each `command[N]`'s
+/// caption (its `label`, else the executed text) and executed string
+/// `"<name> <args>"` (adl2pydm's `command_list`). A command with no `name` is
+/// dropped with a warning; a command carrying MEDM's `%` argument prompt is kept
+/// but warned (SiDM has no run-time argument-substitution dialog).
+fn shell_command_entries(b: &mut Builder, widget: &MedmWidget) -> Vec<(String, String)> {
+    let commands = widget
+        .records
+        .get("commands")
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let mut entries = Vec::new();
+    for spec in commands {
+        let Some(name) = spec.get("name").filter(|s| !s.is_empty()) else {
+            b.warnings.push(format!(
+                "line {}: shell command entry has no name; skipped",
+                widget.line
+            ));
+            continue;
+        };
+        let args = spec.get("args").map(String::as_str).unwrap_or("");
+        let command = if args.is_empty() {
+            name.clone()
+        } else {
+            format!("{name} {args}")
+        };
+        if command.contains('%') {
+            b.warnings.push(format!(
+                "line {}: shell command {command:?} uses MEDM `%` argument prompt; \
+                 spawned verbatim (no run-time argument dialog)",
+                widget.line
+            ));
+        }
+        let label = spec
+            .get("label")
+            .filter(|s| !s.is_empty())
+            .cloned()
+            .unwrap_or_else(|| command.clone());
+        entries.push((label, command));
+    }
+    entries
+}
+
+/// The statement that runs one command: `sh -c "<command>"`, detached (`spawn`,
+/// not `status`) so the UI thread never blocks, with the child handle discarded
+/// — MEDM's fire-and-forget shell execution.
+fn spawn_command_stmt(command: &str) -> String {
+    format!(
+        "let _ = std::process::Command::new(\"sh\").arg(\"-c\").arg({}).spawn();",
+        rust_str(command)
+    )
+}
+
+/// The caption on a multi-target *menu* button (shell command / related display):
+/// the widget's MEDM `label` (sans the leading `-` MEDM uses to hide the icon),
+/// else `generic`.
+fn menu_title(widget: &MedmWidget, generic: &str) -> String {
+    widget
+        .assignments
+        .get("label")
+        .map(|l| l.trim_start_matches('-'))
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| generic.to_string())
 }
 
 /// `embedded display` — not implemented in adl2pydm either, and SiDM has no
@@ -2834,7 +2949,90 @@ polygon {
     }
 
     #[test]
-    fn deferred_controls_emit_disabled_foreground_buttons() {
+    fn shell_command_emits_a_live_menu_spawning_each_command() {
+        let g = stubs();
+        // Two commands and no widget label -> a `menu_button` with the generic
+        // title and one item per command. Each item spawns `sh -c "<name>"` and
+        // closes the menu — a live control, not a disabled placeholder.
+        assert!(
+            g.source
+                .contains("ui.menu_button(\"Shell Command\", |ui| {"),
+            "shell command not emitted as a menu:\n{}",
+            g.source
+        );
+        assert!(
+            g.source.contains("if ui.button(\"Eyes\").clicked() {"),
+            "{}",
+            g.source
+        );
+        for prog in ["xeyes", "xload"] {
+            assert!(
+                g.source.contains(&format!(
+                    "let _ = std::process::Command::new(\"sh\").arg(\"-c\").arg({prog:?}).spawn();"
+                )),
+                "missing spawn for {prog}:\n{}",
+                g.source
+            );
+        }
+        assert!(g.source.contains("ui.close();"), "{}", g.source);
+        // Layered Foreground so a decoration can never occlude it.
+        let menu = g.source.find("menu_button").expect("menu placement");
+        assert!(
+            g.source[..menu].rfind("egui::Order::Foreground").is_some(),
+            "shell command must be a Foreground placement:\n{}",
+            g.source
+        );
+        assert!(
+            g.warnings.iter().any(|w| w.contains("spawns via `sh -c`")),
+            "{:?}",
+            g.warnings
+        );
+        // Channel-less: no Engine widget fabricated for it.
+        assert!(!g.source.contains("SidmPushButton"), "{}", g.source);
+    }
+
+    #[test]
+    fn single_shell_command_emits_a_plain_button() {
+        let adl = r#"
+"color map" {
+	colors {
+		ffffff,
+	}
+}
+"shell command" {
+	object {
+		x=0
+		y=0
+		width=80
+		height=20
+	}
+	label="Run"
+	command[0] {
+		name="make"
+		args="-j8 all"
+	}
+}
+"#;
+        let g = generate(&parse(adl), &Options::default());
+        // One command -> a plain button captioned by the widget label, spawning
+        // the joined `"<name> <args>"` string; no menu.
+        assert!(
+            g.source.contains("if ui.button(\"Run\").clicked() {"),
+            "{}",
+            g.source
+        );
+        assert!(
+            g.source.contains(
+                "let _ = std::process::Command::new(\"sh\").arg(\"-c\").arg(\"make -j8 all\").spawn();"
+            ),
+            "{}",
+            g.source
+        );
+        assert!(!g.source.contains("menu_button"), "{}", g.source);
+    }
+
+    #[test]
+    fn related_display_emits_a_disabled_foreground_button() {
         let g = stubs();
         // related display: the sole display's label captions a disabled button
         // at the control (Foreground) layer; no Engine field, no channel.
@@ -2844,21 +3042,12 @@ polygon {
             "related-display button not labelled with its target:\n{}",
             g.source
         );
-        // shell command has two commands and no widget label -> generic caption.
-        assert!(
-            g.source
-                .contains("ui.add_enabled(false, egui::Button::new(\"Shell Command\"))"),
-            "{}",
-            g.source
-        );
-        // Both sit at Foreground so a decoration can never occlude them.
         let rel = g
             .source
             .find("Open Detail")
             .expect("related display button");
-        let before = &g.source[..rel];
         assert!(
-            before.rfind("egui::Order::Foreground").is_some(),
+            g.source[..rel].rfind("egui::Order::Foreground").is_some(),
             "deferred control must be a Foreground placement:\n{}",
             g.source
         );
@@ -2867,15 +3056,6 @@ polygon {
             "{:?}",
             g.warnings
         );
-        assert!(
-            g.warnings
-                .iter()
-                .any(|w| w.contains("shell execution deferred")),
-            "{:?}",
-            g.warnings
-        );
-        // No channel widgets were created for these inert controls.
-        assert!(!g.source.contains("SidmPushButton"), "{}", g.source);
     }
 
     // A MEDM `dynamic attribute` CALC/visibility rule on otherwise-supported

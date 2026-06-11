@@ -142,3 +142,32 @@ byte {
 		chan="loc://flags?type=int&init=170"
 	}
 }
+"shell command" {
+	object {
+		x=20
+		y=332
+		width=130
+		height=22
+	}
+	label="Echo"
+	command[0] {
+		name="echo"
+		args="hello from adl2sidm"
+	}
+}
+"shell command" {
+	object {
+		x=170
+		y=332
+		width=170
+		height=22
+	}
+	command[0] {
+		label="Date"
+		name="date"
+	}
+	command[1] {
+		label="Uptime"
+		name="uptime"
+	}
+}

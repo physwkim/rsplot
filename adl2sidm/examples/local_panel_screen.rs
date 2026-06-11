@@ -82,6 +82,23 @@ impl Screen {
         place(ui, egui::Order::Foreground, egui::Id::new(8u64), 170.0, 300.0, 120.0, 22.0, |ui| {
             let _ = w8.show(ui);
         });
+        place(ui, egui::Order::Foreground, egui::Id::new(9u64), 20.0, 332.0, 130.0, 22.0, |ui| {
+            if ui.button("Echo").clicked() {
+                let _ = std::process::Command::new("sh").arg("-c").arg("echo hello from adl2sidm").spawn();
+            }
+        });
+        place(ui, egui::Order::Foreground, egui::Id::new(10u64), 170.0, 332.0, 170.0, 22.0, |ui| {
+            ui.menu_button("Shell Command", |ui| {
+                if ui.button("Date").clicked() {
+                    let _ = std::process::Command::new("sh").arg("-c").arg("date").spawn();
+                    ui.close();
+                }
+                if ui.button("Uptime").clicked() {
+                    let _ = std::process::Command::new("sh").arg("-c").arg("uptime").spawn();
+                    ui.close();
+                }
+            });
+        });
     }
 }
 
