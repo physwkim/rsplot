@@ -15,6 +15,8 @@ pub struct Screen {
     w6: SidmSlider,
     w7: SidmByteIndicator,
     w8: SidmLineEdit,
+    w13: SidmFrame,
+    w15: SidmLabel,
 }
 
 impl Screen {
@@ -48,13 +50,18 @@ impl Screen {
             .with_big_endian(true);
         let w8 = SidmLineEdit::new(&engine, "loc://flags?type=int&init=170")
             .expect("adl2sidm: connect loc://flags?type=int&init=170");
-        Self { _engine: engine, w1, w2, w3, w4, w5, w6, w7, w8 }
+        let w13 = SidmFrame::new(&engine, "loc://adl2sidm_embed_204")
+            .expect("adl2sidm: connect loc://adl2sidm_embed_204 (embedded embed_child.adl)");
+        let w15 = SidmLabel::new(&engine, "loc://embcount?type=int&init=7")
+            .expect("adl2sidm: connect loc://embcount?type=int&init=7 (text update)")
+            .with_precision(0);
+        Self { _engine: engine, w1, w2, w3, w4, w5, w6, w7, w8, w13, w15 }
     }
 
     pub fn ui(&mut self, ui: &mut egui::Ui) {
         // Back-to-front: decoration (Background) -> monitor (Middle) -> control
         // (Foreground), so controls are never occluded or click-stolen.
-        let Self { _engine: _, w1, w2, w3, w4, w5, w6, w7, w8 } = self;
+        let Self { _engine: _, w1, w2, w3, w4, w5, w6, w7, w8, w13, w15 } = self;
         place(ui, egui::Order::Background, egui::Id::new(0u64), 10.0, 10.0, 320.0, 22.0, |ui| {
             ui.label(egui::RichText::new("SiDM panel from .adl (no IOC)").color(Color32::from_rgb(0, 0, 0)));
         });
@@ -72,6 +79,16 @@ impl Screen {
         });
         place(ui, egui::Order::Middle, egui::Id::new(7u64), 20.0, 300.0, 140.0, 20.0, |ui| {
             let _ = w7.show(ui);
+        });
+        place(ui, egui::Order::Middle, egui::Id::new(13u64), 20.0, 400.0, 160.0, 40.0, |ui| {
+            let _ = w13.show(ui, |ui| {
+                place(ui, egui::Order::Background, egui::Id::new(14u64), 4.0, 2.0, 152.0, 14.0, |ui| {
+                    ui.label(egui::RichText::new("embedded child").color(Color32::from_rgb(0, 0, 0)));
+                });
+                place(ui, egui::Order::Middle, egui::Id::new(15u64), 4.0, 20.0, 152.0, 16.0, |ui| {
+                    let _ = w15.show(ui);
+                });
+            });
         });
         place(ui, egui::Order::Foreground, egui::Id::new(4u64), 20.0, 214.0, 140.0, 22.0, |ui| {
             let _ = w4.show(ui);

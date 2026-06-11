@@ -62,6 +62,10 @@ fn example_screen_matches_the_committed_module() {
     let adl = include_str!("../examples/local_panel.adl");
     let options = Options {
         protocol: String::new(),
+        // The panel embeds `embed_child.adl`; resolve it from the examples dir so
+        // the embedded display inlines exactly as the CLI produced the committed
+        // module (the CLI sets `source_dir` to the input's directory).
+        source_dir: Some(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples")),
         ..Options::default()
     };
     let generated = generate(&parse(adl), &options);

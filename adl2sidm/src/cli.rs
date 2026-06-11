@@ -85,6 +85,14 @@ fn run(cli: Cli) -> Result<Vec<String>, String> {
         protocol: cli.protocol,
         macros: cli.macros,
         use_scatterplot: cli.use_scatterplot,
+        // Embedded displays name a `composite file` relative to this `.adl`, so
+        // resolve it against the input's directory (`.` when the input is bare).
+        source_dir: Some(
+            cli.input
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .map_or_else(|| PathBuf::from("."), Path::to_path_buf),
+        ),
     };
     let generated = generate(&screen, &options);
 

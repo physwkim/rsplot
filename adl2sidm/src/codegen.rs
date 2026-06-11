@@ -19,9 +19,15 @@
 //! [`MedmScreen`]: crate::adl_parser::MedmScreen
 
 use std::fmt::Write as _;
+use std::path::PathBuf;
 
-use crate::adl_parser::{Color, Geometry, MedmScreen, MedmWidget};
+use crate::adl_parser::{Color, Geometry, MedmScreen, MedmWidget, parse};
 use crate::symbols::{self, ZLayer};
+
+/// Maximum embedded-display nesting depth inlined at code-gen time, a backstop
+/// against runaway recursion (cycles are caught separately by [`Builder`]'s
+/// `embed_stack`). Beyond it the embedded display falls back to a placeholder.
+const MAX_EMBED_DEPTH: usize = 8;
 
 /// Code-generation options (the converter's CLI flags).
 #[derive(Clone, Debug)]
@@ -33,6 +39,11 @@ pub struct Options {
     /// Translate `cartesian plot` as a scatter plot rather than a waveform plot
     /// (mirrors adl2pydm's `--use-scatterplot`).
     pub use_scatterplot: bool,
+    /// Directory the source `.adl` lives in, used to resolve an `embedded
+    /// display`'s `composite file` so its target can be inlined. `None` (the
+    /// default, e.g. converting from stdin or in headless tests) disables
+    /// inlining — an embedded display then falls back to a placeholder.
+    pub source_dir: Option<PathBuf>,
 }
 
 impl Default for Options {
@@ -41,6 +52,7 @@ impl Default for Options {
             protocol: "ca://".to_string(),
             macros: Vec::new(),
             use_scatterplot: false,
+            source_dir: None,
         }
     }
 }
@@ -96,6 +108,10 @@ struct Builder {
     /// Whether any emitted code references `Color32` / `sidm::widgets`.
     needs_color: bool,
     needs_widgets: bool,
+    /// Canonical paths of the `.adl` files currently being inlined (embedded
+    /// display recursion), newest last. Guards against include cycles; its length
+    /// is the current nesting depth (capped at [`MAX_EMBED_DEPTH`]).
+    embed_stack: Vec<PathBuf>,
 }
 
 impl Builder {
@@ -162,7 +178,7 @@ fn emit_widget(b: &mut Builder, widget: &MedmWidget, options: &Options) {
         "polygon" => emit_polyshape(b, widget, options, z, true),
         "polyline" => emit_polyshape(b, widget, options, z, false),
         "image" => emit_image(b, widget, z),
-        "embedded display" => emit_embedded_stub(b, widget),
+        "embedded display" => emit_embedded_display(b, widget, options, z),
         "related display" => emit_related_display(b, widget, z),
         "shell command" => emit_shell_command(b, widget, z),
         // Unreachable: every `ADL_WIDGET_SYMBOLS` entry has an arm above. Kept as
@@ -762,36 +778,75 @@ fn emit_composite(b: &mut Builder, widget: &MedmWidget, options: &Options, z: ZL
         skip_no_geometry(b, widget);
         return;
     };
+    // MEDM writes an embedded display as a *childless* composite carrying a
+    // `"composite file"`; adl2pydm rewrites it to an embedded display at output
+    // time, and so do we — route it to the inliner instead of an empty frame.
+    if widget.children.is_empty() && widget.assignments.contains_key("composite file") {
+        emit_embedded_display(b, widget, options, z);
+        return;
+    }
     let addr = match widget.assignments.get("chan").filter(|c| !c.is_empty()) {
         Some(chan) => apply_protocol(chan, options),
         None => format!("loc://adl2sidm_frame_{}", widget.line),
     };
+    // Composite children are in absolute SCREEN coordinates, so they translate
+    // into the frame interior by the composite's own origin.
+    emit_frame_container(
+        b,
+        z,
+        geom,
+        &addr,
+        &format!("adl2sidm: connect {addr} (composite)"),
+        &widget.children,
+        (geom.x, geom.y),
+        options,
+    );
+}
+
+/// Emit a `SidmFrame` at `geom` whose draw closure re-draws `children`
+/// back-to-front in the frame interior. `child_origin` is the coordinate the
+/// children are measured from: a composite's own screen origin for in-screen
+/// children, or `(0, 0)` for an embedded display's children (which carry the
+/// target screen's own origin-relative coordinates). The single owner of
+/// frame-container emission, shared by `composite` and `embedded display`.
+#[allow(clippy::too_many_arguments)]
+fn emit_frame_container(
+    b: &mut Builder,
+    z: ZLayer,
+    geom: Geometry,
+    addr: &str,
+    connect_desc: &str,
+    children: &[MedmWidget],
+    child_origin: (i32, i32),
+    options: &Options,
+) {
     let frame_id = b.index();
     let frame_field = format!("w{frame_id}");
     b.needs_widgets = true;
     b.ctors.push(format!(
         "let {frame_field} = SidmFrame::new(&engine, {})\n            .expect({});",
-        rust_str(&addr),
-        rust_str(&format!("adl2sidm: connect {addr} (composite)"))
+        rust_str(addr),
+        rust_str(connect_desc)
     ));
     b.fields
         .push((frame_field.clone(), "SidmFrame".to_string()));
 
     // Emit the children into the shared builder, then lift their placements out of
     // the top-level list and into this frame's draw closure (coordinate-translated
-    // by the composite origin and re-layered back-to-front). Their struct fields /
-    // ctors stay; only the *draw* moves inside the frame.
+    // by `child_origin` and re-layered back-to-front). Their struct fields / ctors
+    // stay; only the *draw* moves inside the frame.
     let start = b.placements.len();
-    for child in &widget.children {
+    for child in children {
         emit_widget(b, child, options);
     }
     let mut child_placements: Vec<Placement> = b.placements.drain(start..).collect();
     child_placements.sort_by_key(|p| p.z);
 
+    let (dx, dy) = child_origin;
     let mut body = String::new();
     let _ = writeln!(body, "let _ = {frame_field}.show(ui, |ui| {{");
     for p in &child_placements {
-        write_placement(&mut body, p, geom.x, geom.y, "    ");
+        write_placement(&mut body, p, dx, dy, "    ");
     }
     let _ = write!(body, "}});");
 
@@ -1232,13 +1287,138 @@ fn menu_title(widget: &MedmWidget, generic: &str) -> String {
         .unwrap_or_else(|| generic.to_string())
 }
 
-/// `embedded display` — not implemented in adl2pydm either, and SiDM has no
-/// runtime display loader; warn and skip (no placeholder, matching the plan).
-fn emit_embedded_stub(b: &mut Builder, widget: &MedmWidget) {
+/// `embedded display` — inline the referenced screen at code-gen time. MEDM's
+/// embedded display names another `.adl` (`"composite file"="file;macros"`) that
+/// MEDM/PyDM load at run time; SiDM has no run-time display loader, so the
+/// faithful analogue is to read that file *now*, convert it, and emit its widgets
+/// into a `SidmFrame` at the embedded geometry — the same inlining `composite`
+/// uses, but sourced from an external file. The embedded `macros` extend (and
+/// override) the parent's for the inlined subtree.
+///
+/// Inlining needs the source directory ([`Options::source_dir`]); without it, or
+/// when the file is missing / forms an include cycle / exceeds
+/// [`MAX_EMBED_DEPTH`], the widget falls back to a visible placeholder naming the
+/// file (never a silent drop).
+fn emit_embedded_display(b: &mut Builder, widget: &MedmWidget, options: &Options, z: ZLayer) {
+    let Some(geom) = widget.geometry else {
+        skip_no_geometry(b, widget);
+        return;
+    };
+    let Some((file, macros)) = embedded_file_and_macros(widget) else {
+        emit_marker_placeholder(
+            b,
+            widget,
+            z,
+            "embedded display (no file)",
+            "embedded display has no \"composite file\"; nothing to inline",
+        );
+        return;
+    };
+
+    let Some(dir) = options.source_dir.as_deref() else {
+        embed_placeholder(b, widget, z, &file, "no source directory to resolve it");
+        return;
+    };
+    let path = dir.join(&file);
+    let Ok(canonical) = path.canonicalize() else {
+        embed_placeholder(b, widget, z, &file, "file not found");
+        return;
+    };
+    if b.embed_stack.contains(&canonical) {
+        embed_placeholder(b, widget, z, &file, "include cycle");
+        return;
+    }
+    if b.embed_stack.len() >= MAX_EMBED_DEPTH {
+        embed_placeholder(b, widget, z, &file, "max embed depth reached");
+        return;
+    }
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) => {
+            embed_placeholder(b, widget, z, &file, &format!("cannot read: {e}"));
+            return;
+        }
+    };
+
+    let target = parse(&text);
+    // Resolve the target's channels in the embedded directory (so a nested
+    // embedded display resolves relative to *its* file), with the embedded macros
+    // taking precedence over the inherited ones.
+    let child_options = Options {
+        macros: merged_macros(&macros, &options.macros),
+        source_dir: canonical.parent().map(PathBuf::from),
+        ..options.clone()
+    };
+    let addr = format!("loc://adl2sidm_embed_{}", widget.line);
+
+    b.embed_stack.push(canonical);
+    // The target's widgets are in its OWN screen coordinates (origin 0,0), so they
+    // translate into the frame interior by (0, 0).
+    emit_frame_container(
+        b,
+        z,
+        geom,
+        &addr,
+        &format!("adl2sidm: connect {addr} (embedded {file})"),
+        &target.widgets,
+        (0, 0),
+        &child_options,
+    );
+    b.embed_stack.pop();
     b.warnings.push(format!(
-        "line {}: embedded display unsupported (no runtime display loader); skipped",
-        widget.line
+        "line {}: embedded display inlined {file} ({} widget(s))",
+        widget.line,
+        target.widgets.len()
     ));
+}
+
+/// The `(file, macros)` of an embedded display's `"composite file"`, which MEDM
+/// stores as `file` or `file;macros` (semicolon-delimited, adl2pydm's
+/// `split(";")`). `None` when there is no non-empty `composite file`.
+fn embedded_file_and_macros(widget: &MedmWidget) -> Option<(String, String)> {
+    let spec = widget
+        .assignments
+        .get("composite file")
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())?;
+    match spec.split_once(';') {
+        Some((file, macros)) => Some((file.trim().to_string(), macros.trim().to_string())),
+        None => Some((spec.to_string(), String::new())),
+    }
+}
+
+/// Parse an embedded display's macro string (`"A=1,B=2"`) into pairs, dropping
+/// entries with no `=` or an empty name.
+fn parse_embedded_macros(s: &str) -> Vec<(String, String)> {
+    s.split(',')
+        .filter_map(|kv| {
+            let (name, value) = kv.split_once('=')?;
+            let name = name.trim();
+            (!name.is_empty()).then(|| (name.to_string(), value.trim().to_string()))
+        })
+        .collect()
+}
+
+/// The macros for an inlined subtree: the embedded display's own macros first
+/// (so they win on a key the parent also sets — [`substitute_macros`] applies the
+/// first match), then the inherited parent macros.
+fn merged_macros(embedded: &str, parent: &[(String, String)]) -> Vec<(String, String)> {
+    let mut macros = parse_embedded_macros(embedded);
+    macros.extend_from_slice(parent);
+    macros
+}
+
+/// A visible placeholder for an embedded display that could not be inlined (no
+/// source dir, missing file, cycle, or depth limit): a red marker naming the
+/// file and the reason, plus a warning. Never a silent drop.
+fn embed_placeholder(b: &mut Builder, widget: &MedmWidget, z: ZLayer, file: &str, reason: &str) {
+    emit_marker_placeholder(
+        b,
+        widget,
+        z,
+        &format!("embedded: {file}"),
+        &format!("embedded display {file:?} not inlined ({reason})"),
+    );
 }
 
 /// `related display` — a real control that reports the screen(s) it would open.
@@ -2993,17 +3173,181 @@ polygon {
     }
 
     #[test]
-    fn embedded_display_is_skipped_with_a_warning_and_no_placement() {
+    fn embedded_display_without_a_file_emits_a_no_file_marker() {
+        // The STUBS embedded display is a literal block with no `composite file`,
+        // so there is nothing to inline — a visible marker, not a silent drop.
         let g = stubs();
         assert!(
             g.warnings
                 .iter()
-                .any(|w| w.contains("embedded display unsupported")),
+                .any(|w| w.contains("no \"composite file\"")),
             "{:?}",
             g.warnings
         );
-        // Skipped means no placeholder text for it (unlike the shape stubs).
-        assert!(!g.source.contains("embedded"), "{}", g.source);
+        assert!(
+            g.source.contains("[embedded display (no file)]"),
+            "{}",
+            g.source
+        );
+    }
+
+    #[test]
+    fn embedded_display_without_source_dir_emits_a_placeholder() {
+        // A childless composite carrying a `composite file` IS an embedded display
+        // (adl2pydm's rewrite), but default options have no source directory, so
+        // the file can't be resolved — a placeholder naming it.
+        let adl = r#"
+"color map" {
+	colors {
+		ffffff,
+	}
+}
+composite {
+	object {
+		x=0
+		y=0
+		width=80
+		height=20
+	}
+	"composite file"="other.adl"
+}
+"#;
+        let g = generate(&parse(adl), &Options::default());
+        assert!(g.source.contains("[embedded: other.adl]"), "{}", g.source);
+        assert!(
+            g.warnings.iter().any(|w| w.contains("no source directory")),
+            "{:?}",
+            g.warnings
+        );
+    }
+
+    /// A fresh temp directory for the filesystem-backed embedded-display tests.
+    /// nextest runs each test in its own process, so `process::id()` keys it
+    /// uniquely; `tag` separates dirs within a process.
+    fn embed_tmpdir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("adl2sidm_embed_{}_{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        dir
+    }
+
+    #[test]
+    fn embedded_display_inlines_the_target_with_merged_macros() {
+        let dir = embed_tmpdir("inline");
+        std::fs::write(
+            dir.join("child.adl"),
+            r#"
+"color map" {
+	colors {
+		ffffff,
+		000000,
+	}
+}
+display {
+	object {
+		x=0
+		y=0
+		width=120
+		height=24
+	}
+	clr=1
+	bclr=0
+}
+"text update" {
+	object {
+		x=4
+		y=2
+		width=110
+		height=18
+	}
+	monitor {
+		chan="loc://$(EMB)?type=int"
+		clr=1
+	}
+}
+"#,
+        )
+        .unwrap();
+        let parent = r#"
+"color map" {
+	colors {
+		ffffff,
+		000000,
+	}
+}
+composite {
+	object {
+		x=30
+		y=40
+		width=120
+		height=24
+	}
+	"composite file"="child.adl;EMB=count"
+}
+"#;
+        let options = Options {
+            protocol: String::new(),
+            source_dir: Some(dir.clone()),
+            ..Options::default()
+        };
+        let g = generate(&parse(parent), &options);
+        // The childless-composite-with-composite-file is recognised as an embedded
+        // display and inlined into a SidmFrame at the embedded geometry.
+        assert!(g.source.contains("SidmFrame::new"), "{}", g.source);
+        // The child's text-update became a SidmLabel; the embedded macro EMB=count
+        // substituted into its channel.
+        assert!(
+            g.source.contains("loc://count?type=int"),
+            "embedded macro not applied:\n{}",
+            g.source
+        );
+        assert!(
+            g.warnings.iter().any(|w| w.contains("inlined child.adl")),
+            "{:?}",
+            g.warnings
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn embedded_display_breaks_include_cycles_with_a_placeholder() {
+        let dir = embed_tmpdir("cycle");
+        std::fs::write(
+            dir.join("cyclic.adl"),
+            r#"
+"color map" {
+	colors {
+		ffffff,
+	}
+}
+composite {
+	object {
+		x=0
+		y=0
+		width=80
+		height=20
+	}
+	"composite file"="cyclic.adl"
+}
+"#,
+        )
+        .unwrap();
+        let text = std::fs::read_to_string(dir.join("cyclic.adl")).unwrap();
+        let options = Options {
+            protocol: String::new(),
+            source_dir: Some(dir.clone()),
+            ..Options::default()
+        };
+        let g = generate(&parse(&text), &options);
+        // The outer level inlines once; the self-reference inside is caught and
+        // rendered as a placeholder instead of recursing forever.
+        assert!(
+            g.warnings.iter().any(|w| w.contains("include cycle")),
+            "{:?}",
+            g.warnings
+        );
+        assert!(g.source.contains("[embedded: cyclic.adl]"), "{}", g.source);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -1,0 +1,48 @@
+file {
+	name="embed_child.adl"
+	version=030107
+}
+"color map" {
+	colors {
+		ffffff,
+		000000,
+		00ff00,
+	}
+}
+display {
+	object {
+		x=0
+		y=0
+		width=160
+		height=40
+	}
+	clr=1
+	bclr=0
+}
+text {
+	object {
+		x=4
+		y=2
+		width=152
+		height=14
+	}
+	"basic attribute" {
+		clr=1
+	}
+	textix="embedded child"
+}
+"text update" {
+	object {
+		x=4
+		y=20
+		width=152
+		height=16
+	}
+	monitor {
+		chan="loc://$(EMB)?type=int&init=7"
+		clr=3
+	}
+	limits {
+		precDefault=0
+	}
+}
