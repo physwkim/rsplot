@@ -394,11 +394,20 @@ fn emit_static_text(b: &mut Builder, widget: &MedmWidget, z: ZLayer) {
     let text = widget.title.clone().unwrap_or_default();
     let color = widget.color.unwrap_or(Color { r: 0, g: 0, b: 0 });
     b.needs_color = true;
-    let body = format!(
+    let label_call = format!(
         "ui.label(egui::RichText::new({}).color({}));",
         rust_str(&text),
         color_expr(color)
     );
+    // MEDM `align` positions the text horizontally. Left (the default) keeps the
+    // bare `ui.label`; centre/right wrap it in a top-down layout whose cross-axis
+    // alignment moves the text without changing its vertical placement.
+    let body = match text_alignment(widget) {
+        Some((_, align)) => format!(
+            "ui.with_layout(egui::Layout::top_down(egui::Align::{align}), |ui| {{ {label_call} }});"
+        ),
+        None => label_call,
+    };
     b.placements.push(Placement::drawn(z, id, geom, body));
 }
 
@@ -411,6 +420,9 @@ fn emit_text_update(b: &mut Builder, widget: &MedmWidget, options: &Options, z: 
     let mut builders: Vec<String> = precision_default_builder(widget).into_iter().collect();
     builders.extend(string_format_builder(widget, &addr));
     builders.extend(alarm_content_builder(widget));
+    if let Some((variant, _)) = text_alignment(widget) {
+        builders.push(format!(".with_alignment(TextAlign::{variant})"));
+    }
     push_channel_widget(
         b,
         z,
@@ -1977,6 +1989,21 @@ fn alarm_content_builder(widget: &MedmWidget) -> Option<String> {
         .then(|| ".with_alarm_sensitive_content(true)".to_string())
 }
 
+/// The horizontal text alignment for a `text` / `text update`, as
+/// `(sidm TextAlign variant, egui Align variant)`, for the non-default cases.
+/// MEDM `horiz. left`, `justify`, and an absent `align` are the default left
+/// alignment and return `None` (so nothing is emitted and existing left-aligned
+/// output is unchanged). adl2pydm applies `align` to static text and text updates
+/// (`writePropertyTextAlignment`); `justify` collapses to left for single-line
+/// value text.
+fn text_alignment(widget: &MedmWidget) -> Option<(&'static str, &'static str)> {
+    match widget.assignments.get("align").map(String::as_str) {
+        Some("horiz. centered") => Some(("Center", "Center")),
+        Some("horiz. right") => Some(("Right", "Max")),
+        _ => None,
+    }
+}
+
 /// User-defined `(low, high)` limits for a control: present only when MEDM marks
 /// `loprSrc`/`hoprSrc` as `"default"` (otherwise limits come from the channel).
 /// Each missing default reads as `0.0`, matching `adl2pydm`'s `write_limits`.
@@ -2848,6 +2875,87 @@ byte {
         assert!(
             g.source
                 .contains(".with_on_color(Color32::from_rgb(0, 255, 0))")
+        );
+    }
+
+    #[test]
+    fn medm_align_drives_text_and_text_update_alignment() {
+        // A centered static text, a right-aligned text update, and a left-aligned
+        // (default) static text. MEDM `align` → sidm alignment; left emits nothing.
+        let adl = r#"
+"color map" {
+	colors {
+		000000,
+	}
+}
+text {
+	object {
+		x=0
+		y=0
+		width=120
+		height=20
+	}
+	"basic attribute" {
+		clr=0
+	}
+	textix="centered"
+	align="horiz. centered"
+}
+"text update" {
+	object {
+		x=0
+		y=30
+		width=120
+		height=20
+	}
+	monitor {
+		chan="RB"
+		clr=0
+	}
+	align="horiz. right"
+}
+text {
+	object {
+		x=0
+		y=60
+		width=120
+		height=20
+	}
+	"basic attribute" {
+		clr=0
+	}
+	textix="plain"
+}
+"#;
+        let g = generate(&parse(adl), &Options::default());
+        // Static text centred → a top-down(Center) layout wraps its ui.label.
+        assert!(
+            g.source.contains(
+                "ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| { ui.label(egui::RichText::new(\"centered\")"
+            ),
+            "centered static text not wrapped in a centering layout:\n{}",
+            g.source
+        );
+        // Text update right-aligned → the SidmLabel carries with_alignment(Right).
+        assert!(
+            g.source.contains(".with_alignment(TextAlign::Right)"),
+            "right-aligned text update missing with_alignment:\n{}",
+            g.source
+        );
+        // The plain (left) static text stays a bare ui.label — no layout wrapper,
+        // and there is exactly one alignment wrapper (the centered one).
+        assert!(
+            g.source.contains(
+                "ui.label(egui::RichText::new(\"plain\").color(Color32::from_rgb(0, 0, 0)));"
+            ),
+            "left-aligned static text must stay a bare ui.label:\n{}",
+            g.source
+        );
+        assert_eq!(
+            g.source.matches("egui::Layout::top_down(").count(),
+            1,
+            "only the centered static text should wrap in a layout:\n{}",
+            g.source
         );
     }
 

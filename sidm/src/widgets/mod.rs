@@ -48,7 +48,7 @@ pub use event_plot::{SidmEventPlot, event_sample};
 pub use frame::SidmFrame;
 pub use image_file::{SidmImage, decode_color_image};
 pub use image_view::{ReadingOrder, SidmImageView, color_range, reshape_image, value_to_image};
-pub use label::SidmLabel;
+pub use label::{SidmLabel, TextAlign};
 pub use line_edit::{SidmLineEdit, parse_input};
 pub use plot_style::{CurveStyle, DEFAULT_LINE_WIDTH};
 pub use push_button::{DEFAULT_CONFIRM_MESSAGE, SidmPushButton, compute_send_value};

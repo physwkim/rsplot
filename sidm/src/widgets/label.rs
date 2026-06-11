@@ -12,6 +12,19 @@ use crate::engine::{Engine, EngineError};
 use crate::widgets::base::ChannelBase;
 use crate::widgets::display_format::{DisplayFormat, FormatSpec, format_value};
 
+/// Horizontal alignment of the label text within its rect (MEDM `align` / PyDM
+/// `alignment`). Vertical layout is unchanged; only the cross-axis position moves.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TextAlign {
+    /// Left-aligned (MEDM `horiz. left`, the default).
+    #[default]
+    Left,
+    /// Horizontally centered (MEDM `horiz. centered`).
+    Center,
+    /// Right-aligned (MEDM `horiz. right`).
+    Right,
+}
+
 /// A read-only channel value display (PyDM `PyDMLabel`).
 pub struct SidmLabel {
     base: ChannelBase,
@@ -21,6 +34,8 @@ pub struct SidmLabel {
     pub precision: Option<i32>,
     /// Append the engineering units (PyDM `showUnits`).
     pub show_units: bool,
+    /// Horizontal text alignment (MEDM `align`).
+    pub alignment: TextAlign,
 }
 
 impl SidmLabel {
@@ -32,12 +47,19 @@ impl SidmLabel {
             format: DisplayFormat::Default,
             precision: None,
             show_units: false,
+            alignment: TextAlign::Left,
         })
     }
 
     /// Set the display format (builder style).
     pub fn with_format(mut self, format: DisplayFormat) -> Self {
         self.format = format;
+        self
+    }
+
+    /// Set the horizontal text alignment (builder style; MEDM `align`).
+    pub fn with_alignment(mut self, alignment: TextAlign) -> Self {
+        self.alignment = alignment;
         self
     }
 
@@ -97,13 +119,23 @@ impl SidmLabel {
         let state = self.base.channel().state();
         let text = self.display_text(&state);
         let color = self.base.content_color(&state);
+        // Horizontal alignment is the cross axis of a top-down layout, so the
+        // vertical placement is unchanged and `Left` (`Align::Min`) is the default
+        // layout — only `Center`/`Right` move the text.
+        let halign = match self.alignment {
+            TextAlign::Left => egui::Align::Min,
+            TextAlign::Center => egui::Align::Center,
+            TextAlign::Right => egui::Align::Max,
+        };
         self.base
             .framed(ui, &state, false, |ui| {
                 let mut rich = egui::RichText::new(text);
                 if let Some(color) = color {
                     rich = rich.color(color);
                 }
-                ui.label(rich);
+                ui.with_layout(egui::Layout::top_down(halign), |ui| {
+                    ui.label(rich);
+                });
             })
             .response
     }
@@ -134,6 +166,17 @@ mod tests {
             value: Some(value),
             ..ChannelState::default()
         }
+    }
+
+    #[test]
+    fn alignment_defaults_left_and_builder_sets_it() {
+        let engine = Engine::new();
+        let label = SidmLabel::new(&engine, "loc://label_align").expect("connect");
+        assert_eq!(label.alignment, TextAlign::Left);
+        let centered = SidmLabel::new(&engine, "loc://label_align2")
+            .expect("connect")
+            .with_alignment(TextAlign::Center);
+        assert_eq!(centered.alignment, TextAlign::Center);
     }
 
     #[test]
