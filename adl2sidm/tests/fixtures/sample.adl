@@ -139,6 +139,7 @@ rectangle {
 		width=2
 	}
 	"dynamic attribute" {
+		clr="alarm"
 		vis="if not zero"
 		chan="$(P)show_box"
 	}

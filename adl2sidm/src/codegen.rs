@@ -390,6 +390,17 @@ fn emit_static_text(b: &mut Builder, widget: &MedmWidget, z: ZLayer) {
         ));
         return;
     };
+    // Static text shows fixed glyphs, not a channel value, so a dynamic-attribute
+    // colour rule has no clean SiDM target (there is no "fixed text recoloured by a
+    // channel's alarm severity" widget). Keep the static colour and warn rather than
+    // silently dropping the rule. (Shapes get the rule wired — see drawing_alarm_builder.)
+    if let Some(mode) = dynamic_color_mode(widget).filter(|m| *m == "alarm" || *m == "discrete") {
+        b.warnings.push(format!(
+            "line {}: static text dynamic-attribute clr=\"{mode}\" colour rule not applied \
+             (no SiDM widget recolours fixed text by channel state; the static colour is kept)",
+            widget.line
+        ));
+    }
     let id = b.index();
     let text = widget.title.clone().unwrap_or_default();
     let color = widget.color.unwrap_or(Color { r: 0, g: 0, b: 0 });
@@ -866,6 +877,9 @@ fn drawing_brush_builders(b: &mut Builder, widget: &MedmWidget) -> Vec<String> {
             widget.line
         ));
     }
+    // MEDM dynamic-attribute clr="alarm": recolour the colour this shape actually
+    // draws with — the border for an `outline` shape, the fill for a solid one.
+    builders.extend(drawing_alarm_builder(b, widget, fill_mode == "outline"));
     builders
 }
 
@@ -994,11 +1008,15 @@ fn polyline_stroke_builder(b: &mut Builder, widget: &MedmWidget) -> Vec<String> 
             widget.line
         ));
     }
-    vec![format!(
+    let mut builders = vec![format!(
         ".with_border({}, {})",
         color_expr(color),
         float_lit(width.max(1.0))
-    )]
+    )];
+    // A polyline paints only its pen, so dynamic-attribute clr="alarm" recolours
+    // the border (stroke) by severity.
+    builders.extend(drawing_alarm_builder(b, widget, true));
+    builders
 }
 
 /// A drawing's angle field (`beginAngle`/`pathAngle`) in degrees, or `default`
@@ -2051,6 +2069,54 @@ fn alarm_content_builder(widget: &MedmWidget) -> Option<String> {
         .then(|| ".with_alarm_sensitive_content(true)".to_string())
 }
 
+/// The MEDM `dynamic attribute` colour MODE (`clr`: `static`/`alarm`/`discrete`),
+/// or `None` when the widget has no dynamic attribute or no `clr` key there. This
+/// is the colour-rule mode string and is DISTINCT from the integer `clr`/`bclr`
+/// colour indices the parser resolves into `widget.color` (a non-numeric
+/// `clr="alarm"` fails to parse as an index, so the parser leaves it here).
+fn dynamic_color_mode(widget: &MedmWidget) -> Option<&str> {
+    widget
+        .attributes
+        .get("dynamic attribute")?
+        .get("clr")
+        .map(String::as_str)
+}
+
+/// The `.with_alarm_sensitive_*` builder for a `SidmDrawing` whose MEDM dynamic
+/// attribute sets `clr="alarm"`: the bound channel's alarm severity recolours the
+/// object's drawing colour — its border when `draws_border_only` (an `outline`
+/// shape or a polyline, which paint only their pen), otherwise its fill. The
+/// drawing is already connected to the dynamic-attribute channel by
+/// [`dynamic_channel`], so only the sensitivity flag is missing. `clr="discrete"`
+/// has no SiDM colour-rule engine and adl2pydm does not convert it either, so it
+/// is warned (the static colour is kept) rather than silently dropped; `static`
+/// (the default) and any unknown mode add nothing.
+fn drawing_alarm_builder(
+    b: &mut Builder,
+    widget: &MedmWidget,
+    draws_border_only: bool,
+) -> Option<String> {
+    match dynamic_color_mode(widget) {
+        Some("alarm") => Some(
+            if draws_border_only {
+                ".with_alarm_sensitive_border(true)"
+            } else {
+                ".with_alarm_sensitive_content(true)"
+            }
+            .to_string(),
+        ),
+        Some("discrete") => {
+            b.warnings.push(format!(
+                "line {}: dynamic-attribute clr=\"discrete\" colour rule not applied \
+                 (SiDM has no discrete colour-rule engine; the static colour is kept)",
+                widget.line
+            ));
+            None
+        }
+        _ => None,
+    }
+}
+
 /// The horizontal text alignment for a `text` / `text update`, as
 /// `(sidm TextAlign variant, egui Align variant)`, for the non-default cases.
 /// MEDM `horiz. left`, `justify`, and an absent `align` are the default left
@@ -2879,6 +2945,163 @@ rectangle {
         // Both PVs are still emitted (the static one just keeps its default).
         assert!(g.source.contains("ca://$(P)alarmPV"));
         assert!(g.source.contains("ca://$(P)staticPV"));
+    }
+
+    #[test]
+    fn dynamic_attribute_clr_alarm_recolours_shapes_by_fill_mode() {
+        // MEDM `dynamic attribute` clr="alarm" colours the object's drawing colour
+        // by the channel's alarm severity: the BORDER for an outline shape (paints
+        // only its pen), the FILL for a solid shape. The shape is bound to the
+        // dynamic-attribute channel, so only the sensitivity flag is added.
+        let adl = r#"
+"color map" {
+	colors {
+		ffffff,
+		00ff00,
+	}
+}
+rectangle {
+	object {
+		x=0
+		y=0
+		width=40
+		height=40
+	}
+	"basic attribute" {
+		clr=1
+		fill="outline"
+		width=2
+	}
+	"dynamic attribute" {
+		clr="alarm"
+		chan="$(P)statusA"
+	}
+}
+oval {
+	object {
+		x=50
+		y=0
+		width=40
+		height=40
+	}
+	"basic attribute" {
+		clr=1
+		fill="solid"
+	}
+	"dynamic attribute" {
+		clr="alarm"
+		chan="$(P)statusB"
+	}
+}
+"#;
+        let g = generate(&parse(adl), &Options::default());
+        // Outline rectangle → severity recolours the border.
+        assert!(
+            g.source.contains(".with_alarm_sensitive_border(true)"),
+            "outline shape clr=alarm must recolour the border:\n{}",
+            g.source
+        );
+        // Solid oval → severity recolours the fill (content).
+        assert!(
+            g.source.contains(".with_alarm_sensitive_content(true)"),
+            "solid shape clr=alarm must recolour the fill:\n{}",
+            g.source
+        );
+        // Each shape is bound to its dynamic-attribute channel (not a synthetic
+        // loc:// placeholder), so alarm severity has a real source.
+        assert!(g.source.contains("ca://$(P)statusA"));
+        assert!(g.source.contains("ca://$(P)statusB"));
+        // clr="alarm" is handled, so no warning is emitted for it.
+        assert!(
+            !g.warnings.iter().any(|w| w.contains("clr=\"alarm\"")),
+            "clr=alarm on a shape must not warn: {:?}",
+            g.warnings
+        );
+    }
+
+    #[test]
+    fn dynamic_attribute_clr_discrete_warns_and_keeps_static_colour() {
+        // clr="discrete" needs a colour-rule engine SiDM lacks (adl2pydm does not
+        // convert it either): warn, keep the static colour, add no alarm builder.
+        let adl = r#"
+"color map" {
+	colors {
+		ffffff,
+		00ff00,
+	}
+}
+rectangle {
+	object {
+		x=0
+		y=0
+		width=40
+		height=40
+	}
+	"basic attribute" {
+		clr=1
+		fill="outline"
+		width=2
+	}
+	"dynamic attribute" {
+		clr="discrete"
+		chan="$(P)mode"
+	}
+}
+"#;
+        let g = generate(&parse(adl), &Options::default());
+        assert!(
+            !g.source.contains("alarm_sensitive"),
+            "discrete must not emit an alarm builder:\n{}",
+            g.source
+        );
+        assert!(
+            g.warnings.iter().any(|w| w.contains("clr=\"discrete\"")),
+            "discrete colour rule must warn (not silently dropped): {:?}",
+            g.warnings
+        );
+    }
+
+    #[test]
+    fn static_text_clr_alarm_warns_no_silent_drop() {
+        // A static text label has no clean SiDM target for a colour rule (it shows
+        // fixed glyphs, not a channel value), so clr="alarm" is warned, not dropped.
+        let adl = r#"
+"color map" {
+	colors {
+		ffffff,
+		000000,
+	}
+}
+text {
+	object {
+		x=0
+		y=0
+		width=80
+		height=20
+	}
+	"basic attribute" {
+		clr=1
+	}
+	"dynamic attribute" {
+		clr="alarm"
+		chan="$(P)stat"
+	}
+	textix="STATUS"
+}
+"#;
+        let g = generate(&parse(adl), &Options::default());
+        assert!(
+            !g.source.contains("alarm_sensitive"),
+            "static text keeps its static colour (no channel-value widget):\n{}",
+            g.source
+        );
+        assert!(
+            g.warnings
+                .iter()
+                .any(|w| w.contains("static text") && w.contains("clr=\"alarm\"")),
+            "static text clr=alarm must warn: {:?}",
+            g.warnings
+        );
     }
 
     #[test]

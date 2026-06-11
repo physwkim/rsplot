@@ -57,7 +57,8 @@ impl Screen {
         let w8 = SidmDrawing::new(&engine, "ca://DMM1:show_box", DrawingShape::Rectangle)
             .expect("adl2sidm: connect ca://DMM1:show_box (drawing)")
             .with_fill(Color32::TRANSPARENT)
-            .with_border(Color32::from_rgb(192, 192, 192), 2.0);
+            .with_border(Color32::from_rgb(192, 192, 192), 2.0)
+            .with_alarm_sensitive_border(true);
         let gate9 = engine
             .connect("calc://adl2sidm_vis_129?expr=A!=0&A=ca://DMM1:show_box&update=A")
             .expect("adl2sidm: connect visibility gate calc://adl2sidm_vis_129?expr=A!=0&A=ca://DMM1:show_box&update=A");
