@@ -38,7 +38,7 @@ use eframe::egui;
 use sidm::Engine;
 use sidm::widgets::{
     DataMargins, SidmEnumComboBox, SidmImageView, SidmLabel, SidmLineEdit, SidmPushButton,
-    SidmSlider, SidmTimePlot, SidmWaveformPlot,
+    SidmSlider, SidmTimePlot, SidmWaveformPlot, TimeAxisMode,
 };
 
 // Every PV lives under the IOC's `mini:` prefix (st.cmd `epicsEnvSet PREFIX`).
@@ -243,6 +243,17 @@ impl MiniBeamline {
         ui.horizontal(|ui| {
             ui.label("Value:");
             self.beam_label.show(ui);
+        });
+        // Runtime X-axis toggle (PyDM's relative vs absolute time axis): flip the
+        // strip chart between seconds-since-start and the local wall-clock time.
+        ui.horizontal(|ui| {
+            ui.label("X axis:");
+            let mut mode = self.beam_plot.time_axis_mode();
+            ui.selectable_value(&mut mode, TimeAxisMode::SinceStart, "Since start (s)");
+            ui.selectable_value(&mut mode, TimeAxisMode::WallClock, "Wall clock");
+            if mode != self.beam_plot.time_axis_mode() {
+                self.beam_plot.set_time_axis_mode(mode);
+            }
         });
         // Fill the rest of the tab so the strip chart grows with the window.
         ui.allocate_ui(ui.available_size(), |ui| {
