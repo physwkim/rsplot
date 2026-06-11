@@ -68,7 +68,7 @@ Category drives the z-layer: `static` = decoration (back), `monitor` = read-only
 | bar | monitor | `SidmScaleIndicator` | ✅ |
 | indicator | monitor | `SidmScaleIndicator` | ✅ |
 | meter | monitor | `SidmScaleIndicator` | ✅ |
-| composite | container | `SidmFrame` (children re-layered inside) | ⬜ |
+| composite | container | `SidmFrame` (children re-layered inside) | ✅ |
 | rectangle | static | `SidmDrawing(Rectangle)` | ✅ |
 | oval | static | `SidmDrawing(Ellipse)` | ✅ |
 | strip chart | monitor | `SidmTimePlot` | ⬜ |
@@ -127,7 +127,7 @@ not silently dropped (SiDM has no rules engine yet).
   placement, so `let _ = self.wN.show(ui);` and the back-to-front layering are
   uniform. 7 new codegen tests; the full 6-control screen was smoke-checked to
   `cargo check` clean (no warnings) against real sidm.
-- 🚧 B6 — emitter batch: indicators + shapes (split into B6a/B6b/B6c for the
+- ✅ B6 — emitter batch: indicators + shapes (split into B6a/B6b/B6c for the
   composite's nested re-layering).
   - ✅ B6a — scale indicators (`bar`/`indicator`/`meter` → `SidmScaleIndicator`).
     `bar` → `with_bar_indicator(true)` + the MEDM decoration `label` drives the
@@ -149,8 +149,23 @@ not silently dropped (SiDM has no rules engine yet).
     `SidmDrawing` pen-style builder, so it warns rather than dropping silently.
     A shared `apply_protocol` now backs both `channel_address` and
     `dynamic_channel`. 4 new codegen tests; smoke-checked clean against real sidm.
-  - ⬜ B6c — `composite` → `SidmFrame` with children re-layered (back-to-front)
-    and coordinate-translated to the frame interior.
+  - ✅ B6c — `composite` → `SidmFrame` with children re-layered (back-to-front)
+    and coordinate-translated to the frame interior. The composite's children are
+    emitted by draining the placements the recursion produced
+    (`placements.drain(start..)`), re-sorting them by `ZLayer`, and writing each
+    inside the frame's `show(ui, |ui| { … })` closure with coordinates translated
+    to the frame origin — so the back-to-front rule holds *independently* inside
+    every frame, and nesting (composite-in-composite) translates coordinates
+    recursively. The frame is a `SidmFrame` on a `loc://` placeholder channel
+    (or the composite's own `chan` when set). `ui()` destructures
+    `let Self { _engine: _, w0, w1, … } = self;` so a frame closure can borrow
+    its sibling fields disjointly (`SidmFrame` paints `Frame::NONE`, so it never
+    occludes the children it wraps). 8 new codegen tests, incl. a nested
+    composite-in-composite asserting two frames, recursive coordinate
+    translation, and the deepest control nested inside both closures; the
+    single- and nested-composite screens were generated and `cargo check`'d clean
+    (no warnings) against real sidm. Gate: clippy -p adl2sidm clean, nextest
+    39/39.
 - ⬜ B7 — emitter batch: plots + image (strip chart, cartesian plot, image).
 - ⬜ B8 — stubs + warnings for the deferred 6 + CALC `// TODO` comments.
 - ⬜ C9 — CLI (`--protocol` / `--macro` / `--out` / `--use-scatterplot`).

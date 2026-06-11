@@ -128,6 +128,7 @@ fn emit_widget(b: &mut Builder, widget: &MedmWidget, options: &Options) {
         "indicator" | "meter" => emit_scale_indicator(b, widget, options, z, false),
         "rectangle" => emit_drawing(b, widget, options, z, "Rectangle"),
         "oval" => emit_drawing(b, widget, options, z, "Ellipse"),
+        "composite" => emit_composite(b, widget, options, z),
         _ => b.warnings.push(format!(
             "line {}: {:?} -> {} not emitted yet (skipped)",
             widget.line, widget.symbol, map.sidm_widget
@@ -522,6 +523,60 @@ fn emit_drawing(b: &mut Builder, widget: &MedmWidget, options: &Options, z: ZLay
     );
 }
 
+/// `composite` — a `SidmFrame` grouping its children. MEDM stores children in
+/// absolute screen coordinates, so each child is translated into the frame's
+/// interior and re-layered back-to-front *inside* the frame's draw closure. The
+/// frame paints nothing by default (transparent `egui::Frame::NONE`), so nesting
+/// only adds the optional alarm border / enable-gating and the per-container
+/// z-order — a control child still layers Foreground (never occluded), a
+/// decoration child Background. A composite usually has no channel, so a `loc://`
+/// placeholder is used unless its top-level `chan` is set.
+fn emit_composite(b: &mut Builder, widget: &MedmWidget, options: &Options, z: ZLayer) {
+    let Some(geom) = widget.geometry else {
+        skip_no_geometry(b, widget);
+        return;
+    };
+    let addr = match widget.assignments.get("chan").filter(|c| !c.is_empty()) {
+        Some(chan) => apply_protocol(chan, options),
+        None => format!("loc://adl2sidm_frame_{}", widget.line),
+    };
+    let frame_id = b.index();
+    let frame_field = format!("w{frame_id}");
+    b.needs_widgets = true;
+    b.ctors.push(format!(
+        "let {frame_field} = SidmFrame::new(&engine, {})\n            .expect({});",
+        rust_str(&addr),
+        rust_str(&format!("adl2sidm: connect {addr} (composite)"))
+    ));
+    b.fields
+        .push((frame_field.clone(), "SidmFrame".to_string()));
+
+    // Emit the children into the shared builder, then lift their placements out of
+    // the top-level list and into this frame's draw closure (coordinate-translated
+    // by the composite origin and re-layered back-to-front). Their struct fields /
+    // ctors stay; only the *draw* moves inside the frame.
+    let start = b.placements.len();
+    for child in &widget.children {
+        emit_widget(b, child, options);
+    }
+    let mut child_placements: Vec<Placement> = b.placements.drain(start..).collect();
+    child_placements.sort_by_key(|p| p.z);
+
+    let mut body = String::new();
+    let _ = writeln!(body, "let _ = {frame_field}.show(ui, |ui| {{");
+    for p in &child_placements {
+        write_placement(&mut body, p, geom.x, geom.y, "    ");
+    }
+    let _ = write!(body, "}});");
+
+    b.placements.push(Placement {
+        z,
+        id: frame_id,
+        geom,
+        body,
+    });
+}
+
 /// Resolve the geometry and channel address common to every channel-bound
 /// widget, recording the matching skip warning and returning `None` if either is
 /// absent.
@@ -569,11 +624,14 @@ fn push_channel_widget(
 
     b.ctors.push(ctor);
     b.fields.push((field.clone(), ty.to_string()));
+    // The body references the field's `&mut` local (bound by `ui()`'s `let Self {
+    // .. }` destructure), not `self.field`, so a container's draw closure can hold
+    // disjoint borrows of the frame and its siblings.
     b.placements.push(Placement {
         z,
         id,
         geom,
-        body: format!("let _ = self.{field}.show(ui);"),
+        body: format!("let _ = {field}.show(ui);"),
     });
 }
 
@@ -811,6 +869,19 @@ fn emit_ui(s: &mut String, b: &Builder) {
         s,
         "        // (Foreground), so controls are never occluded or click-stolen."
     );
+
+    // Bind each widget field to a disjoint `&mut` local. A container's draw
+    // closure (`SidmFrame::show(ui, |ui| ...)`) needs to touch sibling fields
+    // while the frame itself is borrowed by the `show` receiver; going through
+    // `self.field` inside the closure would re-borrow all of `self` and conflict.
+    if !b.fields.is_empty() {
+        let _ = write!(s, "        let Self {{ _engine: _");
+        for (name, _) in &b.fields {
+            let _ = write!(s, ", {name}");
+        }
+        let _ = writeln!(s, " }} = self;");
+    }
+
     let mut order: Vec<&Placement> = b.placements.iter().collect();
     order.sort_by_key(|p| p.z); // stable: preserves MEDM order within a layer
 
@@ -818,26 +889,36 @@ fn emit_ui(s: &mut String, b: &Builder) {
         let _ = writeln!(s, "        let _ = ui;");
     }
     for p in order {
-        let Geometry {
-            x,
-            y,
-            width,
-            height,
-        } = p.geom;
-        let _ = writeln!(
-            s,
-            "        place(ui, {}, egui::Id::new({}u64), {}.0, {}.0, {}.0, {}.0, |ui| {{",
-            p.z.order_ident(),
-            p.id,
-            x,
-            y,
-            width,
-            height
-        );
-        let _ = writeln!(s, "            {}", p.body);
-        let _ = writeln!(s, "        }});");
+        write_placement(s, p, 0, 0, "        ");
     }
     let _ = writeln!(s, "    }}");
+}
+
+/// Emit one `place(...)` call at `indent`, offsetting the geometry by `(dx, dy)`
+/// — `0, 0` at the top level; a composite's origin for its children so they land
+/// inside the frame's interior coordinates. The `body` may be several lines (a
+/// container's nested draws), each re-indented inside the closure.
+fn write_placement(s: &mut String, p: &Placement, dx: i32, dy: i32, indent: &str) {
+    let Geometry {
+        x,
+        y,
+        width,
+        height,
+    } = p.geom;
+    let _ = writeln!(
+        s,
+        "{indent}place(ui, {}, egui::Id::new({}u64), {}.0, {}.0, {}.0, {}.0, |ui| {{",
+        p.z.order_ident(),
+        p.id,
+        x - dx,
+        y - dy,
+        width,
+        height
+    );
+    for line in p.body.lines() {
+        let _ = writeln!(s, "{indent}    {line}");
+    }
+    let _ = writeln!(s, "{indent}}});");
 }
 
 /// Emit the shared absolute-placement helper.
@@ -1473,5 +1554,250 @@ rectangle {
         let g = shapes();
         assert!(g.source.contains("egui::Order::Background"));
         assert!(!g.source.contains("egui::Order::Foreground"));
+    }
+
+    /// A composite at (120, 10) grouping a decoration rectangle and a text-entry
+    /// control, both in absolute screen coordinates.
+    const COMPOSITE: &str = r#"
+"color map" {
+	colors {
+		ffffff,
+		000000,
+	}
+}
+composite {
+	object {
+		x=120
+		y=10
+		width=80
+		height=40
+	}
+	"composite name"=""
+	vis="static"
+	chan=""
+	children {
+		rectangle {
+			object {
+				x=120
+				y=10
+				width=80
+				height=40
+			}
+			"basic attribute" {
+				clr=1
+				fill="outline"
+			}
+		}
+		"text entry" {
+			object {
+				x=150
+				y=20
+				width=40
+				height=18
+			}
+			control {
+				chan="SET"
+			}
+		}
+	}
+}
+"#;
+
+    fn composite() -> Generated {
+        generate(&parse(COMPOSITE), &Options::default())
+    }
+
+    #[test]
+    fn composite_becomes_a_frame_holding_its_children() {
+        let g = composite();
+        // The frame (loc:// placeholder, no chan) plus both children are fields.
+        assert!(
+            g.source
+                .contains("SidmFrame::new(&engine, \"loc://adl2sidm_frame_"),
+            "{}",
+            g.source
+        );
+        assert!(g.source.contains(": SidmFrame,"));
+        assert!(g.source.contains(": SidmDrawing,"));
+        assert!(g.source.contains(": SidmLineEdit,"));
+    }
+
+    #[test]
+    fn composite_children_draw_inside_the_frame_closure() {
+        let g = composite();
+        // The frame's show takes a closure; the children's place() calls sit
+        // inside it (the `.show(ui, |ui| {` appears before the child draws).
+        let frame_show = g
+            .source
+            .find(".show(ui, |ui| {")
+            .expect("frame show closure");
+        let child_draw = g.source.find(".show(ui);").expect("a child draw");
+        assert!(
+            frame_show < child_draw,
+            "children must draw inside the frame closure:\n{}",
+            g.source
+        );
+    }
+
+    #[test]
+    fn composite_children_are_translated_to_frame_relative_coordinates() {
+        let g = composite();
+        // text entry at absolute (150, 20), composite origin (120, 10) ->
+        // relative (30, 10) inside the frame.
+        assert!(
+            g.source.contains("30.0, 10.0, 40.0, 18.0"),
+            "child not translated to frame-relative coords:\n{}",
+            g.source
+        );
+        // The rectangle child at (120,10) == composite origin -> (0, 0).
+        assert!(g.source.contains("0.0, 0.0, 80.0, 40.0"));
+    }
+
+    #[test]
+    fn composite_nests_children_under_a_single_frame_placement() {
+        let g = composite();
+        // The frame's Middle place() opens first, then its `show` closure, then
+        // the control child's Foreground place() -- proving the control is nested
+        // inside the frame, not a top-level sibling (ordering, not indentation,
+        // since an 8-space prefix is a substring of a deeper-indented line).
+        let frame_place = g
+            .source
+            .find("egui::Order::Middle")
+            .expect("frame middle place");
+        let frame_show = g.source.find(".show(ui, |ui| {").expect("frame show");
+        let control_place = g
+            .source
+            .find("egui::Order::Foreground")
+            .expect("control place");
+        assert!(frame_place < frame_show, "{}", g.source);
+        assert!(
+            frame_show < control_place,
+            "control must be nested in the frame closure:\n{}",
+            g.source
+        );
+    }
+
+    #[test]
+    fn composite_destructures_self_for_disjoint_field_borrows() {
+        let g = composite();
+        assert!(
+            g.source.contains("let Self { _engine: _,"),
+            "ui() must destructure self so the frame closure can borrow siblings:\n{}",
+            g.source
+        );
+    }
+
+    // A composite nested inside another composite: outer (100,100), inner
+    // (120,120) holding a text entry at (140,130), plus a text update at
+    // (110,260) directly under the outer frame. Exercises the recursive
+    // translate-and-drain path that single-level composites do not.
+    const NESTED_COMPOSITE: &str = r#"
+"color map" {
+	colors {
+		ffffff,
+		000000,
+	}
+}
+composite {
+	object {
+		x=100
+		y=100
+		width=200
+		height=200
+	}
+	chan=""
+	children {
+		composite {
+			object {
+				x=120
+				y=120
+				width=80
+				height=40
+			}
+			chan=""
+			children {
+				"text entry" {
+					object {
+						x=140
+						y=130
+						width=40
+						height=18
+					}
+					control {
+						chan="SET"
+					}
+				}
+			}
+		}
+		"text update" {
+			object {
+				x=110
+				y=260
+				width=80
+				height=18
+			}
+			monitor {
+				chan="RBV"
+			}
+		}
+	}
+}
+"#;
+
+    fn nested_composite() -> Generated {
+        generate(&parse(NESTED_COMPOSITE), &Options::default())
+    }
+
+    #[test]
+    fn nested_composite_emits_two_frames() {
+        let g = nested_composite();
+        let frames = g.source.matches(": SidmFrame,").count();
+        assert_eq!(frames, 2, "outer + inner frame fields:\n{}", g.source);
+    }
+
+    #[test]
+    fn nested_composite_translates_coordinates_recursively() {
+        let g = nested_composite();
+        // inner composite abs (120,120), outer origin (100,100) -> rel (20,20).
+        assert!(
+            g.source.contains("20.0, 20.0, 80.0, 40.0"),
+            "inner frame not translated relative to outer:\n{}",
+            g.source
+        );
+        // text entry abs (140,130), inner origin (120,120) -> rel (20,10):
+        // a second translation on top of the first, proving recursion.
+        assert!(
+            g.source.contains("20.0, 10.0, 40.0, 18.0"),
+            "deepest child not translated relative to inner frame:\n{}",
+            g.source
+        );
+        // text update abs (110,260), outer origin (100,100) -> rel (10,160).
+        assert!(
+            g.source.contains("10.0, 160.0, 80.0, 18.0"),
+            "outer-frame child not translated relative to outer:\n{}",
+            g.source
+        );
+    }
+
+    #[test]
+    fn nested_composite_places_inner_child_inside_both_frame_closures() {
+        let g = nested_composite();
+        // Two frame show-closures open before the deepest control's place():
+        // the control is two levels deep, not a top-level sibling.
+        let shows: Vec<usize> = g
+            .source
+            .match_indices(".show(ui, |ui| {")
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(shows.len(), 2, "two frame closures expected:\n{}", g.source);
+        let control_place = g
+            .source
+            .find("egui::Order::Foreground")
+            .expect("control place");
+        assert!(
+            shows[1] < control_place,
+            "deepest control must sit inside the inner frame closure:\n{}",
+            g.source
+        );
     }
 }
