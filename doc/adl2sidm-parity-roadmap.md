@@ -44,11 +44,12 @@ dropped).
   MEDM PV names get the prefix. Overridable via `--protocol`; basic `$(macro)`
   substitution via `--macro` (port of adl2pydm `convertMacros`).
 - **Deferred** (tracked, not dropped): runtime `.adl`/display-file loader;
-  proportional/grid scaling; SiDM-side `DrawingShape` Arc/Pie/Polygon/Polyline;
-  a rules engine for MEDM dynamic-attribute CALC; related-display navigation,
-  shell-command, embedded display (matching `sidm`'s own deferred set); the MEDM
-  `image` static GIF/TIFF-file display (SiDM has only `SidmImageView`, a live
-  array-data viewer — no file-image widget to map onto).
+  proportional/grid scaling; MEDM dynamic-attribute **colour** rules
+  (`clr="alarm"/"discrete"` — SiDM has no colour-rule engine; visibility rules
+  are now wired as `calc://` gates). The arc/polygon/polyline shapes, the
+  static-file `image`, related-display/shell-command/embedded-display, and CALC
+  *visibility* — all originally deferred — are now implemented (see the coverage
+  table).
 
 ## MEDM widget coverage
 
@@ -75,20 +76,37 @@ Category drives the z-layer: `static` = decoration (back), `monitor` = read-only
 | oval | static | `SidmDrawing(Ellipse)` | ✅ |
 | strip chart | monitor | `SidmTimePlot` | ✅ |
 | cartesian plot | monitor | `SidmWaveformPlot` / `SidmScatterPlot` | ✅ |
-| image | monitor | ⏸ placeholder marker + warning (static GIF/TIFF file, no array channel) | ✅ |
-| arc | static | ⏸ placeholder marker + warning (no `DrawingShape::Arc`) | ✅ |
-| polygon | static | ⏸ placeholder marker + warning (no `DrawingShape::Polygon`) | ✅ |
-| polyline | static | ⏸ placeholder marker + warning (no `DrawingShape::Polyline`) | ✅ |
-| related display | controller | ⏸ disabled `egui::Button` + warning (nav deferred) | ✅ |
-| shell command | controller | ⏸ disabled `egui::Button` + warning (shell deferred) | ✅ |
-| embedded display | container | ⏸ skip + warning (not in adl2pydm either) | ✅ |
+| image | static | `SidmImage` (channel-less static GIF/TIFF file) | ✅ |
+| arc | static | `SidmDrawing(Arc { begin_deg, span_deg })` | ✅ |
+| polygon | static | `SidmDrawing(Polygon)` | ✅ |
+| polyline | static | `SidmDrawing(Polyline)` | ✅ |
+| related display | controller | live `egui::Button`/menu (reports target on click) | ✅ |
+| shell command | controller | live `egui::Button`/menu (spawns each command) | ✅ |
+| embedded display | container | `SidmFrame` (target inlined at code-gen) | ✅ |
 
-Dynamic-attribute CALC (visibility/colour rules; adl2pydm `calc2rules.py`): ✅
-emitted as a `// TODO: dynamic rule:` comment just above the widget's placement
-(quoting the MEDM `vis`/`calc`/A–D channel fields verbatim) plus a warning — a
-documented gap, not silently dropped (SiDM has no rules engine yet). A rule is
-recognised when `vis` is conditional (anything but `"static"`) or a `calc`
-expression is present; `vis="static"` with only a channel is not a rule.
+> The MEDM `image` is a static *file* picture with no data channel, so it is
+> decoration (Background layer) — a divergence from adl2pydm's `type="monitor"`,
+> which targets Qt's native z-order. `related display`/`shell command` are
+> clickable, so they sit in the Control (front) layer even though `symbols.py`
+> types them `static`.
+
+Dynamic-attribute CALC **visibility** (`vis`/`calc`; adl2pydm `calc2rules.py`):
+✅ wired as a live `calc://` gate. For each gated widget the emitter builds a
+`calc://adl2sidm_vis_<line>?expr=<expr>&A=<chan>&…&update=A,B` channel that
+evaluates the rule and wraps every `place(...)` it produced in
+`if gate.read(…) != Some(0.0) { … }` (hidden only when the gate reads exactly
+zero). MEDM-CALC → evalexpr: `#` → `!=`, standalone `=` → `==`; the `vis` mode
+wraps the optional `calc` expression (`if zero` → `(expr)=0`, `if not zero` →
+`(expr)#0`, `calc` → verbatim, default channel `A`). A rule is recognised when
+`vis` is conditional (anything but `"static"`) or a `calc` is present;
+`vis="static"` with only a channel is not a rule. An expression containing `&`
+(logical/bitwise AND) cannot be carried by the `calc://` query (which splits on
+`&`), so that widget is left always-visible with a warning rather than emitting
+a silently-wrong gate.
+
+Still deferred — dynamic-attribute **colour** rules (`clr="alarm"/"discrete"`):
+SiDM has no colour-rule engine, so alarm/discrete colouring is not yet wired
+(tracked, not dropped).
 
 ## Wave / commit log
 
@@ -283,3 +301,55 @@ expression is present; `vis="static"` with only a channel is not a rule.
   converter, and `cargo build --example local_panel` (covered by clippy
   `--all-targets`) compiles it against the real sidm/siplot/eframe APIs. Gate:
   clippy -p adl2sidm --all-targets clean, nextest 56/56, example builds.
+
+## Phase 2 — deferred widgets implemented for real
+
+The Wave-B plan emitted six widgets (+`image`, +CALC) as placeholders / disabled
+buttons / `// TODO` comments (see B8a/B8b above — historical). Phase 2 replaces
+every one of those with a real implementation. The B8a/B8b descriptions are
+superseded by the coverage table and CALC note at the top of this doc.
+
+- ✅ arc / polyline / polygon → real `SidmDrawing` (`42cbb18`). `sidm` gained
+  `DrawingShape::Arc { begin_deg, span_deg }`, `Polyline`, and `Polygon`; the
+  emitter parses MEDM `begin`/`path` (1/64-degree units) and the `points` block
+  (normalised to the widget origin) into those shapes at the Background layer.
+- ✅ `image` → channel-less `SidmImage` (`96e0f1c`). `sidm` gained `SidmImage`, a
+  static GIF/TIFF *file* widget that decodes at run time; the emitter targets it
+  with the MEDM `"image name"`, sized to the geometry — no fabricated channel.
+- ✅ shell command → live `egui::Button`/`menu_button` (`778d6c2`). A single
+  `command[0]` is a plain button that `std::process::Command::new("sh").arg("-c")`
+  -spawns `"<name> <args>"`; multiple commands become a `menu_button` (one entry
+  each, `ui.close()` after spawn). A `%`-containing command is warned (MEDM
+  macro-arg prompting is unsupported); a name-less command is dropped.
+- ✅ related display → live `egui::Button`/`menu_button` (`b2a057b`). Reports its
+  target (`eprintln!("related display: open <file> (macros: …)")`) on click —
+  an honest, side-effect-only navigation stand-in (SiDM has no screen-stack
+  loader), not an inert disabled button.
+- ✅ embedded display → inlined `SidmFrame` (`d2a252b`). The childless
+  `composite` + `"composite file"="file;macros"` form is resolved at code-gen
+  time: the target `.adl` is read from `Options::source_dir`, macro-merged
+  (embedded macros win), parsed, and its widgets re-layered inside a `SidmFrame`
+  via the shared `emit_frame_container` (origin `(0,0)`, the target's own
+  coords). Cycle (canonicalised `embed_stack`) and depth (`MAX_EMBED_DEPTH=8`)
+  guards fall back to a visible marker; no source dir / missing file / no
+  `composite file` likewise emit a marker, never a silent drop.
+- ✅ CALC dynamic-attribute **visibility** → live `calc://` gate (`06e8663`).
+  `Placement.comment` (the `// TODO` note) became `Placement.gate`
+  (`Option<boolean cond>`); a gated placement is wrapped in
+  `if gate.read(…) != Some(0.0) { place(…) }`. The gate is a synthetic
+  `calc://adl2sidm_vis_<line>?expr=<expr>&A=<chan>&…&update=A,B` channel; see the
+  CALC note above for the MEDM-CALC→evalexpr translation and the `&`-limitation.
+- ✅ z-order + symbol-map reconciliation (`4e1ea14`, `e8f4ad8`). `image` retyped
+  `Monitor`→`Decoration` so the static picture sits in the Background layer with
+  the other static graphics (it was drawing above them). The now-vacuous
+  `WidgetMap.supported` flag (every widget is implemented) was removed structurally
+  rather than flipped all-true, and the stale `"stub: …"` target strings were
+  updated to the real targets.
+
+Phase-2 gate (per commit): `cargo fmt --all`; `cargo clippy -p adl2sidm
+--all-targets -- -D warnings` (lints the generated fixture + example too);
+`cargo nextest run -p adl2sidm` (66/66). Full-workspace pass still owed before
+any push.
+
+Still deferred (tracked): runtime `.adl` loader; proportional/grid scaling; CALC
+**colour** rules (`clr="alarm"/"discrete"`).
