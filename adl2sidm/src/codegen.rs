@@ -391,6 +391,7 @@ fn emit_text_update(b: &mut Builder, widget: &MedmWidget, options: &Options, z: 
     let new_call = format!("SidmLabel::new(&engine, {})", rust_str(&addr));
     let mut builders: Vec<String> = precision_default_builder(widget).into_iter().collect();
     builders.extend(string_format_builder(widget, &addr));
+    builders.extend(alarm_content_builder(widget));
     push_channel_widget(
         b,
         z,
@@ -1785,6 +1786,19 @@ fn string_format_builder(widget: &MedmWidget, addr: &str) -> Option<String> {
     }
 }
 
+/// A `.with_alarm_sensitive_content(true)` builder when MEDM `clrmod="alarm"` —
+/// the widget's foreground colour follows alarm severity instead of its static
+/// `clr`. MEDM's other modes (`static`, the default, and `discrete`) keep the
+/// static colour and emit nothing. `adl2pydm` leaves this to PyDM's widget
+/// defaults; sidm defaults `alarm_sensitive_content` off, so reproducing MEDM's
+/// alarm colouring needs the builder set explicitly. Only callers whose sidm
+/// widget actually exposes `with_alarm_sensitive_content` (currently `SidmLabel`
+/// and `SidmDrawing`) may use this.
+fn alarm_content_builder(widget: &MedmWidget) -> Option<String> {
+    (widget.assignments.get("clrmod").map(String::as_str) == Some("alarm"))
+        .then(|| ".with_alarm_sensitive_content(true)".to_string())
+}
+
 /// User-defined `(low, high)` limits for a control: present only when MEDM marks
 /// `loprSrc`/`hoprSrc` as `"default"` (otherwise limits come from the channel).
 /// Each missing default reads as `0.0`, matching `adl2pydm`'s `write_limits`.
@@ -2386,6 +2400,60 @@ text {
             "decimal text update should still be emitted:\n{}",
             g.source
         );
+    }
+
+    #[test]
+    fn clrmod_alarm_maps_to_alarm_sensitive_content() {
+        // MEDM clrmod="alarm" on a text update colours the foreground by alarm
+        // severity; sidm's alarm_sensitive_content defaults off, so it must be
+        // set explicitly. The default (no clrmod / clrmod="static") emits nothing.
+        let adl = r#"
+"color map" {
+	colors {
+		ffffff,
+		000000,
+	}
+}
+"text update" {
+	object {
+		x=0
+		y=0
+		width=80
+		height=18
+	}
+	monitor {
+		chan="$(P)alarmPV"
+		clr=0
+	}
+	clrmod="alarm"
+}
+"text update" {
+	object {
+		x=0
+		y=30
+		width=80
+		height=18
+	}
+	monitor {
+		chan="$(P)staticPV"
+		clr=0
+	}
+	clrmod="static"
+}
+"#;
+        let g = generate(&parse(adl), &Options::default());
+        // Exactly one widget (the alarm one) gets the builder.
+        assert_eq!(
+            g.source
+                .matches(".with_alarm_sensitive_content(true)")
+                .count(),
+            1,
+            "only the clrmod=alarm text update should be alarm-sensitive:\n{}",
+            g.source
+        );
+        // Both PVs are still emitted (the static one just keeps its default).
+        assert!(g.source.contains("ca://$(P)alarmPV"));
+        assert!(g.source.contains("ca://$(P)staticPV"));
     }
 
     #[test]
