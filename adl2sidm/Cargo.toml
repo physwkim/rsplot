@@ -28,3 +28,15 @@ path = "src/main.rs"
 # The library — parser, symbol map, code emitter — stays pure and does not use
 # it, so a consumer embedding the converter pulls no CLI machinery.
 clap = { version = "4", features = ["derive"] }
+
+[dev-dependencies]
+# The fidelity gate (tests/compiles.rs) and the runnable example compile a
+# committed generated `Screen` against the REAL sidm/siplot/eframe APIs — the
+# strongest correctness signal, and a check adl2pydm cannot do against Qt. sidm
+# is taken with default-features = false (the headless core: widgets + Engine +
+# `loc://`); the generated code names `ca://` only as string literals, so no
+# EPICS backend feature is needed. eframe's `wgpu` feature provides the
+# `CreationContext::wgpu_render_state` the generated `new(cc)` reads.
+siplot = { path = ".." }
+sidm = { path = "../sidm", default-features = false }
+eframe = { version = "0.34", features = ["wgpu"] }

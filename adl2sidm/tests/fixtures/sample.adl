@@ -1,0 +1,218 @@
+file {
+	name="sample.adl"
+	version=030107
+}
+"color map" {
+	colors {
+		ffffff,
+		000000,
+		ff0000,
+		00ff00,
+		0000ff,
+		c0c0c0,
+	}
+}
+display {
+	object {
+		x=0
+		y=0
+		width=400
+		height=500
+	}
+	clr=1
+	bclr=5
+}
+text {
+	object {
+		x=10
+		y=10
+		width=200
+		height=20
+	}
+	"basic attribute" {
+		clr=1
+	}
+	textix="Sample Panel"
+}
+"text update" {
+	object {
+		x=10
+		y=40
+		width=120
+		height=20
+	}
+	monitor {
+		chan="$(P)readback"
+		clr=0
+	}
+	limits {
+		precDefault=3
+	}
+}
+"text entry" {
+	object {
+		x=10
+		y=70
+		width=120
+		height=20
+	}
+	control {
+		chan="$(P)setpoint"
+	}
+}
+"message button" {
+	object {
+		x=10
+		y=100
+		width=80
+		height=24
+	}
+	control {
+		chan="$(P)go"
+	}
+	press_msg="1"
+	release_msg="0"
+	label="Start"
+}
+menu {
+	object {
+		x=100
+		y=100
+		width=100
+		height=24
+	}
+	control {
+		chan="$(P)mode"
+	}
+}
+valuator {
+	object {
+		x=10
+		y=140
+		width=180
+		height=24
+	}
+	control {
+		chan="$(P)level"
+	}
+	dPrecision=2.000000
+	loprSrc="default"
+	loprDefault=0.000000
+	hoprSrc="default"
+	hoprDefault=100.000000
+}
+byte {
+	object {
+		x=10
+		y=170
+		width=120
+		height=20
+	}
+	monitor {
+		chan="$(P)bits"
+	}
+	sbit=0
+	ebit=7
+}
+bar {
+	object {
+		x=10
+		y=200
+		width=180
+		height=24
+	}
+	monitor {
+		chan="$(P)fill"
+	}
+	label="limits"
+}
+rectangle {
+	object {
+		x=210
+		y=10
+		width=180
+		height=120
+	}
+	"basic attribute" {
+		clr=5
+		fill="outline"
+		width=2
+	}
+	"dynamic attribute" {
+		vis="if not zero"
+		chan="$(P)show_box"
+	}
+}
+oval {
+	object {
+		x=210
+		y=140
+		width=60
+		height=60
+	}
+	"basic attribute" {
+		clr=2
+	}
+}
+arc {
+	object {
+		x=290
+		y=140
+		width=60
+		height=60
+	}
+	"basic attribute" {
+		clr=3
+	}
+}
+"strip chart" {
+	object {
+		x=10
+		y=240
+		width=380
+		height=110
+	}
+	period=60
+	units="second"
+	pen[0] {
+		chan="$(P)readback"
+		clr=4
+	}
+}
+"cartesian plot" {
+	object {
+		x=10
+		y=360
+		width=380
+		height=110
+	}
+	count=1000
+	trace[0] {
+		xdata="$(P)xwave"
+		ydata="$(P)ywave"
+		data_clr=2
+	}
+}
+composite {
+	object {
+		x=210
+		y=210
+		width=180
+		height=24
+	}
+	chan=""
+	children {
+		"text update" {
+			object {
+				x=210
+				y=210
+				width=180
+				height=24
+			}
+			monitor {
+				chan="$(P)status"
+				clr=0
+			}
+		}
+	}
+}
