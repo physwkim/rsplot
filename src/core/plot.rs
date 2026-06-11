@@ -509,6 +509,17 @@ pub struct Plot {
     /// [`TickMode::TimeSeries`] is active (silx `getXAxis().setTimeZone`).
     /// Defaults to [`TimeZone::Utc`], matching the previous UTC-only behavior.
     x_time_zone: TimeZone,
+    /// Epoch offset added to X tick *values* before they are formatted as
+    /// date-times under [`TickMode::TimeSeries`] (siplot extension, no silx
+    /// counterpart). The stored X data values are interpreted as
+    /// `epoch - x_time_offset`, so a caller can upload small relative
+    /// coordinates — an `f32`-safe GPU vertex range — while the time ticks still
+    /// read absolute wall-clock. The curve vertex path packs positions as `f32`
+    /// (`render/gpu_curve.rs::pack`), so an absolute epoch (~1.7e9) would lose
+    /// ~128 s of precision and a few-second strip-chart window could not render.
+    /// Defaults to `0.0` (the X values *are* epoch seconds, so TimeSeries labels
+    /// are unchanged from the offset-free behavior).
+    x_time_offset: f64,
     /// Infinite line items drawn over the data area (silx `Line`,
     /// `items/shape.py:289`). Each is clipped to the current viewport and drawn
     /// every frame.
@@ -595,6 +606,7 @@ impl Plot {
             autoreplot: true,
             x_tick_mode: TickMode::Numeric,
             x_time_zone: TimeZone::Utc,
+            x_time_offset: 0.0,
             lines: Vec::new(),
             pan_with_arrow_keys: true,
             zoom_x_enabled: true,
@@ -873,6 +885,21 @@ impl Plot {
     /// the ticks are laid out in this zone's wall-clock calendar.
     pub fn set_x_time_zone(&mut self, tz: TimeZone) {
         self.x_time_zone = tz;
+    }
+
+    /// The X-axis epoch offset applied to date-time tick labels (siplot
+    /// extension; see the `x_time_offset` field docs).
+    pub fn x_time_offset(&self) -> f64 {
+        self.x_time_offset
+    }
+
+    /// Set the epoch offset added to X tick values before [`TickMode::TimeSeries`]
+    /// formatting, so a caller feeding relative (`f32`-safe) X coordinates still
+    /// gets absolute wall-clock tick labels. The stored X values are interpreted
+    /// as `epoch - offset`; `0.0` (the default) means the X values already are
+    /// epoch seconds. No effect outside the TimeSeries tick mode.
+    pub fn set_x_time_offset(&mut self, offset: f64) {
+        self.x_time_offset = offset;
     }
 
     /// Append an infinite line item (silx `addItem` of a `Line`). The widget

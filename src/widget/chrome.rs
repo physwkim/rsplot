@@ -359,7 +359,7 @@ const TIME_SERIES_NUM_TICKS: usize = 5;
 /// linear axis, one-per-decade on a log axis. The default [`TickMode::Numeric`]
 /// path is unchanged.
 fn axis_ticks(axis: &Axis, max_ticks: usize) -> Vec<(f64, String)> {
-    axis_ticks_with_mode(axis, max_ticks, TickMode::Numeric, TimeZone::Utc)
+    axis_ticks_with_mode(axis, max_ticks, TickMode::Numeric, TimeZone::Utc, 0.0)
 }
 
 /// As [`axis_ticks`] but honoring the axis [`TickMode`]. With
@@ -371,11 +371,21 @@ fn axis_ticks(axis: &Axis, max_ticks: usize) -> Vec<(f64, String)> {
 /// only on a [`Scale::Linear`] axis (silx ties the time locator to the
 /// linear/numeric axis); a log axis falls back to the numeric decade ticks.
 /// `tz` is ignored outside the TimeSeries-on-linear path.
+///
+/// `time_offset` is the epoch corresponding to axis value `0` (siplot extension;
+/// see [`Plot::set_x_time_offset`](crate::Plot::set_x_time_offset)): under
+/// TimeSeries the ticks are laid out over the absolute-epoch window
+/// `[min + time_offset, max + time_offset]` and labeled as wall-clock, then each
+/// tick position is shifted back by `time_offset` so it lands at the right pixel
+/// in the axis's (possibly relative) value space. `0.0` (the default) means the
+/// axis values already are epoch seconds — unchanged behavior. Ignored outside
+/// the TimeSeries-on-linear path.
 fn axis_ticks_with_mode(
     axis: &Axis,
     max_ticks: usize,
     tick_mode: TickMode,
     tz: TimeZone,
+    time_offset: f64,
 ) -> Vec<(f64, String)> {
     if tick_mode == TickMode::TimeSeries && axis.scale == Scale::Linear {
         let (lo, hi) = if axis.max >= axis.min {
@@ -383,9 +393,18 @@ fn axis_ticks_with_mode(
         } else {
             (axis.max, axis.min)
         };
-        let (ticks, spacing, unit) = dtime_ticks::calc_ticks_tz(lo, hi, TIME_SERIES_NUM_TICKS, tz);
+        let (ticks, spacing, unit) = dtime_ticks::calc_ticks_tz(
+            lo + time_offset,
+            hi + time_offset,
+            TIME_SERIES_NUM_TICKS,
+            tz,
+        );
         let labels = dtime_ticks::format_ticks_tz(&ticks, spacing, unit, tz);
-        return ticks.into_iter().zip(labels).collect();
+        return ticks
+            .into_iter()
+            .map(|epoch| epoch - time_offset)
+            .zip(labels)
+            .collect();
     }
     match axis.scale {
         Scale::Linear => {
@@ -479,6 +498,7 @@ pub fn draw_axes(
         y_max_ticks,
         TickMode::Numeric,
         TimeZone::Utc,
+        0.0,
     );
 }
 
@@ -499,6 +519,7 @@ pub fn draw_axes_with_x_tick_mode(
     y_max_ticks: Option<usize>,
     x_tick_mode: TickMode,
     x_time_zone: TimeZone,
+    x_time_offset: f64,
 ) {
     let area = t.area;
     let axis = Stroke::new(1.0, style.axis);
@@ -513,12 +534,19 @@ pub fn draw_axes_with_x_tick_mode(
     let font = FontId::proportional(11.0);
     let tick_len = 4.0;
 
-    let xticks = axis_ticks_with_mode(&t.x, x_max_ticks.unwrap_or(8), x_tick_mode, x_time_zone);
+    let xticks = axis_ticks_with_mode(
+        &t.x,
+        x_max_ticks.unwrap_or(8),
+        x_tick_mode,
+        x_time_zone,
+        x_time_offset,
+    );
     let yticks = axis_ticks_with_mode(
         &t.y,
         y_max_ticks.unwrap_or(6),
         TickMode::Numeric,
         TimeZone::Utc,
+        0.0,
     );
 
     if grid_mode.minor() {
@@ -1781,7 +1809,7 @@ mod tests {
             scale: Scale::Linear,
             inverted: false,
         };
-        let ticks = axis_ticks_with_mode(&axis, 8, TickMode::TimeSeries, TimeZone::Utc);
+        let ticks = axis_ticks_with_mode(&axis, 8, TickMode::TimeSeries, TimeZone::Utc, 0.0);
         assert!(!ticks.is_empty(), "time-series ticks empty");
         // The week window selects the Days unit -> ISO date labels "YYYY-MM-DD".
         for (_, label) in &ticks {
@@ -1796,6 +1824,48 @@ mod tests {
     }
 
     #[test]
+    fn axis_ticks_time_series_offset_shifts_positions_keeps_absolute_labels() {
+        // A caller storing relative X (epoch - offset) must get the SAME wall-clock
+        // labels as the absolute-epoch layout, with every tick position shifted
+        // back by the offset so it lands at the right pixel. This is the f32-safe
+        // strip-chart path: small relative vertices, absolute wall-clock ticks.
+        let offset = crate::core::dtime_ticks::DateTime::from_civil(2021, 1, 4, 0, 0, 0, 0)
+            .to_epoch_seconds();
+        let span = 6.0 * 86400.0; // a one-week window
+        // Absolute layout: the X values ARE epoch, offset 0.
+        let abs_axis = Axis {
+            min: offset,
+            max: offset + span,
+            scale: Scale::Linear,
+            inverted: false,
+        };
+        let abs = axis_ticks_with_mode(&abs_axis, 8, TickMode::TimeSeries, TimeZone::Utc, 0.0);
+        // Relative layout: the X values are epoch - offset (start at 0); the offset
+        // is supplied so the labels still read absolute.
+        let rel_axis = Axis {
+            min: 0.0,
+            max: span,
+            scale: Scale::Linear,
+            inverted: false,
+        };
+        let rel = axis_ticks_with_mode(&rel_axis, 8, TickMode::TimeSeries, TimeZone::Utc, offset);
+        assert_eq!(abs.len(), rel.len());
+        assert!(!rel.is_empty());
+        for ((abs_pos, abs_label), (rel_pos, rel_label)) in abs.iter().zip(&rel) {
+            assert_eq!(
+                abs_label, rel_label,
+                "labels must match the absolute layout"
+            );
+            assert!(
+                (abs_pos - rel_pos - offset).abs() < 1e-6,
+                "position {abs_pos} should be {rel_pos} + {offset}"
+            );
+        }
+        // The relative positions stay small (f32-safe), not ~1.6e9.
+        assert!(rel.last().unwrap().0 <= span + 1.0);
+    }
+
+    #[test]
     fn axis_ticks_numeric_mode_matches_default_path() {
         // The Numeric tick mode must produce exactly the pre-existing numeric
         // ticks (zero behavior change).
@@ -1805,7 +1875,7 @@ mod tests {
             scale: Scale::Linear,
             inverted: false,
         };
-        let numeric = axis_ticks_with_mode(&axis, 8, TickMode::Numeric, TimeZone::Utc);
+        let numeric = axis_ticks_with_mode(&axis, 8, TickMode::Numeric, TimeZone::Utc, 0.0);
         let default_path = axis_ticks(&axis, 8);
         assert_eq!(numeric, default_path);
         // And the labels are plain numbers, not dates (no '-' separators after a
@@ -1828,8 +1898,8 @@ mod tests {
             scale: Scale::Log10,
             inverted: false,
         };
-        let ts = axis_ticks_with_mode(&axis, 8, TickMode::TimeSeries, TimeZone::Utc);
-        let log = axis_ticks_with_mode(&axis, 8, TickMode::Numeric, TimeZone::Utc);
+        let ts = axis_ticks_with_mode(&axis, 8, TickMode::TimeSeries, TimeZone::Utc, 0.0);
+        let log = axis_ticks_with_mode(&axis, 8, TickMode::Numeric, TimeZone::Utc, 0.0);
         assert_eq!(ts, log, "log axis should ignore TimeSeries");
     }
 
@@ -1851,8 +1921,8 @@ mod tests {
             scale: Scale::Linear,
             inverted: false,
         };
-        let jst_ticks = axis_ticks_with_mode(&axis, 8, TickMode::TimeSeries, jst);
-        let utc_ticks = axis_ticks_with_mode(&axis, 8, TickMode::TimeSeries, TimeZone::Utc);
+        let jst_ticks = axis_ticks_with_mode(&axis, 8, TickMode::TimeSeries, jst, 0.0);
+        let utc_ticks = axis_ticks_with_mode(&axis, 8, TickMode::TimeSeries, TimeZone::Utc, 0.0);
         assert!(!jst_ticks.is_empty(), "zoned ticks empty");
         // Every tick sits at local midnight in the zone, and the first label is
         // the zone-local ISO date.

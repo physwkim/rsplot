@@ -448,6 +448,7 @@ impl<'a> PlotView<'a> {
                 plot.y_max_ticks,
                 plot.x_tick_mode(),
                 plot.x_time_zone(),
+                plot.x_time_offset(),
             );
             if let Some(t_right) = &transform_right {
                 chrome::draw_y2_ticks(painter, t_right, &style);
