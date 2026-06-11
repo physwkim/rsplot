@@ -24,7 +24,10 @@
 //!   (`mini:dot:cam1:Acquire`, `mini:dot:cam1:ImageMode`).
 //!
 //! Run (after the IOC is up and reachable):
-//! `cargo run -p sidm --example sidm_mini_beamline --features ca`
+//! `cargo run -p sidm --example sidm_mini_beamline`
+//! (`ca` is a default feature, so no `--features` flag is needed; the
+//! `required-features = ["ca"]` gate only skips the example under
+//! `--no-default-features`.)
 //!
 //! Point `EPICS_CA_ADDR_LIST` at the IOC's host if it is not on the local
 //! broadcast domain. With no IOC reachable the channels stay disconnected and
