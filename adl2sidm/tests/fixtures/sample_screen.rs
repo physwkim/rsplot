@@ -61,11 +61,11 @@ impl Screen {
         let gate9 = engine
             .connect("calc://adl2sidm_vis_129?expr=A!=0&A=ca://DMM1:show_box&update=A")
             .expect("adl2sidm: connect visibility gate calc://adl2sidm_vis_129?expr=A!=0&A=ca://DMM1:show_box&update=A");
-        let w10 = SidmDrawing::new(&engine, "loc://adl2sidm_shape_146", DrawingShape::Ellipse)
-            .expect("adl2sidm: connect loc://adl2sidm_shape_146 (drawing)")
+        let w10 = SidmDrawing::new(&engine, "loc://adl2sidm_shape_0", DrawingShape::Ellipse)
+            .expect("adl2sidm: connect loc://adl2sidm_shape_0 (drawing)")
             .with_fill(Color32::from_rgb(255, 0, 0));
-        let w11 = SidmDrawing::new(&engine, "loc://adl2sidm_shape_157", DrawingShape::Arc { begin_deg: 0.0, span_deg: 360.0 })
-            .expect("adl2sidm: connect loc://adl2sidm_shape_157 (arc)")
+        let w11 = SidmDrawing::new(&engine, "loc://adl2sidm_shape_1", DrawingShape::Arc { begin_deg: 0.0, span_deg: 360.0 })
+            .expect("adl2sidm: connect loc://adl2sidm_shape_1 (arc)")
             .with_fill(Color32::from_rgb(0, 255, 0));
         let w12 = SidmImage::new("logo.gif")
             .with_size(egui::Vec2::new(80.0, 24.0));
@@ -73,8 +73,8 @@ impl Screen {
         w13.add_channel(&engine, "ca://DMM1:readback", Color32::from_rgb(0, 0, 255), "$(P)readback").expect("adl2sidm: add strip-chart curve $(P)readback");
         let mut w14 = SidmWaveformPlot::new(rs, 1);
         w14.add_xy_channel(&engine, "ca://DMM1:ywave", Some("ca://DMM1:xwave"), Color32::from_rgb(255, 0, 0), "curve 1").expect("adl2sidm: add waveform curve 1");
-        let w15 = SidmFrame::new(&engine, "loc://adl2sidm_frame_206")
-            .expect("adl2sidm: connect loc://adl2sidm_frame_206 (composite)");
+        let w15 = SidmFrame::new(&engine, "loc://adl2sidm_frame_2")
+            .expect("adl2sidm: connect loc://adl2sidm_frame_2 (composite)");
         let w16 = SidmLabel::new(&engine, "ca://DMM1:status")
             .expect("adl2sidm: connect ca://DMM1:status (text update)");
         Self { _engine: engine, w1, w2, w3, w4, w5, w6, w7, w8, gate9, w10, w11, w12, w13, w14, w15, w16 }

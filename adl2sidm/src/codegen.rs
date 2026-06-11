@@ -115,6 +115,12 @@ struct Builder {
     /// Running plot index → distinct `PlotId`s for GPU plot/image widgets, which
     /// siplot uses to key their GPU resources (must be unique within a screen).
     next_plot_id: u64,
+    /// Running counter for synthetic `loc://` placeholder channels (channel-less
+    /// shapes, composite frames, embedded-display frames). Keyed off this rather
+    /// than `widget.line` so addresses stay unique across inlined files — two
+    /// widgets at the same source line in different `.adl`s must not share a
+    /// channel.
+    next_synthetic_id: u64,
     /// Whether any emitted code references `Color32` / `sidm::widgets`.
     needs_color: bool,
     needs_widgets: bool,
@@ -146,6 +152,16 @@ impl Builder {
         let i = self.next_plot_id;
         self.next_plot_id += 1;
         i
+    }
+
+    /// A fresh synthetic `loc://adl2sidm_<kind>_<n>` placeholder address, unique
+    /// across the whole screen (including inlined embedded files). `kind` labels
+    /// it (`shape`/`frame`/`embed`); the monotonic `n` guarantees uniqueness even
+    /// when two widgets share a source line across different `.adl`s.
+    fn synthetic_addr(&mut self, kind: &str) -> String {
+        let i = self.next_synthetic_id;
+        self.next_synthetic_id += 1;
+        format!("loc://adl2sidm_{kind}_{i}")
     }
 }
 
@@ -724,7 +740,7 @@ fn emit_drawing(b: &mut Builder, widget: &MedmWidget, options: &Options, z: ZLay
         skip_no_geometry(b, widget);
         return;
     };
-    let addr = dynamic_channel(widget, options, "shape");
+    let addr = dynamic_channel(b, widget, options, "shape");
     let new_call = format!(
         "SidmDrawing::new(&engine, {}, DrawingShape::{shape})",
         rust_str(&addr)
@@ -805,7 +821,7 @@ fn emit_arc(b: &mut Builder, widget: &MedmWidget, options: &Options, z: ZLayer) 
         skip_no_geometry(b, widget);
         return;
     };
-    let addr = dynamic_channel(widget, options, "shape");
+    let addr = dynamic_channel(b, widget, options, "shape");
     let begin = angle_deg(widget, "beginAngle", 0.0);
     let span = angle_deg(widget, "pathAngle", 360.0);
     let new_call = format!(
@@ -858,7 +874,7 @@ fn emit_polyshape(
         );
         return;
     }
-    let addr = dynamic_channel(widget, options, "shape");
+    let addr = dynamic_channel(b, widget, options, "shape");
     let shape = if polygon { "Polygon" } else { "Polyline" };
     let new_call = format!(
         "SidmDrawing::new(&engine, {}, DrawingShape::{shape})",
@@ -956,7 +972,7 @@ fn emit_composite(b: &mut Builder, widget: &MedmWidget, options: &Options, z: ZL
     }
     let addr = match widget.assignments.get("chan").filter(|c| !c.is_empty()) {
         Some(chan) => apply_protocol(chan, options),
-        None => format!("loc://adl2sidm_frame_{}", widget.line),
+        None => b.synthetic_addr("frame"),
     };
     // Composite children are in absolute SCREEN coordinates, so they translate
     // into the frame interior by the composite's own origin.
@@ -1523,7 +1539,7 @@ fn emit_embedded_display(b: &mut Builder, widget: &MedmWidget, options: &Options
         source_dir: canonical.parent().map(PathBuf::from),
         ..options.clone()
     };
-    let addr = format!("loc://adl2sidm_embed_{}", widget.line);
+    let addr = b.synthetic_addr("embed");
 
     b.embed_stack.push(canonical);
     // The target's widgets are in its OWN screen coordinates (origin 0,0), so they
@@ -2034,8 +2050,9 @@ fn channel_address(widget: &MedmWidget, options: &Options) -> Option<String> {
 /// The channel for a `dynamic attribute` (drawings, composites): its `chan` with
 /// macros + protocol when present and non-empty, else a unique local `loc://`
 /// placeholder so the channel-less decoration still constructs. `kind` names the
-/// placeholder (`shape`, `frame`) and the widget line keeps it unique.
-fn dynamic_channel(widget: &MedmWidget, options: &Options, kind: &str) -> String {
+/// placeholder (`shape`, `frame`); a per-screen counter (not the widget line)
+/// keeps it unique even across inlined files.
+fn dynamic_channel(b: &mut Builder, widget: &MedmWidget, options: &Options, kind: &str) -> String {
     if let Some(chan) = widget
         .attributes
         .get("dynamic attribute")
@@ -2044,7 +2061,7 @@ fn dynamic_channel(widget: &MedmWidget, options: &Options, kind: &str) -> String
     {
         return apply_protocol(chan, options);
     }
-    format!("loc://adl2sidm_{kind}_{}", widget.line)
+    b.synthetic_addr(kind)
 }
 
 /// Substitute macros and prefix the protocol onto a bare MEDM channel name.
@@ -4179,6 +4196,123 @@ composite {
             g.warnings
         );
         assert!(g.source.contains("[embedded: cyclic.adl]"), "{}", g.source);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The synthetic `loc://adl2sidm_<kind>_<n>` placeholder address that each
+    /// widget *constructor* connects to — one entry per channel-less widget
+    /// (`SidmDrawing::new(&engine, "loc://…")`, `SidmFrame::new(&engine, …)`).
+    /// Anchoring on the `(&engine, "` constructor argument skips the same address
+    /// re-appearing in connect-description strings, so two equal entries mean two
+    /// widgets genuinely share one channel — the E4 collision.
+    fn synthetic_ctor_addrs(source: &str) -> Vec<String> {
+        const ANCHOR: &str = "(&engine, \"loc://adl2sidm_";
+        let mut out = Vec::new();
+        let mut rest = source;
+        while let Some(start) = rest.find(ANCHOR) {
+            let tail = &rest[start + "(&engine, \"".len()..];
+            let end = tail.find('"').unwrap_or(tail.len());
+            out.push(tail[..end].to_string());
+            rest = &tail[end..];
+        }
+        out
+    }
+
+    #[test]
+    fn synthetic_addresses_stay_unique_across_inlined_files() {
+        // E4: synthetic placeholder channels were once keyed off `widget.line`, so
+        // a channel-less shape at the same source line in two inlined `.adl`s
+        // collided onto one `loc://` address — two widgets sharing one Engine
+        // channel. Embedding the SAME child file twice reproduces it: both copies'
+        // channel-less rectangle sits at the identical line. A monotonic per-screen
+        // counter must hand each occurrence a distinct address.
+        let dir = embed_tmpdir("unique");
+        std::fs::write(
+            dir.join("child.adl"),
+            r#"
+"color map" {
+	colors {
+		ffffff,
+		000000,
+	}
+}
+display {
+	object {
+		x=0
+		y=0
+		width=80
+		height=20
+	}
+	clr=1
+	bclr=0
+}
+rectangle {
+	object {
+		x=0
+		y=0
+		width=80
+		height=20
+	}
+	"basic attribute" {
+		clr=1
+		fill="solid"
+	}
+}
+"#,
+        )
+        .unwrap();
+        // Two composites in the parent, each embedding the identical child file.
+        let parent = r#"
+"color map" {
+	colors {
+		ffffff,
+		000000,
+	}
+}
+composite {
+	object {
+		x=0
+		y=0
+		width=80
+		height=20
+	}
+	"composite file"="child.adl"
+}
+composite {
+	object {
+		x=0
+		y=40
+		width=80
+		height=20
+	}
+	"composite file"="child.adl"
+}
+"#;
+        let options = Options {
+            protocol: String::new(),
+            source_dir: Some(dir.clone()),
+            ..Options::default()
+        };
+        let g = generate(&parse(parent), &options);
+        let addrs = synthetic_ctor_addrs(&g.source);
+        // Two embed frames + two channel-less rectangle children = four constructor
+        // sites needing a synthetic channel.
+        assert_eq!(
+            addrs.len(),
+            4,
+            "expected 4 synthetic constructor sites (2 embeds + 2 shapes):\n{addrs:?}\n{}",
+            g.source
+        );
+        // Every one must be distinct (the pre-fix code emitted two identical
+        // `..._shape_<line>` for the two rectangles, fusing their channels).
+        let mut deduped = addrs.clone();
+        deduped.sort();
+        deduped.dedup();
+        assert_eq!(
+            deduped.len(),
+            addrs.len(),
+            "synthetic channel addresses must be unique; got duplicates in {addrs:?}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

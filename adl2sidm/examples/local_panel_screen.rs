@@ -30,8 +30,8 @@ impl Screen {
             .with_precision(1);
         let mut w2 = SidmTimePlot::new(rs, 0).with_time_span(20.0);
         w2.add_channel(&engine, "fake://temperature?wave=sine&period=8&rate=20&min=20&max=80", Color32::from_rgb(0, 0, 255), "fake://temperature?wave=sine&period=8&rate=20&min=20&max=80").expect("adl2sidm: add strip-chart curve fake://temperature?wave=sine&period=8&rate=20&min=20&max=80");
-        let w3 = SidmDrawing::new(&engine, "loc://adl2sidm_shape_66", DrawingShape::Rectangle)
-            .expect("adl2sidm: connect loc://adl2sidm_shape_66 (drawing)")
+        let w3 = SidmDrawing::new(&engine, "loc://adl2sidm_shape_0", DrawingShape::Rectangle)
+            .expect("adl2sidm: connect loc://adl2sidm_shape_0 (drawing)")
             .with_fill(Color32::TRANSPARENT)
             .with_border(Color32::from_rgb(192, 192, 192), 2.0);
         let w4 = SidmLineEdit::new(&engine, "loc://setpoint?type=float&init=5&precision=2")
@@ -50,8 +50,8 @@ impl Screen {
             .with_big_endian(true);
         let w8 = SidmLineEdit::new(&engine, "loc://flags?type=int&init=170")
             .expect("adl2sidm: connect loc://flags?type=int&init=170");
-        let w13 = SidmFrame::new(&engine, "loc://adl2sidm_embed_204")
-            .expect("adl2sidm: connect loc://adl2sidm_embed_204 (embedded embed_child.adl)");
+        let w13 = SidmFrame::new(&engine, "loc://adl2sidm_embed_1")
+            .expect("adl2sidm: connect loc://adl2sidm_embed_1 (embedded embed_child.adl)");
         let w15 = SidmLabel::new(&engine, "loc://embcount?type=int&init=7")
             .expect("adl2sidm: connect loc://embcount?type=int&init=7 (text update)")
             .with_precision(0);
