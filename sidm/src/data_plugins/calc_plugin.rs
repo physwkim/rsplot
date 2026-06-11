@@ -161,7 +161,7 @@ async fn run_channel(
                     && let Some(value) = evaluate(&expr, &children, prev_value.as_ref())
                 {
                     prev_value = Some(value.clone());
-                    writer.update(move |s| {
+                    writer.post_value(move |s| {
                         s.connected = true;
                         s.value = Some(value);
                     });

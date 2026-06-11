@@ -13,6 +13,7 @@
 //! [`Channel`] handle and its `Connection`/`StateWriter` machinery (which a
 //! plugin task drives over the async runtime) live at the bottom of the file.
 
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::time::SystemTime;
 
@@ -205,6 +206,72 @@ impl ChannelState {
     }
 }
 
+/// One value update, delivered to a subscriber as a discrete event.
+///
+/// The [`ChannelState`] snapshot keeps only the *latest* value, so consumers
+/// that read it once per GUI frame coalesce every update that arrived since the
+/// previous frame into one (acceptable for a label, lossy for a strip chart).
+/// A `ValueEvent` is the event-driven complement: the engine emits exactly one
+/// per value arrival (an EPICS `camonitor` callback), so a consumer that drains
+/// the [`ValueSubscription`] queue sees *every* value — at its own arrival
+/// time — even when many land between two frames. This mirrors PyDM, whose
+/// `receiveNewValue` slot fires (and appends to the plot buffer) once per
+/// monitor callback, independent of repaint.
+#[derive(Clone, Debug)]
+pub struct ValueEvent {
+    /// The value carried by this update.
+    pub value: PvValue,
+    /// Engine-side receive time, used as the sample's timestamp (PyDM uses
+    /// `time.time()` in the value callback — the same wall clock the engine
+    /// stamps here when it fans the event out).
+    pub time: SystemTime,
+}
+
+/// A bounded FIFO of [`ValueEvent`]s shared by one producer (the connection
+/// task) and one consumer (a widget on the GUI thread).
+///
+/// Bounded with drop-oldest: if the consumer falls behind, the oldest events are
+/// dropped so memory stays bounded — the consumer keeps the most recent `cap`,
+/// which matches the bounded plot buffer it feeds (PyDM `bufferSize`).
+struct ValueQueue {
+    events: Mutex<VecDeque<ValueEvent>>,
+    cap: usize,
+}
+
+impl ValueQueue {
+    fn push(&self, event: ValueEvent) {
+        let mut events = self.events.lock().expect("value queue poisoned");
+        while events.len() >= self.cap {
+            events.pop_front();
+        }
+        events.push_back(event);
+    }
+
+    /// Take every queued event (oldest first), leaving the queue empty.
+    fn take(&self) -> VecDeque<ValueEvent> {
+        std::mem::take(&mut *self.events.lock().expect("value queue poisoned"))
+    }
+}
+
+/// A widget's handle to a channel's value-event stream, obtained from
+/// [`Channel::subscribe_values`]. Dropping it unsubscribes: the connection
+/// prunes the now-dead queue on its next publish (the queue is held by a `Weak`
+/// on the producer side).
+pub struct ValueSubscription {
+    queue: Arc<ValueQueue>,
+}
+
+impl ValueSubscription {
+    /// Drain every event queued since the last call (oldest first) into `f`.
+    /// Call this each frame: the queue buffers events between frames, so nothing
+    /// is lost even when the widget is not drawn (an inactive tab).
+    pub fn drain(&self, mut f: impl FnMut(ValueEvent)) {
+        for event in self.queue.take() {
+            f(event);
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Live channel machinery (engine side).
 // ---------------------------------------------------------------------------
@@ -236,10 +303,53 @@ impl RepaintHook {
 }
 
 /// State shared between a [`Channel`] (GUI side) and its [`StateWriter`]
-/// (plugin side): the locked [`ChannelState`] plus the repaint hook.
+/// (plugin side): the locked [`ChannelState`] snapshot, the repaint hook, and
+/// the live value-event subscribers (one [`ValueQueue`] per
+/// [`Channel::subscribe_values`], held weakly so a dropped subscription is
+/// pruned on the next publish).
 pub(crate) struct ConnShared {
     state: RwLock<ChannelState>,
     repaint: RepaintHook,
+    value_subs: Mutex<Vec<Weak<ValueQueue>>>,
+}
+
+impl ConnShared {
+    /// Register a new bounded value-event queue and return it. The producer
+    /// keeps only a `Weak`, so dropping the returned [`ValueSubscription`]
+    /// (which owns the `Arc`) ends the subscription.
+    fn subscribe_values(&self, cap: usize) -> Arc<ValueQueue> {
+        let queue = Arc::new(ValueQueue {
+            events: Mutex::new(VecDeque::new()),
+            cap: cap.max(1),
+        });
+        self.value_subs
+            .lock()
+            .expect("value subscribers poisoned")
+            .push(Arc::downgrade(&queue));
+        queue
+    }
+
+    /// Fan a value out to every live subscriber, stamping it with the current
+    /// receive time, and prune any whose subscription has been dropped. A no-op
+    /// (beyond the empty-list check) when nothing subscribes — the common case
+    /// for scalar widgets that only read the snapshot.
+    fn publish_value(&self, value: PvValue) {
+        let mut subs = self.value_subs.lock().expect("value subscribers poisoned");
+        if subs.is_empty() {
+            return;
+        }
+        let event = ValueEvent {
+            value,
+            time: SystemTime::now(),
+        };
+        subs.retain(|weak| match weak.upgrade() {
+            Some(queue) => {
+                queue.push(event.clone());
+                true
+            }
+            None => false,
+        });
+    }
 }
 
 /// The plugin-side handle used to publish [`ChannelState`] updates.
@@ -255,6 +365,13 @@ pub struct StateWriter {
 impl StateWriter {
     /// Apply `f` to the channel state under the write lock, bump the update
     /// stamp, and request a repaint.
+    ///
+    /// Use this for connection / metadata / access-rights changes — anything
+    /// that does **not** deliver a new value. A value arrival must instead go
+    /// through [`post_value`](Self::post_value) so it is also emitted to
+    /// value-event subscribers; routing it through `update` would update the
+    /// snapshot but silently drop the event (a strip chart would miss the
+    /// sample).
     pub fn update(&self, f: impl FnOnce(&mut ChannelState)) {
         {
             let mut state = self.shared.state.write().expect("channel state poisoned");
@@ -262,6 +379,31 @@ impl StateWriter {
             state.stamp = state.stamp.wrapping_add(1);
         }
         self.shared.repaint.notify();
+    }
+
+    /// Apply `f` (which **must** set `state.value`), bump the stamp, request a
+    /// repaint, and emit the resulting value as a [`ValueEvent`] to every
+    /// subscriber.
+    ///
+    /// This is the single owner of "a value arrived": updating the latest-value
+    /// snapshot and fanning the event out happen together, so a value can never
+    /// reach the snapshot without also reaching the event stream. Call it at
+    /// every value-arrival site (the monitor callback, the connect-time initial
+    /// value); connection/metadata-only changes use [`update`](Self::update) so
+    /// they do not emit a spurious sample. The published value is whatever `f`
+    /// leaves in `state.value`, so a repeated value still emits an event (a
+    /// strip chart must show the time progression even when the value repeats).
+    pub fn post_value(&self, f: impl FnOnce(&mut ChannelState)) {
+        let value = {
+            let mut state = self.shared.state.write().expect("channel state poisoned");
+            f(&mut state);
+            state.stamp = state.stamp.wrapping_add(1);
+            state.value.clone()
+        };
+        self.shared.repaint.notify();
+        if let Some(value) = value {
+            self.shared.publish_value(value);
+        }
     }
 }
 
@@ -297,6 +439,7 @@ impl Connection {
         let shared = Arc::new(ConnShared {
             state: RwLock::new(ChannelState::default()),
             repaint,
+            value_subs: Mutex::new(Vec::new()),
         });
         let (writes_tx, writes_rx) = mpsc::unbounded_channel();
         let cancel = CancellationToken::new();
@@ -363,6 +506,23 @@ impl Channel {
             .read()
             .expect("channel state poisoned")
             .clone()
+    }
+
+    /// Subscribe to this channel's value-event stream, returning a
+    /// [`ValueSubscription`] backed by a bounded `cap`-event queue.
+    ///
+    /// Every subsequent value arrival is queued as one [`ValueEvent`]; the
+    /// caller drains it each frame (see [`ValueSubscription::drain`]). Unlike
+    /// the latest-value [`state`](Self::state) snapshot, this loses no update
+    /// when several arrive between two frames — the model an event-driven
+    /// `camonitor` stream needs. Each subscription has its own queue, so two
+    /// widgets on the same PV both receive every event. Only values posted
+    /// *after* subscribing are delivered (the current snapshot value is not
+    /// replayed).
+    pub fn subscribe_values(&self, cap: usize) -> ValueSubscription {
+        ValueSubscription {
+            queue: self.conn.shared.subscribe_values(cap),
+        }
     }
 
     /// The current update stamp (monotonic per connection).
@@ -463,5 +623,96 @@ mod tests {
         assert_eq!(s.severity, AlarmSeverity::NoAlarm);
         assert_eq!(s.effective_severity(), AlarmSeverity::Disconnected);
         assert_eq!(s.stamp, 0);
+    }
+
+    /// Build a connected `(Channel, StateWriter)` pair with a dangling pool weak
+    /// (the pool prune in `Drop` is a no-op) for exercising the value-event path.
+    fn channel_pair() -> (Channel, StateWriter) {
+        let (conn, writer, _writes, _cancel) = Connection::new(
+            crate::address::PvAddress::parse("loc://value_events"),
+            RepaintHook::default(),
+            Weak::new(),
+            "loc://value_events".to_owned(),
+        );
+        // Keep the write queue / cancel token alive for the test's lifetime by
+        // leaking them into the Channel's connection (they live on `conn`); the
+        // returned receivers are only dropped here, which is harmless.
+        (Channel::new(conn), writer)
+    }
+
+    fn drain_values(sub: &ValueSubscription) -> Vec<f64> {
+        let mut out = Vec::new();
+        sub.drain(|ev| out.push(ev.value.as_f64().expect("numeric")));
+        out
+    }
+
+    #[test]
+    fn post_value_delivers_every_value_to_a_subscriber() {
+        let (channel, writer) = channel_pair();
+        let sub = channel.subscribe_values(16);
+        // Three values posted with no drain between: a snapshot would coalesce
+        // these to the last one; the event queue must keep all three, in order.
+        for v in [1.0, 2.0, 3.0] {
+            writer.post_value(|s| {
+                s.connected = true;
+                s.value = Some(PvValue::Float(v));
+            });
+        }
+        assert_eq!(drain_values(&sub), vec![1.0, 2.0, 3.0]);
+        // A repeated value still emits an event (strip-chart time progression).
+        writer.post_value(|s| s.value = Some(PvValue::Float(3.0)));
+        assert_eq!(drain_values(&sub), vec![3.0]);
+        // Drain leaves the queue empty.
+        assert_eq!(drain_values(&sub), Vec::<f64>::new());
+    }
+
+    #[test]
+    fn update_does_not_emit_a_value_event() {
+        let (channel, writer) = channel_pair();
+        let sub = channel.subscribe_values(16);
+        // A connection/metadata-only change must not enqueue a sample, even
+        // though a stale value sits in the snapshot.
+        writer.post_value(|s| {
+            s.connected = true;
+            s.value = Some(PvValue::Float(5.0));
+        });
+        assert_eq!(drain_values(&sub), vec![5.0]);
+        writer.update(|s| s.connected = false);
+        writer.update(|s| s.write_access = true);
+        assert_eq!(drain_values(&sub), Vec::<f64>::new());
+    }
+
+    #[test]
+    fn subscriber_queue_drops_oldest_past_capacity() {
+        let (channel, writer) = channel_pair();
+        let sub = channel.subscribe_values(2);
+        for v in [1.0, 2.0, 3.0, 4.0] {
+            writer.post_value(|s| s.value = Some(PvValue::Float(v)));
+        }
+        // cap = 2: only the two most recent survive.
+        assert_eq!(drain_values(&sub), vec![3.0, 4.0]);
+    }
+
+    #[test]
+    fn dropped_subscription_is_pruned_and_others_keep_receiving() {
+        let (channel, writer) = channel_pair();
+        let live = channel.subscribe_values(16);
+        let gone = channel.subscribe_values(16);
+        drop(gone);
+        // Publishing after a subscriber drops must not panic and must still
+        // deliver to the live one (the dead queue is pruned on publish).
+        writer.post_value(|s| s.value = Some(PvValue::Float(7.0)));
+        assert_eq!(drain_values(&live), vec![7.0]);
+    }
+
+    #[test]
+    fn values_posted_before_subscribing_are_not_replayed() {
+        let (channel, writer) = channel_pair();
+        writer.post_value(|s| s.value = Some(PvValue::Float(1.0)));
+        // Subscribing after the fact starts from empty (no snapshot replay).
+        let sub = channel.subscribe_values(16);
+        assert_eq!(drain_values(&sub), Vec::<f64>::new());
+        writer.post_value(|s| s.value = Some(PvValue::Float(2.0)));
+        assert_eq!(drain_values(&sub), vec![2.0]);
     }
 }

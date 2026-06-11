@@ -175,7 +175,7 @@ impl DataPlugin for FakePlugin {
                         let t = start.elapsed().as_secs_f64();
                         let value = sample(cfg.wave, t, tick, cfg.period, cfg.min, cfg.max);
                         let severity = severity_for(value, cfg.warn, cfg.alarm);
-                        writer.update(move |s| {
+                        writer.post_value(move |s| {
                             s.connected = true;
                             s.write_access = false;
                             s.value = Some(PvValue::Float(value));

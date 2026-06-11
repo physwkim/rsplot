@@ -41,7 +41,7 @@ use siplot::egui::Color32;
 use siplot::egui_wgpu::RenderState;
 use siplot::{DataMargins, ItemHandle, Plot1D, PlotId, PlotResponse, egui};
 
-use crate::channel::{Channel, ChannelState, PvValue};
+use crate::channel::{Channel, ChannelState, PvValue, ValueEvent, ValueSubscription};
 use crate::engine::{Engine, EngineError};
 use crate::widgets::plot_menu::{
     YAxisMenu, enable_y_autoscale, set_y_range, show_with_y_axis_menu,
@@ -80,23 +80,34 @@ pub fn is_rate_due(now: f64, last_push: f64, interval: f64) -> bool {
     now - last_push >= interval
 }
 
-/// Wall-clock POSIX seconds (PyDM `time.time()`), or `0.0` before the epoch.
-fn now_epoch_secs() -> f64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
+/// Seconds since the UNIX epoch for `t` — the strip chart's `f64` time axis —
+/// or `0.0` for a pre-epoch time.
+fn secs_since_epoch(t: SystemTime) -> f64 {
+    t.duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs_f64())
         .unwrap_or(0.0)
 }
 
-/// The pure sample-feeding state for one curve: its buffer plus the bookkeeping
-/// each [`UpdateMode`] needs. Appends a `(time, value)` sample per
-/// [`CurveFeed::ingest`] and reports whether the buffer changed.
+/// Wall-clock POSIX seconds now (PyDM `time.time()`).
+fn now_epoch_secs() -> f64 {
+    secs_since_epoch(SystemTime::now())
+}
+
+/// The sample-feeding state for one curve: its buffer plus the fixed-rate
+/// bookkeeping. Appends `(time, value)` samples and reports whether the buffer
+/// changed (so the curve needs a redraw).
+///
+/// The two update modes feed it differently, matching PyDM:
+/// - [`UpdateMode::OnValueChange`] drains the channel's value-event stream and
+///   appends each event ([`CurveFeed::ingest_event`]) — event-driven, lossless,
+///   one sample per `camonitor` callback at its own receive time.
+/// - [`UpdateMode::AtFixedRate`] tracks the latest snapshot value and appends it
+///   at the fixed rate ([`CurveFeed::ingest_fixed`]) — rate-driven, the latest
+///   value resampled on a timer.
 struct CurveFeed {
     buffer: TimeSeriesBuffer,
-    /// Last observed snapshot stamp (PyDM value-change detection).
-    last_stamp: u64,
     /// Most recent numeric value, held for the fixed-rate push (PyDM
-    /// `latest_value`).
+    /// `latest_value`). Used only by [`CurveFeed::ingest_fixed`].
     latest_value: Option<f64>,
 }
 
@@ -104,46 +115,43 @@ impl CurveFeed {
     fn new(buffer_size: usize) -> Self {
         Self {
             buffer: TimeSeriesBuffer::new(buffer_size),
-            last_stamp: 0,
             latest_value: None,
         }
     }
 
-    /// Feed the current channel snapshot at time `now`. Returns `true` when a
-    /// sample was appended (the buffer changed and the curve needs a redraw).
-    fn ingest(&mut self, now: f64, state: &ChannelState, mode: UpdateMode, rate_due: bool) -> bool {
-        let value = state.value.as_ref().and_then(PvValue::as_f64);
-        match mode {
-            UpdateMode::OnValueChange => {
-                // A new snapshot (only while connected — a disconnect bumps the
-                // stamp but carries a stale value).
-                if state.connected && state.stamp != self.last_stamp {
-                    self.last_stamp = state.stamp;
-                    if let Some(v) = value {
-                        self.buffer.push(now, v);
-                        return true;
-                    }
-                }
-                false
-            }
-            UpdateMode::AtFixedRate => {
-                if let Some(v) = value {
-                    self.latest_value = Some(v);
-                }
-                if rate_due && let Some(v) = self.latest_value {
-                    self.buffer.push(now, v);
-                    return true;
-                }
-                false
-            }
+    /// `OnValueChange`: append one value event at its receive time. Returns
+    /// `true` when a sample was appended (a numeric value). Each event is one
+    /// distinct monitor callback, so there is no stamp dedup — a repeated value
+    /// still appends, showing the time progression (PyDM `receiveNewValue`).
+    fn ingest_event(&mut self, event: &ValueEvent) -> bool {
+        if let Some(v) = event.value.as_f64() {
+            self.buffer.push(secs_since_epoch(event.time), v);
+            return true;
         }
+        false
+    }
+
+    /// `AtFixedRate`: track the latest snapshot value, and append it at `now`
+    /// when the fixed interval is due (PyDM `asyncUpdate` on a `QTimer`).
+    /// Returns `true` when a sample was appended.
+    fn ingest_fixed(&mut self, now: f64, state: &ChannelState, rate_due: bool) -> bool {
+        if let Some(v) = state.value.as_ref().and_then(PvValue::as_f64) {
+            self.latest_value = Some(v);
+        }
+        if rate_due && let Some(v) = self.latest_value {
+            self.buffer.push(now, v);
+            return true;
+        }
+        false
     }
 }
 
-/// One channel-driven curve: its channel handle, its feed, and the siplot item
-/// handle plus reusable scratch buffers for the render feed.
+/// One channel-driven curve: its channel handle, its value-event subscription
+/// (drained in `OnValueChange`), its feed, and the siplot item handle plus
+/// reusable scratch buffers for the render feed.
 struct TimeCurve {
     channel: Channel,
+    subscription: ValueSubscription,
     feed: CurveFeed,
     handle: ItemHandle,
     style: CurveStyle,
@@ -279,9 +287,14 @@ impl SidmTimePlot {
         legend: impl Into<String>,
     ) -> Result<usize, EngineError> {
         let channel = engine.connect(address)?;
+        // Subscribe to the value-event stream so `OnValueChange` gets every
+        // monitor callback (not a per-frame snapshot poll). Cap the queue at the
+        // buffer size — the same bound the curve buffer keeps.
+        let subscription = channel.subscribe_values(self.buffer_size);
         let handle = self.plot.add_curve_with_legend(&[], &[], color, legend);
         self.curves.push(TimeCurve {
             channel,
+            subscription,
             feed: CurveFeed::new(self.buffer_size),
             handle,
             style: CurveStyle::line(color),
@@ -323,23 +336,48 @@ impl SidmTimePlot {
         true
     }
 
-    /// Poll every channel, append samples, redraw changed curves, scroll the X
-    /// window, and render the plot this frame.
+    /// Ingest pending data, redraw changed curves, scroll the X window, and
+    /// render the plot this frame.
+    ///
+    /// In [`UpdateMode::OnValueChange`] this drains each curve's value-event
+    /// queue: every value that arrived since the last frame lands as its own
+    /// sample at its own receive time, so a burst arriving between two frames is
+    /// not coalesced. The queue is filled by the engine independent of repaint,
+    /// so a chart on an inactive tab keeps accumulating (up to the queue bound)
+    /// and renders its full recent history when the tab is shown again — no need
+    /// for the app to poll a hidden chart. In [`UpdateMode::AtFixedRate`] it
+    /// resamples the latest snapshot value on the fixed timer instead.
     pub fn show(&mut self, ui: &mut egui::Ui) -> PlotResponse {
         let now = now_epoch_secs();
-        let mode = self.update_mode;
         let t0 = self.t0;
-        let interval = update_interval(self.update_rate_hz);
-        let rate_due =
-            mode == UpdateMode::AtFixedRate && is_rate_due(now, self.last_fixed_push, interval);
-        if rate_due {
-            self.last_fixed_push = now;
-        }
 
-        for curve in &mut self.curves {
-            let state = curve.channel.state();
-            if curve.feed.ingest(now, &state, mode, rate_due) {
-                redraw_curve(&mut self.plot, curve, t0);
+        match self.update_mode {
+            UpdateMode::OnValueChange => {
+                for curve in &mut self.curves {
+                    let feed = &mut curve.feed;
+                    let mut changed = false;
+                    curve.subscription.drain(|event| {
+                        if feed.ingest_event(&event) {
+                            changed = true;
+                        }
+                    });
+                    if changed {
+                        redraw_curve(&mut self.plot, curve, t0);
+                    }
+                }
+            }
+            UpdateMode::AtFixedRate => {
+                let interval = update_interval(self.update_rate_hz);
+                let rate_due = is_rate_due(now, self.last_fixed_push, interval);
+                if rate_due {
+                    self.last_fixed_push = now;
+                }
+                for curve in &mut self.curves {
+                    let state = curve.channel.state();
+                    if curve.feed.ingest_fixed(now, &state, rate_due) {
+                        redraw_curve(&mut self.plot, curve, t0);
+                    }
+                }
             }
         }
 
@@ -369,6 +407,7 @@ impl SidmTimePlot {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{Duration, UNIX_EPOCH};
 
     fn state(connected: bool, stamp: u64, value: Option<PvValue>) -> ChannelState {
         ChannelState {
@@ -376,6 +415,15 @@ mod tests {
             value,
             stamp,
             ..ChannelState::default()
+        }
+    }
+
+    /// A value event at `secs` seconds past the epoch (the strip chart's time
+    /// axis), carrying `value`.
+    fn event(value: PvValue, secs: f64) -> ValueEvent {
+        ValueEvent {
+            value,
+            time: UNIX_EPOCH + Duration::from_secs_f64(secs),
         }
     }
 
@@ -397,88 +445,38 @@ mod tests {
     }
 
     #[test]
-    fn on_value_change_appends_on_new_stamp_with_numeric_value() {
+    fn ingest_event_appends_each_numeric_value_at_its_receive_time() {
         let mut feed = CurveFeed::new(8);
-        // First connected snapshot with a value appends.
-        assert!(feed.ingest(
-            1.0,
-            &state(true, 1, Some(PvValue::Float(5.0))),
-            UpdateMode::OnValueChange,
-            false
-        ));
+        // Each event appends a sample stamped at the event's receive time.
+        assert!(feed.ingest_event(&event(PvValue::Float(5.0), 1.0)));
         assert_eq!(feed.buffer.newest(), Some((1.0, 5.0)));
-        // Same stamp: no append.
-        assert!(!feed.ingest(
-            2.0,
-            &state(true, 1, Some(PvValue::Float(5.0))),
-            UpdateMode::OnValueChange,
-            false
-        ));
-        // New stamp: appends with the new time.
-        assert!(feed.ingest(
-            3.0,
-            &state(true, 2, Some(PvValue::Float(6.0))),
-            UpdateMode::OnValueChange,
-            false
-        ));
+        // A second event carrying a *repeated* value still appends (no stamp
+        // dedup — the strip chart must show the time progression).
+        assert!(feed.ingest_event(&event(PvValue::Float(5.0), 2.0)));
+        assert_eq!(feed.buffer.newest(), Some((2.0, 5.0)));
+        assert!(feed.ingest_event(&event(PvValue::Float(6.0), 3.0)));
         assert_eq!(feed.buffer.newest(), Some((3.0, 6.0)));
-        assert_eq!(feed.buffer.len(), 2);
+        // Three events between two frames → three samples (no coalescing).
+        assert_eq!(feed.buffer.len(), 3);
     }
 
     #[test]
-    fn on_value_change_skips_disconnected_and_non_numeric() {
+    fn ingest_event_skips_non_numeric_values() {
         let mut feed = CurveFeed::new(8);
-        // Disconnected: no append even with a value and a new stamp.
-        assert!(!feed.ingest(
-            1.0,
-            &state(false, 1, Some(PvValue::Float(5.0))),
-            UpdateMode::OnValueChange,
-            false
-        ));
-        // Connected but non-numeric: stamp advances, but nothing is plotted.
-        assert!(!feed.ingest(
-            2.0,
-            &state(true, 2, Some(PvValue::Str("x".into()))),
-            UpdateMode::OnValueChange,
-            false
-        ));
-        assert!(feed.buffer.is_empty());
-        // A later numeric value at the same advanced stamp does NOT re-append
-        // (stamp already consumed) — only a fresh stamp does.
-        assert!(!feed.ingest(
-            3.0,
-            &state(true, 2, Some(PvValue::Float(9.0))),
-            UpdateMode::OnValueChange,
-            false
-        ));
+        assert!(!feed.ingest_event(&event(PvValue::Str("x".into()), 1.0)));
         assert!(feed.buffer.is_empty());
     }
 
     #[test]
-    fn at_fixed_rate_appends_latest_value_only_when_due() {
+    fn ingest_fixed_appends_latest_value_only_when_due() {
         let mut feed = CurveFeed::new(8);
         // Not due: tracks latest, appends nothing.
-        assert!(!feed.ingest(
-            1.0,
-            &state(true, 1, Some(PvValue::Float(5.0))),
-            UpdateMode::AtFixedRate,
-            false
-        ));
+        assert!(!feed.ingest_fixed(1.0, &state(true, 1, Some(PvValue::Float(5.0))), false));
         assert!(feed.buffer.is_empty());
         // A newer value updates the tracked latest.
-        assert!(!feed.ingest(
-            1.5,
-            &state(true, 2, Some(PvValue::Float(7.0))),
-            UpdateMode::AtFixedRate,
-            false
-        ));
+        assert!(!feed.ingest_fixed(1.5, &state(true, 2, Some(PvValue::Float(7.0))), false));
         // Due: appends the latest tracked value at the current time.
-        assert!(feed.ingest(
-            2.0,
-            &state(true, 2, Some(PvValue::Float(7.0))),
-            UpdateMode::AtFixedRate,
-            true
-        ));
+        assert!(feed.ingest_fixed(2.0, &state(true, 2, Some(PvValue::Float(7.0))), true));
         assert_eq!(feed.buffer.newest(), Some((2.0, 7.0)));
         assert_eq!(feed.buffer.len(), 1);
     }

@@ -195,7 +195,10 @@ async fn run_channel(
                 Some(Ok(snap)) => {
                     connected_now = true;
                     let strings = enum_cache.clone();
-                    writer.update(move |s| apply_value(s, &snap, strings.as_deref()));
+                    // A monitor value arrival: post_value also fans it out to
+                    // value-event subscribers (strip charts), so every monitor
+                    // callback becomes one sample even between GUI frames.
+                    writer.post_value(move |s| apply_value(s, &snap, strings.as_deref()));
                 }
                 Some(Err(_)) => {}  // transient monitor error; keep the connection
                 None => break,      // subscription ended (channel shutdown)
@@ -237,7 +240,10 @@ async fn on_connect(
                 .filter(|e| !e.strings.is_empty())
                 .map(|e| Arc::from(e.strings.clone()));
             *enum_cache = strings.clone();
-            writer.update(move |s| apply_metadata(s, &snap, strings));
+            // The connect-time snapshot carries the initial value, so post it as
+            // a value event (not a bare snapshot update) — the first strip-chart
+            // sample.
+            writer.post_value(move |s| apply_metadata(s, &snap, strings));
         }
         Err(_) => {
             // Connected, but the metadata read failed; reflect the connection so

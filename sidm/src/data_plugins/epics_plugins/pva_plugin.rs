@@ -161,7 +161,10 @@ async fn run_channel(
                     if let Some(c) = enum_choices_of(&value) {
                         *choices.lock().expect("pva choices cache poisoned") = Some(c);
                     }
-                    writer.update(move |s| apply_ntscalar(s, &value));
+                    // A pvAccess monitor value: post it so value-event
+                    // subscribers (strip charts) get every update, not just the
+                    // latest snapshot per frame.
+                    writer.post_value(move |s| apply_ntscalar(s, &value));
                 }
                 MonitorEvent::Disconnected | MonitorEvent::Finished => {
                     // Keep the stale value (PyDM behaviour); only `connected`

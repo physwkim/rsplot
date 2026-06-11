@@ -36,9 +36,12 @@ impl DataPlugin for LocalPlugin {
             address,
         } = ctx;
 
-        // Publish the initial (connected) state from the query parameters.
+        // Publish the initial (connected) state from the query parameters. Use
+        // post_value so an initial value (if the address carried one) is also
+        // emitted as the first value event; with no initial value it publishes
+        // nothing (the snapshot value stays `None`).
         let init = initial_local_state(&address.query_params());
-        writer.update(move |s| {
+        writer.post_value(move |s| {
             *s = init;
             s.timestamp = Some(SystemTime::now());
         });
@@ -48,7 +51,7 @@ impl DataPlugin for LocalPlugin {
                 tokio::select! {
                     _ = cancel.cancelled() => break,
                     maybe = writes.recv() => match maybe {
-                        Some(value) => writer.update(|s| {
+                        Some(value) => writer.post_value(|s| {
                             s.value = Some(value);
                             s.timestamp = Some(SystemTime::now());
                         }),

@@ -37,7 +37,10 @@ pub mod utilities;
 pub mod widgets;
 
 pub use address::PvAddress;
-pub use channel::{AlarmSeverity, Channel, ChannelState, PvValue, RepaintHook, StateWriter};
+pub use channel::{
+    AlarmSeverity, Channel, ChannelState, PvValue, RepaintHook, StateWriter, ValueEvent,
+    ValueSubscription,
+};
 #[cfg(feature = "calc")]
 pub use data_plugins::calc_plugin::{CalcPlugin, ChildConnector};
 #[cfg(feature = "ca")]
