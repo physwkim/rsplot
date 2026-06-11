@@ -13,7 +13,7 @@
 //! queue bound.
 //!
 //! The redraw gate is the shared [`mode_allows`]; the pairing state machine
-//! ([`PairAccumulator`]) and the buffer ([`TimeSeriesBuffer`]) are unit-tested
+//! (`PairAccumulator`) and the buffer ([`TimeSeriesBuffer`]) are unit-tested
 //! purely. The GPU rendering is exercised by a headless wgpu readback test.
 
 use std::time::SystemTime;
