@@ -20,7 +20,9 @@
 //! * `codegen` — walks the IR and emits Rust source, one emitter per MEDM
 //!   widget type (the analogue of `adl2pydm/output_handler.py`).
 //!
-//! The modules land over the next commits; this is the crate scaffold.
+//! The remaining modules land over the next commits.
 //!
 //! [`adl2pydm`]: https://github.com/BCDA-APS/adl2pydm
 //! [`sidm`]: https://docs.rs/sidm
+
+pub mod adl_parser;

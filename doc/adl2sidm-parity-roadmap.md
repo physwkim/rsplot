@@ -88,7 +88,13 @@ not silently dropped (SiDM has no rules engine yet).
 ## Wave / commit log
 
 - ⬜ A1 — workspace member `adl2sidm` scaffold + this roadmap skeleton.
-- ⬜ A2 — `adl_parser.rs` (block parser + widget-tree IR).
+- ✅ A2 — `adl_parser.rs` (block parser + widget-tree IR). Faithful port of
+  `adl_parser.py`: line-oriented block/assignment scanning, colour-table
+  resolution (`colors` hex list or `dl_color` blocks), geometry, `control`/
+  `monitor`/etc. attribute blocks (whose `clr`/`bclr` override the widget colour,
+  as in `parseColorAssignments`), `limits` splicing, `points`, recursive
+  `composite` children, and indexed `trace`/`pen`/`display`/`command` records.
+  6 unit tests; sanity-checked against all 60 real adl2pydm fixtures (no panic).
 - ⬜ A3 — `symbols.rs` (MEDM → SiDM map + category + z-layer table).
 - ⬜ B4 — `codegen.rs` scaffold + simplest widgets (text / text update / text entry).
 - ⬜ B5 — emitter batch: controls (message button, menu, choice button, valuator, wheel switch, byte).
