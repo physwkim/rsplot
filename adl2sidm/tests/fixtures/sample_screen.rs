@@ -128,6 +128,9 @@ impl Screen {
         place(ui, __origin, egui::Order::Background, egui::Id::new(0u64), 10.0, 10.0, 200.0, 20.0, |ui| {
             {
                 ui.style_mut().override_font_id = Some(egui::FontId::proportional(12.0));
+                let __font = ui.style().override_font_id.clone().unwrap_or_else(|| egui::TextStyle::Body.resolve(ui.style()));
+                let __row = ui.fonts_mut(|f| f.row_height(&__font));
+                ui.add_space(((ui.available_height() - __row) / 2.0).max(0.0));
                 ui.label(egui::RichText::new("Sample Panel DMM1:").color(Color32::from_rgb(0, 0, 0)));
             }
         });
@@ -135,6 +138,9 @@ impl Screen {
             {
                 ui.style_mut().override_font_id = Some(egui::FontId::proportional(11.0));
                 let __c = alarm2.read(|s| severity_color_medm(s.effective_severity()));
+                let __font = ui.style().override_font_id.clone().unwrap_or_else(|| egui::TextStyle::Body.resolve(ui.style()));
+                let __row = ui.fonts_mut(|f| f.row_height(&__font));
+                ui.add_space(((ui.available_height() - __row) / 2.0).max(0.0));
                 ui.label(egui::RichText::new("STATUS").color(__c));
             }
         });

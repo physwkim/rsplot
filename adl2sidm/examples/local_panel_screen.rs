@@ -101,6 +101,9 @@ impl Screen {
         place(ui, __origin, sx, sy, egui::Order::Background, egui::Id::new(0u64), 10.0, 10.0, 320.0, 22.0, |ui| {
             {
                 ui.style_mut().override_font_id = Some(egui::FontId::proportional(13.0 * sy));
+                let __font = ui.style().override_font_id.clone().unwrap_or_else(|| egui::TextStyle::Body.resolve(ui.style()));
+                let __row = ui.fonts_mut(|f| f.row_height(&__font));
+                ui.add_space(((ui.available_height() - __row) / 2.0).max(0.0));
                 ui.label(egui::RichText::new("SiDM panel from .adl (no IOC)").color(Color32::from_rgb(0, 0, 0)));
             }
         });
@@ -158,6 +161,9 @@ impl Screen {
                 place(ui, __frame_origin_13, sx, sy, egui::Order::Background, egui::Id::new(14u64), 4.0, 2.0, 152.0, 14.0, |ui| {
                     {
                         ui.style_mut().override_font_id = Some(egui::FontId::proportional(8.0 * sy));
+                        let __font = ui.style().override_font_id.clone().unwrap_or_else(|| egui::TextStyle::Body.resolve(ui.style()));
+                        let __row = ui.fonts_mut(|f| f.row_height(&__font));
+                        ui.add_space(((ui.available_height() - __row) / 2.0).max(0.0));
                         ui.label(egui::RichText::new("embedded child").color(Color32::from_rgb(0, 0, 0)));
                     }
                 });

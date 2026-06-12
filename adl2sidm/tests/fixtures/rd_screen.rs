@@ -49,6 +49,9 @@ impl Screen {
         place(ui, __origin, sx, sy, egui::Order::Background, egui::Id::new(0u64), 10.0, 10.0, 200.0, 20.0, |ui| {
             {
                 ui.style_mut().override_font_id = Some(egui::FontId::proportional(12.0 * sy));
+                let __font = ui.style().override_font_id.clone().unwrap_or_else(|| egui::TextStyle::Body.resolve(ui.style()));
+                let __row = ui.fonts_mut(|f| f.row_height(&__font));
+                ui.add_space(((ui.available_height() - __row) / 2.0).max(0.0));
                 ui.label(egui::RichText::new("RD PARENT X:").color(Color32::from_rgb(0, 0, 0)));
             }
         });
@@ -278,6 +281,9 @@ pub mod __rd_rd_child {
             place(ui, __origin, sx, sy, egui::Order::Background, egui::Id::new(0u64), 10.0, 10.0, 180.0, 20.0, |ui| {
                 {
                     ui.style_mut().override_font_id = Some(egui::FontId::proportional(12.0 * sy));
+                    let __font = ui.style().override_font_id.clone().unwrap_or_else(|| egui::TextStyle::Body.resolve(ui.style()));
+                    let __row = ui.fonts_mut(|f| f.row_height(&__font));
+                    ui.add_space(((ui.available_height() - __row) / 2.0).max(0.0));
                     ui.label(egui::RichText::new(__m.expand("CHILD $(P)").as_str()).color(Color32::from_rgb(0, 0, 0)));
                 }
             });

@@ -514,7 +514,13 @@ fn emit_static_text(b: &mut Builder, widget: &MedmWidget, options: &Options, z: 
         None => label_call,
     };
     let prelude = style_prelude(b, WidgetColors::default(), Some(font_px));
-    let body = format!("{{\n{prelude}{alarm_setup}    {aligned}\n}}");
+    // Centre the text row in the MEDM cell — the band every framed widget
+    // renders (`SidmLabel`'s justified path). MEDM draws static text at the top
+    // with a font sized to fill the height; the height-derived font is smaller,
+    // so centring reproduces MEDM's visual band for group titles too. The
+    // spacing runs before the alignment layout, so it serves all three aligns.
+    let centring = "    let __font = ui.style().override_font_id.clone().unwrap_or_else(|| egui::TextStyle::Body.resolve(ui.style()));\n    let __row = ui.fonts_mut(|f| f.row_height(&__font));\n    ui.add_space(((ui.available_height() - __row) / 2.0).max(0.0));\n";
+    let body = format!("{{\n{prelude}{alarm_setup}{centring}    {aligned}\n}}");
     b.placements.push(Placement::drawn(z, id, geom, body));
 }
 
@@ -4377,6 +4383,18 @@ text {
             "only the centered static text should wrap in a layout:\n{}",
             g.source
         );
+        // Every static text centres its row in the MEDM cell (the framed-widget
+        // band) — the add_space runs before the alignment layout, so both the
+        // centered and the plain emission carry it. The text update does not
+        // (SidmLabel centres internally), so exactly the two `text` widgets.
+        assert_eq!(
+            g.source
+                .matches("ui.add_space(((ui.available_height() - __row) / 2.0).max(0.0));")
+                .count(),
+            2,
+            "each static text must vertically centre its row:\n{}",
+            g.source
+        );
     }
 
     #[test]
@@ -4460,9 +4478,11 @@ rectangle {
             "text update missing height-derived font:\n{}",
             g.source
         );
-        // Exactly the two text-bearing widgets set a font; the rectangle does not.
+        // Exactly the two text-bearing widgets set a font; the rectangle does
+        // not. Count the assignments — the static-text row centring also READS
+        // `override_font_id` back.
         assert_eq!(
-            g.source.matches("override_font_id").count(),
+            g.source.matches("override_font_id = Some(").count(),
             2,
             "only text-bearing widgets should set a font override:\n{}",
             g.source
