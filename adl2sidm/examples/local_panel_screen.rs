@@ -54,7 +54,8 @@ impl Screen {
             .with_placeholder_channel();
         let w4 = SidmLineEdit::new(&engine, "loc://setpoint?type=float&init=5&precision=2")
             .expect("adl2sidm: connect loc://setpoint?type=float&init=5&precision=2")
-            .with_border_mode(BorderMode::DisconnectedOnly);
+            .with_border_mode(BorderMode::DisconnectedOnly)
+            .with_alignment(TextAlign::Center);
         let w5 = SidmLabel::new(&engine, "loc://setpoint?type=float&init=5&precision=2")
             .expect("adl2sidm: connect loc://setpoint?type=float&init=5&precision=2 (text update)")
             .with_border_mode(BorderMode::DisconnectedOnly)
@@ -73,7 +74,8 @@ impl Screen {
             .with_big_endian(true);
         let w8 = SidmLineEdit::new(&engine, "loc://flags?type=int&init=170")
             .expect("adl2sidm: connect loc://flags?type=int&init=170")
-            .with_border_mode(BorderMode::DisconnectedOnly);
+            .with_border_mode(BorderMode::DisconnectedOnly)
+            .with_alignment(TextAlign::Center);
         let w13 = SidmFrame::new(&engine, "loc://adl2sidm_embed_1")
             .expect("adl2sidm: connect loc://adl2sidm_embed_1 (embedded embed_child.adl)")
             .with_placeholder_channel();

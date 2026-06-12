@@ -57,7 +57,8 @@ impl Screen {
             .with_precision(3);
         let w4 = SidmLineEdit::new(&engine, "ca://DMM1:setpoint")
             .expect("adl2sidm: connect ca://DMM1:setpoint")
-            .with_border_mode(BorderMode::DisconnectedOnly);
+            .with_border_mode(BorderMode::DisconnectedOnly)
+            .with_alignment(TextAlign::Center);
         let w5 = SidmPushButton::new(&engine, "ca://DMM1:go", "Start", "1")
             .expect("adl2sidm: connect ca://DMM1:go (message button)")
             .with_border_mode(BorderMode::DisconnectedOnly)

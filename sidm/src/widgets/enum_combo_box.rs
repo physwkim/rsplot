@@ -172,11 +172,7 @@ impl SidmEnumComboBox {
                     content.min,
                     egui::pos2(content.max.x - icon_size.x - icon_spacing, content.max.y),
                 );
-                let align2 = match self.alignment {
-                    TextAlign::Left => egui::Align2::LEFT_CENTER,
-                    TextAlign::Center => egui::Align2::CENTER_CENTER,
-                    TextAlign::Right => egui::Align2::RIGHT_CENTER,
-                };
+                let align2 = egui::Align2([self.alignment.to_align(), egui::Align::Center]);
                 let text_rect = align2.align_size_within_rect(galley.size(), text_area);
                 ui.painter()
                     .galley(text_rect.min, galley, visuals.text_color());

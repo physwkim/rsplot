@@ -559,6 +559,12 @@ fn emit_text_entry(b: &mut Builder, widget: &MedmWidget, options: &Options, z: Z
     let new_call = format!("SidmLineEdit::new(&engine, {})", medm_str(b, &addr));
     let mut builders: Vec<String> = precision_default_builder(widget).into_iter().collect();
     builders.extend(string_format_builder(widget, &addr));
+    // Centre the field text. This is a DELIBERATE DEVIATION from MEDM and PyDM,
+    // both of which left-align text entries (MEDM's `XmTextField` has no
+    // `XmNalignment`; adl2pydm sets `alignment` only on text/text-update, not on
+    // the line edit) — applied uniformly here so the editable control fields
+    // match the centred menu/button captions on converted screens (user ask).
+    builders.push(".with_alignment(TextAlign::Center)".to_string());
     push_channel_widget(
         b,
         z,
@@ -3527,6 +3533,31 @@ text {
                 .count(),
             2,
             "{}",
+            g.source
+        );
+    }
+
+    #[test]
+    fn text_entry_centres_its_text() {
+        // MEDM (`XmTextField`, no `XmNalignment`) and PyDM (adl2pydm aligns only
+        // text/text-update, never the line edit) both LEFT-align text entries;
+        // the converter centres them uniformly so the editable control fields
+        // match the centred menu/button captions on a converted screen — a
+        // deliberate, documented deviation. OVERLAP has one text entry and no
+        // menu, so the sole centred caption is the line edit (its text update is
+        // an un-aligned SidmLabel).
+        let g = build(&Options::default());
+        assert!(
+            g.source.contains("SidmLineEdit::new(&engine,"),
+            "{}",
+            g.source
+        );
+        assert_eq!(
+            g.source
+                .matches(".with_alignment(TextAlign::Center)")
+                .count(),
+            1,
+            "exactly the text entry should carry centre alignment\n{}",
             g.source
         );
     }

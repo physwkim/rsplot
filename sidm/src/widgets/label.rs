@@ -25,6 +25,19 @@ pub enum TextAlign {
     Right,
 }
 
+impl TextAlign {
+    /// The horizontal [`egui::Align`] this maps to (`Left`→`Min`, `Center`→
+    /// `Center`, `Right`→`Max`). Single owner of the mapping shared by every
+    /// widget that aligns text (label, line edit, combo face).
+    pub fn to_align(self) -> egui::Align {
+        match self {
+            TextAlign::Left => egui::Align::Min,
+            TextAlign::Center => egui::Align::Center,
+            TextAlign::Right => egui::Align::Max,
+        }
+    }
+}
+
 /// A read-only channel value display (PyDM `PyDMLabel`).
 pub struct SidmLabel {
     base: ChannelBase,
@@ -141,11 +154,7 @@ impl SidmLabel {
         // Horizontal alignment is the cross axis of a top-down layout, so the
         // vertical placement is unchanged and `Left` (`Align::Min`) is the default
         // layout — only `Center`/`Right` move the text.
-        let halign = match self.alignment {
-            TextAlign::Left => egui::Align::Min,
-            TextAlign::Center => egui::Align::Center,
-            TextAlign::Right => egui::Align::Max,
-        };
+        let halign = self.alignment.to_align();
         self.base
             .framed(ui, &state, false, |ui| {
                 let mut rich = egui::RichText::new(text);

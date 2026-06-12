@@ -27,6 +27,7 @@ use crate::channel::{Channel, ChannelState, PvValue};
 use crate::engine::{Engine, EngineError};
 use crate::widgets::base::{BorderMode, ChannelBase, layout_justify};
 use crate::widgets::display_format::{DisplayFormat, FormatSpec, format_value};
+use crate::widgets::label::TextAlign;
 
 /// A writable channel text entry (PyDM `PyDMLineEdit`).
 pub struct SidmLineEdit {
@@ -38,6 +39,10 @@ pub struct SidmLineEdit {
     pub precision: Option<i32>,
     /// Append/strip the engineering units (PyDM `showUnits`).
     pub show_units: bool,
+    /// Horizontal alignment of the field text. `Left` is the PyDM/Qt default
+    /// (and MEDM's — `XmTextField` has no `XmNalignment`); the converter sets
+    /// `Center` to match the centred control captions on converted screens.
+    pub alignment: TextAlign,
     /// The text being edited. Frozen against incoming updates while focused.
     edit_buffer: String,
     /// Whether the field held keyboard focus at the end of the last frame.
@@ -53,6 +58,7 @@ impl SidmLineEdit {
             format: DisplayFormat::Default,
             precision: None,
             show_units: false,
+            alignment: TextAlign::Left,
             edit_buffer: String::new(),
             editing: false,
         })
@@ -73,6 +79,13 @@ impl SidmLineEdit {
     /// Show/strip engineering units (builder style).
     pub fn with_show_units(mut self, show_units: bool) -> Self {
         self.show_units = show_units;
+        self
+    }
+
+    /// Set the horizontal alignment of the field text (builder style; default
+    /// `Left`).
+    pub fn with_alignment(mut self, alignment: TextAlign) -> Self {
+        self.alignment = alignment;
         self
     }
 
@@ -116,7 +129,8 @@ impl SidmLineEdit {
         }
 
         let inner = self.base.framed(ui, &state, true, |ui| {
-            let mut edit = egui::TextEdit::singleline(&mut self.edit_buffer);
+            let mut edit = egui::TextEdit::singleline(&mut self.edit_buffer)
+                .horizontal_align(self.alignment.to_align());
             if layout_justify(ui).1 {
                 // A justified cell is the MEDM text-entry rect; `TextEdit`
                 // top-aligns its single row (galley at top + margin), so size

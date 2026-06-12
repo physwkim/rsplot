@@ -793,6 +793,53 @@ fn label_centres_horizontally_with_center_alignment() {
     );
 }
 
+/// MEDM (`XmTextField`, no `XmNalignment`) and PyDM (Qt `QLineEdit`) both
+/// left-align text entries; the converter centres them so the editable fields
+/// match the centred control captions. `with_alignment(Center)` must centre the
+/// field text horizontally in the MEDM cell; the builder default keeps the left
+/// anchor (the reference behaviour).
+#[test]
+fn line_edit_centres_horizontally_with_center_alignment() {
+    use sidm::widgets::TextAlign;
+
+    let engine = Engine::new();
+    let mut centred =
+        sidm::widgets::SidmLineEdit::new(&engine, "loc://cell_lec?type=float&init=1.0")
+            .expect("connect")
+            .with_alignment(TextAlign::Center);
+    assert!(
+        wait_for(|| centred.channel().is_connected(), Duration::from_secs(2)),
+        "centred line edit channel never connected"
+    );
+    let (left, right) = medm_cell_text_cols(move |ui| drop(centred.show(ui)));
+    // No icon strip on a line edit: the text area is the framed cell interior
+    // (x 12..98) less the 4 px TextEdit margins, middle ≈ 55. ±5 px absorbs the
+    // narrow "1" glyph's bearings.
+    let mid = (left + right) as f32 / 2.0;
+    eprintln!("centred line edit text: cols {left}..{right} mid {mid}");
+    assert!(
+        (mid - 55.0).abs() <= 5.0,
+        "a Center-aligned line edit must sit at the cell middle: cols {left}..{right} mid {mid}"
+    );
+
+    let mut left_aligned =
+        sidm::widgets::SidmLineEdit::new(&engine, "loc://cell_lel?type=float&init=1.0")
+            .expect("connect");
+    assert!(
+        wait_for(
+            || left_aligned.channel().is_connected(),
+            Duration::from_secs(2)
+        ),
+        "left line edit channel never connected"
+    );
+    let (l, r) = medm_cell_text_cols(move |ui| drop(left_aligned.show(ui)));
+    eprintln!("default line edit text: cols {l}..{r}");
+    assert!(
+        l <= 22 && r < 45,
+        "the default line edit must keep the left anchor: cols {l}..{r}"
+    );
+}
+
 /// The combo face (an MEDM menu) carries its selected enum string; `loc://`
 /// cannot seed enum strings, so this rides the in-process CA fixture.
 #[test]
