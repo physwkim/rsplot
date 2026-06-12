@@ -27,7 +27,9 @@ use siplot::egui::{self, Color32, Pos2, Stroke, Vec2};
 
 use crate::channel::Channel;
 use crate::engine::{Engine, EngineError};
-use crate::widgets::base::{AlarmPalette, BorderMode, ChannelBase, justified_size, layout_justify};
+use crate::widgets::base::{
+    AlarmPalette, BorderMode, ChannelBase, justified_size, layout_justify, middle_click_copy,
+};
 
 /// The shape drawn by a [`SidmDrawing`] (PyDM `PyDMDrawing*` subclasses, plus
 /// the MEDM `arc`/`polyline`/`polygon` shapes the `adl2sidm` converter targets).
@@ -266,6 +268,14 @@ impl SidmDrawing {
         self
     }
 
+    /// Mark the channel as an internal placeholder, not a user-named PV
+    /// (builder style; suppresses the address tooltip and the middle-click PV
+    /// copy — adl2sidm uses this for channel-less MEDM decorations).
+    pub fn with_placeholder_channel(mut self) -> Self {
+        self.base.placeholder_channel = true;
+        self
+    }
+
     /// The underlying channel.
     pub fn channel(&self) -> &Channel {
         self.base.channel()
@@ -287,7 +297,12 @@ impl SidmDrawing {
         if ui.is_rect_visible(rect) {
             self.paint(ui.painter(), rect, fill, border);
         }
-        response.on_hover_text(self.base.tooltip(&state))
+        if self.base.placeholder_channel {
+            return response;
+        }
+        let response = response.on_hover_text(self.base.tooltip(&state));
+        middle_click_copy(ui, &response, [self.base.channel().address().raw()]);
+        response
     }
 
     /// Paint the shape into `rect`, insetting by the border width so the stroke

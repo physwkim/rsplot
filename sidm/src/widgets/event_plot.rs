@@ -22,6 +22,7 @@ use siplot::{DataMargins, ItemHandle, Plot1D, PlotId, PlotResponse, Symbol, egui
 
 use crate::channel::{Channel, ValueEvent, ValueSubscription};
 use crate::engine::{Engine, EngineError};
+use crate::widgets::base::middle_click_copy;
 use crate::widgets::plot_menu::{
     YAxisMenu, enable_y_autoscale, set_y_range, show_with_y_axis_menu,
 };
@@ -236,7 +237,14 @@ impl SidmEventPlot {
             }
         }
         ui.ctx().request_repaint();
-        show_with_y_axis_menu(&mut self.plot, &mut self.y_menu, ui)
+        let response = show_with_y_axis_menu(&mut self.plot, &mut self.y_menu, ui);
+        // MEDM Btn2 copies every record the plot carries (event-plot channels).
+        middle_click_copy(
+            ui,
+            &response.response,
+            self.curves.iter().map(|c| c.channel.address().raw()),
+        );
+        response
     }
 
     /// Pin a fixed Y range, disabling live autoscale (pyqtgraph `setYRange`);

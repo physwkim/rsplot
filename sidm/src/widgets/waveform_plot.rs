@@ -17,6 +17,7 @@ use siplot::{DataMargins, ItemHandle, Plot1D, PlotId, PlotResponse, egui};
 
 use crate::channel::{Channel, PvValue};
 use crate::engine::{Engine, EngineError};
+use crate::widgets::base::middle_click_copy;
 use crate::widgets::plot_menu::{
     YAxisMenu, enable_y_autoscale, set_y_range, show_with_y_axis_menu,
 };
@@ -272,7 +273,17 @@ impl SidmWaveformPlot {
             }
         }
         ui.ctx().request_repaint();
-        show_with_y_axis_menu(&mut self.plot, &mut self.y_menu, ui)
+        let response = show_with_y_axis_menu(&mut self.plot, &mut self.y_menu, ui);
+        // MEDM Btn2 copies every record the plot carries (trace Y then X, PyDM channels() order).
+        middle_click_copy(
+            ui,
+            &response.response,
+            self.curves.iter().flat_map(|c| {
+                std::iter::once(c.y_channel.address().raw())
+                    .chain(c.x_channel.as_ref().map(|x| x.address().raw()))
+            }),
+        );
+        response
     }
 
     /// Pin a fixed Y range, disabling live autoscale (pyqtgraph `setYRange`);

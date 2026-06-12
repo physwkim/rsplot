@@ -37,7 +37,7 @@ pub mod waveform_plot;
 
 pub use base::{
     AlarmPalette, BorderMode, BorderStyle, ChannelBase, alarm_border, control_range,
-    severity_color, severity_color_medm,
+    middle_click_copy, severity_color, severity_color_medm,
 };
 pub use byte::{Orientation, SidmByteIndicator, extract_bits};
 pub use checkbox::SidmCheckbox;

@@ -24,6 +24,7 @@ use siplot::{DataMargins, ItemHandle, Plot1D, PlotId, PlotResponse, Symbol, egui
 
 use crate::channel::{Channel, ValueSubscription};
 use crate::engine::{Engine, EngineError};
+use crate::widgets::base::middle_click_copy;
 use crate::widgets::plot_menu::{
     YAxisMenu, enable_y_autoscale, set_y_range, show_with_y_axis_menu,
 };
@@ -123,8 +124,8 @@ impl PairAccumulator {
 /// alive), their value-event subscriptions, the pairing accumulator, and the GPU
 /// item handle plus reusable render scratch.
 struct ScatterCurve {
-    _x_channel: Channel,
-    _y_channel: Channel,
+    x_channel: Channel,
+    y_channel: Channel,
     x_subscription: ValueSubscription,
     y_subscription: ValueSubscription,
     handle: ItemHandle,
@@ -220,8 +221,8 @@ impl SidmScatterPlot {
                 .add_scatter_with_symbol(&[], &[], color, Symbol::Circle, DEFAULT_SYMBOL_SIZE);
         self.plot.set_item_legend(handle, legend);
         self.curves.push(ScatterCurve {
-            _x_channel: x_channel,
-            _y_channel: y_channel,
+            x_channel,
+            y_channel,
             x_subscription,
             y_subscription,
             handle,
@@ -306,7 +307,16 @@ impl SidmScatterPlot {
             }
         }
         ui.ctx().request_repaint();
-        show_with_y_axis_menu(&mut self.plot, &mut self.y_menu, ui)
+        let response = show_with_y_axis_menu(&mut self.plot, &mut self.y_menu, ui);
+        // MEDM Btn2 copies every record the plot carries (Y then X, PyDM channels() order).
+        middle_click_copy(
+            ui,
+            &response.response,
+            self.curves
+                .iter()
+                .flat_map(|c| [c.y_channel.address().raw(), c.x_channel.address().raw()]),
+        );
+        response
     }
 
     /// Pin a fixed Y range, disabling live autoscale (pyqtgraph `setYRange`);

@@ -147,6 +147,102 @@ pub(crate) fn justified_size(
     )
 }
 
+/// Arbitrates the MEDM-style middle-click PV copy across overlapping widgets:
+/// every widget under the pointer registers a candidate during the pass, and at
+/// pass end the SMALLEST rect wins — MEDM's `findSmallestTouchedExecuteElement`
+/// (utils.c), which picks the innermost element for `StartDrag` (actions.c).
+/// egui's hit-testing cannot arbitrate this for us: the copy responses are
+/// hover-sensed (clicks must keep flowing to the widgets' own faces), and
+/// `Response::contains_pointer` reports every stacked widget, back-to-front.
+#[derive(Default)]
+struct MiddleClickCopy {
+    /// Best candidate this pass: `(rect area, widget id, clipboard text)`. On
+    /// equal areas the later registration wins, so the front-most of two
+    /// stacked equal rects provides the names (registration follows draw
+    /// order, back-to-front).
+    best: Option<(f32, egui::Id, String)>,
+    /// The widget whose copy is being announced while the middle button stays
+    /// down — it shows the address tooltip (PyDM `show_address_tooltip`; MEDM
+    /// keeps its drag icon up while Btn2 is held).
+    holding: Option<egui::Id>,
+}
+
+impl egui::plugin::Plugin for MiddleClickCopy {
+    fn debug_name(&self) -> &'static str {
+        "sidm_middle_click_copy"
+    }
+
+    fn on_end_pass(&mut self, ui: &mut egui::Ui) {
+        if let Some((_, id, text)) = self.best.take() {
+            ui.ctx().copy_text(text);
+            self.holding = Some(id);
+        }
+        if self.holding.is_some()
+            && !ui.input(|i| i.pointer.button_down(egui::PointerButton::Middle))
+        {
+            self.holding = None;
+        }
+    }
+}
+
+/// MEDM Btn2 / PyDM middle-click copy: pressing the middle button over a
+/// channel widget copies its PV name(s) to the clipboard, protocol-stripped and
+/// space-joined exactly as both references produce them (MEDM `StartDrag` owns
+/// the selection with the space-joined record names, actions.c; PyDM
+/// `show_address_tooltip` joins `remove_protocol`'d addresses,
+/// pydm/widgets/base.py). While the button stays held, the winning widget shows
+/// the full address(es) as a tooltip, newline-joined like PyDM's. Overlapping
+/// widgets resolve through the [`MiddleClickCopy`] plugin.
+///
+/// Every framed channel widget gets this through [`ChannelBase`]; a custom
+/// widget that draws its own response wires it explicitly (the plots do).
+pub fn middle_click_copy<'a>(
+    ui: &egui::Ui,
+    response: &egui::Response,
+    addresses: impl IntoIterator<Item = &'a str>,
+) {
+    let ctx = ui.ctx();
+    // Register up-front, NOT on press: `Context::run_ui` snapshots the plugin
+    // list before the pass runs, so a plugin added mid-pass only gets its
+    // `on_end_pass` from the NEXT pass — registering here (idempotent by type)
+    // guarantees the plugin is live by the time a press arrives.
+    ctx.add_plugin(MiddleClickCopy::default());
+    if !response.contains_pointer() {
+        return;
+    }
+    let (pressed, down) = ui.input(|i| {
+        (
+            i.pointer.button_pressed(egui::PointerButton::Middle),
+            i.pointer.button_down(egui::PointerButton::Middle),
+        )
+    });
+    if !pressed && !down {
+        return;
+    }
+    let raw: Vec<&str> = addresses.into_iter().collect();
+    if raw.is_empty() {
+        return;
+    }
+    if pressed {
+        let text = raw
+            .iter()
+            .map(|a| a.split_once("://").map_or(*a, |(_, rest)| rest))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let area = response.rect.area();
+        ctx.with_plugin(|p: &mut MiddleClickCopy| {
+            if p.best.as_ref().is_none_or(|(best, ..)| area <= *best) {
+                p.best = Some((area, response.id, text));
+            }
+        });
+    }
+    if down
+        && ctx.with_plugin(|p: &mut MiddleClickCopy| p.holding == Some(response.id)) == Some(true)
+    {
+        response.show_tooltip_text(raw.join("\n"));
+    }
+}
+
 /// Border stroke width (PyDM `2px`).
 const BORDER_WIDTH: f32 = 2.0;
 /// Uniform inset reserved around content so the border has room and the content
@@ -169,6 +265,14 @@ pub struct ChannelBase {
     pub alarm_sensitive_content: bool,
     /// The palette severity-sensitive styling draws from (default PyDM).
     pub alarm_palette: AlarmPalette,
+    /// The channel is an internal placeholder rather than a user-named PV
+    /// (adl2sidm binds synthetic `loc://` addresses to MEDM widgets that carry
+    /// no channel, because every sidm widget requires one). Suppresses the
+    /// PV-facing surfaces — the address hover tooltip and the middle-click PV
+    /// copy — matching MEDM, where Btn2 acts only on elements with records
+    /// (`StartDrag` returns without an update task), and PyDM, where a
+    /// channel-less widget shows neither.
+    pub placeholder_channel: bool,
 }
 
 impl ChannelBase {
@@ -180,6 +284,7 @@ impl ChannelBase {
             border_mode: BorderMode::default(),
             alarm_sensitive_content: false,
             alarm_palette: AlarmPalette::default(),
+            placeholder_channel: false,
         }
     }
 
@@ -305,7 +410,13 @@ impl ChannelBase {
         if let Some(style) = border {
             paint_border(ui.painter(), response.rect, &style);
         }
-        let response = response.on_hover_text(self.tooltip(state));
+        let response = if self.placeholder_channel {
+            response
+        } else {
+            let response = response.on_hover_text(self.tooltip(state));
+            middle_click_copy(ui, &response, [self.channel.address().raw()]);
+            response
+        };
         egui::InnerResponse::new(value, response)
     }
 }

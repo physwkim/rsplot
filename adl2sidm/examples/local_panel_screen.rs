@@ -50,7 +50,8 @@ impl Screen {
             .expect("adl2sidm: connect loc://adl2sidm_shape_0 (drawing)")
             .with_fill(Color32::TRANSPARENT)
             .with_border(Color32::from_rgb(192, 192, 192), 2.0)
-            .with_size(egui::Vec2::new(348.0, 160.0));
+            .with_size(egui::Vec2::new(348.0, 160.0))
+            .with_placeholder_channel();
         let w4 = SidmLineEdit::new(&engine, "loc://setpoint?type=float&init=5&precision=2")
             .expect("adl2sidm: connect loc://setpoint?type=float&init=5&precision=2")
             .with_border_mode(BorderMode::DisconnectedOnly);
@@ -74,7 +75,8 @@ impl Screen {
             .expect("adl2sidm: connect loc://flags?type=int&init=170")
             .with_border_mode(BorderMode::DisconnectedOnly);
         let w13 = SidmFrame::new(&engine, "loc://adl2sidm_embed_1")
-            .expect("adl2sidm: connect loc://adl2sidm_embed_1 (embedded embed_child.adl)");
+            .expect("adl2sidm: connect loc://adl2sidm_embed_1 (embedded embed_child.adl)")
+            .with_placeholder_channel();
         let w15 = SidmLabel::new(&engine, "loc://embcount?type=int&init=7")
             .expect("adl2sidm: connect loc://embcount?type=int&init=7 (text update)")
             .with_border_mode(BorderMode::DisconnectedOnly)

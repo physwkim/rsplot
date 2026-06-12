@@ -94,11 +94,13 @@ impl Screen {
         let w12 = SidmDrawing::new(&engine, "loc://adl2sidm_shape_0", DrawingShape::Ellipse)
             .expect("adl2sidm: connect loc://adl2sidm_shape_0 (drawing)")
             .with_fill(Color32::from_rgb(255, 0, 0))
-            .with_size(egui::Vec2::new(60.0, 60.0));
+            .with_size(egui::Vec2::new(60.0, 60.0))
+            .with_placeholder_channel();
         let w13 = SidmDrawing::new(&engine, "loc://adl2sidm_shape_1", DrawingShape::Arc { begin_deg: 0.0, span_deg: 360.0 })
             .expect("adl2sidm: connect loc://adl2sidm_shape_1 (arc)")
             .with_fill(Color32::from_rgb(0, 255, 0))
-            .with_size(egui::Vec2::new(60.0, 60.0));
+            .with_size(egui::Vec2::new(60.0, 60.0))
+            .with_placeholder_channel();
         let w14 = SidmImage::new("logo.gif")
             .with_size(egui::Vec2::new(80.0, 24.0));
         let mut w15 = SidmTimePlot::new(rs, __plot_base).with_time_span(60.0);
@@ -106,7 +108,8 @@ impl Screen {
         let mut w16 = SidmWaveformPlot::new(rs, __plot_base + 1);
         w16.add_xy_channel(&engine, "ca://DMM1:ywave", Some("ca://DMM1:xwave"), Color32::from_rgb(255, 0, 0), "curve 1").expect("adl2sidm: add waveform curve 1");
         let w17 = SidmFrame::new(&engine, "loc://adl2sidm_frame_2")
-            .expect("adl2sidm: connect loc://adl2sidm_frame_2 (composite)");
+            .expect("adl2sidm: connect loc://adl2sidm_frame_2 (composite)")
+            .with_placeholder_channel();
         let w18 = SidmLabel::new(&engine, "ca://DMM1:status")
             .expect("adl2sidm: connect ca://DMM1:status (text update)")
             .with_border_mode(BorderMode::DisconnectedOnly);

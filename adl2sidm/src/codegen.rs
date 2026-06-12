@@ -902,13 +902,16 @@ fn emit_drawing(b: &mut Builder, widget: &MedmWidget, options: &Options, z: ZLay
         skip_no_geometry(b, widget);
         return;
     };
-    let addr = dynamic_channel(b, widget, options, "shape");
+    let (addr, placeholder) = dynamic_channel(b, widget, options, "shape");
     let new_call = format!(
         "SidmDrawing::new(&engine, {}, DrawingShape::{shape})",
         medm_str(b, &addr)
     );
     let mut builders = drawing_brush_builders(b, widget);
     builders.push(drawing_size_builder(geom));
+    if placeholder {
+        builders.push(".with_placeholder_channel()".to_string());
+    }
     push_channel_widget(
         b,
         z,
@@ -1001,7 +1004,7 @@ fn emit_arc(b: &mut Builder, widget: &MedmWidget, options: &Options, z: ZLayer) 
         skip_no_geometry(b, widget);
         return;
     };
-    let addr = dynamic_channel(b, widget, options, "shape");
+    let (addr, placeholder) = dynamic_channel(b, widget, options, "shape");
     let begin = angle_deg(widget, "beginAngle", 0.0);
     let span = angle_deg(widget, "pathAngle", 360.0);
     let new_call = format!(
@@ -1012,6 +1015,9 @@ fn emit_arc(b: &mut Builder, widget: &MedmWidget, options: &Options, z: ZLayer) 
     );
     let mut builders = drawing_brush_builders(b, widget);
     builders.push(drawing_size_builder(geom));
+    if placeholder {
+        builders.push(".with_placeholder_channel()".to_string());
+    }
     push_channel_widget(
         b,
         z,
@@ -1056,7 +1062,7 @@ fn emit_polyshape(
         );
         return;
     }
-    let addr = dynamic_channel(b, widget, options, "shape");
+    let (addr, placeholder) = dynamic_channel(b, widget, options, "shape");
     let shape = if polygon { "Polygon" } else { "Polyline" };
     let new_call = format!(
         "SidmDrawing::new(&engine, {}, DrawingShape::{shape})",
@@ -1081,6 +1087,9 @@ fn emit_polyshape(
         .collect();
     builders.push(format!(".with_points(vec![{}])", verts.join(", ")));
     builders.push(drawing_size_builder(geom));
+    if placeholder {
+        builders.push(".with_placeholder_channel()".to_string());
+    }
     push_channel_widget(
         b,
         z,
@@ -1158,9 +1167,9 @@ fn emit_composite(b: &mut Builder, widget: &MedmWidget, options: &Options, z: ZL
         emit_embedded_display(b, widget, options, z);
         return;
     }
-    let addr = match widget.assignments.get("chan").filter(|c| !c.is_empty()) {
-        Some(chan) => apply_protocol(chan, options),
-        None => b.synthetic_addr("frame"),
+    let (addr, placeholder) = match widget.assignments.get("chan").filter(|c| !c.is_empty()) {
+        Some(chan) => (apply_protocol(chan, options), false),
+        None => (b.synthetic_addr("frame"), true),
     };
     // Composite children are in absolute SCREEN coordinates, so they translate
     // into the frame interior by the composite's own origin.
@@ -1169,6 +1178,7 @@ fn emit_composite(b: &mut Builder, widget: &MedmWidget, options: &Options, z: ZL
         z,
         geom,
         &addr,
+        placeholder,
         &format!("adl2sidm: connect {addr} (composite)"),
         &widget.children,
         (geom.x, geom.y),
@@ -1188,6 +1198,7 @@ fn emit_frame_container(
     z: ZLayer,
     geom: Geometry,
     addr: &str,
+    placeholder: bool,
     connect_desc: &str,
     children: &[MedmWidget],
     child_origin: (i32, i32),
@@ -1197,8 +1208,14 @@ fn emit_frame_container(
     let frame_field = format!("w{frame_id}");
     b.needs_widgets = true;
     let addr_expr = medm_str(b, addr);
+    // A synthetic frame address must not surface as a PV (tooltip, Btn2 copy).
+    let mark = if placeholder {
+        "\n            .with_placeholder_channel()"
+    } else {
+        ""
+    };
     b.ctors.push(format!(
-        "let {frame_field} = SidmFrame::new(&engine, {addr_expr})\n            .expect({});",
+        "let {frame_field} = SidmFrame::new(&engine, {addr_expr})\n            .expect({}){mark};",
         rust_str(connect_desc)
     ));
     b.fields
@@ -1810,6 +1827,7 @@ fn emit_embedded_display(b: &mut Builder, widget: &MedmWidget, options: &Options
         z,
         geom,
         &addr,
+        true,
         &format!("adl2sidm: connect {addr} (embedded {file})"),
         &target.widgets,
         (0, 0),
@@ -2601,17 +2619,24 @@ fn channel_address(widget: &MedmWidget, options: &Options) -> Option<String> {
 /// macros + protocol when present and non-empty, else a unique local `loc://`
 /// placeholder so the channel-less decoration still constructs. `kind` names the
 /// placeholder (`shape`, `frame`); a per-screen counter (not the widget line)
-/// keeps it unique even across inlined files.
-fn dynamic_channel(b: &mut Builder, widget: &MedmWidget, options: &Options, kind: &str) -> String {
+/// keeps it unique even across inlined files. The flag reports the placeholder
+/// case, which the emitters turn into `.with_placeholder_channel()` so the
+/// synthetic address never reaches a PV-facing surface (tooltip, Btn2 copy).
+fn dynamic_channel(
+    b: &mut Builder,
+    widget: &MedmWidget,
+    options: &Options,
+    kind: &str,
+) -> (String, bool) {
     if let Some(chan) = widget
         .attributes
         .get("dynamic attribute")
         .and_then(|a| a.get("chan"))
         .filter(|c| !c.is_empty())
     {
-        return apply_protocol(chan, options);
+        return (apply_protocol(chan, options), false);
     }
-    b.synthetic_addr(kind)
+    (b.synthetic_addr(kind), true)
 }
 
 /// Prefix the protocol onto a MEDM channel name. The channel's `$(macro)`

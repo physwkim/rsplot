@@ -47,6 +47,7 @@ use siplot::{DataMargins, ItemHandle, Plot1D, PlotId, PlotResponse, TickMode, Ti
 
 use crate::channel::{Channel, ChannelState, PvValue, ValueEvent, ValueSubscription};
 use crate::engine::{Engine, EngineError};
+use crate::widgets::base::middle_click_copy;
 use crate::widgets::plot_menu::{
     YAxisMenu, enable_y_autoscale, set_y_range, show_with_y_axis_menu,
 };
@@ -506,7 +507,14 @@ impl SidmTimePlot {
         // A strip chart animates: keep frames coming even between channel updates
         // so the X window scrolls smoothly.
         ui.ctx().request_repaint();
-        show_with_y_axis_menu(&mut self.plot, &mut self.y_menu, ui)
+        let response = show_with_y_axis_menu(&mut self.plot, &mut self.y_menu, ui);
+        // MEDM Btn2 copies every record the plot carries (strip-chart pens).
+        middle_click_copy(
+            ui,
+            &response.response,
+            self.curves.iter().map(|c| c.channel.address().raw()),
+        );
+        response
     }
 
     /// Pin a fixed Y range, disabling live autoscale (pyqtgraph `setYRange`);

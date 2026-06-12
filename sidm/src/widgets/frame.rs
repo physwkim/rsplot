@@ -56,6 +56,14 @@ impl SidmFrame {
         self
     }
 
+    /// Mark the channel as an internal placeholder, not a user-named PV
+    /// (builder style; suppresses the address tooltip and the middle-click PV
+    /// copy — adl2sidm uses this for MEDM composites that carry no channel).
+    pub fn with_placeholder_channel(mut self) -> Self {
+        self.base.placeholder_channel = true;
+        self
+    }
+
     /// The underlying channel base, for reading state / styling.
     pub fn base(&self) -> &ChannelBase {
         &self.base
