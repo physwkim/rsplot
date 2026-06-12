@@ -25,8 +25,8 @@ use egui_kittest::Harness;
 use egui_kittest::wgpu::{WgpuTestRenderer, create_render_state, default_wgpu_setup};
 use sidm::Engine;
 use sidm::widgets::{
-    DrawingShape, SidmByteIndicator, SidmDrawing, SidmEnumComboBox, SidmImage, SidmScaleIndicator,
-    SidmSymbol,
+    DrawingShape, SidmByteIndicator, SidmDrawing, SidmEnumComboBox, SidmImage, SidmLabel,
+    SidmScaleIndicator, SidmSymbol,
 };
 use siplot::egui;
 
@@ -130,18 +130,18 @@ fn plain_image_keeps_its_native_size() {
     assert_eq!(rect.size(), egui::vec2(120.0, 80.0));
 }
 
-/// Render `show` in a 400×400 harness, justified or plain, and return the
-/// pixel count selected by `count`.
-fn pixel_probe(
-    justified: bool,
-    show: impl FnMut(&mut egui::Ui) + 'static,
-    count: fn(&[u8]) -> u32,
-) -> u32 {
+/// The 400×400 harness size shared by every pixel probe (one row is
+/// `PROBE_SIZE` RGBA pixels in the raw buffer).
+const PROBE_SIZE: u32 = 400;
+
+/// Render `show` in a [`PROBE_SIZE`]² harness, justified or plain, and return
+/// the raw RGBA bytes.
+fn pixel_probe_raw(justified: bool, show: impl FnMut(&mut egui::Ui) + 'static) -> Vec<u8> {
     let rs = create_render_state(default_wgpu_setup());
     let renderer = WgpuTestRenderer::from_render_state(rs);
     let show = RefCell::new(show);
     let mut harness = Harness::builder()
-        .with_size(egui::vec2(400.0, 400.0))
+        .with_size(egui::vec2(PROBE_SIZE as f32, PROBE_SIZE as f32))
         .with_pixels_per_point(1.0)
         .renderer(renderer)
         .build_ui(move |ui| {
@@ -157,7 +157,38 @@ fn pixel_probe(
     harness.step();
     harness.step();
     let image = harness.render().expect("headless wgpu render");
-    count(image.as_raw())
+    image.into_raw()
+}
+
+/// Render `show` in a [`PROBE_SIZE`]² harness, justified or plain, and return
+/// the pixel count selected by `count`.
+fn pixel_probe(
+    justified: bool,
+    show: impl FnMut(&mut egui::Ui) + 'static,
+    count: fn(&[u8]) -> u32,
+) -> u32 {
+    count(&pixel_probe_raw(justified, show))
+}
+
+/// The bounding-box size of the near-white pixels (the dashed disconnect
+/// border, pure `Color32::WHITE`; default text at gray ~140 stays below the
+/// threshold) in a [`PROBE_SIZE`]-wide probe image. `(0, 0)` when none.
+fn white_bbox(raw: &[u8]) -> (u32, u32) {
+    let (mut x0, mut y0, mut x1, mut y1) = (u32::MAX, u32::MAX, 0u32, 0u32);
+    for (i, px) in raw.chunks_exact(4).enumerate() {
+        if px[0] > 230 && px[1] > 230 && px[2] > 230 {
+            let (x, y) = (i as u32 % PROBE_SIZE, i as u32 / PROBE_SIZE);
+            x0 = x0.min(x);
+            y0 = y0.min(y);
+            x1 = x1.max(x);
+            y1 = y1.max(y);
+        }
+    }
+    if x0 == u32::MAX {
+        (0, 0)
+    } else {
+        (x1 - x0 + 1, y1 - y0 + 1)
+    }
 }
 
 fn red_symbol(engine: &Engine, address: &str) -> SidmSymbol {
@@ -273,6 +304,122 @@ fn justified_enum_combo_box_fills_the_available_rect() {
     assert!(
         justified > 100_000 && plain > 1000 && plain < 5_000,
         "justified combo should fill both axes: justified={justified} plain={plain}"
+    );
+}
+
+/// A `ca://` channel with no IOC behind it stays disconnected, so the label
+/// shows its address inside the dashed pure-white disconnect border — the
+/// border's bounding box is the observable for how far the face extends
+/// (the label's own response/count can't be used: justification expands the
+/// outer allocation even when the face hugs its galley).
+#[test]
+fn justified_label_fills_the_available_rect() {
+    let engine = Engine::new();
+    let mut filled = SidmLabel::new(&engine, "ca://sidm:jf:l1").expect("connect");
+    let justified = white_bbox(&pixel_probe_raw(true, move |ui| drop(filled.show(ui))));
+    let mut native = SidmLabel::new(&engine, "ca://sidm:jf:l2").expect("connect");
+    let plain = white_bbox(&pixel_probe_raw(false, move |ui| drop(native.show(ui))));
+    // Justified: the dashed border must span both axes of the 400×400 harness.
+    // Plain: it hugs the one-line address text (~110×24 with the frame inset).
+    eprintln!("label: justified={justified:?} plain={plain:?}");
+    assert!(
+        justified.0 > 380 && justified.1 > 380,
+        "justified label face should span both axes: justified={justified:?}"
+    );
+    assert!(
+        plain.0 > 60 && plain.0 < 250 && plain.1 > 10 && plain.1 < 40,
+        "plain label face should hug its text: plain={plain:?}"
+    );
+}
+
+/// In-process CA IOC fixture for the enum-button probe (the only widget here
+/// that needs enum strings, which `loc://` does not provide). Mirrors
+/// `ca_ioc.rs::ioc_engine`: the engine's CA plugin searches exactly the
+/// loopback server, so the test is parallel-safe.
+#[cfg(feature = "ca")]
+fn enum_ioc_engine() -> (Engine, tokio::runtime::Runtime) {
+    use std::net::SocketAddr;
+    use std::sync::Arc;
+
+    use epics_base_rs::server::records::bi::BiRecord;
+    use epics_ca_rs::server::CaServer;
+
+    let probe = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("reserve free CA server port");
+    let port = probe.local_addr().unwrap().port();
+    drop(probe);
+
+    let server_rt = tokio::runtime::Runtime::new().expect("server runtime");
+    let server = server_rt.block_on(async {
+        let mut rec = BiRecord::new(0);
+        rec.znam = "Off".to_owned();
+        rec.onam = "On".to_owned();
+        CaServer::builder()
+            .port(port)
+            .record("sidm:jf:bi", rec)
+            .build()
+            .await
+            .expect("build in-process CA server")
+    });
+    server_rt.spawn(async move {
+        let _ = server.run().await;
+    });
+    std::thread::sleep(Duration::from_millis(300));
+
+    let addr: SocketAddr = format!("127.0.0.1:{port}")
+        .parse()
+        .expect("loopback server address");
+    let engine = Engine::new();
+    engine.register_plugin(Arc::new(sidm::CaPlugin::with_addresses(vec![addr])));
+    (engine, server_rt)
+}
+
+#[cfg(feature = "ca")]
+fn red_selected_enum_button(engine: &Engine) -> sidm::widgets::SidmEnumButton {
+    let button = sidm::widgets::SidmEnumButton::new(engine, "ca://sidm:jf:bi").expect("connect");
+    assert!(
+        wait_for(
+            || button.channel().read(|s| s.enum_strings.is_some()),
+            Duration::from_secs(5)
+        ),
+        "enum button never received its enum strings"
+    );
+    button
+}
+
+/// The selected choice paints `visuals.selection.bg_fill`, so painting it red
+/// and counting makes the per-button face size observable. MEDM divides the
+/// choice-button rect equally among the buttons (medmChoiceButtons.c
+/// XmNfractionBase): with two options, the selected one must cover about half
+/// the justified rect.
+#[test]
+#[cfg(feature = "ca")]
+fn justified_enum_button_divides_the_available_rect() {
+    let (engine, _server_rt) = enum_ioc_engine();
+    let mut filled = red_selected_enum_button(&engine);
+    let justified = pixel_probe(
+        true,
+        move |ui| {
+            ui.style_mut().visuals.selection.bg_fill = egui::Color32::from_rgb(255, 0, 0);
+            drop(filled.show(ui));
+        },
+        count_red,
+    );
+    let mut native = red_selected_enum_button(&engine);
+    let plain = pixel_probe(
+        false,
+        move |ui| {
+            ui.style_mut().visuals.selection.bg_fill = egui::Color32::from_rgb(255, 0, 0);
+            drop(native.show(ui));
+        },
+        count_red,
+    );
+    // Justified: the selected "Off" button is one of two equal vertical shares
+    // of the 400×400 harness (~390×193 ≈ 75k px). Plain: it hugs its caption.
+    // Area floors, not a ratio (see the symbol test).
+    eprintln!("enum button: justified={justified} plain={plain}");
+    assert!(
+        justified > 60_000 && plain > 200 && plain < 5_000,
+        "justified enum button should fill its equal share: justified={justified} plain={plain}"
     );
 }
 

@@ -9,7 +9,7 @@ use siplot::egui;
 
 use crate::channel::{Channel, ChannelState};
 use crate::engine::{Engine, EngineError};
-use crate::widgets::base::ChannelBase;
+use crate::widgets::base::{ChannelBase, layout_justify};
 use crate::widgets::display_format::{DisplayFormat, FormatSpec, format_value};
 
 /// Horizontal alignment of the label text within its rect (MEDM `align` / PyDM
@@ -133,7 +133,18 @@ impl SidmLabel {
                 if let Some(color) = color {
                     rich = rich.color(color);
                 }
+                // The alignment `with_layout` replaces an inherited justified
+                // layout, so the label face would hug its galley while the
+                // screen's bclr backing fills the whole rect (MEDM text-update
+                // geometry) — re-fill each justified axis explicitly.
+                let justify = layout_justify(ui);
                 ui.with_layout(egui::Layout::top_down(halign), |ui| {
+                    if justify.0 {
+                        ui.set_min_width(ui.available_width());
+                    }
+                    if justify.1 {
+                        ui.set_min_height(ui.available_height());
+                    }
                     ui.label(rich);
                 });
             })

@@ -18,7 +18,7 @@ use siplot::egui;
 
 use crate::channel::{Channel, PvValue};
 use crate::engine::{Engine, EngineError};
-use crate::widgets::base::ChannelBase;
+use crate::widgets::base::{ChannelBase, layout_justify};
 use crate::widgets::byte::Orientation;
 use crate::widgets::enum_choice::{enum_current_index, enum_index_value, enum_options};
 
@@ -122,13 +122,19 @@ impl SidmEnumButton {
         let orientation = self.orientation;
 
         let mut chosen = None;
-        let mut draw = |ui: &mut egui::Ui| {
+        let mut draw = |ui: &mut egui::Ui, size: Option<egui::Vec2>| {
             for &idx in &order {
                 let label = options[idx].as_str();
                 let selected = Some(idx) == current;
-                let clicked = match widget_type {
-                    EnumButtonType::Push => ui.selectable_label(selected, label).clicked(),
-                    EnumButtonType::Radio => ui.radio(selected, label).clicked(),
+                let clicked = match (widget_type, size) {
+                    (EnumButtonType::Push, Some(size)) => ui
+                        .add_sized(size, egui::Button::selectable(selected, label))
+                        .clicked(),
+                    (EnumButtonType::Push, None) => ui.selectable_label(selected, label).clicked(),
+                    (EnumButtonType::Radio, Some(size)) => ui
+                        .add_sized(size, egui::RadioButton::new(selected, label))
+                        .clicked(),
+                    (EnumButtonType::Radio, None) => ui.radio(selected, label).clicked(),
                 };
                 if clicked {
                     chosen = Some(idx);
@@ -136,12 +142,38 @@ impl SidmEnumButton {
             }
         };
 
-        self.base.framed(ui, &state, true, |ui| match orientation {
-            Orientation::Vertical => {
-                ui.vertical(|ui| draw(ui));
-            }
-            Orientation::Horizontal => {
-                ui.horizontal(|ui| draw(ui));
+        self.base.framed(ui, &state, true, |ui| {
+            // The `vertical`/`horizontal` stack replaces an inherited justified
+            // layout, so the buttons would hug their captions inside the bclr
+            // backing. MEDM divides the choice-button rect equally among the
+            // buttons (medmChoiceButtons.c XmNfractionBase), so under a
+            // justified layout size each button to its equal share; a
+            // non-justified axis keeps egui's default interact size.
+            let justify = layout_justify(ui);
+            let size = (justify.0 || justify.1).then(|| {
+                let n = order.len().max(1) as f32;
+                let d = ui.spacing().interact_size;
+                let gap = ui.spacing().item_spacing;
+                let (w, h) = (
+                    if justify.0 { ui.available_width() } else { d.x },
+                    if justify.1 {
+                        ui.available_height()
+                    } else {
+                        d.y
+                    },
+                );
+                match orientation {
+                    Orientation::Vertical => egui::vec2(w, (h - gap.y * (n - 1.0)) / n),
+                    Orientation::Horizontal => egui::vec2((w - gap.x * (n - 1.0)) / n, h),
+                }
+            });
+            match orientation {
+                Orientation::Vertical => {
+                    ui.vertical(|ui| draw(ui, size));
+                }
+                Orientation::Horizontal => {
+                    ui.horizontal(|ui| draw(ui, size));
+                }
             }
         });
 
