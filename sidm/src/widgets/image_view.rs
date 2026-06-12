@@ -17,6 +17,7 @@ use siplot::{Colormap, ColormapName, ImageView, PlotId, egui};
 
 use crate::channel::{Channel, PvValue};
 use crate::engine::{Engine, EngineError};
+use crate::widgets::base::middle_click_copy;
 
 /// Reading order of the flat image array (PyDM `readingOrder`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -237,8 +238,10 @@ impl SidmImageView {
     }
 
     /// Poll the channels, reshape and re-upload the image when it (or the width)
-    /// changed, and render the view this frame.
-    pub fn show(&mut self, ui: &mut egui::Ui) {
+    /// changed, and render the view this frame. The returned response covers
+    /// the view's footprint and carries the MEDM Btn2 middle-click PV copy
+    /// (image channel first, then the width channel — PyDM `channels()` order).
+    pub fn show(&mut self, ui: &mut egui::Ui) -> egui::Response {
         if let Some(wc) = &self.width_channel {
             let ws = wc.state();
             if ws.connected && ws.stamp != self.last_width_stamp {
@@ -266,7 +269,17 @@ impl SidmImageView {
             self.dirty = false;
         }
         ui.ctx().request_repaint();
-        self.view.show(ui, None, None);
+        // `ImageView::show` returns no response; the scope registers the drawn
+        // footprint as a widget rect, which is what MEDM's Btn2 touches anyway
+        // (the whole image-monitor element, side panels included).
+        let response = ui.scope(|ui| self.view.show(ui, None, None)).response;
+        middle_click_copy(
+            ui,
+            &response,
+            std::iter::once(self.image_channel.address().raw())
+                .chain(self.width_channel.as_ref().map(|wc| wc.address().raw())),
+        );
+        response
     }
 }
 

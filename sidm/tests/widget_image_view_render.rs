@@ -104,6 +104,65 @@ fn gradient_array_renders_a_color_mapped_image() {
 }
 
 #[test]
+fn middle_click_copies_image_and_width_channels() {
+    let rs = create_render_state(default_wgpu_setup());
+    siplot::install(&rs);
+    let engine = Engine::new();
+    let mut view = SidmImageView::new(
+        &engine,
+        &rs,
+        0,
+        "loc://cam_copy",
+        Some("loc://cam_copy_w?type=int&init=16"),
+    )
+    .expect("connect image channel")
+    .with_width(16);
+    bare(&mut view);
+
+    let app = Rc::new(RefCell::new(view));
+    let renderer = WgpuTestRenderer::from_render_state(rs);
+    let app_ui = app.clone();
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(400.0, 300.0))
+        .with_pixels_per_point(1.0)
+        .renderer(renderer)
+        .build_ui(move |ui| {
+            app_ui.borrow_mut().show(ui);
+        });
+    let pos = egui::pos2(200.0, 150.0);
+    harness.step();
+    harness
+        .input_mut()
+        .events
+        .push(egui::Event::PointerMoved(pos));
+    harness.step();
+    harness.input_mut().events.push(egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Middle,
+        pressed: true,
+        modifiers: egui::Modifiers::NONE,
+    });
+    harness.step();
+    let copies: Vec<String> = harness
+        .output()
+        .platform_output
+        .commands
+        .iter()
+        .filter_map(|c| match c {
+            egui::OutputCommand::CopyText(t) => Some(t.clone()),
+            _ => None,
+        })
+        .collect();
+    drop(engine);
+    // PyDM channels() order: image first, then width; protocols stripped.
+    assert_eq!(
+        copies,
+        vec!["cam_copy cam_copy_w?type=int&init=16".to_owned()],
+        "middle press over the image view must copy both channel names"
+    );
+}
+
+#[test]
 fn view_without_data_renders_no_color_mapped_image() {
     let rs = create_render_state(default_wgpu_setup());
     siplot::install(&rs);
