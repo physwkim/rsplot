@@ -1240,33 +1240,70 @@ fn emit_frame_container(
     }
     let mut child_placements: Vec<Placement> = b.placements.drain(start..).collect();
     child_placements.sort_by_key(|p| p.z);
-    // MEDM draws strictly in file order with composites transparent (a
-    // composite is a group, not a stacking context): a later sibling paints
-    // over a composite's children on the same layer. Sorting the frame at the
-    // container's own Middle hoisted its children's Areas after every sibling
-    // decoration — ADBuffers.adl's title chip (a rectangle inside a composite)
-    // covered the later "Buffers" text. The frame itself paints nothing, so it
-    // sorts at its children's LOWEST layer, which restores the composite's
-    // file position among the siblings of that layer; children on higher
-    // layers still render above via their own Area `Order`, which is the
-    // z-order guarantee (statement order only ranks Areas within one Order).
-    let sort_z = child_placements.iter().map(|p| p.z).min().unwrap_or(z);
 
     let (dx, dy) = child_origin;
-    // Capture the frame's OUTER top-left before `show` insets the interior by
-    // `BORDER_INSET`; children are positioned relative to this, so the inset never
-    // shifts them. Named per frame so nested frames keep distinct origins.
-    let origin = format!("__frame_origin_{frame_id}");
-    let mut body = String::new();
-    let _ = writeln!(body, "let {origin} = ui.max_rect().min;");
-    let _ = writeln!(body, "let _ = {frame_field}.show(ui, |ui| {{");
-    for p in &child_placements {
-        write_placement(&mut body, p, dx, dy, "    ", options.use_layout, &origin);
-    }
-    let _ = write!(body, "}});");
 
-    b.placements
-        .push(Placement::drawn(sort_z, frame_id, geom, body));
+    // A childless container is just its (empty) frame shell, drawn at the
+    // container's own layer.
+    if child_placements.is_empty() {
+        let origin = format!("__frame_origin_{frame_id}");
+        let mut body = String::new();
+        let _ = writeln!(body, "let {origin} = ui.max_rect().min;");
+        let _ = write!(body, "let _ = {frame_field}.show(ui, |ui| {{}});");
+        b.placements.push(Placement::drawn(z, frame_id, geom, body));
+        return;
+    }
+
+    // MEDM draws strictly in file order with composites TRANSPARENT (a composite
+    // is a group, not a stacking context): a sibling on the same layer that is
+    // later in the file must paint over a composite child on that layer. egui
+    // stacks same-`Order` Areas by CREATION order, and a single frame closure
+    // creates every child's Area at one statement position — so a multi-layer
+    // composite could honour file order on at most ONE layer (sorting the frame
+    // at its children's lowest layer fixed the ADBuffers title-chip-over-text
+    // case, but a control inside the composite then stacked wrong against an
+    // earlier same-layer top-level sibling). The structural cure: emit ONE
+    // placement PER layer present, each sharing the frame's outer rect/origin so
+    // children translate identically, so each child's Area is created at its OWN
+    // layer's statement position — file order then holds on every layer at once.
+    // The frame shell (border/enable — both no-ops on the children, which are
+    // detached Areas) rides the lowest layer, behind everything it groups. A
+    // visibility gate the caller sets applies to all of these placements
+    // uniformly (apply_dynamic_visibility tags every placement in `[start..]`).
+    let mut layers: Vec<ZLayer> = child_placements.iter().map(|p| p.z).collect();
+    layers.dedup(); // already sorted ascending by the sort_by_key above
+    let home = layers[0];
+
+    for &layer in &layers {
+        // Distinct Area id per layer group (reuse the frame's id for the home
+        // group); `place()` salts the Area with it, so the groups never collide.
+        let pid = if layer == home { frame_id } else { b.index() };
+        // Capture each group's OUTER top-left before `show` insets the home
+        // group's interior by `BORDER_INSET`; children are positioned relative to
+        // this, so the inset never shifts them. Every group shares the frame's
+        // rect, so each captures the same origin and children land identically.
+        let origin = format!("__frame_origin_{pid}");
+        let mut body = String::new();
+        let _ = writeln!(body, "let {origin} = ui.max_rect().min;");
+        let group = child_placements.iter().filter(|p| p.z == layer);
+        if layer == home {
+            // The lowest layer hosts the frame shell (and consumes its field).
+            let _ = writeln!(body, "let _ = {frame_field}.show(ui, |ui| {{");
+            for p in group {
+                write_placement(&mut body, p, dx, dy, "    ", options.use_layout, &origin);
+            }
+            let _ = write!(body, "}});");
+        } else {
+            for p in group {
+                write_placement(&mut body, p, dx, dy, "", options.use_layout, &origin);
+            }
+            // Drop the trailing newline so bodies are uniformly newline-free.
+            while body.ends_with('\n') {
+                body.pop();
+            }
+        }
+        b.placements.push(Placement::drawn(layer, pid, geom, body));
+    }
 }
 
 /// `strip chart` → `SidmTimePlot`: each MEDM `pen` is a time-series curve. A pen
@@ -5481,27 +5518,149 @@ composite {
     }
 
     #[test]
-    fn composite_nests_children_under_a_single_frame_placement() {
+    fn composite_splits_children_into_one_placement_per_layer() {
         let g = composite();
-        // The frame's place() opens first (it sorts at its children's lowest
-        // layer -- Background, from the rectangle child), then its `show`
-        // closure, then the control child's Foreground place() -- proving the
-        // control is nested inside the frame, not a top-level sibling
-        // (ordering, not indentation, since an 8-space prefix is a substring
-        // of a deeper-indented line).
+        // A composite spanning two layers (a Background rectangle + a Foreground
+        // text entry) emits ONE placement per layer, each at the frame's outer
+        // rect: the lowest layer (Background) hosts the frame shell and its
+        // closure draws the decoration; the control is a SEPARATE Foreground
+        // placement on its own layer, NOT nested in the closure -- so each
+        // child's Area is created at its own layer's statement position and file
+        // order holds per layer (the structural fix for a control inside a
+        // composite stacking wrong against an earlier same-layer sibling).
         let frame_place = g
             .source
             .find("egui::Order::Background")
             .expect("frame background place");
         let frame_show = g.source.find(".show(ui, |ui| {").expect("frame show");
-        let control_place = g
+        assert!(frame_place < frame_show, "{}", g.source);
+        // The decoration (frame-relative 0,0) draws inside the shell closure.
+        let deco = g
+            .source
+            .find("0.0, 0.0, 80.0, 40.0")
+            .expect("decoration place");
+        assert!(
+            frame_show < deco,
+            "the decoration must draw inside the frame shell:\n{}",
+            g.source
+        );
+        // The control is its own Foreground placement, after the decoration.
+        let control_layer = g
             .source
             .find("egui::Order::Foreground")
+            .expect("control layer");
+        let control = g
+            .source
+            .find("30.0, 10.0, 40.0, 18.0")
             .expect("control place");
-        assert!(frame_place < frame_show, "{}", g.source);
         assert!(
-            frame_show < control_place,
-            "control must be nested in the frame closure:\n{}",
+            deco < control_layer && control_layer < control,
+            "the control must be a separate Foreground placement:\n{}",
+            g.source
+        );
+        // Exactly one frame shell (only the lowest layer hosts `show`), and one
+        // captured origin per layer group.
+        assert_eq!(
+            g.source.matches(".show(ui, |ui| {").count(),
+            1,
+            "the frame shell rides only the lowest layer:\n{}",
+            g.source
+        );
+        assert_eq!(
+            g.source.matches("let __frame_origin_").count(),
+            2,
+            "one captured frame origin per layer group:\n{}",
+            g.source
+        );
+    }
+
+    /// A top-level control that is EARLIER in the file than a composite whose
+    /// interior also holds a control: the composite's control must keep file
+    /// order on the Foreground layer (draw on top of the earlier sibling),
+    /// which the per-layer split guarantees by creating its Area at the
+    /// Foreground statement position rather than at the composite's lowest
+    /// layer. Pre-fix, the whole composite sorted at its lowest (Background)
+    /// layer, creating the interior control's Area before the earlier sibling's
+    /// — so the sibling wrongly painted over it.
+    const CONTROL_BEFORE_COMPOSITE: &str = r#"
+"color map" {
+	colors {
+		ffffff,
+		000000,
+	}
+}
+"text entry" {
+	object {
+		x=10
+		y=200
+		width=100
+		height=20
+	}
+	control {
+		chan="BTOP"
+	}
+}
+composite {
+	object {
+		x=10
+		y=10
+		width=150
+		height=150
+	}
+	"composite name"=""
+	chan=""
+	children {
+		rectangle {
+			object {
+				x=10
+				y=10
+				width=150
+				height=150
+			}
+			"basic attribute" {
+				clr=1
+				fill="outline"
+			}
+		}
+		"text entry" {
+			object {
+				x=20
+				y=20
+				width=80
+				height=18
+			}
+			control {
+				chan="AINNER"
+			}
+		}
+	}
+}
+"#;
+
+    #[test]
+    fn composite_control_keeps_file_order_against_an_earlier_sibling() {
+        let g = generate(&parse(CONTROL_BEFORE_COMPOSITE), &Options::default());
+        // Both controls are Foreground; the earlier top-level one (BTOP, screen
+        // coords 10,200) must be emitted BEFORE the composite's interior control
+        // (AINNER, frame-relative 10,10) so the latter's Area stacks on top.
+        let btop = g
+            .source
+            .find("10.0, 200.0, 100.0, 20.0")
+            .expect("top-level control place");
+        let ainner = g
+            .source
+            .find("10.0, 10.0, 80.0, 18.0")
+            .expect("composite control place");
+        assert!(
+            btop < ainner,
+            "the earlier top-level control must precede the composite's interior \
+             control on the Foreground layer (file order):\n{}",
+            g.source
+        );
+        // The composite still draws its decoration behind, on a Background shell.
+        assert!(
+            g.source.contains("egui::Order::Background"),
+            "the composite decoration must keep its Background shell:\n{}",
             g.source
         );
     }
