@@ -163,6 +163,19 @@ impl SidmLabel {
                     }
                     if justify.1 {
                         ui.set_min_height(ui.available_height());
+                        // Centre the single text row in the MEDM cell. MEDM
+                        // draws textUpdate at y = ascent (top), but with a
+                        // font sized to fill the height (medmTextUpdate.c);
+                        // our height-derived font is smaller, so centring is
+                        // what reproduces MEDM's visual band — and matches
+                        // the centred controls beside it.
+                        let font = ui
+                            .style()
+                            .override_font_id
+                            .clone()
+                            .unwrap_or_else(|| egui::TextStyle::Body.resolve(ui.style()));
+                        let row = ui.fonts_mut(|f| f.row_height(&font));
+                        ui.add_space(((ui.available_height() - row) / 2.0).max(0.0));
                     }
                     ui.label(rich);
                 });

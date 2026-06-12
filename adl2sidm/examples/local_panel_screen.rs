@@ -104,6 +104,9 @@ impl Screen {
         });
         place(ui, __origin, sx, sy, egui::Order::Background, egui::Id::new(3u64), 6.0, 200.0, 348.0, 160.0, |ui| {
             ui.with_layout(egui::Layout::centered_and_justified(egui::Direction::LeftToRight), |ui| {
+                let spacing = ui.spacing_mut();
+                spacing.interact_size = egui::Vec2::ZERO;
+                spacing.button_padding = egui::Vec2::ZERO;
                 let _ = w3.show(ui);
             });
         });
@@ -112,12 +115,18 @@ impl Screen {
                 ui.style_mut().override_font_id = Some(egui::FontId::proportional(12.0 * sy));
                 ui.style_mut().visuals.override_text_color = Some(Color32::from_rgb(0, 0, 0));
                 ui.with_layout(egui::Layout::centered_and_justified(egui::Direction::LeftToRight), |ui| {
+                    let spacing = ui.spacing_mut();
+                    spacing.interact_size = egui::Vec2::ZERO;
+                    spacing.button_padding = egui::Vec2::ZERO;
                     let _ = w1.show(ui);
                 });
             }
         });
         place(ui, __origin, sx, sy, egui::Order::Middle, egui::Id::new(2u64), 10.0, 70.0, 340.0, 120.0, |ui| {
             ui.with_layout(egui::Layout::centered_and_justified(egui::Direction::LeftToRight), |ui| {
+                let spacing = ui.spacing_mut();
+                spacing.interact_size = egui::Vec2::ZERO;
+                spacing.button_padding = egui::Vec2::ZERO;
                 let _ = w2.show(ui);
             });
         });
@@ -126,12 +135,18 @@ impl Screen {
                 ui.style_mut().override_font_id = Some(egui::FontId::proportional(12.0 * sy));
                 ui.style_mut().visuals.override_text_color = Some(Color32::from_rgb(0, 0, 0));
                 ui.with_layout(egui::Layout::centered_and_justified(egui::Direction::LeftToRight), |ui| {
+                    let spacing = ui.spacing_mut();
+                    spacing.interact_size = egui::Vec2::ZERO;
+                    spacing.button_padding = egui::Vec2::ZERO;
                     let _ = w5.show(ui);
                 });
             }
         });
         place(ui, __origin, sx, sy, egui::Order::Middle, egui::Id::new(7u64), 20.0, 300.0, 140.0, 20.0, |ui| {
             ui.with_layout(egui::Layout::centered_and_justified(egui::Direction::LeftToRight), |ui| {
+                let spacing = ui.spacing_mut();
+                spacing.interact_size = egui::Vec2::ZERO;
+                spacing.button_padding = egui::Vec2::ZERO;
                 let _ = w7.show(ui);
             });
         });
@@ -148,6 +163,9 @@ impl Screen {
                     {
                         ui.style_mut().override_font_id = Some(egui::FontId::proportional(10.0 * sy));
                         ui.with_layout(egui::Layout::centered_and_justified(egui::Direction::LeftToRight), |ui| {
+                            let spacing = ui.spacing_mut();
+                            spacing.interact_size = egui::Vec2::ZERO;
+                            spacing.button_padding = egui::Vec2::ZERO;
                             let _ = w15.show(ui);
                         });
                     }
@@ -158,12 +176,18 @@ impl Screen {
             {
                 ui.style_mut().override_font_id = Some(egui::FontId::proportional(13.0 * sy));
                 ui.with_layout(egui::Layout::centered_and_justified(egui::Direction::LeftToRight), |ui| {
+                    let spacing = ui.spacing_mut();
+                    spacing.interact_size = egui::Vec2::ZERO;
+                    spacing.button_padding = egui::Vec2::ZERO;
                     let _ = w4.show(ui);
                 });
             }
         });
         place(ui, __origin, sx, sy, egui::Order::Foreground, egui::Id::new(6u64), 20.0, 246.0, 320.0, 24.0, |ui| {
             ui.with_layout(egui::Layout::centered_and_justified(egui::Direction::LeftToRight), |ui| {
+                let spacing = ui.spacing_mut();
+                spacing.interact_size = egui::Vec2::ZERO;
+                spacing.button_padding = egui::Vec2::ZERO;
                 let _ = w6.show(ui);
             });
         });
@@ -171,6 +195,9 @@ impl Screen {
             {
                 ui.style_mut().override_font_id = Some(egui::FontId::proportional(13.0 * sy));
                 ui.with_layout(egui::Layout::centered_and_justified(egui::Direction::LeftToRight), |ui| {
+                    let spacing = ui.spacing_mut();
+                    spacing.interact_size = egui::Vec2::ZERO;
+                    spacing.button_padding = egui::Vec2::ZERO;
                     let _ = w8.show(ui);
                 });
             }
@@ -179,6 +206,9 @@ impl Screen {
             {
                 ui.style_mut().override_font_id = Some(egui::FontId::proportional(13.0 * sy));
                 ui.with_layout(egui::Layout::centered_and_justified(egui::Direction::LeftToRight), |ui| {
+                    let spacing = ui.spacing_mut();
+                    spacing.interact_size = egui::Vec2::ZERO;
+                    spacing.button_padding = egui::Vec2::ZERO;
                     if ui.button("Echo").clicked() {
                         let _ = std::process::Command::new("sh").arg("-c").arg("echo hello from adl2sidm").spawn();
                     }
@@ -189,6 +219,9 @@ impl Screen {
             {
                 ui.style_mut().override_font_id = Some(egui::FontId::proportional(13.0 * sy));
                 ui.with_layout(egui::Layout::centered_and_justified(egui::Direction::LeftToRight), |ui| {
+                    let spacing = ui.spacing_mut();
+                    spacing.interact_size = egui::Vec2::ZERO;
+                    spacing.button_padding = egui::Vec2::ZERO;
                     let __m = ui.menu_button("", |ui| {
                         if ui.button("Date").clicked() {
                             let _ = std::process::Command::new("sh").arg("-c").arg("date").spawn();
@@ -207,6 +240,9 @@ impl Screen {
             {
                 ui.style_mut().override_font_id = Some(egui::FontId::proportional(13.0 * sy));
                 ui.with_layout(egui::Layout::centered_and_justified(egui::Direction::LeftToRight), |ui| {
+                    let spacing = ui.spacing_mut();
+                    spacing.interact_size = egui::Vec2::ZERO;
+                    spacing.button_padding = egui::Vec2::ZERO;
                     let __r = ui.button("").on_hover_text("related display: open detail.adl");
                     related_display_icon(ui, __r.rect, ui.visuals().text_color(), ui.visuals().widgets.inactive.weak_bg_fill);
                     if __r.clicked() {
@@ -219,6 +255,9 @@ impl Screen {
             {
                 ui.style_mut().override_font_id = Some(egui::FontId::proportional(13.0 * sy));
                 ui.with_layout(egui::Layout::centered_and_justified(egui::Direction::LeftToRight), |ui| {
+                    let spacing = ui.spacing_mut();
+                    spacing.interact_size = egui::Vec2::ZERO;
+                    spacing.button_padding = egui::Vec2::ZERO;
                     ui.menu_button("Screens", |ui| {
                         if ui.button("Overview").on_hover_text("related display: open overview.adl").clicked() {
                             eprintln!("related display: open overview.adl");

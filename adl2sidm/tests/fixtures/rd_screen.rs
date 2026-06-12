@@ -56,6 +56,9 @@ impl Screen {
             {
                 ui.style_mut().override_font_id = Some(egui::FontId::proportional(14.0 * sy));
                 ui.with_layout(egui::Layout::centered_and_justified(egui::Direction::LeftToRight), |ui| {
+                    let spacing = ui.spacing_mut();
+                    spacing.interact_size = egui::Vec2::ZERO;
+                    spacing.button_padding = egui::Vec2::ZERO;
                     if ui.button("Open Child").on_hover_text("open rd_child.adl (macros: P=X:)").clicked() {
                         let __rd_ctx = ui.ctx().clone();
                         let __rd_args = "P=X:".to_string();
@@ -70,6 +73,9 @@ impl Screen {
             {
                 ui.style_mut().override_font_id = Some(egui::FontId::proportional(14.0 * sy));
                 ui.with_layout(egui::Layout::centered_and_justified(egui::Direction::LeftToRight), |ui| {
+                    let spacing = ui.spacing_mut();
+                    spacing.interact_size = egui::Vec2::ZERO;
+                    spacing.button_padding = egui::Vec2::ZERO;
                     if ui.button("Missing").on_hover_text("related display: open rd_missing_fixture.adl").clicked() {
                         eprintln!("related display: open rd_missing_fixture.adl");
                     }
@@ -279,6 +285,9 @@ pub mod __rd_rd_child {
                 {
                     ui.style_mut().override_font_id = Some(egui::FontId::proportional(14.0 * sy));
                     ui.with_layout(egui::Layout::centered_and_justified(egui::Direction::LeftToRight), |ui| {
+                        let spacing = ui.spacing_mut();
+                        spacing.interact_size = egui::Vec2::ZERO;
+                        spacing.button_padding = egui::Vec2::ZERO;
                         if ui.button("Back").on_hover_text(__m.expand("open rd_parent.adl (macros: P=$(P))").as_str()).clicked() {
                             let __rd_ctx = ui.ctx().clone();
                             let __rd_args = __m.expand("P=$(P)");

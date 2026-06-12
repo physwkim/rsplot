@@ -25,7 +25,7 @@ use siplot::egui;
 
 use crate::channel::{Channel, ChannelState, PvValue};
 use crate::engine::{Engine, EngineError};
-use crate::widgets::base::{BorderMode, ChannelBase};
+use crate::widgets::base::{BorderMode, ChannelBase, layout_justify};
 use crate::widgets::display_format::{DisplayFormat, FormatSpec, format_value};
 
 /// A writable channel text entry (PyDM `PyDMLineEdit`).
@@ -116,7 +116,21 @@ impl SidmLineEdit {
         }
 
         let inner = self.base.framed(ui, &state, true, |ui| {
-            ui.add(egui::TextEdit::singleline(&mut self.edit_buffer))
+            let mut edit = egui::TextEdit::singleline(&mut self.edit_buffer);
+            if layout_justify(ui).1 {
+                // A justified cell is the MEDM text-entry rect; `TextEdit`
+                // top-aligns its single row (galley at top + margin), so size
+                // the vertical margin to half the slack to centre the text.
+                let font = ui
+                    .style()
+                    .override_font_id
+                    .clone()
+                    .unwrap_or_else(|| egui::TextStyle::Body.resolve(ui.style()));
+                let row = ui.fonts_mut(|f| f.row_height(&font));
+                let slack = ((ui.available_height() - row) / 2.0).clamp(0.0, 127.0);
+                edit = edit.margin(egui::Margin::symmetric(4, slack.round() as i8));
+            }
+            ui.add(edit)
         });
         let resp = inner.inner;
         self.editing = resp.has_focus();

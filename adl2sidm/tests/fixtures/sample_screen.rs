@@ -138,22 +138,34 @@ impl Screen {
         if gate11.read(|s| s.value.as_ref().and_then(|v| v.as_f64())).is_some_and(|v| v != 0.0) {
             place(ui, __origin, egui::Order::Background, egui::Id::new(10u64), 210.0, 10.0, 180.0, 120.0, |ui| {
                 ui.with_layout(egui::Layout::centered_and_justified(egui::Direction::LeftToRight), |ui| {
+                    let spacing = ui.spacing_mut();
+                    spacing.interact_size = egui::Vec2::ZERO;
+                    spacing.button_padding = egui::Vec2::ZERO;
                     let _ = w10.show(ui);
                 });
             });
         }
         place(ui, __origin, egui::Order::Background, egui::Id::new(12u64), 210.0, 140.0, 60.0, 60.0, |ui| {
             ui.with_layout(egui::Layout::centered_and_justified(egui::Direction::LeftToRight), |ui| {
+                let spacing = ui.spacing_mut();
+                spacing.interact_size = egui::Vec2::ZERO;
+                spacing.button_padding = egui::Vec2::ZERO;
                 let _ = w12.show(ui);
             });
         });
         place(ui, __origin, egui::Order::Background, egui::Id::new(13u64), 290.0, 140.0, 60.0, 60.0, |ui| {
             ui.with_layout(egui::Layout::centered_and_justified(egui::Direction::LeftToRight), |ui| {
+                let spacing = ui.spacing_mut();
+                spacing.interact_size = egui::Vec2::ZERO;
+                spacing.button_padding = egui::Vec2::ZERO;
                 let _ = w13.show(ui);
             });
         });
         place(ui, __origin, egui::Order::Background, egui::Id::new(14u64), 210.0, 210.0, 80.0, 24.0, |ui| {
             ui.with_layout(egui::Layout::centered_and_justified(egui::Direction::LeftToRight), |ui| {
+                let spacing = ui.spacing_mut();
+                spacing.interact_size = egui::Vec2::ZERO;
+                spacing.button_padding = egui::Vec2::ZERO;
                 let _ = w14.show(ui);
             });
         });
@@ -162,27 +174,42 @@ impl Screen {
                 ui.style_mut().override_font_id = Some(egui::FontId::proportional(12.0));
                 ui.style_mut().visuals.override_text_color = Some(Color32::from_rgb(255, 255, 255));
                 ui.with_layout(egui::Layout::centered_and_justified(egui::Direction::LeftToRight), |ui| {
+                    let spacing = ui.spacing_mut();
+                    spacing.interact_size = egui::Vec2::ZERO;
+                    spacing.button_padding = egui::Vec2::ZERO;
                     let _ = w3.show(ui);
                 });
             }
         });
         place(ui, __origin, egui::Order::Middle, egui::Id::new(8u64), 10.0, 170.0, 120.0, 20.0, |ui| {
             ui.with_layout(egui::Layout::centered_and_justified(egui::Direction::LeftToRight), |ui| {
+                let spacing = ui.spacing_mut();
+                spacing.interact_size = egui::Vec2::ZERO;
+                spacing.button_padding = egui::Vec2::ZERO;
                 let _ = w8.show(ui);
             });
         });
         place(ui, __origin, egui::Order::Middle, egui::Id::new(9u64), 10.0, 200.0, 180.0, 24.0, |ui| {
             ui.with_layout(egui::Layout::centered_and_justified(egui::Direction::LeftToRight), |ui| {
+                let spacing = ui.spacing_mut();
+                spacing.interact_size = egui::Vec2::ZERO;
+                spacing.button_padding = egui::Vec2::ZERO;
                 let _ = w9.show(ui);
             });
         });
         place(ui, __origin, egui::Order::Middle, egui::Id::new(15u64), 10.0, 240.0, 380.0, 110.0, |ui| {
             ui.with_layout(egui::Layout::centered_and_justified(egui::Direction::LeftToRight), |ui| {
+                let spacing = ui.spacing_mut();
+                spacing.interact_size = egui::Vec2::ZERO;
+                spacing.button_padding = egui::Vec2::ZERO;
                 let _ = w15.show(ui);
             });
         });
         place(ui, __origin, egui::Order::Middle, egui::Id::new(16u64), 10.0, 360.0, 380.0, 110.0, |ui| {
             ui.with_layout(egui::Layout::centered_and_justified(egui::Direction::LeftToRight), |ui| {
+                let spacing = ui.spacing_mut();
+                spacing.interact_size = egui::Vec2::ZERO;
+                spacing.button_padding = egui::Vec2::ZERO;
                 let _ = w16.show(ui);
             });
         });
@@ -194,6 +221,9 @@ impl Screen {
                         ui.style_mut().override_font_id = Some(egui::FontId::proportional(14.0));
                         ui.style_mut().visuals.override_text_color = Some(Color32::from_rgb(255, 255, 255));
                         ui.with_layout(egui::Layout::centered_and_justified(egui::Direction::LeftToRight), |ui| {
+                            let spacing = ui.spacing_mut();
+                            spacing.interact_size = egui::Vec2::ZERO;
+                            spacing.button_padding = egui::Vec2::ZERO;
                             let _ = w18.show(ui);
                         });
                     }
@@ -204,6 +234,9 @@ impl Screen {
             {
                 ui.style_mut().override_font_id = Some(egui::FontId::proportional(12.0));
                 ui.with_layout(egui::Layout::centered_and_justified(egui::Direction::LeftToRight), |ui| {
+                    let spacing = ui.spacing_mut();
+                    spacing.interact_size = egui::Vec2::ZERO;
+                    spacing.button_padding = egui::Vec2::ZERO;
                     let _ = w4.show(ui);
                 });
             }
@@ -221,6 +254,9 @@ impl Screen {
                 __v.text_edit_bg_color = Some(Color32::from_rgb(192, 192, 192));
                 __v.override_text_color = Some(Color32::from_rgb(0, 0, 0));
                 ui.with_layout(egui::Layout::centered_and_justified(egui::Direction::LeftToRight), |ui| {
+                    let spacing = ui.spacing_mut();
+                    spacing.interact_size = egui::Vec2::ZERO;
+                    spacing.button_padding = egui::Vec2::ZERO;
                     let _ = w5.show(ui);
                 });
             }
@@ -229,12 +265,18 @@ impl Screen {
             {
                 ui.style_mut().override_font_id = Some(egui::FontId::proportional(14.0));
                 ui.with_layout(egui::Layout::centered_and_justified(egui::Direction::LeftToRight), |ui| {
+                    let spacing = ui.spacing_mut();
+                    spacing.interact_size = egui::Vec2::ZERO;
+                    spacing.button_padding = egui::Vec2::ZERO;
                     let _ = w6.show(ui);
                 });
             }
         });
         place(ui, __origin, egui::Order::Foreground, egui::Id::new(7u64), 10.0, 140.0, 180.0, 24.0, |ui| {
             ui.with_layout(egui::Layout::centered_and_justified(egui::Direction::LeftToRight), |ui| {
+                let spacing = ui.spacing_mut();
+                spacing.interact_size = egui::Vec2::ZERO;
+                spacing.button_padding = egui::Vec2::ZERO;
                 let _ = w7.show(ui);
             });
         });

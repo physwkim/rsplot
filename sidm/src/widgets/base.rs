@@ -268,13 +268,39 @@ impl ChannelBase {
         add: impl FnOnce(&mut egui::Ui) -> R,
     ) -> egui::InnerResponse<R> {
         let border = self.border(state);
+        let justify = layout_justify(ui);
 
-        let egui::InnerResponse {
-            inner: value,
-            response,
-        } = egui::Frame::NONE
-            .inner_margin(egui::Margin::same(BORDER_INSET))
-            .show(ui, |ui| ui.add_enabled_ui(enabled, add).inner);
+        let (value, response) = if justify.0 && justify.1 {
+            // A both-axis-justified layout is the MEDM-cell contract (the
+            // converted screens wrap every widget in one): the widget owns
+            // exactly this rect. Flow placement cannot honour that — egui
+            // floors rows and buttons at `interact_size`, and the justified
+            // parent re-centres an overflowing frame a few px into the clip
+            // (measured) — so reserve the rect with one constant allocation
+            // and run the content in a child pinned to it. Motif widgets have
+            // no minimum size and no margins (MEDM createToggleButtons et
+            // al.), so the egui floors are scoped away; the content then fits
+            // the cell and the inherited centred layout truly centres it.
+            let outer = ui.available_rect_before_wrap();
+            let response = ui.allocate_rect(outer, egui::Sense::hover());
+            let mut content =
+                ui.new_child(egui::UiBuilder::new().max_rect(outer).layout(*ui.layout()));
+            {
+                let spacing = content.spacing_mut();
+                spacing.interact_size = egui::Vec2::ZERO;
+                spacing.button_padding = egui::Vec2::ZERO;
+            }
+            let value = egui::Frame::NONE
+                .inner_margin(egui::Margin::same(BORDER_INSET))
+                .show(&mut content, |ui| ui.add_enabled_ui(enabled, add).inner)
+                .inner;
+            (value, response)
+        } else {
+            let egui::InnerResponse { inner, response } = egui::Frame::NONE
+                .inner_margin(egui::Margin::same(BORDER_INSET))
+                .show(ui, |ui| ui.add_enabled_ui(enabled, add).inner);
+            (inner, response)
+        };
 
         if let Some(style) = border {
             paint_border(ui.painter(), response.rect, &style);

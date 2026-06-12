@@ -612,3 +612,140 @@ fn justified_byte_divides_the_available_rect_among_bits() {
         "justified byte should fill both axes: justified={justified} plain={plain}"
     );
 }
+
+/// Render `show` in an adl2sidm MEDM cell — the generated `place()` shape (a
+/// clipped Area pinned at the rect) with the generated style prelude (MEDM
+/// bclr fill behind + on the widget face, black text, height-derived font) —
+/// and return the row band of the dark text pixels inside the cell.
+fn medm_cell_text_rows(show: impl FnMut(&mut egui::Ui) + 'static) -> (usize, usize) {
+    const BCLR: egui::Color32 = egui::Color32::from_rgb(115, 223, 255);
+    let rect = egui::Rect::from_min_size(egui::pos2(10.0, 10.0), egui::vec2(90.0, 20.0));
+    let show = RefCell::new(show);
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(110.0, 40.0))
+        .with_pixels_per_point(1.0)
+        .renderer(WgpuTestRenderer::from_render_state(create_render_state(
+            default_wgpu_setup(),
+        )))
+        .build_ui(move |ui| {
+            egui::Area::new(ui.id().with("medm_cell"))
+                .fixed_pos(rect.min)
+                .constrain(false)
+                .show(ui.ctx(), |ui| {
+                    ui.set_clip_rect(rect);
+                    ui.set_max_size(rect.size());
+                    ui.style_mut().override_font_id = Some(egui::FontId::proportional(12.0));
+                    ui.painter()
+                        .rect_filled(ui.max_rect(), egui::CornerRadius::ZERO, BCLR);
+                    let v = &mut ui.style_mut().visuals;
+                    v.widgets.inactive.weak_bg_fill = BCLR;
+                    v.widgets.hovered.weak_bg_fill = BCLR;
+                    v.widgets.active.weak_bg_fill = BCLR;
+                    v.widgets.open.weak_bg_fill = BCLR;
+                    v.text_edit_bg_color = Some(BCLR);
+                    v.override_text_color = Some(egui::Color32::BLACK);
+                    ui.with_layout(
+                        egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
+                        |ui| show.borrow_mut()(ui),
+                    );
+                });
+        });
+    harness.step();
+    harness.step();
+    let raw = harness.render().expect("headless wgpu render").into_raw();
+    // Confine the scan to the cell interior: outside it lies the dark harness
+    // panel, which would swallow the band into rows 0..39.
+    let (mut top, mut bottom) = (usize::MAX, 0usize);
+    for (i, px) in raw.chunks_exact(4).enumerate() {
+        let (x, y) = (i % 110, i / 110);
+        if (12..98).contains(&x) && (10..30).contains(&y) && px[0] < 70 && px[1] < 70 && px[2] < 70
+        {
+            top = top.min(y);
+            bottom = bottom.max(y);
+        }
+    }
+    assert!(
+        top <= bottom,
+        "the widget must draw dark text inside the MEDM cell"
+    );
+    (top, bottom)
+}
+
+/// The gap above the text band vs the gap below it inside the 20 px cell
+/// (rows 10..=29): equal ±2 px when the content is vertically centred, and
+/// at least 1 px so the glyphs do not ride the clip edge (MEDM never clips
+/// its captions — the cell is the widget).
+fn assert_centred(widget: &str, top: usize, bottom: usize) {
+    let (gap_above, gap_below) = (top as f32 - 10.0, 29.0 - bottom as f32);
+    eprintln!("{widget}: text rows {top}..{bottom} gaps {gap_above}/{gap_below}");
+    assert!(
+        (gap_above - gap_below).abs() <= 2.0 && gap_above >= 1.0 && gap_below >= 1.0,
+        "{widget} text must be vertically centred in the MEDM cell: \
+         rows {top}..{bottom}, gaps above/below {gap_above}/{gap_below}"
+    );
+}
+
+/// The framed flow path floored the content row at `interact_size.y` (18) and
+/// the justified parent re-centred the overflowing frame, displacing every
+/// framed control ~2.5 px down (text-entry rows 18..25 in a cell whose centred
+/// band is 16..23) — the bottoms of the glyphs clipped in short MEDM cells.
+#[test]
+fn justified_line_edit_centres_text_in_a_medm_cell() {
+    let engine = Engine::new();
+    let mut edit = sidm::widgets::SidmLineEdit::new(&engine, "loc://cell_le?type=float&init=1.0")
+        .expect("connect");
+    assert!(
+        wait_for(|| edit.channel().is_connected(), Duration::from_secs(2)),
+        "line edit channel never connected"
+    );
+    let (top, bottom) = medm_cell_text_rows(move |ui| drop(edit.show(ui)));
+    assert_centred("line edit", top, bottom);
+}
+
+#[test]
+fn justified_push_button_centres_caption_in_a_medm_cell() {
+    let engine = Engine::new();
+    let mut button =
+        sidm::widgets::SidmPushButton::new(&engine, "loc://cell_pb?type=int&init=0", "Start", "1")
+            .expect("connect");
+    assert!(
+        wait_for(|| button.channel().is_connected(), Duration::from_secs(2)),
+        "push button channel never connected"
+    );
+    let (top, bottom) = medm_cell_text_rows(move |ui| drop(button.show(ui)));
+    assert_centred("push button", top, bottom);
+}
+
+/// The label was only accidentally centred before the framed pinning (the
+/// frame displacement happened to cancel its top alignment); with the pinned
+/// frame it needs its own explicit centring (MEDM textUpdate fills the cell
+/// height with its font — medmTextUpdate.c — so the visual band is centred).
+#[test]
+fn justified_label_centres_text_in_a_medm_cell() {
+    let engine = Engine::new();
+    let mut label = SidmLabel::new(&engine, "loc://cell_lb?type=float&init=1.0").expect("connect");
+    assert!(
+        wait_for(|| label.channel().is_connected(), Duration::from_secs(2)),
+        "label channel never connected"
+    );
+    let (top, bottom) = medm_cell_text_rows(move |ui| drop(label.show(ui)));
+    assert_centred("label", top, bottom);
+}
+
+/// The combo face (an MEDM menu) carries its selected enum string; `loc://`
+/// cannot seed enum strings, so this rides the in-process CA fixture.
+#[test]
+#[cfg(feature = "ca")]
+fn justified_combo_centres_face_text_in_a_medm_cell() {
+    let (engine, _server_rt) = enum_ioc_engine();
+    let mut combo = SidmEnumComboBox::new(&engine, "ca://sidm:jf:bi").expect("connect");
+    assert!(
+        wait_for(
+            || combo.channel().read(|s| s.enum_strings.is_some()),
+            Duration::from_secs(5)
+        ),
+        "combo never received its enum strings"
+    );
+    let (top, bottom) = medm_cell_text_rows(move |ui| drop(combo.show(ui)));
+    assert_centred("combo", top, bottom);
+}

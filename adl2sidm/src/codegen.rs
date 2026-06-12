@@ -2220,9 +2220,14 @@ fn style_prelude(b: &mut Builder, colors: WidgetColors, font_px: Option<f32>) ->
 /// responsive (`--use-layout`) scale; child uis (e.g. the alarm-border frame
 /// inside each sidm widget) inherit the layout, so the fill reaches the inner
 /// widget.
+///
+/// The wrap also zeroes egui's size floors: a Motif widget has no minimum size
+/// or margins, but egui buttons floor their height at `interact_size.y` (18),
+/// so a bare `ui.button` in a shorter MEDM cell (related display / shell
+/// command) overflowed downward and its caption rode the bottom clip edge.
 fn justified_body(stmt: &str) -> String {
     format!(
-        "ui.with_layout(egui::Layout::centered_and_justified(egui::Direction::LeftToRight), |ui| {{\n    {}\n}});",
+        "ui.with_layout(egui::Layout::centered_and_justified(egui::Direction::LeftToRight), |ui| {{\n    let spacing = ui.spacing_mut();\n    spacing.interact_size = egui::Vec2::ZERO;\n    spacing.button_padding = egui::Vec2::ZERO;\n    {}\n}});",
         stmt.replace('\n', "\n    ")
     )
 }
