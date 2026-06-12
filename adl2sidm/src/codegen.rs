@@ -819,7 +819,8 @@ fn emit_drawing(b: &mut Builder, widget: &MedmWidget, options: &Options, z: ZLay
         "SidmDrawing::new(&engine, {}, DrawingShape::{shape})",
         rust_str(&addr)
     );
-    let builders = drawing_brush_builders(b, widget);
+    let mut builders = drawing_brush_builders(b, widget);
+    builders.push(drawing_size_builder(geom));
     push_channel_widget(
         b,
         z,
@@ -888,6 +889,19 @@ fn drawing_brush_builders(b: &mut Builder, widget: &MedmWidget) -> Vec<String> {
     builders
 }
 
+/// `.with_size(...)` sized from MEDM geometry. Without it `SidmDrawing::show`
+/// allocates its `DEFAULT_SIZE` (40×40), so a large group-box rectangle or a
+/// long polyline collapses to a tiny square. Mirrors how `emit_image` sizes
+/// `SidmImage` from the same `object` geometry — the drawing then fills exactly
+/// the `place()` rect it is positioned into.
+fn drawing_size_builder(geom: Geometry) -> String {
+    format!(
+        ".with_size(egui::Vec2::new({}, {}))",
+        float_lit(f64::from(geom.width)),
+        float_lit(f64::from(geom.height))
+    )
+}
+
 /// `arc` — a `SidmDrawing(DrawingShape::Arc { begin_deg, span_deg })`. The MEDM
 /// `begin`/`path` angles are parsed to degrees (`beginAngle`/`pathAngle`); SiDM's
 /// arc keeps MEDM's X11 convention (0° at 3 o'clock, CCW positive), so the
@@ -908,7 +922,8 @@ fn emit_arc(b: &mut Builder, widget: &MedmWidget, options: &Options, z: ZLayer) 
         float_lit(begin),
         float_lit(span)
     );
-    let builders = drawing_brush_builders(b, widget);
+    let mut builders = drawing_brush_builders(b, widget);
+    builders.push(drawing_size_builder(geom));
     push_channel_widget(
         b,
         z,
@@ -977,6 +992,7 @@ fn emit_polyshape(
         })
         .collect();
     builders.push(format!(".with_points(vec![{}])", verts.join(", ")));
+    builders.push(drawing_size_builder(geom));
     push_channel_widget(
         b,
         z,
@@ -4285,6 +4301,12 @@ rectangle {
             g.source
                 .contains(".with_border(Color32::from_rgb(255, 0, 0), 2.0)")
         );
+        // Sized to the MEDM 40x20 geometry, not SidmDrawing's 40x40 default.
+        assert!(
+            g.source.contains(".with_size(egui::Vec2::new(40.0, 20.0))"),
+            "{}",
+            g.source
+        );
     }
 
     #[test]
@@ -4296,6 +4318,12 @@ rectangle {
         assert!(
             g.source
                 .contains(".with_border(Color32::from_rgb(255, 0, 0), 1.0)"),
+            "{}",
+            g.source
+        );
+        // Sized to the MEDM 30x30 geometry.
+        assert!(
+            g.source.contains(".with_size(egui::Vec2::new(30.0, 30.0))"),
             "{}",
             g.source
         );
@@ -4869,6 +4897,16 @@ image {
             "polyline points not normalised to the widget origin:\n{}",
             g.source
         );
+        // Both are sized to their MEDM 40x40 geometry (the polyline's vertices
+        // are placed relative to that rect), not the 40x40 default by accident.
+        assert_eq!(
+            g.source
+                .matches(".with_size(egui::Vec2::new(40.0, 40.0))")
+                .count(),
+            2,
+            "arc and polyline should each be sized from geometry:\n{}",
+            g.source
+        );
         // Both are decorations -> Background layer, and both are real fielded
         // widgets (no fieldless placeholder).
         assert!(g.source.contains("egui::Order::Background"), "{}", g.source);
@@ -4923,6 +4961,12 @@ polygon {
                 ".with_points(vec![egui::Vec2::new(0.0, 0.0), \
                  egui::Vec2::new(40.0, 0.0), egui::Vec2::new(20.0, 30.0)])"
             ),
+            "{}",
+            g.source
+        );
+        // Sized to the MEDM 40x30 geometry, so the placed vertices land correctly.
+        assert!(
+            g.source.contains(".with_size(egui::Vec2::new(40.0, 30.0))"),
             "{}",
             g.source
         );

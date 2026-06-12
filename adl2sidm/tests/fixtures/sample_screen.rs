@@ -62,16 +62,19 @@ impl Screen {
             .expect("adl2sidm: connect ca://DMM1:show_box (drawing)")
             .with_fill(Color32::TRANSPARENT)
             .with_border(Color32::from_rgb(192, 192, 192), 2.0)
-            .with_alarm_sensitive_border(true);
+            .with_alarm_sensitive_border(true)
+            .with_size(egui::Vec2::new(180.0, 120.0));
         let gate11 = engine
             .connect("calc://adl2sidm_vis_146?expr=A!=0&A=ca://DMM1:show_box&update=A")
             .expect("adl2sidm: connect visibility gate calc://adl2sidm_vis_146?expr=A!=0&A=ca://DMM1:show_box&update=A");
         let w12 = SidmDrawing::new(&engine, "loc://adl2sidm_shape_0", DrawingShape::Ellipse)
             .expect("adl2sidm: connect loc://adl2sidm_shape_0 (drawing)")
-            .with_fill(Color32::from_rgb(255, 0, 0));
+            .with_fill(Color32::from_rgb(255, 0, 0))
+            .with_size(egui::Vec2::new(60.0, 60.0));
         let w13 = SidmDrawing::new(&engine, "loc://adl2sidm_shape_1", DrawingShape::Arc { begin_deg: 0.0, span_deg: 360.0 })
             .expect("adl2sidm: connect loc://adl2sidm_shape_1 (arc)")
-            .with_fill(Color32::from_rgb(0, 255, 0));
+            .with_fill(Color32::from_rgb(0, 255, 0))
+            .with_size(egui::Vec2::new(60.0, 60.0));
         let w14 = SidmImage::new("logo.gif")
             .with_size(egui::Vec2::new(80.0, 24.0));
         let mut w15 = SidmTimePlot::new(rs, 0).with_time_span(60.0);

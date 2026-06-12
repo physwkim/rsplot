@@ -33,7 +33,8 @@ impl Screen {
         let w3 = SidmDrawing::new(&engine, "loc://adl2sidm_shape_0", DrawingShape::Rectangle)
             .expect("adl2sidm: connect loc://adl2sidm_shape_0 (drawing)")
             .with_fill(Color32::TRANSPARENT)
-            .with_border(Color32::from_rgb(192, 192, 192), 2.0);
+            .with_border(Color32::from_rgb(192, 192, 192), 2.0)
+            .with_size(egui::Vec2::new(348.0, 160.0));
         let w4 = SidmLineEdit::new(&engine, "loc://setpoint?type=float&init=5&precision=2")
             .expect("adl2sidm: connect loc://setpoint?type=float&init=5&precision=2");
         let w5 = SidmLabel::new(&engine, "loc://setpoint?type=float&init=5&precision=2")
