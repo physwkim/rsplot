@@ -353,20 +353,22 @@ fn visibility_gate_address(
     Some(addr)
 }
 
-/// The MEDM CALC expression for a visibility rule, combining the `vis` mode with
-/// the optional `calc` field — a port of adl2pydm's
-/// `processDynamicAttributeAsRules`. `vis="calc"` uses the `calc` field verbatim
-/// (default `A`); `if zero` / `if not zero` test the calc result (default channel
-/// `A`) against zero with MEDM's `=` / `#` operators.
+/// The MEDM CALC expression for a visibility rule. `vis="calc"` uses the `calc`
+/// field verbatim (default `A`); `if zero` / `if not zero` test channel `A`
+/// against zero with MEDM's `=` / `#` operators — and IGNORE the `calc` field,
+/// matching MEDM (`calcVisibility`, utils.c:4471-4477, reads `records[0]->value`
+/// directly for IF_ZERO/IF_NOT_ZERO; `calc` participates only under V_CALC). A
+/// stray `calc="0"` beside `vis="if not zero"` (ADSetup.adl's Connected text)
+/// must not poison the gate into a constant. Deliberate deviation from
+/// adl2pydm, which wraps the calc in the vis test (output_handler.py
+/// `convertDynamicAttribute_to_Rules`) and so hides that text forever.
 fn medm_visibility_expr(vis: &str, calc: Option<&str>) -> String {
     match (vis, calc) {
         ("calc", Some(expr)) => expr.to_string(),
         ("calc", None) => "A".to_string(),
-        ("if zero", Some(expr)) => format!("({expr})=0"),
-        ("if zero", None) => "A=0".to_string(),
+        ("if zero", _) => "A=0".to_string(),
         // "if not zero" (the MEDM default) and any unknown mode.
-        (_, Some(expr)) => format!("({expr})#0"),
-        (_, None) => "A#0".to_string(),
+        (_, _) => "A#0".to_string(),
     }
 }
 
@@ -6062,12 +6064,16 @@ composite {
     }
 
     #[test]
-    fn medm_visibility_expr_combines_vis_mode_and_calc() {
+    fn medm_visibility_expr_uses_calc_only_under_vis_calc() {
         assert_eq!(medm_visibility_expr("if not zero", None), "A#0");
         assert_eq!(medm_visibility_expr("if zero", None), "A=0");
         assert_eq!(medm_visibility_expr("calc", Some("A>5")), "A>5");
-        assert_eq!(medm_visibility_expr("if not zero", Some("A+B")), "(A+B)#0");
-        assert_eq!(medm_visibility_expr("if zero", Some("A+B")), "(A+B)=0");
+        assert_eq!(medm_visibility_expr("calc", None), "A");
+        // MEDM ignores `calc` for if-zero/if-not-zero (calcVisibility reads the
+        // channel value directly), so calc="0" must not become a constant gate.
+        assert_eq!(medm_visibility_expr("if not zero", Some("0")), "A#0");
+        assert_eq!(medm_visibility_expr("if zero", Some("0")), "A=0");
+        assert_eq!(medm_visibility_expr("if not zero", Some("A+B")), "A#0");
     }
 
     #[test]
