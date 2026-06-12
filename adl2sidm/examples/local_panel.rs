@@ -8,7 +8,7 @@
 //!
 //! ```text
 //! cargo run -p adl2sidm -- adl2sidm/examples/local_panel.adl \
-//!     -o adl2sidm/examples/local_panel_screen.rs --protocol "" --use-layout
+//!     -o adl2sidm/examples/local_panel_screen.rs --protocol ""
 //! ```
 //!
 //! (`--protocol ""` because the channels already carry their `loc://`/`fake://`
@@ -16,10 +16,11 @@
 //! generated `Screen` into a tiny `eframe` app — the same `new(cc)` / `ui(ui)`
 //! shape the converter emits for every screen.
 //!
-//! `--use-layout` emits the responsive layout mode (adl2pydm `grid_layout`
-//! parity): every widget's MEDM rect scales by `available / native` on each axis,
-//! so the panel reflows to fill its window instead of leaving dead space when the
-//! window is larger than the 360×460 native screen.
+//! The default responsive layout mode (adl2pydm `grid_layout` parity) scales
+//! every widget's MEDM rect by `available / native` on each axis, so the panel
+//! reflows to fill its window instead of leaving dead space when the window is
+//! larger than the 360×460 native screen. (`--absolute` would pin the fixed
+//! MEDM pixels instead.)
 //!
 //! The screen also demonstrates the z-order rule the converter enforces: the
 //! grey border `rectangle` (a decoration) overlaps the line edit, slider, and

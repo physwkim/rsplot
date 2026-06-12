@@ -29,17 +29,18 @@ dropped).
   builder, and a `ui(&mut self, ui)` draw method. (A runtime display-file format
   + loader is the larger alternative — deferred, matching the `sidm` plan's
   deferral of display loading.)
-- **Absolute positioning (default), with an opt-in responsive layout.** MEDM
-  screens are absolute `x/y/w/h`; by default each widget is placed at its MEDM
-  `Rect` via egui absolute placement inside a fixed-size canvas sized to the
-  `display` block. `--use-layout` instead emits a **responsive layout** (adl2pydm
+- **Responsive layout (default), with an opt-out absolute mode.** MEDM screens
+  are absolute `x/y/w/h`; the default emits a **responsive layout** (adl2pydm
   `grid_layout.py` / `use_layout` parity): every widget's rect scales by
   `available / native` on each axis so the screen reflows to fill its window.
   egui has no spanning weighted-grid widget, but adl2pydm's weighted grid — whose
   stretch factors are the pixel gaps between widget edges — reduces edge-for-edge
   to this per-axis proportional reflow, so the proportional realization *is* the
   grid behaviour (and, unlike a literal strip grid, it preserves overlap and its
-  z-order layering). Absolute stays the default (non-breaking).
+  z-order layering). `--absolute` opts back into fixed MEDM pixels (each widget
+  placed at its `Rect` inside a fixed-size canvas sized to the `display` block);
+  `--use-layout`, the old opt-in, stays accepted as a no-op. (Responsive became
+  the default 2026-06-12 on user direction.)
 - **Z-order: decoration behind, controls on top.** A hard correctness rule, not
   cosmetics: in egui a later-drawn `Area` renders on top *and captures pointer
   input*, so a MEDM static rectangle over a control would hide it and steal its
@@ -372,9 +373,10 @@ Phase-2 gate (per commit): `cargo fmt --all`; `cargo clippy -p adl2sidm
 `cargo nextest run -p adl2sidm` (66/66 at Phase 2). Full-workspace pass still
 owed before any push.
 
-## Responsive layout mode (`--use-layout`, 2026-06-11)
+## Responsive layout mode (2026-06-11; the default since 2026-06-12)
 
-`--use-layout` (`Options::use_layout`, off by default) emits a responsive layout
+The responsive layout (`Options::use_layout`, on by default — `--absolute` opts
+out, `--use-layout` is a compatible no-op) emits proportional reflow
 instead of fixed absolute pixels (`c25b9bc`). It is the egui realization of
 adl2pydm's `grid_layout.py` / `use_layout`: that algorithm builds a weighted grid
 whose column/row stretch factors are the pixel gaps between widget edges, which

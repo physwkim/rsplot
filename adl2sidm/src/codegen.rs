@@ -53,7 +53,8 @@ pub struct Options {
     /// edges reduces, edge-for-edge, to per-axis proportional reflow — there is no
     /// spanning weighted-grid widget in egui, so the faithful realization places
     /// each widget at its native rect scaled by `available / native` on each axis.
-    /// Default `false` keeps faithful absolute MEDM positioning.
+    /// Default `true` (screens reflow with the window); set `false` (CLI
+    /// `--absolute`) for fixed absolute MEDM pixels.
     pub use_layout: bool,
 }
 
@@ -64,7 +65,7 @@ impl Default for Options {
             macros: Vec::new(),
             use_scatterplot: false,
             source_dir: None,
-            use_layout: false,
+            use_layout: true,
         }
     }
 }
@@ -3044,9 +3045,10 @@ text {
             "the screen background must be painted before any widget:\n{}",
             g.source
         );
-        // It is a Background-order Area at the native screen size.
+        // It is a Background-order Area at the native screen size (scaled by the
+        // default responsive layout's sx/sy like every placement).
         assert!(g.source.contains(
-            "place(ui, __origin, egui::Order::Background, egui::Id::new(18446744073709551615u64), 0.0, 0.0, 100.0, 80.0,"
+            "place(ui, __origin, sx, sy, egui::Order::Background, egui::Id::new(18446744073709551615u64), 0.0, 0.0, 100.0, 80.0,"
         ));
     }
 
@@ -3596,7 +3598,15 @@ rectangle {
 	}
 }
 "#;
-        let g = generate(&parse(adl), &Options::default());
+        // Absolute mode keeps the font literals exact (the default responsive
+        // layout appends `* sy`, covered by use_layout_scales_fonts_by_the_height_factor).
+        let g = generate(
+            &parse(adl),
+            &Options {
+                use_layout: false,
+                ..Options::default()
+            },
+        );
         // Static text at its height-derived size.
         assert!(
             g.source.contains(
@@ -3645,10 +3655,12 @@ rectangle {
 
     #[test]
     fn use_layout_scales_placements_to_fill_the_area() {
-        // Responsive mode binds the per-axis scale and threads it into every
-        // place() call; the absolute default does neither (regression guard so
-        // the new mode stays opt-in).
-        let absolute = build(&Options::default());
+        // Responsive mode (the default) binds the per-axis scale and threads it
+        // into every place() call; `--absolute` (use_layout: false) does neither.
+        let absolute = build(&Options {
+            use_layout: false,
+            ..Options::default()
+        });
         assert!(
             !absolute.source.contains("let sx = avail.width()"),
             "absolute mode must not emit a scale:\n{}",
@@ -3706,9 +3718,12 @@ rectangle {
     #[test]
     fn use_layout_scales_fonts_by_the_height_factor() {
         // MEDM re-derives a widget's font from its resized height, so responsive
-        // mode scales every emitted font by `sy` (rects already scale by sx/sy);
-        // absolute mode keeps the fixed MEDM-height-derived size.
-        let absolute = build(&Options::default());
+        // mode (the default) scales every emitted font by `sy` (rects already
+        // scale by sx/sy); absolute mode keeps the fixed MEDM-height-derived size.
+        let absolute = build(&Options {
+            use_layout: false,
+            ..Options::default()
+        });
         assert!(
             absolute.source.contains("egui::FontId::proportional(11.0)"),
             "absolute mode must keep the fixed font size:\n{}",
@@ -5812,10 +5827,7 @@ composite {
             g.source
         );
         // The gated place() is the frame's Middle placement.
-        let mid = g
-            .source
-            .find("place(ui, __origin, egui::Order::Middle")
-            .expect("frame place");
+        let mid = g.source.find("egui::Order::Middle").expect("frame place");
         assert!(
             g.source[mid.saturating_sub(200)..mid].contains("if gate"),
             "composite gate must wrap the frame placement:\n{}",
