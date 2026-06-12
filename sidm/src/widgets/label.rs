@@ -9,7 +9,7 @@ use siplot::egui;
 
 use crate::channel::{Channel, ChannelState};
 use crate::engine::{Engine, EngineError};
-use crate::widgets::base::{AlarmPalette, ChannelBase, layout_justify};
+use crate::widgets::base::{AlarmPalette, BorderMode, ChannelBase, layout_justify};
 use crate::widgets::display_format::{DisplayFormat, FormatSpec, format_value};
 
 /// Horizontal alignment of the label text within its rect (MEDM `align` / PyDM
@@ -85,7 +85,19 @@ impl SidmLabel {
     /// Draw or suppress the alarm-severity border (PyDM `alarmSensitiveBorder`,
     /// builder style).
     pub fn with_alarm_sensitive_border(mut self, on: bool) -> Self {
-        self.base.alarm_sensitive_border = on;
+        self.base.border_mode = if on {
+            BorderMode::Alarm
+        } else {
+            BorderMode::Off
+        };
+        self
+    }
+
+    /// Choose which severities draw a border (builder style;
+    /// `DisconnectedOnly` for converted MEDM screens — MEDM draws no severity
+    /// border, the dash is the SiDM disconnect marker).
+    pub fn with_border_mode(mut self, mode: BorderMode) -> Self {
+        self.base.border_mode = mode;
         self
     }
 

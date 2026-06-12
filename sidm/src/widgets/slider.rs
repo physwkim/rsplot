@@ -17,7 +17,7 @@ use siplot::egui;
 
 use crate::channel::{Channel, PvValue};
 use crate::engine::{Engine, EngineError};
-use crate::widgets::base::{ChannelBase, control_range};
+use crate::widgets::base::{BorderMode, ChannelBase, control_range};
 
 /// PyDM's default number of slider positions (`PyDMSlider._num_steps`).
 pub const DEFAULT_NUM_STEPS: u32 = 101;
@@ -60,6 +60,14 @@ impl SidmSlider {
     /// Override the displayed decimals (builder style).
     pub fn with_precision(mut self, precision: i32) -> Self {
         self.precision_override = Some(precision);
+        self
+    }
+
+    /// Choose which severities draw a border (builder style;
+    /// `DisconnectedOnly` for converted MEDM screens — MEDM draws no severity
+    /// border, the dash is the SiDM disconnect marker).
+    pub fn with_border_mode(mut self, mode: BorderMode) -> Self {
+        self.base.border_mode = mode;
         self
     }
 

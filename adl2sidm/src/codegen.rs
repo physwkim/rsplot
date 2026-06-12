@@ -2280,6 +2280,16 @@ fn push_channel_widget(b: &mut Builder, z: ZLayer, geom: Geometry, w: ChannelWid
         "let {field} = {new_call}\n            .expect({})",
         rust_str(connect_desc)
     );
+    // MEDM draws no alarm-severity border, so every framed widget keeps only
+    // the SiDM disconnect dash (PyDM's default would ring Minor/Major/Invalid).
+    // A SidmDrawing has no framed border — its border flag recolours the
+    // shape's own pen (set by drawing_alarm_builder), so it is left alone.
+    if ty != "SidmDrawing" {
+        let _ = write!(
+            ctor,
+            "\n            .with_border_mode(BorderMode::DisconnectedOnly)"
+        );
+    }
     for bld in builders {
         let _ = write!(ctor, "\n            {bld}");
     }
@@ -3413,6 +3423,22 @@ text {
     }
 
     #[test]
+    fn channel_widgets_keep_only_the_disconnect_border() {
+        // MEDM draws no alarm-severity border, so every framed channel widget
+        // (here: the text update and the text entry) is emitted in
+        // disconnect-dash-only mode — no PyDM ring on Minor/Major/Invalid.
+        let g = build(&Options::default());
+        assert_eq!(
+            g.source
+                .matches(".with_border_mode(BorderMode::DisconnectedOnly)")
+                .count(),
+            2,
+            "{}",
+            g.source
+        );
+    }
+
+    #[test]
     fn emits_struct_new_ui_and_place_helper() {
         let g = build(&Options::default());
         assert!(g.source.contains("pub struct Screen {"));
@@ -4016,6 +4042,9 @@ oval {
             "both clr=alarm shapes must use the MEDM palette:\n{}",
             g.source
         );
+        // A drawing has no framed border (its border flag recolours the pen),
+        // so the disconnect-only border mode is never emitted on shapes.
+        assert!(!g.source.contains("with_border_mode"), "{}", g.source);
         // Each shape is bound to its dynamic-attribute channel (not a synthetic
         // loc:// placeholder), so alarm severity has a real source.
         assert!(g.source.contains("ca://$(P)statusA"));

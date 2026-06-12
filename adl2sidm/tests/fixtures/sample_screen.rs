@@ -53,25 +53,32 @@ impl Screen {
             .expect("adl2sidm: connect alarm-colour source ca://DMM1:status");
         let w3 = SidmLabel::new(&engine, "ca://DMM1:readback")
             .expect("adl2sidm: connect ca://DMM1:readback (text update)")
+            .with_border_mode(BorderMode::DisconnectedOnly)
             .with_precision(3);
         let w4 = SidmLineEdit::new(&engine, "ca://DMM1:setpoint")
-            .expect("adl2sidm: connect ca://DMM1:setpoint");
+            .expect("adl2sidm: connect ca://DMM1:setpoint")
+            .with_border_mode(BorderMode::DisconnectedOnly);
         let w5 = SidmPushButton::new(&engine, "ca://DMM1:go", "Start", "1")
             .expect("adl2sidm: connect ca://DMM1:go (message button)")
+            .with_border_mode(BorderMode::DisconnectedOnly)
             .with_release_value("0");
         let w6 = SidmEnumComboBox::new(&engine, "ca://DMM1:mode")
-            .expect("adl2sidm: connect ca://DMM1:mode (menu)");
+            .expect("adl2sidm: connect ca://DMM1:mode (menu)")
+            .with_border_mode(BorderMode::DisconnectedOnly);
         let w7 = SidmSlider::new(&engine, "ca://DMM1:level")
             .expect("adl2sidm: connect ca://DMM1:level (valuator)")
+            .with_border_mode(BorderMode::DisconnectedOnly)
             .with_limits(0.0, 100.0)
             .with_precision(2);
         let w8 = SidmByteIndicator::new(&engine, "ca://DMM1:bits")
             .expect("adl2sidm: connect ca://DMM1:bits (byte)")
+            .with_border_mode(BorderMode::DisconnectedOnly)
             .with_num_bits(8)
             .with_orientation(Orientation::Horizontal)
             .with_big_endian(true);
         let w9 = SidmScaleIndicator::new(&engine, "ca://DMM1:fill")
             .expect("adl2sidm: connect ca://DMM1:fill (scale indicator)")
+            .with_border_mode(BorderMode::DisconnectedOnly)
             .with_bar_indicator(true);
         let w10 = SidmDrawing::new(&engine, "ca://DMM1:show_box", DrawingShape::Rectangle)
             .expect("adl2sidm: connect ca://DMM1:show_box (drawing)")
@@ -100,7 +107,8 @@ impl Screen {
         let w17 = SidmFrame::new(&engine, "loc://adl2sidm_frame_2")
             .expect("adl2sidm: connect loc://adl2sidm_frame_2 (composite)");
         let w18 = SidmLabel::new(&engine, "ca://DMM1:status")
-            .expect("adl2sidm: connect ca://DMM1:status (text update)");
+            .expect("adl2sidm: connect ca://DMM1:status (text update)")
+            .with_border_mode(BorderMode::DisconnectedOnly);
         Self { _engine: engine, alarm2, w3, w4, w5, w6, w7, w8, w9, w10, gate11, w12, w13, w14, w15, w16, w17, w18 }
     }
 

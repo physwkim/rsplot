@@ -17,7 +17,7 @@ use siplot::egui;
 
 use crate::channel::{Channel, ChannelState, PvValue};
 use crate::engine::{Engine, EngineError};
-use crate::widgets::base::ChannelBase;
+use crate::widgets::base::{BorderMode, ChannelBase};
 use crate::widgets::display_format::{DisplayFormat, FormatSpec};
 use crate::widgets::line_edit::parse_input;
 
@@ -111,6 +111,14 @@ impl SidmPushButton {
     pub fn with_confirm(mut self, message: impl Into<String>) -> Self {
         self.show_confirm_dialog = true;
         self.confirm_message = message.into();
+        self
+    }
+
+    /// Choose which severities draw a border (builder style;
+    /// `DisconnectedOnly` for converted MEDM screens — MEDM draws no severity
+    /// border, the dash is the SiDM disconnect marker).
+    pub fn with_border_mode(mut self, mode: BorderMode) -> Self {
+        self.base.border_mode = mode;
         self
     }
 

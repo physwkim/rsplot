@@ -17,7 +17,7 @@
 use siplot::egui;
 
 use crate::engine::{Engine, EngineError};
-use crate::widgets::base::ChannelBase;
+use crate::widgets::base::{BorderMode, ChannelBase};
 
 /// A channel-connected grouping container (PyDM `PyDMFrame`).
 pub struct SidmFrame {
@@ -31,7 +31,7 @@ impl SidmFrame {
     pub fn new(engine: &Engine, address: &str) -> Result<Self, EngineError> {
         let channel = engine.connect(address)?;
         let mut base = ChannelBase::new(channel);
-        base.alarm_sensitive_border = false;
+        base.border_mode = BorderMode::Off;
         Ok(Self {
             base,
             disable_on_disconnect: false,
@@ -48,7 +48,11 @@ impl SidmFrame {
     /// Draw the alarm-severity border (builder style; PyDM
     /// `alarmSensitiveBorder`). Off by default for the frame.
     pub fn with_alarm_sensitive_border(mut self, on: bool) -> Self {
-        self.base.alarm_sensitive_border = on;
+        self.base.border_mode = if on {
+            BorderMode::Alarm
+        } else {
+            BorderMode::Off
+        };
         self
     }
 
@@ -97,7 +101,7 @@ mod tests {
         let engine = crate::Engine::new();
         let frame = SidmFrame::new(&engine, "loc://frame_test").expect("connect");
         // PyDM frame defaults alarmSensitiveBorder off (the value widgets are on).
-        assert!(!frame.base().alarm_sensitive_border);
+        assert_eq!(frame.base().border_mode, BorderMode::Off);
         assert!(!frame.disable_on_disconnect);
     }
 }

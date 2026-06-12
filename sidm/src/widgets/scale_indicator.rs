@@ -24,7 +24,7 @@ use siplot::egui::{self, Color32, Stroke, Vec2};
 use crate::channel::{Channel, PvValue};
 use crate::engine::{Engine, EngineError};
 use crate::widgets::base::{
-    AlarmPalette, ChannelBase, control_range, justified_size, layout_justify,
+    AlarmPalette, BorderMode, ChannelBase, control_range, justified_size, layout_justify,
 };
 use crate::widgets::byte::Orientation;
 use crate::widgets::display_format::{DisplayFormat, FormatSpec, format_value};
@@ -150,6 +150,14 @@ impl SidmScaleIndicator {
     /// Set the scale size in points (builder style).
     pub fn with_size(mut self, size: Vec2) -> Self {
         self.size = size;
+        self
+    }
+
+    /// Choose which severities draw a border (builder style;
+    /// `DisconnectedOnly` for converted MEDM screens — MEDM draws no severity
+    /// border, the dash is the SiDM disconnect marker).
+    pub fn with_border_mode(mut self, mode: BorderMode) -> Self {
+        self.base.border_mode = mode;
         self
     }
 

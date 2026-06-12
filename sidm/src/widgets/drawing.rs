@@ -27,7 +27,7 @@ use siplot::egui::{self, Color32, Pos2, Stroke, Vec2};
 
 use crate::channel::Channel;
 use crate::engine::{Engine, EngineError};
-use crate::widgets::base::{AlarmPalette, ChannelBase, justified_size, layout_justify};
+use crate::widgets::base::{AlarmPalette, BorderMode, ChannelBase, justified_size, layout_justify};
 
 /// The shape drawn by a [`SidmDrawing`] (PyDM `PyDMDrawing*` subclasses, plus
 /// the MEDM `arc`/`polyline`/`polygon` shapes the `adl2sidm` converter targets).
@@ -193,7 +193,7 @@ impl SidmDrawing {
     /// `PyDMDrawing.alarmSensitiveBorder = False`).
     pub fn new(engine: &Engine, address: &str, shape: DrawingShape) -> Result<Self, EngineError> {
         let mut base = ChannelBase::new(engine.connect(address)?);
-        base.alarm_sensitive_border = false;
+        base.border_mode = BorderMode::Off;
         Ok(Self {
             base,
             shape,
@@ -248,9 +248,14 @@ impl SidmDrawing {
     }
 
     /// Recolour the border by alarm severity (builder style; PyDM
-    /// `alarmSensitiveBorder`, off by default for drawings).
+    /// `alarmSensitiveBorder`, off by default for drawings). A drawing has no
+    /// framed outline — this gates the recolouring of its own pen.
     pub fn with_alarm_sensitive_border(mut self, on: bool) -> Self {
-        self.base.alarm_sensitive_border = on;
+        self.base.border_mode = if on {
+            BorderMode::Alarm
+        } else {
+            BorderMode::Off
+        };
         self
     }
 
@@ -274,7 +279,7 @@ impl SidmDrawing {
             self.border_color,
             self.base.severity_override(&state),
             self.base.alarm_sensitive_content,
-            self.base.alarm_sensitive_border,
+            self.base.border_mode == BorderMode::Alarm,
         );
 
         let size = justified_size(layout_justify(ui), ui, self.size);

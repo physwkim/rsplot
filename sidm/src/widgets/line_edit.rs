@@ -25,7 +25,7 @@ use siplot::egui;
 
 use crate::channel::{Channel, ChannelState, PvValue};
 use crate::engine::{Engine, EngineError};
-use crate::widgets::base::ChannelBase;
+use crate::widgets::base::{BorderMode, ChannelBase};
 use crate::widgets::display_format::{DisplayFormat, FormatSpec, format_value};
 
 /// A writable channel text entry (PyDM `PyDMLineEdit`).
@@ -73,6 +73,14 @@ impl SidmLineEdit {
     /// Show/strip engineering units (builder style).
     pub fn with_show_units(mut self, show_units: bool) -> Self {
         self.show_units = show_units;
+        self
+    }
+
+    /// Choose which severities draw a border (builder style;
+    /// `DisconnectedOnly` for converted MEDM screens — MEDM draws no severity
+    /// border, the dash is the SiDM disconnect marker).
+    pub fn with_border_mode(mut self, mode: BorderMode) -> Self {
+        self.base.border_mode = mode;
         self
     }
 

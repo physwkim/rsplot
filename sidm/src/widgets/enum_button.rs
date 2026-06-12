@@ -18,7 +18,7 @@ use siplot::egui;
 
 use crate::channel::{Channel, PvValue};
 use crate::engine::{Engine, EngineError};
-use crate::widgets::base::{ChannelBase, layout_justify};
+use crate::widgets::base::{BorderMode, ChannelBase, layout_justify};
 use crate::widgets::byte::Orientation;
 use crate::widgets::enum_choice::{enum_current_index, enum_index_value, enum_options};
 
@@ -91,6 +91,14 @@ impl SidmEnumButton {
     /// Reverse the display order (builder style; PyDM `invertOrder`).
     pub fn with_invert_order(mut self, invert: bool) -> Self {
         self.invert_order = invert;
+        self
+    }
+
+    /// Choose which severities draw a border (builder style;
+    /// `DisconnectedOnly` for converted MEDM screens — MEDM draws no severity
+    /// border, the dash is the SiDM disconnect marker).
+    pub fn with_border_mode(mut self, mode: BorderMode) -> Self {
+        self.base.border_mode = mode;
         self
     }
 

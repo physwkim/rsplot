@@ -42,6 +42,7 @@ impl Screen {
         engine.attach_repaint(ctx.clone());
         let w1 = SidmLabel::new(&engine, "fake://temperature?wave=sine&period=8&rate=20&min=20&max=80")
             .expect("adl2sidm: connect fake://temperature?wave=sine&period=8&rate=20&min=20&max=80 (text update)")
+            .with_border_mode(BorderMode::DisconnectedOnly)
             .with_precision(1);
         let mut w2 = SidmTimePlot::new(rs, __plot_base).with_time_span(20.0);
         w2.add_channel(&engine, "fake://temperature?wave=sine&period=8&rate=20&min=20&max=80", Color32::from_rgb(0, 0, 255), "fake://temperature?wave=sine&period=8&rate=20&min=20&max=80").expect("adl2sidm: add strip-chart curve fake://temperature?wave=sine&period=8&rate=20&min=20&max=80");
@@ -51,25 +52,31 @@ impl Screen {
             .with_border(Color32::from_rgb(192, 192, 192), 2.0)
             .with_size(egui::Vec2::new(348.0, 160.0));
         let w4 = SidmLineEdit::new(&engine, "loc://setpoint?type=float&init=5&precision=2")
-            .expect("adl2sidm: connect loc://setpoint?type=float&init=5&precision=2");
+            .expect("adl2sidm: connect loc://setpoint?type=float&init=5&precision=2")
+            .with_border_mode(BorderMode::DisconnectedOnly);
         let w5 = SidmLabel::new(&engine, "loc://setpoint?type=float&init=5&precision=2")
             .expect("adl2sidm: connect loc://setpoint?type=float&init=5&precision=2 (text update)")
+            .with_border_mode(BorderMode::DisconnectedOnly)
             .with_precision(2);
         let w6 = SidmSlider::new(&engine, "loc://setpoint?type=float&init=5&precision=2")
             .expect("adl2sidm: connect loc://setpoint?type=float&init=5&precision=2 (valuator)")
+            .with_border_mode(BorderMode::DisconnectedOnly)
             .with_limits(0.0, 10.0)
             .with_precision(2);
         let w7 = SidmByteIndicator::new(&engine, "loc://flags?type=int&init=170")
             .expect("adl2sidm: connect loc://flags?type=int&init=170 (byte)")
+            .with_border_mode(BorderMode::DisconnectedOnly)
             .with_num_bits(8)
             .with_orientation(Orientation::Horizontal)
             .with_big_endian(true);
         let w8 = SidmLineEdit::new(&engine, "loc://flags?type=int&init=170")
-            .expect("adl2sidm: connect loc://flags?type=int&init=170");
+            .expect("adl2sidm: connect loc://flags?type=int&init=170")
+            .with_border_mode(BorderMode::DisconnectedOnly);
         let w13 = SidmFrame::new(&engine, "loc://adl2sidm_embed_1")
             .expect("adl2sidm: connect loc://adl2sidm_embed_1 (embedded embed_child.adl)");
         let w15 = SidmLabel::new(&engine, "loc://embcount?type=int&init=7")
             .expect("adl2sidm: connect loc://embcount?type=int&init=7 (text update)")
+            .with_border_mode(BorderMode::DisconnectedOnly)
             .with_precision(0);
         Self { _engine: engine, w1, w2, w3, w4, w5, w6, w7, w8, w13, w15 }
     }

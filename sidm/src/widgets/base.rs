@@ -85,6 +85,23 @@ pub fn alarm_border(severity: AlarmSeverity) -> Option<BorderStyle> {
     })
 }
 
+/// Which severities draw a widget border. PyDM's `alarmSensitiveBorder` is a
+/// boolean (all severities or none); MEDM draws no severity border at all, so
+/// a converted screen wants only the SiDM disconnect marker — the dashed
+/// outline that stands in for MEDM's white-blanking of unconnected widgets.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BorderMode {
+    /// Severity rings plus the disconnected dash (PyDM
+    /// `alarmSensitiveBorder = true`, the default).
+    #[default]
+    Alarm,
+    /// Only the disconnected dash — no ring while connected, whatever the
+    /// severity (MEDM-converted screens).
+    DisconnectedOnly,
+    /// No border ever (PyDM `alarmSensitiveBorder = false`).
+    Off,
+}
+
 /// Resolve a numeric widget's range: the user override when set, otherwise the
 /// PV's control limits (`DRVL`/`DRVH`). `None` when neither is available — the
 /// widget then cannot establish a range (PyDM `reset_limits` /
@@ -144,9 +161,9 @@ const DASH_GAP: f32 = 3.0;
 /// helpers each frame.
 pub struct ChannelBase {
     channel: Channel,
-    /// Draw the alarm-severity border (PyDM `alarmSensitiveBorder`, default
-    /// `true`).
-    pub alarm_sensitive_border: bool,
+    /// Which severities draw a border (PyDM `alarmSensitiveBorder` defaults to
+    /// every severity; see [`BorderMode`]).
+    pub border_mode: BorderMode,
     /// Recolour the widget content by alarm severity (PyDM
     /// `alarmSensitiveContent`, default `false`).
     pub alarm_sensitive_content: bool,
@@ -160,7 +177,7 @@ impl ChannelBase {
     pub fn new(channel: Channel) -> Self {
         Self {
             channel,
-            alarm_sensitive_border: true,
+            border_mode: BorderMode::default(),
             alarm_sensitive_content: false,
             alarm_palette: AlarmPalette::default(),
         }
@@ -181,14 +198,17 @@ impl ChannelBase {
         &self.channel
     }
 
-    /// Border to draw for `state`, honouring [`Self::alarm_sensitive_border`].
-    /// Uses [`ChannelState::effective_severity`] so a disconnected channel gets
-    /// the dashed border regardless of its last wire severity.
+    /// Border to draw for `state`, honouring [`Self::border_mode`]. Uses
+    /// [`ChannelState::effective_severity`] so a disconnected channel gets the
+    /// dashed border regardless of its last wire severity.
     pub fn border(&self, state: &ChannelState) -> Option<BorderStyle> {
-        if self.alarm_sensitive_border {
-            alarm_border(state.effective_severity())
-        } else {
-            None
+        let severity = state.effective_severity();
+        match self.border_mode {
+            BorderMode::Alarm => alarm_border(severity),
+            BorderMode::DisconnectedOnly if severity == AlarmSeverity::Disconnected => {
+                alarm_border(severity)
+            }
+            BorderMode::DisconnectedOnly | BorderMode::Off => None,
         }
     }
 
@@ -350,9 +370,25 @@ mod tests {
     #[test]
     fn border_off_when_alarm_sensitive_border_disabled() {
         let mut b = base();
-        b.alarm_sensitive_border = false;
-        // Even a major alarm yields no border when the flag is off.
+        b.border_mode = BorderMode::Off;
+        // Even a major alarm yields no border when the mode is off.
         assert_eq!(b.border(&st(true, true, AlarmSeverity::Major)), None);
+    }
+
+    #[test]
+    fn disconnected_only_mode_draws_no_ring_but_keeps_the_dash() {
+        let mut b = base();
+        b.border_mode = BorderMode::DisconnectedOnly;
+        // No ring while connected — whatever the severity (MEDM draws no
+        // severity border).
+        assert_eq!(b.border(&st(true, true, AlarmSeverity::Minor)), None);
+        assert_eq!(b.border(&st(true, true, AlarmSeverity::Major)), None);
+        assert_eq!(b.border(&st(true, true, AlarmSeverity::Invalid)), None);
+        // The disconnect marker stays.
+        let dash = b
+            .border(&st(false, false, AlarmSeverity::NoAlarm))
+            .expect("disconnected still draws the dash");
+        assert!(dash.dashed);
     }
 
     #[test]

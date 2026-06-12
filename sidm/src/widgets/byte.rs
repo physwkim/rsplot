@@ -14,7 +14,7 @@ use siplot::egui::{self, Color32};
 
 use crate::channel::{AlarmSeverity, Channel, ChannelState, PvValue};
 use crate::engine::{Engine, EngineError};
-use crate::widgets::base::{AlarmPalette, ChannelBase, layout_justify};
+use crate::widgets::base::{AlarmPalette, BorderMode, ChannelBase, layout_justify};
 
 /// Layout direction for the row/column of bit indicators.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -168,6 +168,14 @@ impl SidmByteIndicator {
     /// `Medm` for converted `clrmod="alarm"` widgets).
     pub fn with_alarm_palette(mut self, palette: AlarmPalette) -> Self {
         self.base.alarm_palette = palette;
+        self
+    }
+
+    /// Choose which severities draw a border (builder style;
+    /// `DisconnectedOnly` for converted MEDM screens — MEDM draws no severity
+    /// border, the dash is the SiDM disconnect marker).
+    pub fn with_border_mode(mut self, mode: BorderMode) -> Self {
+        self.base.border_mode = mode;
         self
     }
 

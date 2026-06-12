@@ -15,7 +15,7 @@ use siplot::egui;
 
 use crate::channel::{Channel, ChannelState, PvValue};
 use crate::engine::{Engine, EngineError};
-use crate::widgets::base::{ChannelBase, control_range};
+use crate::widgets::base::{BorderMode, ChannelBase, control_range};
 
 /// A writable numeric spin box (PyDM `PyDMSpinbox`).
 pub struct SidmSpinbox {
@@ -57,6 +57,14 @@ impl SidmSpinbox {
     /// Set the single-step increment (builder style).
     pub fn with_step(mut self, step: f64) -> Self {
         self.step = Some(step);
+        self
+    }
+
+    /// Choose which severities draw a border (builder style;
+    /// `DisconnectedOnly` for converted MEDM screens — MEDM draws no severity
+    /// border, the dash is the SiDM disconnect marker).
+    pub fn with_border_mode(mut self, mode: BorderMode) -> Self {
+        self.base.border_mode = mode;
         self
     }
 
