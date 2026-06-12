@@ -43,6 +43,9 @@ impl Screen {
         _macros: Vec<(String, String)>,
     ) -> Self {
         let rs = render_state.expect("adl2sidm: this screen needs a wgpu render state for its plots");
+        // This instance's block of siplot PlotIds (unique per instance, so
+        // related-display children never collide on GPU plot resources).
+        let __plot_base = next_plot_ids(2);
         let engine = Engine::new();
         engine.attach_repaint(ctx.clone());
         let alarm2 = engine
@@ -89,9 +92,9 @@ impl Screen {
             .with_size(egui::Vec2::new(60.0, 60.0));
         let w14 = SidmImage::new("logo.gif")
             .with_size(egui::Vec2::new(80.0, 24.0));
-        let mut w15 = SidmTimePlot::new(rs, 0).with_time_span(60.0);
+        let mut w15 = SidmTimePlot::new(rs, __plot_base).with_time_span(60.0);
         w15.add_channel(&engine, "ca://DMM1:readback", Color32::from_rgb(0, 0, 255), "DMM1:readback").expect("adl2sidm: add strip-chart curve DMM1:readback");
-        let mut w16 = SidmWaveformPlot::new(rs, 1);
+        let mut w16 = SidmWaveformPlot::new(rs, __plot_base + 1);
         w16.add_xy_channel(&engine, "ca://DMM1:ywave", Some("ca://DMM1:xwave"), Color32::from_rgb(255, 0, 0), "curve 1").expect("adl2sidm: add waveform curve 1");
         let w17 = SidmFrame::new(&engine, "loc://adl2sidm_frame_2")
             .expect("adl2sidm: connect loc://adl2sidm_frame_2 (composite)");
@@ -232,7 +235,10 @@ impl Screen {
 /// `origin` is the container's outer top-left (the screen origin, or a frame's
 /// pre-inset origin), so a frame's `BORDER_INSET` never shifts its children. The
 /// Area's `order` is the z-layer, so decoration (`Background`) renders and takes
-/// input below controls (`Foreground`) regardless of call order.
+/// input below controls (`Foreground`) regardless of call order. The Area id is
+/// salted with the host `ui.id()` so two screen instances sharing one viewport
+/// (related-display children on an embedded fallback backend) keep distinct
+/// Area state.
 #[allow(clippy::too_many_arguments)]
 fn place(
     ui: &mut egui::Ui,
@@ -246,7 +252,7 @@ fn place(
     add: impl FnOnce(&mut egui::Ui),
 ) {
     let rect = egui::Rect::from_min_size(origin + egui::vec2(x, y), egui::vec2(w, h));
-    egui::Area::new(id)
+    egui::Area::new(ui.id().with(id))
         .order(order)
         .fixed_pos(rect.min)
         .constrain(false)
@@ -255,4 +261,15 @@ fn place(
             ui.set_max_size(rect.size());
             add(ui);
         });
+}
+
+/// Allocate a contiguous block of `count` siplot `PlotId`s, unique across every
+/// screen instance built from this generated file (related-display children
+/// included) -- siplot keys per-plot GPU resources by `PlotId`, so two
+/// instances must never share one. (Two *separately generated* files compiled
+/// into one app each start at 0 and can still collide; convert such screens
+/// together through one root instead.)
+fn next_plot_ids(count: u64) -> u64 {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    SEQ.fetch_add(count, std::sync::atomic::Ordering::Relaxed)
 }

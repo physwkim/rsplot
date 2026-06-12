@@ -54,3 +54,7 @@ clap = { version = "4", features = ["derive"] }
 siplot = { path = ".." }
 sidm = { path = "../sidm", default-features = false }
 eframe = { version = "0.34", features = ["wgpu"] }
+# The behaviour gate (tests/opens.rs) drives a generated screen headlessly:
+# clicking a related-display button must OPEN the converted child screen (the
+# egui embedded-viewport fallback renders it in the same pass, no GPU needed).
+egui_kittest = "0.34.3"

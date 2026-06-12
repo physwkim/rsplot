@@ -18,6 +18,7 @@
 //! [`Engine`]: https://docs.rs/sidm
 //! [`MedmScreen`]: crate::adl_parser::MedmScreen
 
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
@@ -56,6 +57,31 @@ pub struct Options {
     /// Default `true` (screens reflow with the window); set `false` (CLI
     /// `--absolute`) for fixed absolute MEDM pixels.
     pub use_layout: bool,
+    /// Related-display targets converted alongside this screen, keyed by the
+    /// target `name` exactly as the emitter sees it (after convert-time macro
+    /// baking). Filled by the recursive driver ([`crate::convert`]); when a
+    /// target is present a click *opens* its screen in a viewport, when absent
+    /// (or for a plain single-file [`generate`]) the click only logs it.
+    pub rd_modules: BTreeMap<String, RdModule>,
+    /// `true` when this screen is emitted as a child `pub mod __rd_*` inside
+    /// the driver's output file: the shared top-level items (`SidmDisplay`,
+    /// `OpenDisplay`, `parse_macro_args`, `next_plot_ids`) are then referenced
+    /// through `super::`.
+    pub child_module: bool,
+}
+
+/// A converted related-display target: the sibling module holding its `Screen`
+/// (`None` = the root screen itself, for a cycle back to the root), plus the
+/// window title and native size for the child viewport.
+#[derive(Clone, Debug)]
+pub struct RdModule {
+    /// The `pub mod` ident the target's screen lives in; `None` for the root.
+    pub ident: Option<String>,
+    /// The child window's title (MEDM titles a display with its file name).
+    pub title: String,
+    /// The target display's native size — the child viewport's inner size.
+    pub width: f64,
+    pub height: f64,
 }
 
 impl Default for Options {
@@ -66,6 +92,8 @@ impl Default for Options {
             use_scatterplot: false,
             source_dir: None,
             use_layout: true,
+            rd_modules: BTreeMap::new(),
+            child_module: false,
         }
     }
 }
@@ -76,6 +104,14 @@ impl Default for Options {
 pub struct Generated {
     pub source: String,
     pub warnings: Vec<String>,
+    /// Every related-display target `name` seen during emission (after
+    /// convert-time macro baking), resolvable or not — the recursive driver's
+    /// discovery feed ([`crate::convert`]).
+    pub related_targets: Vec<String>,
+    /// Whether the screen allocates siplot `PlotId`s (plots/strip charts), so
+    /// the driver knows the output file needs the shared `next_plot_ids`
+    /// allocator at its top level.
+    pub uses_plot_ids: bool,
 }
 
 /// One placed widget: where it goes (`z`, `geom`, a unique Area `id`) and the
@@ -145,6 +181,19 @@ struct Builder {
     /// The convert-time `--macro` table ([`Options::macros`]); cached here so
     /// `emit_new` can pass it as the root instance's runtime table.
     macros: Vec<(String, String)>,
+    /// Converted related-display targets ([`Options::rd_modules`]); cached so
+    /// `emit_related_display` can turn a click into an *open* of the sibling
+    /// module's screen rather than a log line.
+    rd_modules: BTreeMap<String, RdModule>,
+    /// Mirrors [`Options::child_module`]: prefix shared top-level items with
+    /// `super::` when this screen is emitted as a child `pub mod`.
+    child_module: bool,
+    /// Whether any related-display click actually opens a converted screen, so
+    /// the `__rs`/`__open` fields, the end-of-`ui()` `show_all`, and (at the
+    /// top level) the related-display runtime are emitted.
+    needs_rd_open: bool,
+    /// Every related-display target name seen (the driver's discovery feed).
+    related_targets: Vec<String>,
     /// Canonical paths of the `.adl` files currently being inlined (embedded
     /// display recursion), newest last. Guards against include cycles; its length
     /// is the current nesting depth (capped at [`MAX_EMBED_DEPTH`]).
@@ -181,6 +230,13 @@ impl Builder {
         self.next_synthetic_id += 1;
         format!("loc://adl2sidm_{kind}_{i}")
     }
+
+    /// The path prefix for the shared top-level items (`SidmDisplay`,
+    /// `OpenDisplay`, `parse_macro_args`, `next_plot_ids`): `super::` inside a
+    /// child `pub mod`, empty at the file's top level.
+    fn rt_prefix(&self) -> &'static str {
+        if self.child_module { "super::" } else { "" }
+    }
 }
 
 /// Generate the SiDM Rust source for a parsed MEDM screen.
@@ -199,6 +255,8 @@ pub fn generate(screen: &MedmScreen, options: &Options) -> Generated {
     let mut b = Builder {
         use_layout: options.use_layout,
         macros: options.macros.clone(),
+        rd_modules: options.rd_modules.clone(),
+        child_module: options.child_module,
         ..Default::default()
     };
     for widget in &screen.widgets {
@@ -210,6 +268,8 @@ pub fn generate(screen: &MedmScreen, options: &Options) -> Generated {
     Generated {
         source: assemble(&b, screen),
         warnings: b.warnings,
+        related_targets: b.related_targets,
+        uses_plot_ids: b.next_plot_id > 0,
     }
 }
 
@@ -1211,7 +1271,7 @@ fn emit_strip_chart(b: &mut Builder, widget: &MedmWidget, options: &Options, z: 
         with.push(format!(".with_time_span({})", float_lit(span)));
     }
     b.needs_color = true;
-    let plot_id = b.plot_id();
+    let plot_id = plot_id_expr(b);
     push_plot_widget(
         b,
         z,
@@ -1221,6 +1281,17 @@ fn emit_strip_chart(b: &mut Builder, widget: &MedmWidget, options: &Options, z: 
         &with,
         &adds,
     );
+}
+
+/// The `PlotId` expression for the next plot: an offset into the instance's
+/// `__plot_base` block (`new_in` allocates it from the shared counter, so two
+/// screen instances never collide on GPU plot resources). The first plot is
+/// the bare base — `+ 0` would trip clippy's `identity_op` in the output.
+fn plot_id_expr(b: &mut Builder) -> String {
+    match b.plot_id() {
+        0 => "__plot_base".to_string(),
+        n => format!("__plot_base + {n}"),
+    }
 }
 
 /// `cartesian plot` → `SidmWaveformPlot` (default) or `SidmScatterPlot`
@@ -1330,7 +1401,7 @@ fn emit_cartesian_plot(b: &mut Builder, widget: &MedmWidget, options: &Options, 
         with.push(format!(".with_buffer_size({count})"));
     }
     b.needs_color = true;
-    let plot_id = b.plot_id();
+    let plot_id = plot_id_expr(b);
     push_plot_widget(
         b,
         z,
@@ -1830,45 +1901,45 @@ fn emit_related_display(b: &mut Builder, widget: &MedmWidget, z: ZLayer) {
         b.needs_color = true;
     }
     let (icon_fg, icon_bg) = icon_color_exprs(widget);
-    let body = if let [(_, report)] = entries.as_slice() {
+    let body = if let [entry] = entries.as_slice() {
         // Exactly one target: a plain button. A hover tooltip names the target so
-        // it is discoverable in the GUI (the click only logs to stderr);
-        // adl2pydm likewise gives the button a tooltip.
+        // it is discoverable in the GUI; adl2pydm likewise gives the button a
+        // tooltip.
+        let (hover, click) = rd_click(b, widget.line, entry);
         match &caption {
             Some(label) => format!(
-                "if ui.button({}).on_hover_text({}).clicked() {{\n    {}\n}}",
-                rust_str(label),
-                rust_str(report),
-                eprintln_literal(report),
+                "if ui.button({}).on_hover_text({hover}).clicked() {{\n{}\n}}",
+                medm_str(b, label),
+                indent_lines(&click, 4),
             ),
             None => format!(
-                "let __r = ui.button(\"\").on_hover_text({});\nrelated_display_icon(ui, __r.rect, {icon_fg}, {icon_bg});\nif __r.clicked() {{\n    {}\n}}",
-                rust_str(report),
-                eprintln_literal(report),
+                "let __r = ui.button(\"\").on_hover_text({hover});\nrelated_display_icon(ui, __r.rect, {icon_fg}, {icon_bg});\nif __r.clicked() {{\n{}\n}}",
+                indent_lines(&click, 4),
             ),
         }
     } else {
-        // Several targets: a menu whose items each report one target, then close.
-        // Each item carries a hover tooltip naming its target (GUI-discoverable);
-        // the per-target labels caption only these menu items, never the button.
+        // Several targets: a menu whose items each open (or report) one target,
+        // then close. Each item carries a hover tooltip naming its target
+        // (GUI-discoverable); the per-target labels caption only these menu
+        // items, never the button.
         let mut body = match &caption {
-            Some(title) => format!("ui.menu_button({}, |ui| {{", rust_str(title)),
-            None => "let __m = ui.menu_button(\"\", |ui| {".to_string(),
+            Some(title) => format!("ui.menu_button({}, |ui| {{", medm_str(b, title)),
+            None => "let __rd_menu = ui.menu_button(\"\", |ui| {".to_string(),
         };
-        for (item, report) in &entries {
+        for entry in &entries {
+            let (hover, click) = rd_click(b, widget.line, entry);
             let _ = write!(
                 body,
-                "\n    if ui.button({}).on_hover_text({}).clicked() {{\n        {}\n        ui.close();\n    }}",
-                rust_str(item),
-                rust_str(report),
-                eprintln_literal(report),
+                "\n    if ui.button({}).on_hover_text({hover}).clicked() {{\n{}\n        ui.close();\n    }}",
+                medm_str(b, &entry.caption),
+                indent_lines(&click, 8),
             );
         }
         body.push_str("\n});");
         if caption.is_none() {
             let _ = write!(
                 body,
-                "\nrelated_display_icon(ui, __m.response.rect, {icon_fg}, {icon_bg});"
+                "\nrelated_display_icon(ui, __rd_menu.response.rect, {icon_fg}, {icon_bg});"
             );
         }
         body
@@ -1884,21 +1955,99 @@ fn emit_related_display(b: &mut Builder, widget: &MedmWidget, z: ZLayer) {
     let body = justified_body(&body);
     let body = format!("{{\n{prelude}    {}\n}}", body.replace('\n', "\n    "));
     b.placements.push(Placement::drawn(z, id, geom, body));
-    b.warnings.push(format!(
-        "line {}: related display emitted as a navigation-reporting button/menu \
-         (SiDM has no runtime display loader; click logs the target)",
-        widget.line
-    ));
 }
 
-/// The `(caption, report)` pairs for a related-display widget: each `display[N]`'s
-/// button caption (its `label`, else its target `name`) and the message logged on
-/// click — the target file plus any macro `args`. The target `name` and `args`
-/// already had their `$(P)` macros expanded by the IR pass ([`expand_macros`]),
-/// like channel addresses, so the logged target shows resolved values rather than
-/// raw placeholders. A target with no `name` is dropped with a warning (nothing
-/// to open).
-fn related_display_entries(b: &mut Builder, widget: &MedmWidget) -> Vec<(String, String)> {
+/// One `display[N]` entry of a related display.
+struct RdEntry {
+    /// The button/menu-item caption (the entry's `label`, else its `name`).
+    caption: String,
+    /// The target `.adl` file name as written (post convert-time baking).
+    name: String,
+    /// The macro args handed to the child instance (MEDM `args`).
+    args: String,
+    /// MEDM `mode="replace display"` — MEDM reuses the parent's shell; SiDM
+    /// opens a new window instead (deviation warned at emission).
+    replace: bool,
+}
+
+/// The hover-text *expression* and click statements for one related-display
+/// target. When the recursive driver converted the target ([`Builder`]'s
+/// `rd_modules`), a click opens the sibling module's screen in an immediate
+/// viewport — runtime-expanding the entry's `args` against the parent's macro
+/// table, focusing an already-open (module, args) window instead of duplicating
+/// it (MEDM `relatedDisplayCreateNewDisplay` + `popupExistingDisplay`).
+/// Otherwise (single-file convert, missing file, macro-bearing name) the click
+/// keeps the report-only behaviour: it logs the target to stderr.
+fn rd_click(b: &mut Builder, line: usize, e: &RdEntry) -> (String, String) {
+    let Some(m) = b.rd_modules.get(&e.name).cloned() else {
+        let report = if e.args.is_empty() {
+            format!("related display: open {}", e.name)
+        } else {
+            format!("related display: open {} (macros: {})", e.name, e.args)
+        };
+        b.warnings.push(format!(
+            "line {line}: related display target {} was not converted alongside this \
+             screen (SiDM has no runtime display loader; click logs the target)",
+            e.name
+        ));
+        return (rust_str(&report), eprintln_literal(&report));
+    };
+    b.needs_rd_open = true;
+    if e.replace {
+        b.warnings.push(format!(
+            "line {line}: related display mode \"replace display\" opens a new window \
+             (SiDM keeps the parent open; MEDM would reuse its shell)"
+        ));
+    }
+    let hover = if e.args.is_empty() {
+        format!("open {}", e.name)
+    } else {
+        format!("open {} (macros: {})", e.name, e.args)
+    };
+    let hover = medm_str(b, &hover);
+    // The (module, args) dedup key and the child's macro table both come from
+    // the args string; macro references in it resolve against the *parent*
+    // instance's table at click time (MEDM `performMacroSubstitutions` — no
+    // implicit inheritance of unnamed parent macros).
+    let args_expr = if has_macro_ref(&e.args) {
+        b.needs_macros = true;
+        format!("__m.expand({})", rust_str(&e.args))
+    } else if e.args.is_empty() {
+        "String::new()".to_string()
+    } else {
+        format!("{}.to_string()", rust_str(&e.args))
+    };
+    let p = b.rt_prefix();
+    let path = match &m.ident {
+        Some(ident) => format!("{p}{ident}::Screen"),
+        None => format!("{p}Screen"),
+    };
+    let click = format!(
+        "let __rd_ctx = ui.ctx().clone();\nlet __rd_args = {args_expr};\n{p}OpenDisplay::open_or_focus(__open, &__rd_ctx, ({}, __rd_args.clone()), {}, egui::vec2({}, {}), || {{\n    Box::new({path}::new_in(&__rd_ctx, __rs.as_ref(), {p}parse_macro_args(&__rd_args)))\n}});",
+        rust_str(m.ident.as_deref().unwrap_or("")),
+        rust_str(&m.title),
+        float_lit(m.width),
+        float_lit(m.height),
+    );
+    (hover, click)
+}
+
+/// Re-indent every line of `s` by `n` spaces (multi-line click bodies nested
+/// inside an emitted `if`/menu item).
+fn indent_lines(s: &str, n: usize) -> String {
+    let pad = " ".repeat(n);
+    s.lines()
+        .map(|l| format!("{pad}{l}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The `display[N]` entries of a related display. The target `name` and `args`
+/// already had their `$(P)` macros expanded by the convert-time IR pass
+/// ([`expand_macros`]); whatever survives expands at runtime. A target with no
+/// `name` is dropped with a warning (nothing to open). Every seen name is also
+/// recorded as a discovery target for the recursive driver.
+fn related_display_entries(b: &mut Builder, widget: &MedmWidget) -> Vec<RdEntry> {
     let displays = widget
         .records
         .get("displays")
@@ -1913,18 +2062,20 @@ fn related_display_entries(b: &mut Builder, widget: &MedmWidget) -> Vec<(String,
             ));
             continue;
         };
-        let args = spec.get("args").map(String::as_str).unwrap_or("");
-        let report = if args.is_empty() {
-            format!("related display: open {name}")
-        } else {
-            format!("related display: open {name} (macros: {args})")
-        };
+        let args = spec.get("args").cloned().unwrap_or_default();
+        let replace = spec.get("mode").is_some_and(|m| m.contains("replace"));
         let caption = spec
             .get("label")
             .filter(|s| !s.is_empty())
             .cloned()
             .unwrap_or_else(|| name.clone());
-        entries.push((caption, report));
+        b.related_targets.push(name.clone());
+        entries.push(RdEntry {
+            caption,
+            name,
+            args,
+            replace,
+        });
     }
     entries
 }
@@ -2494,7 +2645,7 @@ fn rust_str(s: &str) -> String {
 /// Whether `s` still carries a `$(name)` / `${name}` macro reference after the
 /// convert-time baking (a stray unclosed `$(` matches too — harmless, since
 /// runtime expansion leaves it literal exactly like MEDM's lexer).
-fn has_macro_ref(s: &str) -> bool {
+pub(crate) fn has_macro_ref(s: &str) -> bool {
     s.contains("$(") || s.contains("${")
 }
 
@@ -2557,6 +2708,18 @@ fn assemble(b: &Builder, screen: &MedmScreen) -> String {
     if b.needs_macros {
         let _ = writeln!(s, "    __m: MacroTable,");
     }
+    if b.needs_rd_open {
+        let _ = writeln!(
+            s,
+            "    /// Render state handed on to child screens opened from related displays."
+        );
+        let _ = writeln!(s, "    __rs: Option<siplot::egui_wgpu::RenderState>,");
+        let _ = writeln!(
+            s,
+            "    /// The related displays this screen has open (MEDM's display list)."
+        );
+        let _ = writeln!(s, "    __open: Vec<{}OpenDisplay>,", b.rt_prefix());
+    }
     for (name, ty) in &b.fields {
         let _ = writeln!(s, "    {name}: {ty},");
     }
@@ -2572,6 +2735,15 @@ fn assemble(b: &Builder, screen: &MedmScreen) -> String {
     emit_place_helper(&mut s, b.use_layout);
     if b.needs_macros {
         s.push_str(MACRO_TABLE_HELPER);
+    }
+    // The shared runtime items live once at the output file's top level; child
+    // `pub mod`s reference them through `super::` (the recursive driver appends
+    // the plot-id allocator itself when only a child needs it).
+    if b.next_plot_id > 0 && !b.child_module {
+        s.push_str(PLOT_IDS_HELPER);
+    }
+    if b.needs_rd_open && !b.child_module {
+        s.push_str(RD_RUNTIME_HELPER);
     }
     if b.needs_rd_icon {
         s.push_str(RELATED_DISPLAY_ICON_HELPER);
@@ -2600,6 +2772,128 @@ impl MacroTable {
         }
         out
     }
+}
+"#;
+
+/// The shared `PlotId` allocator, emitted once at the output file's top level
+/// when any screen in it carries plots (strip charts, cartesian plots): siplot
+/// keys per-plot GPU resources by `PlotId` within a shared render state, so
+/// every screen *instance* — related-display children included — must draw from
+/// one counter.
+pub(crate) const PLOT_IDS_HELPER: &str = r#"
+/// Allocate a contiguous block of `count` siplot `PlotId`s, unique across every
+/// screen instance built from this generated file (related-display children
+/// included) -- siplot keys per-plot GPU resources by `PlotId`, so two
+/// instances must never share one. (Two *separately generated* files compiled
+/// into one app each start at 0 and can still collide; convert such screens
+/// together through one root instead.)
+fn next_plot_ids(count: u64) -> u64 {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    SEQ.fetch_add(count, std::sync::atomic::Ordering::Relaxed)
+}
+"#;
+
+/// The related-display runtime, emitted once at the output file's top level
+/// when any screen in it opens converted targets: the display trait the child
+/// screens implement, the open-display list managing the child viewports, and
+/// MEDM's macro-args parser.
+const RD_RUNTIME_HELPER: &str = r#"
+/// What a related-display child screen exposes to be hosted in a viewport: its
+/// per-frame draw. Implemented by every `Screen` in this generated file.
+pub trait SidmDisplay {
+    fn ui(&mut self, ui: &mut egui::Ui);
+}
+
+/// One open related display: a child screen shown in its own immediate egui
+/// viewport, keyed by (module, macro args) so a second click focuses the
+/// existing window instead of duplicating it (MEDM `popupExistingDisplay`;
+/// MEDM dedups across *all* displays, this list is per parent instance).
+pub struct OpenDisplay {
+    key: (&'static str, String),
+    viewport: egui::ViewportId,
+    title: String,
+    size: egui::Vec2,
+    screen: Box<dyn SidmDisplay>,
+}
+
+impl OpenDisplay {
+    /// Focus the already-open display for `key`, or build one with `make` and
+    /// open it (MEDM `relatedDisplayCreateNewDisplay`).
+    pub fn open_or_focus(
+        open: &mut Vec<OpenDisplay>,
+        ctx: &egui::Context,
+        key: (&'static str, String),
+        title: &str,
+        size: egui::Vec2,
+        make: impl FnOnce() -> Box<dyn SidmDisplay>,
+    ) {
+        if let Some(d) = open.iter().find(|d| d.key == key) {
+            if ctx.embed_viewports() {
+                // Embedded fallback: there is no native window to focus --
+                // the child renders as an `egui::Window` whose area id is its
+                // viewport id (egui `Window::from_viewport`), so raise that
+                // window instead (MEDM `popupExistingDisplay` raises too).
+                ctx.move_to_top(egui::LayerId::new(
+                    egui::Order::Middle,
+                    egui::Id::new(d.viewport),
+                ));
+            } else {
+                ctx.send_viewport_cmd_to(d.viewport, egui::ViewportCommand::Focus);
+            }
+            return;
+        }
+        // A process-wide monotonic id keeps every viewport distinct, even
+        // across close-and-reopen and across parent instances.
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        open.push(OpenDisplay {
+            key,
+            viewport: egui::ViewportId::from_hash_of(("adl2sidm related display", n)),
+            title: title.to_owned(),
+            size,
+            screen: make(),
+        });
+    }
+
+    /// Show every open display as an immediate viewport (a native OS window;
+    /// egui falls back to an embedded `egui::Window` when the backend has no
+    /// multi-viewport support), dropping each one whose window was closed.
+    pub fn show_all(open: &mut Vec<OpenDisplay>, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        open.retain_mut(|d| {
+            let mut keep = true;
+            ctx.show_viewport_immediate(
+                d.viewport,
+                egui::ViewportBuilder::default()
+                    .with_title(d.title.clone())
+                    .with_inner_size(d.size),
+                |ui, _class| {
+                    d.screen.ui(ui);
+                    if ui.ctx().input(|i| i.viewport().close_requested()) {
+                        keep = false;
+                    }
+                },
+            );
+            keep
+        });
+    }
+}
+
+/// Parse MEDM's related-display `args` ("A=1,B=2") into a macro table: names
+/// delimited by `=`, values by `,`, every whitespace character stripped from
+/// both (medm/utils.c `generateNameValueTable`).
+pub fn parse_macro_args(args: &str) -> Vec<(String, String)> {
+    args.split(',')
+        .filter_map(|pair| {
+            let (name, value) = pair.split_once('=')?;
+            let name: String = name.chars().filter(|c| !c.is_whitespace()).collect();
+            if name.is_empty() {
+                return None;
+            }
+            let value: String = value.chars().filter(|c| !c.is_whitespace()).collect();
+            Some((name, value))
+        })
+        .collect()
 }
 "#;
 
@@ -2688,7 +2982,9 @@ fn emit_new(s: &mut String, b: &Builder) {
     let _ = writeln!(s, "    }}");
     s.push('\n');
 
-    let rs_param = if b.needs_render_state {
+    // `render_state` is read when plot ctors unwrap it AND when child screens
+    // opened from related displays inherit it (`__rs`).
+    let rs_param = if b.needs_render_state || b.needs_rd_open {
         "render_state"
     } else {
         "_render_state"
@@ -2720,6 +3016,22 @@ fn emit_new(s: &mut String, b: &Builder) {
     if b.needs_macros {
         let _ = writeln!(s, "        let __m = MacroTable(macros);");
     }
+    if b.next_plot_id > 0 {
+        let _ = writeln!(
+            s,
+            "        // This instance's block of siplot PlotIds (unique per instance, so"
+        );
+        let _ = writeln!(
+            s,
+            "        // related-display children never collide on GPU plot resources)."
+        );
+        let _ = writeln!(
+            s,
+            "        let __plot_base = {}next_plot_ids({});",
+            b.rt_prefix(),
+            b.next_plot_id
+        );
+    }
     let _ = writeln!(s, "        let engine = Engine::new();");
     let _ = writeln!(s, "        engine.attach_repaint(ctx.clone());");
     for ctor in &b.ctors {
@@ -2728,6 +3040,9 @@ fn emit_new(s: &mut String, b: &Builder) {
     let _ = write!(s, "        Self {{ _engine: engine");
     if b.needs_macros {
         let _ = write!(s, ", __m");
+    }
+    if b.needs_rd_open {
+        let _ = write!(s, ", __rs: render_state.cloned(), __open: Vec::new()");
     }
     for (name, _) in &b.fields {
         let _ = write!(s, ", {name}");
@@ -2755,16 +3070,20 @@ fn emit_ui(s: &mut String, b: &Builder, screen: &MedmScreen) {
     // closure (`SidmFrame::show(ui, |ui| ...)`) needs to touch sibling fields
     // while the frame itself is borrowed by the `show` receiver; going through
     // `self.field` inside the closure would re-borrow all of `self` and conflict.
-    if !b.fields.is_empty() || b.needs_macros {
+    if !b.fields.is_empty() || b.needs_macros || b.needs_rd_open {
         let _ = write!(s, "        let Self {{ _engine: _");
         if b.needs_macros {
             // Bind the macro table only when a draw body expands a string;
             // a table used solely by `new_in` is discarded here so the
-            // generated module stays warning-clean.
+            // generated module stays warning-clean. (`__m.` keeps locals
+            // like `__rd_menu` from matching.)
             let ui_uses_macros = b.placements.iter().any(|p| {
-                p.body.contains("__m") || p.gate.as_deref().is_some_and(|g| g.contains("__m"))
+                p.body.contains("__m.") || p.gate.as_deref().is_some_and(|g| g.contains("__m."))
             });
             let _ = write!(s, ", __m{}", if ui_uses_macros { "" } else { ": _" });
+        }
+        if b.needs_rd_open {
+            let _ = write!(s, ", __rs, __open");
         }
         for (name, _) in &b.fields {
             let _ = write!(s, ", {name}");
@@ -2832,6 +3151,22 @@ fn emit_ui(s: &mut String, b: &Builder, screen: &MedmScreen) {
     }
     for p in order {
         write_placement(s, p, 0, 0, "        ", b.use_layout, "__origin");
+    }
+    if b.needs_rd_open {
+        let _ = writeln!(
+            s,
+            "        // Child displays opened from related-display buttons (each in its own"
+        );
+        let _ = writeln!(
+            s,
+            "        // viewport; a backend without multi-viewport support falls back to"
+        );
+        let _ = writeln!(s, "        // embedded windows).");
+        let _ = writeln!(
+            s,
+            "        {}OpenDisplay::show_all(__open, ui);",
+            b.rt_prefix()
+        );
     }
     let _ = writeln!(s, "    }}");
 }
@@ -2934,7 +3269,9 @@ fn emit_place_helper(s: &mut String, use_layout: bool) {
 /// screen origin, or a frame's pre-inset origin), so a frame's `BORDER_INSET`
 /// never shifts its children. The Area's `order` is the z-layer, so decoration
 /// (`Background`) renders and takes input below controls (`Foreground`) regardless
-/// of call order.
+/// of call order. The Area id is salted with the host `ui.id()` so two screen
+/// instances sharing one viewport (related-display children on an embedded
+/// fallback backend) keep distinct Area state.
 #[allow(clippy::too_many_arguments)]
 fn place(
     ui: &mut egui::Ui,
@@ -2951,7 +3288,7 @@ fn place(
 ) {
     let rect =
         egui::Rect::from_min_size(origin + egui::vec2(x * sx, y * sy), egui::vec2(w * sx, h * sy));
-    egui::Area::new(id)
+    egui::Area::new(ui.id().with(id))
         .order(order)
         .fixed_pos(rect.min)
         .constrain(false)
@@ -2970,7 +3307,10 @@ fn place(
 /// `origin` is the container's outer top-left (the screen origin, or a frame's
 /// pre-inset origin), so a frame's `BORDER_INSET` never shifts its children. The
 /// Area's `order` is the z-layer, so decoration (`Background`) renders and takes
-/// input below controls (`Foreground`) regardless of call order.
+/// input below controls (`Foreground`) regardless of call order. The Area id is
+/// salted with the host `ui.id()` so two screen instances sharing one viewport
+/// (related-display children on an embedded fallback backend) keep distinct
+/// Area state.
 #[allow(clippy::too_many_arguments)]
 fn place(
     ui: &mut egui::Ui,
@@ -2984,7 +3324,7 @@ fn place(
     add: impl FnOnce(&mut egui::Ui),
 ) {
     let rect = egui::Rect::from_min_size(origin + egui::vec2(x, y), egui::vec2(w, h));
-    egui::Area::new(id)
+    egui::Area::new(ui.id().with(id))
         .order(order)
         .fixed_pos(rect.min)
         .constrain(false)
@@ -5198,8 +5538,21 @@ composite {
         // period 2 * units "minute" (60) -> 120 s time span.
         assert!(
             g.source
-                .contains("SidmTimePlot::new(rs, 0).with_time_span(120.0)"),
+                .contains("SidmTimePlot::new(rs, __plot_base).with_time_span(120.0)"),
             "strip-chart span not period*units:\n{}",
+            g.source
+        );
+        // The instance allocates its PlotId block from the shared counter, so a
+        // second screen instance (a related-display child, or the same screen
+        // opened twice) never reuses these GPU resource keys.
+        assert!(
+            g.source.contains("let __plot_base = next_plot_ids(2);"),
+            "missing per-instance plot-id base:\n{}",
+            g.source
+        );
+        assert!(
+            g.source.contains("fn next_plot_ids(count: u64) -> u64 {"),
+            "missing shared plot-id allocator:\n{}",
             g.source
         );
         // One add_channel per pen, with the pen colour resolved from the table.
@@ -5251,7 +5604,7 @@ composite {
         // count -> scatter buffer size.
         assert!(
             g.source
-                .contains("SidmScatterPlot::new(rs, 1).with_buffer_size(500)"),
+                .contains("SidmScatterPlot::new(rs, __plot_base + 1).with_buffer_size(500)"),
             "count not mapped to scatter buffer:\n{}",
             g.source
         );
@@ -5290,9 +5643,13 @@ composite {
         );
         let middles = g.source.matches("egui::Order::Middle").count();
         assert_eq!(middles, 2, "two Middle-layer placements:\n{}", g.source);
-        // Distinct PlotIds keep their GPU resources separate.
-        assert!(g.source.contains("SidmTimePlot::new(rs, 0)"));
-        assert!(g.source.contains("SidmWaveformPlot::new(rs, 1)"));
+        // Distinct PlotIds (offsets into the instance's block) keep their GPU
+        // resources separate.
+        assert!(g.source.contains("SidmTimePlot::new(rs, __plot_base)"));
+        assert!(
+            g.source
+                .contains("SidmWaveformPlot::new(rs, __plot_base + 1)")
+        );
     }
 
     // The formerly-deferred widgets, now all implemented for real: the static
@@ -6154,6 +6511,138 @@ composite {
             "related-display target macros not substituted:\n{}",
             g.source
         );
+    }
+
+    /// One related display whose single target the recursive driver resolved.
+    const RESOLVED_RD: &str = r#"
+"color map" {
+	colors {
+		ffffff,
+	}
+}
+"related display" {
+	object {
+		x=0
+		y=0
+		width=120
+		height=24
+	}
+	label="Open"
+	display[0] {
+		label="Child"
+		name="child.adl"
+		args="P=$(P)"
+	}
+}
+"#;
+
+    #[test]
+    fn resolved_related_display_opens_the_converted_module() {
+        let options = Options {
+            rd_modules: BTreeMap::from([(
+                "child.adl".to_string(),
+                RdModule {
+                    ident: Some("__rd_child".to_string()),
+                    title: "child.adl".to_string(),
+                    width: 220.0,
+                    height: 90.0,
+                },
+            )]),
+            ..Options::default()
+        };
+        let g = generate(&parse(RESOLVED_RD), &options);
+        // The entry's args carry an unbound $(P): expanded at click time
+        // against the parent instance's table, then both the dedup key and the
+        // child's macro table come from that string.
+        assert!(
+            g.source.contains("let __rd_args = __m.expand(\"P=$(P)\");"),
+            "{}",
+            g.source
+        );
+        assert!(
+            g.source.contains(
+                "OpenDisplay::open_or_focus(__open, &__rd_ctx, (\"__rd_child\", __rd_args.clone()), \"child.adl\", egui::vec2(220.0, 90.0)"
+            ),
+            "{}",
+            g.source
+        );
+        assert!(
+            g.source.contains(
+                "Box::new(__rd_child::Screen::new_in(&__rd_ctx, __rs.as_ref(), parse_macro_args(&__rd_args)))"
+            ),
+            "{}",
+            g.source
+        );
+        // The shared runtime and the open-display state are emitted at the top
+        // level; the click never falls back to a stderr report.
+        assert!(g.source.contains("pub trait SidmDisplay"), "{}", g.source);
+        assert!(g.source.contains("pub fn parse_macro_args"), "{}", g.source);
+        assert!(
+            g.source
+                .contains("__rs: Option<siplot::egui_wgpu::RenderState>,"),
+            "{}",
+            g.source
+        );
+        assert!(
+            g.source.contains("OpenDisplay::show_all(__open, ui);"),
+            "{}",
+            g.source
+        );
+        assert!(!g.source.contains("eprintln!"), "{}", g.source);
+        assert!(
+            g.related_targets == vec!["child.adl".to_string()],
+            "{:?}",
+            g.related_targets
+        );
+    }
+
+    #[test]
+    fn child_module_references_the_shared_runtime_through_super() {
+        // The same screen emitted as a child `pub mod`, whose target is the
+        // ROOT screen (a cycle): every shared item goes through `super::` and
+        // the root's `Screen` is named directly.
+        let options = Options {
+            child_module: true,
+            rd_modules: BTreeMap::from([(
+                "child.adl".to_string(),
+                RdModule {
+                    ident: None,
+                    title: "rd_parent.adl".to_string(),
+                    width: 300.0,
+                    height: 120.0,
+                },
+            )]),
+            ..Options::default()
+        };
+        let g = generate(&parse(RESOLVED_RD), &options);
+        assert!(
+            g.source.contains(
+                "super::OpenDisplay::open_or_focus(__open, &__rd_ctx, (\"\", __rd_args.clone()), \"rd_parent.adl\""
+            ),
+            "{}",
+            g.source
+        );
+        assert!(
+            g.source.contains(
+                "Box::new(super::Screen::new_in(&__rd_ctx, __rs.as_ref(), super::parse_macro_args(&__rd_args)))"
+            ),
+            "{}",
+            g.source
+        );
+        assert!(
+            g.source.contains("__open: Vec<super::OpenDisplay>,"),
+            "{}",
+            g.source
+        );
+        assert!(
+            g.source
+                .contains("super::OpenDisplay::show_all(__open, ui);"),
+            "{}",
+            g.source
+        );
+        // The shared runtime lives once at the file's top level, never inside
+        // a child module.
+        assert!(!g.source.contains("pub trait SidmDisplay"), "{}", g.source);
     }
 
     // A MEDM `dynamic attribute` CALC/visibility rule on otherwise-supported

@@ -20,6 +20,7 @@
 
 use adl2sidm::adl_parser::parse;
 use adl2sidm::codegen::{Options, generate};
+use adl2sidm::convert::convert_file;
 
 // Compiling this module IS the gate: the generated `Screen` is type-checked
 // against the real sidm/siplot/eframe APIs. It is never instantiated here (no
@@ -27,6 +28,15 @@ use adl2sidm::codegen::{Options, generate};
 #[allow(dead_code)]
 mod sample_screen {
     include!("fixtures/sample_screen.rs");
+}
+
+// The recursive related-display output: root screen + a child `pub mod` per
+// target file + the shared open-display runtime, all in one file. Compiling it
+// gates the whole related-display emission surface; `tests/opens.rs` then
+// drives it (click → child opens).
+#[allow(dead_code)]
+mod rd_screen {
+    include!("fixtures/rd_screen.rs");
 }
 
 /// The exact options the committed `sample_screen.rs` was generated with; the
@@ -83,6 +93,55 @@ fn example_screen_matches_the_committed_module() {
          regenerate it with: cargo run -p adl2sidm -- \
          adl2sidm/examples/local_panel.adl -o \
          adl2sidm/examples/local_panel_screen.rs --protocol \"\""
+    );
+}
+
+#[test]
+fn recursive_conversion_matches_the_committed_module() {
+    // The committed `rd_screen.rs` is the recursive driver's output for
+    // `rd_parent.adl` (which opens `rd_child.adl`, which cycles back to the
+    // parent, plus one missing target): root `Screen` at the top level, the
+    // child as `pub mod __rd_rd_child`, the shared `SidmDisplay`/`OpenDisplay`
+    // runtime once, and a report-only fallback for the missing file.
+    let input =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/rd_parent.adl");
+    let options = Options {
+        macros: vec![("P".to_string(), "X:".to_string())],
+        ..Options::default()
+    };
+    let converted = convert_file(&input, &options).expect("recursive conversion");
+    let committed = include_str!("fixtures/rd_screen.rs");
+    assert_eq!(
+        converted.source, committed,
+        "recursive output drifted from tests/fixtures/rd_screen.rs — \
+         regenerate it with: cargo run -p adl2sidm -- \
+         adl2sidm/tests/fixtures/rd_parent.adl -o \
+         adl2sidm/tests/fixtures/rd_screen.rs -m P=X:"
+    );
+    // The one unresolvable target is warned about twice, with complementary
+    // detail: by the driver (search locations) and by the emitter (the line,
+    // and that the click only logs). Never a silent drop.
+    assert_eq!(
+        converted.warnings.len(),
+        2,
+        "unexpected warnings: {:?}",
+        converted.warnings
+    );
+    assert!(
+        converted
+            .warnings
+            .iter()
+            .any(|w| w.contains("rd_missing_fixture.adl not found")),
+        "{:?}",
+        converted.warnings
+    );
+    assert!(
+        converted
+            .warnings
+            .iter()
+            .any(|w| w.contains("no runtime display loader")),
+        "{:?}",
+        converted.warnings
     );
 }
 

@@ -19,12 +19,15 @@
 //!   category (port of `adl2pydm/symbols.py`).
 //! * `codegen` — walks the IR and emits Rust source, one emitter per MEDM
 //!   widget type (the analogue of `adl2pydm/output_handler.py`).
-//!
-//! The remaining modules land over the next commits.
+//! * `convert` — the recursive driver: converts a root `.adl` plus the
+//!   transitive closure of its related-display targets into one source file,
+//!   so clicking a related-display button *opens* the converted child screen
+//!   (MEDM `relatedDisplayCreateNewDisplay`).
 //!
 //! [`adl2pydm`]: https://github.com/BCDA-APS/adl2pydm
 //! [`sidm`]: https://docs.rs/sidm
 
 pub mod adl_parser;
 pub mod codegen;
+pub mod convert;
 pub mod symbols;

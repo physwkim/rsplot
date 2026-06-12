@@ -1,0 +1,47 @@
+file {
+	name="rd_child.adl"
+	version=030107
+}
+"color map" {
+	colors {
+		ffffff,
+		000000,
+		c0c0c0,
+	}
+}
+display {
+	object {
+		x=0
+		y=0
+		width=220
+		height=90
+	}
+	clr=1
+	bclr=2
+}
+text {
+	object {
+		x=10
+		y=10
+		width=180
+		height=20
+	}
+	"basic attribute" {
+		clr=1
+	}
+	textix="CHILD $(P)"
+}
+"related display" {
+	object {
+		x=10
+		y=50
+		width=120
+		height=24
+	}
+	label="Back"
+	display[0] {
+		label="Parent"
+		name="rd_parent.adl"
+		args="P=$(P)"
+	}
+}

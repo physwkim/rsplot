@@ -1,5 +1,6 @@
 //! Command-line driver for `adl2sidm`: read a MEDM `.adl` screen, emit a SiDM
-//! (Rust) display module.
+//! (Rust) display module — including every related display reachable from it,
+//! converted as sibling modules in the same file (`convert::convert_file`).
 //!
 //! This module is local to the binary (`mod cli` in `main.rs`), so the library
 //! crate stays free of the `clap` dependency. It is the analogue of
@@ -11,8 +12,8 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use adl2sidm::adl_parser::parse;
-use adl2sidm::codegen::{Options, generate};
+use adl2sidm::codegen::Options;
+use adl2sidm::convert::convert_file;
 use clap::Parser;
 
 /// Convert a MEDM `.adl` screen file to a SiDM (Rust) display module.
@@ -79,21 +80,10 @@ pub fn main() -> ExitCode {
     }
 }
 
-/// Read the input, generate the SiDM module, and write it out. Returns the
-/// converter's warnings (printed by `main`) on success.
+/// Read the input, convert it (and every related display reachable from it,
+/// see [`convert_file`]), and write the result out. Returns the converter's
+/// warnings (printed by `main`) on success.
 fn run(cli: Cli) -> Result<Vec<String>, String> {
-    let text = std::fs::read_to_string(&cli.input)
-        .map_err(|e| format!("reading {}: {e}", cli.input.display()))?;
-
-    let mut screen = parse(&text);
-    // Fall back to the input's file name when the `.adl` carries no
-    // `file { name="…" }`, so the generated header still names the source.
-    if screen.adl_filename.is_empty()
-        && let Some(name) = cli.input.file_name().and_then(|n| n.to_str())
-    {
-        screen.adl_filename = name.to_string();
-    }
-
     let options = Options {
         protocol: cli.protocol,
         macros: cli.macros,
@@ -102,23 +92,18 @@ fn run(cli: Cli) -> Result<Vec<String>, String> {
         // `--use-layout`, the old opt-in, is accepted as a no-op — clap
         // rejects combining the two via `conflicts_with`).
         use_layout: cli.use_layout || !cli.absolute,
-        // Embedded displays name a `composite file` relative to this `.adl`, so
-        // resolve it against the input's directory (`.` when the input is bare).
-        source_dir: Some(
-            cli.input
-                .parent()
-                .filter(|p| !p.as_os_str().is_empty())
-                .map_or_else(|| PathBuf::from("."), Path::to_path_buf),
-        ),
+        // `source_dir` (embedded-display resolution), `rd_modules`, and
+        // `child_module` are set per file by the recursive driver.
+        ..Options::default()
     };
-    let generated = generate(&screen, &options);
+    let converted = convert_file(&cli.input, &options)?;
 
     match cli.out.as_deref() {
-        Some(p) if p == Path::new("-") => print!("{}", generated.source),
-        Some(p) => write_out(p, &generated.source)?,
-        None => write_out(&cli.input.with_extension("rs"), &generated.source)?,
+        Some(p) if p == Path::new("-") => print!("{}", converted.source),
+        Some(p) => write_out(p, &converted.source)?,
+        None => write_out(&cli.input.with_extension("rs"), &converted.source)?,
     }
-    Ok(generated.warnings)
+    Ok(converted.warnings)
 }
 
 /// Write the generated source to `path`, reporting where it landed.

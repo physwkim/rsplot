@@ -1,0 +1,60 @@
+file {
+	name="rd_parent.adl"
+	version=030107
+}
+"color map" {
+	colors {
+		ffffff,
+		000000,
+		c0c0c0,
+	}
+}
+display {
+	object {
+		x=0
+		y=0
+		width=300
+		height=120
+	}
+	clr=1
+	bclr=2
+}
+text {
+	object {
+		x=10
+		y=10
+		width=200
+		height=20
+	}
+	"basic attribute" {
+		clr=1
+	}
+	textix="RD PARENT $(P)"
+}
+"related display" {
+	object {
+		x=10
+		y=40
+		width=120
+		height=24
+	}
+	label="Open Child"
+	display[0] {
+		label="Child"
+		name="rd_child.adl"
+		args="P=$(P)"
+	}
+}
+"related display" {
+	object {
+		x=10
+		y=80
+		width=120
+		height=24
+	}
+	label="Missing"
+	display[0] {
+		label="Missing"
+		name="rd_missing_fixture.adl"
+	}
+}
