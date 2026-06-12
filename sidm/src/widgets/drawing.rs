@@ -25,9 +25,9 @@
 
 use siplot::egui::{self, Color32, Pos2, Stroke, Vec2};
 
-use crate::channel::{AlarmSeverity, Channel};
+use crate::channel::Channel;
 use crate::engine::{Engine, EngineError};
-use crate::widgets::base::{ChannelBase, justified_size, layout_justify, severity_color};
+use crate::widgets::base::{AlarmPalette, ChannelBase, justified_size, layout_justify};
 
 /// The shape drawn by a [`SidmDrawing`] (PyDM `PyDMDrawing*` subclasses, plus
 /// the MEDM `arc`/`polyline`/`polygon` shapes the `adl2sidm` converter targets).
@@ -75,17 +75,18 @@ const ARC_SEGMENTS: usize = 48;
 const DEFAULT_SIZE: Vec2 = Vec2::new(40.0, 40.0);
 
 /// The effective `(fill, border)` colours after applying alarm sensitivity
-/// (PyDM's stylesheet override): the fill follows the severity when
-/// `sensitive_content`, the border follows it when `sensitive_border`; a
-/// `NoAlarm` severity (or an insensitive flag) keeps the configured colour.
+/// (PyDM's stylesheet override): the fill follows the severity override when
+/// `sensitive_content`, the border follows it when `sensitive_border`; no
+/// override (PyDM palette at `NoAlarm`, or an insensitive flag) keeps the
+/// configured colour. `sev` is the palette's severity colour
+/// ([`ChannelBase::severity_override`]).
 pub fn effective_colors(
     fill: Color32,
     border: Color32,
-    severity: AlarmSeverity,
+    sev: Option<Color32>,
     sensitive_content: bool,
     sensitive_border: bool,
 ) -> (Color32, Color32) {
-    let sev = severity_color(severity);
     let fill = if sensitive_content {
         sev.unwrap_or(fill)
     } else {
@@ -253,6 +254,13 @@ impl SidmDrawing {
         self
     }
 
+    /// Choose the alarm palette severity styling draws from (builder style;
+    /// `Medm` for converted dynamic-attribute `clr="alarm"` shapes).
+    pub fn with_alarm_palette(mut self, palette: AlarmPalette) -> Self {
+        self.base.alarm_palette = palette;
+        self
+    }
+
     /// The underlying channel.
     pub fn channel(&self) -> &Channel {
         self.base.channel()
@@ -264,7 +272,7 @@ impl SidmDrawing {
         let (fill, border) = effective_colors(
             self.fill,
             self.border_color,
-            state.effective_severity(),
+            self.base.severity_override(&state),
             self.base.alarm_sensitive_content,
             self.base.alarm_sensitive_border,
         );
@@ -340,43 +348,32 @@ impl SidmDrawing {
 mod tests {
     use super::*;
 
+    use crate::channel::AlarmSeverity;
+    use crate::widgets::base::severity_color;
+
     #[test]
-    fn no_alarm_keeps_configured_colors() {
-        let (fill, border) = effective_colors(
-            Color32::BLUE,
-            Color32::GREEN,
-            AlarmSeverity::NoAlarm,
-            true,
-            true,
-        );
+    fn no_override_keeps_configured_colors() {
+        // The PyDM palette yields no override at NoAlarm.
+        let sev = severity_color(AlarmSeverity::NoAlarm);
+        let (fill, border) = effective_colors(Color32::BLUE, Color32::GREEN, sev, true, true);
         assert_eq!(fill, Color32::BLUE);
         assert_eq!(border, Color32::GREEN);
     }
 
     #[test]
     fn sensitive_content_recolors_only_the_fill() {
-        let (fill, border) = effective_colors(
-            Color32::BLUE,
-            Color32::GREEN,
-            AlarmSeverity::Major,
-            true,
-            false,
-        );
-        assert_eq!(fill, severity_color(AlarmSeverity::Major).unwrap());
+        let sev = severity_color(AlarmSeverity::Major);
+        let (fill, border) = effective_colors(Color32::BLUE, Color32::GREEN, sev, true, false);
+        assert_eq!(fill, sev.unwrap());
         assert_eq!(border, Color32::GREEN);
     }
 
     #[test]
     fn sensitive_border_recolors_only_the_border() {
-        let (fill, border) = effective_colors(
-            Color32::BLUE,
-            Color32::GREEN,
-            AlarmSeverity::Minor,
-            false,
-            true,
-        );
+        let sev = severity_color(AlarmSeverity::Minor);
+        let (fill, border) = effective_colors(Color32::BLUE, Color32::GREEN, sev, false, true);
         assert_eq!(fill, Color32::BLUE);
-        assert_eq!(border, severity_color(AlarmSeverity::Minor).unwrap());
+        assert_eq!(border, sev.unwrap());
     }
 
     #[test]

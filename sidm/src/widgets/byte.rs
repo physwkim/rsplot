@@ -14,7 +14,7 @@ use siplot::egui::{self, Color32};
 
 use crate::channel::{AlarmSeverity, Channel, ChannelState, PvValue};
 use crate::engine::{Engine, EngineError};
-use crate::widgets::base::{ChannelBase, layout_justify, severity_color};
+use crate::widgets::base::{AlarmPalette, ChannelBase, layout_justify};
 
 /// Layout direction for the row/column of bit indicators.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -164,6 +164,13 @@ impl SidmByteIndicator {
         self
     }
 
+    /// Choose the alarm palette severity styling draws from (builder style;
+    /// `Medm` for converted `clrmod="alarm"` widgets).
+    pub fn with_alarm_palette(mut self, palette: AlarmPalette) -> Self {
+        self.base.alarm_palette = palette;
+        self
+    }
+
     /// The underlying channel.
     pub fn channel(&self) -> &Channel {
         self.base.channel()
@@ -179,19 +186,16 @@ impl SidmByteIndicator {
     /// Colour for one bit given the channel state (PyDM `update_indicators`):
     /// disconnected → disconnected colour, `INVALID` alarm → invalid colour,
     /// otherwise on/off colour. When alarm-sensitive content is on, a lit bit is
-    /// recoloured by the channel severity (MEDM `clrmod="alarm"`), falling back to
-    /// the static on colour for `NoAlarm`.
+    /// recoloured by the channel severity (MEDM `clrmod="alarm"`) through the
+    /// base's palette, falling back to the static on colour when the palette
+    /// has no override.
     pub fn bit_color(&self, state: &ChannelState, bit_on: bool) -> Color32 {
         if !state.connected {
             self.disconnected_color
         } else if state.severity == AlarmSeverity::Invalid {
             self.invalid_color
         } else if bit_on {
-            if self.base.alarm_sensitive_content {
-                severity_color(state.effective_severity()).unwrap_or(self.on_color)
-            } else {
-                self.on_color
-            }
+            self.base.content_color(state).unwrap_or(self.on_color)
         } else {
             self.off_color
         }
@@ -308,6 +312,7 @@ const INDICATOR_SIZE: f32 = 14.0;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::widgets::base::severity_color;
 
     #[test]
     fn extract_bits_lsb_first_no_shift() {

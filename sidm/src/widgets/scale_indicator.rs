@@ -24,7 +24,7 @@ use siplot::egui::{self, Color32, Stroke, Vec2};
 use crate::channel::{Channel, PvValue};
 use crate::engine::{Engine, EngineError};
 use crate::widgets::base::{
-    ChannelBase, control_range, justified_size, layout_justify, severity_color,
+    AlarmPalette, ChannelBase, control_range, justified_size, layout_justify,
 };
 use crate::widgets::byte::Orientation;
 use crate::widgets::display_format::{DisplayFormat, FormatSpec, format_value};
@@ -140,6 +140,13 @@ impl SidmScaleIndicator {
         self
     }
 
+    /// Choose the alarm palette severity styling draws from (builder style;
+    /// `Medm` for converted `clrmod="alarm"` widgets).
+    pub fn with_alarm_palette(mut self, palette: AlarmPalette) -> Self {
+        self.base.alarm_palette = palette;
+        self
+    }
+
     /// Set the scale size in points (builder style).
     pub fn with_size(mut self, size: Vec2) -> Self {
         self.size = size;
@@ -161,12 +168,8 @@ impl SidmScaleIndicator {
             _ => None,
         };
         // PyDM analog indicator: colour the bar by alarm severity when content is
-        // alarm-sensitive.
-        let bar_color = if self.base.alarm_sensitive_content {
-            severity_color(state.effective_severity()).unwrap_or(self.bar_color)
-        } else {
-            self.bar_color
-        };
+        // alarm-sensitive (through the base's palette).
+        let bar_color = self.base.content_color(&state).unwrap_or(self.bar_color);
         let label_text = if self.show_value_label {
             format_value(
                 state.value.as_ref(),

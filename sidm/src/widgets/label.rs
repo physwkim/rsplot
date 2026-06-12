@@ -9,7 +9,7 @@ use siplot::egui;
 
 use crate::channel::{Channel, ChannelState};
 use crate::engine::{Engine, EngineError};
-use crate::widgets::base::{ChannelBase, layout_justify};
+use crate::widgets::base::{AlarmPalette, ChannelBase, layout_justify};
 use crate::widgets::display_format::{DisplayFormat, FormatSpec, format_value};
 
 /// Horizontal alignment of the label text within its rect (MEDM `align` / PyDM
@@ -86,6 +86,13 @@ impl SidmLabel {
     /// builder style).
     pub fn with_alarm_sensitive_border(mut self, on: bool) -> Self {
         self.base.alarm_sensitive_border = on;
+        self
+    }
+
+    /// Choose the alarm palette severity styling draws from (builder style;
+    /// `Medm` for converted `clrmod="alarm"` widgets).
+    pub fn with_alarm_palette(mut self, palette: AlarmPalette) -> Self {
+        self.base.alarm_palette = palette;
         self
     }
 

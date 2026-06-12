@@ -78,6 +78,7 @@ impl Screen {
             .with_fill(Color32::TRANSPARENT)
             .with_border(Color32::from_rgb(192, 192, 192), 2.0)
             .with_alarm_sensitive_border(true)
+            .with_alarm_palette(AlarmPalette::Medm)
             .with_size(egui::Vec2::new(180.0, 120.0));
         let gate11 = engine
             .connect("calc://adl2sidm_vis_148?expr=A!=0&A=ca://DMM1:show_box&update=A")
@@ -121,7 +122,7 @@ impl Screen {
         place(ui, __origin, egui::Order::Background, egui::Id::new(1u64), 10.0, 475.0, 180.0, 18.0, |ui| {
             {
                 ui.style_mut().override_font_id = Some(egui::FontId::proportional(11.0));
-                let __c = alarm2.read(|s| severity_color(s.effective_severity())).unwrap_or(Color32::from_rgb(0, 0, 0));
+                let __c = alarm2.read(|s| severity_color_medm(s.effective_severity()));
                 ui.label(egui::RichText::new("STATUS").color(__c));
             }
         });

@@ -2352,12 +2352,19 @@ fn string_format_builder(widget: &MedmWidget, addr: &str) -> Option<String> {
 /// `clr`. MEDM's other modes (`static`, the default, and `discrete`) keep the
 /// static colour and emit nothing. `adl2pydm` leaves this to PyDM's widget
 /// defaults; sidm defaults `alarm_sensitive_content` off, so reproducing MEDM's
-/// alarm colouring needs the builder set explicitly. Only callers whose sidm
-/// widget actually exposes `with_alarm_sensitive_content` (`SidmLabel`,
-/// `SidmDrawing`, `SidmScaleIndicator`, `SidmByteIndicator`) may use this.
+/// alarm colouring needs the builder set explicitly. The MEDM palette rides
+/// along: MEDM's `alarmColor` table replaces the foreground for EVERY severity
+/// (`NO_ALARM` paints Green3 — medmWidget.c `alarmColorString`, utils.c
+/// `alarmColor`), where PyDM keeps the static colour outside an alarm. Only
+/// callers whose sidm widget actually exposes `with_alarm_sensitive_content`
+/// (`SidmLabel`, `SidmDrawing`, `SidmScaleIndicator`, `SidmByteIndicator`) may
+/// use this.
 fn alarm_content_builder(widget: &MedmWidget) -> Option<String> {
-    (widget.assignments.get("clrmod").map(String::as_str) == Some("alarm"))
-        .then(|| ".with_alarm_sensitive_content(true)".to_string())
+    (widget.assignments.get("clrmod").map(String::as_str) == Some("alarm")).then(|| {
+        ".with_alarm_sensitive_content(true)\n            \
+         .with_alarm_palette(AlarmPalette::Medm)"
+            .to_string()
+    })
 }
 
 /// The MEDM `dynamic attribute` colour MODE (`clr`: `static`/`alarm`/`discrete`),
@@ -2387,14 +2394,17 @@ fn dynamic_color_mode(widget: &MedmWidget) -> Option<&str> {
 /// emitted is exactly what MEDM draws.
 fn drawing_alarm_builder(widget: &MedmWidget, draws_border_only: bool) -> Option<String> {
     match dynamic_color_mode(widget) {
-        Some("alarm") => Some(
+        // MEDM draws the ALARM arm with `alarmColor(severity)` for every
+        // severity (medmRectangle.c etc.), so the MEDM palette rides along —
+        // NO_ALARM paints Green3, not the static colour.
+        Some("alarm") => Some(format!(
+            "{}\n            .with_alarm_palette(AlarmPalette::Medm)",
             if draws_border_only {
                 ".with_alarm_sensitive_border(true)"
             } else {
                 ".with_alarm_sensitive_content(true)"
             }
-            .to_string(),
-        ),
+        )),
         _ => None,
     }
 }
@@ -2404,8 +2414,9 @@ fn drawing_alarm_builder(widget: &MedmWidget, draws_border_only: bool) -> Option
 /// dynamic attribute sets `clr="alarm"` with a channel, the fixed text is
 /// recoloured by that channel's alarm severity each frame: a `Channel` field is
 /// emitted (mirroring the visibility-gate pattern) and the setup binds a `__c`
-/// local = `severity_color(...)` falling back to the static colour for
-/// NoAlarm/disconnected. `clr="discrete"` keeps the static colour with no setup —
+/// local = `severity_color_medm(...)` — MEDM's `alarmColor` table, which is
+/// total (`NO_ALARM` paints Green3; medmText.c's ALARM arm never falls back to
+/// the static colour). `clr="discrete"` keeps the static colour with no setup —
 /// and that is FAITHFUL: medm/medmText.c draws dynamic-attribute text with
 /// `case STATIC: case DISCRETE:` sharing `colormap[attr.clr]`, so discrete and
 /// static are the same colour for a `text` widget (DISCRETE only differs for
@@ -2442,7 +2453,7 @@ fn static_text_color(
             ));
             b.fields.push((field.clone(), "Channel".to_string()));
             let setup = format!(
-                "    let __c = {field}.read(|s| severity_color(s.effective_severity())).unwrap_or({fallback_expr});\n"
+                "    let __c = {field}.read(|s| severity_color_medm(s.effective_severity()));\n"
             );
             (setup, "__c".to_string())
         }
@@ -3921,6 +3932,16 @@ rectangle {
             "only the clrmod=alarm text update should be alarm-sensitive:\n{}",
             g.source
         );
+        // The MEDM palette rides along: clrmod=alarm replaces the foreground
+        // for every severity (NO_ALARM → Green3), unlike PyDM's tint-in-alarm.
+        assert_eq!(
+            g.source
+                .matches(".with_alarm_palette(AlarmPalette::Medm)")
+                .count(),
+            1,
+            "the clrmod=alarm text update must use the MEDM palette:\n{}",
+            g.source
+        );
         // Both PVs are still emitted (the static one just keeps its default).
         assert!(g.source.contains("ca://$(P)alarmPV"));
         assert!(g.source.contains("ca://$(P)staticPV"));
@@ -3984,6 +4005,15 @@ oval {
         assert!(
             g.source.contains(".with_alarm_sensitive_content(true)"),
             "solid shape clr=alarm must recolour the fill:\n{}",
+            g.source
+        );
+        // Both shapes draw from the MEDM palette (alarmColor is total).
+        assert_eq!(
+            g.source
+                .matches(".with_alarm_palette(AlarmPalette::Medm)")
+                .count(),
+            2,
+            "both clr=alarm shapes must use the MEDM palette:\n{}",
             g.source
         );
         // Each shape is bound to its dynamic-attribute channel (not a synthetic
@@ -4085,10 +4115,12 @@ text {
             g.source
                 .contains("egui::RichText::new(\"STATUS\").color(__c)")
         );
+        // MEDM's alarmColor table is total (NO_ALARM → Green3), so the read
+        // never falls back to the static colour.
         assert!(
             g.source
-                .contains("read(|s| severity_color(s.effective_severity())).unwrap_or("),
-            "static text clr=alarm must read severity each frame:\n{}",
+                .contains("read(|s| severity_color_medm(s.effective_severity()));"),
+            "static text clr=alarm must read MEDM severity colour each frame:\n{}",
             g.source
         );
         assert!(g.source.contains("ca://$(P)stat"));

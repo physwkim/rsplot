@@ -33,6 +33,36 @@ pub fn severity_color(severity: AlarmSeverity) -> Option<Color32> {
     }
 }
 
+/// MEDM's alarm colour for a severity — the `alarmColorString` table
+/// (medmWidget.c: `"Green3", "Yellow", "Red", "White", "Gray80"`) applied by
+/// `alarmColor()` (utils.c). Unlike the PyDM palette it is TOTAL: MEDM's
+/// `clrmod="alarm"` replaces the foreground for every severity, so `NO_ALARM`
+/// paints Green3 rather than keeping the widget's static colour. The
+/// out-of-table arm (`Gray80`) serves [`AlarmSeverity::Disconnected`], a
+/// severity MEDM itself never draws (it blanks unconnected widgets).
+pub fn severity_color_medm(severity: AlarmSeverity) -> Color32 {
+    match severity {
+        AlarmSeverity::NoAlarm => Color32::from_rgb(0x00, 0xCD, 0x00),
+        AlarmSeverity::Minor => Color32::from_rgb(0xFF, 0xFF, 0x00),
+        AlarmSeverity::Major => Color32::from_rgb(0xFF, 0x00, 0x00),
+        AlarmSeverity::Invalid => Color32::WHITE,
+        AlarmSeverity::Disconnected => Color32::from_rgb(0xCC, 0xCC, 0xCC),
+    }
+}
+
+/// Which alarm palette drives a widget's severity styling: PyDM's qss palette
+/// (tint only while in alarm, keep the configured colour at `NoAlarm`) or
+/// MEDM's `alarmColor` table (total replacement, `NO_ALARM` = Green3 — what a
+/// converted `.adl` widget with `clrmod="alarm"` needs).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AlarmPalette {
+    /// PyDM `default_stylesheet.qss` ([`severity_color`]).
+    #[default]
+    Pydm,
+    /// MEDM `alarmColor` ([`severity_color_medm`]).
+    Medm,
+}
+
 /// The alarm border to draw around a widget: a 2px stroke in the severity
 /// colour, dashed only for [`AlarmSeverity::Disconnected`] (qss
 /// `2px dashed #FFFFFF`), solid otherwise. `None` for `NoAlarm`.
@@ -120,6 +150,8 @@ pub struct ChannelBase {
     /// Recolour the widget content by alarm severity (PyDM
     /// `alarmSensitiveContent`, default `false`).
     pub alarm_sensitive_content: bool,
+    /// The palette severity-sensitive styling draws from (default PyDM).
+    pub alarm_palette: AlarmPalette,
 }
 
 impl ChannelBase {
@@ -130,6 +162,17 @@ impl ChannelBase {
             channel,
             alarm_sensitive_border: true,
             alarm_sensitive_content: false,
+            alarm_palette: AlarmPalette::default(),
+        }
+    }
+
+    /// The palette's severity colour for `state` — the single owner of the
+    /// palette choice. `None` means "no severity override" (PyDM palette at
+    /// `NoAlarm`); the MEDM palette always overrides.
+    pub fn severity_override(&self, state: &ChannelState) -> Option<Color32> {
+        match self.alarm_palette {
+            AlarmPalette::Pydm => severity_color(state.effective_severity()),
+            AlarmPalette::Medm => Some(severity_color_medm(state.effective_severity())),
         }
     }
 
@@ -155,7 +198,7 @@ impl ChannelBase {
     /// `PyDMLineEdit` content colour).
     pub fn content_color(&self, state: &ChannelState) -> Option<Color32> {
         if self.alarm_sensitive_content {
-            severity_color(state.effective_severity())
+            self.severity_override(state)
         } else {
             None
         }
@@ -331,6 +374,45 @@ mod tests {
         assert_eq!(b.content_color(&major), None);
         b.alarm_sensitive_content = true;
         assert_eq!(b.content_color(&major), Some(Color32::from_rgb(0xFF, 0, 0)));
+    }
+
+    #[test]
+    fn severity_color_medm_is_total_and_green_at_no_alarm() {
+        // MEDM alarmColorString {"Green3","Yellow","Red","White","Gray80"}
+        // (medmWidget.c) applied unconditionally under clrmod="alarm"
+        // (utils.c alarmColor) — NO_ALARM paints Green3, not the static colour.
+        assert_eq!(
+            severity_color_medm(AlarmSeverity::NoAlarm),
+            Color32::from_rgb(0x00, 0xCD, 0x00)
+        );
+        assert_eq!(
+            severity_color_medm(AlarmSeverity::Minor),
+            Color32::from_rgb(0xFF, 0xFF, 0x00)
+        );
+        assert_eq!(
+            severity_color_medm(AlarmSeverity::Major),
+            Color32::from_rgb(0xFF, 0x00, 0x00)
+        );
+        assert_eq!(severity_color_medm(AlarmSeverity::Invalid), Color32::WHITE);
+        assert_eq!(
+            severity_color_medm(AlarmSeverity::Disconnected),
+            Color32::from_rgb(0xCC, 0xCC, 0xCC)
+        );
+    }
+
+    #[test]
+    fn medm_palette_overrides_content_at_no_alarm() {
+        let mut b = base();
+        b.alarm_sensitive_content = true;
+        b.alarm_palette = AlarmPalette::Medm;
+        assert_eq!(
+            b.content_color(&st(true, true, AlarmSeverity::NoAlarm)),
+            Some(Color32::from_rgb(0x00, 0xCD, 0x00))
+        );
+        assert_eq!(
+            b.content_color(&st(true, true, AlarmSeverity::Minor)),
+            Some(Color32::from_rgb(0xFF, 0xFF, 0x00))
+        );
     }
 
     #[test]
