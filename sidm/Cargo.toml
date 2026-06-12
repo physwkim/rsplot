@@ -1,6 +1,6 @@
 [package]
 name = "sidm"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.92"
 license = "MIT OR Apache-2.0"
@@ -35,7 +35,10 @@ pva = ["dep:epics-pva-rs"]
 calc = ["dep:evalexpr"]
 
 [dependencies]
-siplot = { path = ".." }
+# `version` (alongside `path`) is required so `cargo publish` records a
+# crates.io dependency on the published siplot; the path is used for local
+# workspace builds. Keep this in lockstep with siplot's version.
+siplot = { path = "..", version = "0.2.0" }
 # Async runtime for the data engine. The connection tasks live on a tokio
 # runtime the `Engine` owns; widgets read shared state on the GUI thread. `net`
 # is enabled so `enable_all()` (and the EPICS backends, later) work.
