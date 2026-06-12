@@ -110,7 +110,7 @@ impl Screen {
                 ui.label(egui::RichText::new("STATUS").color(__c));
             }
         });
-        if gate11.read(|s| s.value.as_ref().and_then(|v| v.as_f64())) != Some(0.0) {
+        if gate11.read(|s| s.value.as_ref().and_then(|v| v.as_f64())).is_some_and(|v| v != 0.0) {
             place(ui, __origin, egui::Order::Background, egui::Id::new(10u64), 210.0, 10.0, 180.0, 120.0, |ui| {
                 ui.with_layout(egui::Layout::centered_and_justified(egui::Direction::LeftToRight), |ui| {
                     let _ = w10.show(ui);

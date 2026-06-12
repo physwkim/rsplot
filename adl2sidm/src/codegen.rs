@@ -284,10 +284,16 @@ fn apply_dynamic_visibility(b: &mut Builder, widget: &MedmWidget, options: &Opti
         rust_str(&format!("adl2sidm: connect visibility gate {gate_addr}"))
     ));
     b.fields.push((field.clone(), "Channel".to_string()));
-    // Read the gate's scalar each frame: hidden only when it is exactly zero, so a
-    // control stays visible while the gate has no value yet (the calc:// channel
-    // publishes only once all its children connect) and whenever it is non-zero.
-    let cond = format!("{field}.read(|s| s.value.as_ref().and_then(|v| v.as_f64())) != Some(0.0)");
+    // Read the gate's scalar each frame: shown only when the rule evaluates to a
+    // definite non-zero. While the gate has no value yet (an input channel is
+    // disconnected, so the calc:// channel has published nothing) the widget is
+    // hidden — MEDM never applies a visibility rule to a disconnected
+    // dynamic-attribute object (textDraw &c. blank the region with
+    // drawWhiteRectangle instead of drawing); treating "unknown" as "visible"
+    // made paired vis texts (Collecting/Done) overlap while disconnected.
+    let cond = format!(
+        "{field}.read(|s| s.value.as_ref().and_then(|v| v.as_f64())).is_some_and(|v| v != 0.0)"
+    );
     for placement in &mut b.placements[start..] {
         placement.gate = Some(cond.clone());
     }
@@ -5974,6 +5980,27 @@ composite {
                 .any(|w| w.contains("dynamic visibility wired")),
             "{:?}",
             g.warnings
+        );
+    }
+
+    #[test]
+    fn visibility_gate_hides_while_the_rule_value_is_unknown() {
+        let g = calc();
+        // The gate shows only on a definite non-zero: `.is_some_and(|v| v != 0.0)`.
+        // An unreadable gate (input channel disconnected -> the calc:// channel
+        // has no value) hides the widget — MEDM parity: a disconnected
+        // dynamic-attribute object is never drawn with its rule applied
+        // (drawWhiteRectangle), so paired vis texts (Collecting/Done) must not
+        // BOTH appear while disconnected.
+        assert!(
+            g.source.contains(".is_some_and(|v| v != 0.0) {"),
+            "gate must hide on an unknown rule value:\n{}",
+            g.source
+        );
+        assert!(
+            !g.source.contains("!= Some(0.0)"),
+            "the old unknown-means-visible gate survives:\n{}",
+            g.source
         );
     }
 
