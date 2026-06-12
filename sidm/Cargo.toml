@@ -84,6 +84,17 @@ evalexpr = { version = "13", optional = true }
 # the same facade, so the host app's logger picks both up. Dependency-free.
 log = "0.4"
 
+# X11 PRIMARY selection for the middle-click PV copy: PyDM sets
+# `QClipboard.Selection` alongside the clipboard on Linux
+# (pydm/widgets/base.py `show_address_tooltip`), and MEDM's Btn2 delivers the
+# copy through PRIMARY exclusively (actions.c `selectionConvertProc`) — that is
+# how operators middle-paste PV names into terminals. egui's `copy_text`
+# reaches only the CLIPBOARD selection, so the copy plugin sets PRIMARY
+# directly. Text-only (no `image-data`); eframe already carries arboard via
+# egui-winit, so a full build gains no new crate.
+[target.'cfg(target_os = "linux")'.dependencies]
+arboard = { version = "3.6", default-features = false }
+
 [dev-dependencies]
 # Headless egui renderer for the widget render tests (alarm-border readback),
 # pinned to the same 0.34.3 the siplot crate's tests use so there is one egui in

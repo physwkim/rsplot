@@ -165,6 +165,44 @@ struct MiddleClickCopy {
     /// down — it shows the address tooltip (PyDM `show_address_tooltip`; MEDM
     /// keeps its drag icon up while Btn2 is held).
     holding: Option<egui::Id>,
+    /// Lazily created PRIMARY-selection owner. The X11 selection serves other
+    /// clients only while the owning `Clipboard` lives, so the plugin (alive
+    /// for the app's lifetime) keeps it.
+    #[cfg(target_os = "linux")]
+    primary: Option<arboard::Clipboard>,
+    /// Initialisation failed (no X11 display) — logged once, never retried.
+    #[cfg(target_os = "linux")]
+    primary_unavailable: bool,
+}
+
+impl MiddleClickCopy {
+    /// Own the X11 PRIMARY selection with the copied names: PyDM sets
+    /// `QClipboard.Selection` alongside the clipboard on Linux
+    /// (pydm/widgets/base.py), and MEDM's Btn2 delivers the copy through
+    /// PRIMARY exclusively (actions.c `selectionConvertProc`) — middle-pasting
+    /// PV names into a terminal needs it. egui's `copy_text` reaches only the
+    /// CLIPBOARD selection.
+    #[cfg(target_os = "linux")]
+    fn own_primary_selection(&mut self, text: &str) {
+        use arboard::{LinuxClipboardKind, SetExtLinux};
+        if self.primary.is_none() && !self.primary_unavailable {
+            match arboard::Clipboard::new() {
+                Ok(clipboard) => self.primary = Some(clipboard),
+                Err(err) => {
+                    self.primary_unavailable = true;
+                    log::warn!("middle-click copy: PRIMARY selection unavailable: {err}");
+                }
+            }
+        }
+        if let Some(clipboard) = &mut self.primary
+            && let Err(err) = clipboard
+                .set()
+                .clipboard(LinuxClipboardKind::Primary)
+                .text(text)
+        {
+            log::warn!("middle-click copy: failed to own the PRIMARY selection: {err}");
+        }
+    }
 }
 
 impl egui::plugin::Plugin for MiddleClickCopy {
@@ -174,6 +212,8 @@ impl egui::plugin::Plugin for MiddleClickCopy {
 
     fn on_end_pass(&mut self, ui: &mut egui::Ui) {
         if let Some((_, id, text)) = self.best.take() {
+            #[cfg(target_os = "linux")]
+            self.own_primary_selection(&text);
             ui.ctx().copy_text(text);
             self.holding = Some(id);
         }
@@ -191,8 +231,10 @@ impl egui::plugin::Plugin for MiddleClickCopy {
 /// the selection with the space-joined record names, actions.c; PyDM
 /// `show_address_tooltip` joins `remove_protocol`'d addresses,
 /// pydm/widgets/base.py). While the button stays held, the winning widget shows
-/// the full address(es) as a tooltip, newline-joined like PyDM's. Overlapping
-/// widgets resolve through the [`MiddleClickCopy`] plugin.
+/// the full address(es) as a tooltip, newline-joined like PyDM's. On Linux the
+/// copy also owns the X11 PRIMARY selection (both references do — middle-paste
+/// into a terminal). Overlapping widgets resolve through the
+/// [`MiddleClickCopy`] plugin.
 ///
 /// Every framed channel widget gets this through [`ChannelBase`]; a custom
 /// widget that draws its own response wires it explicitly (the plots do).
