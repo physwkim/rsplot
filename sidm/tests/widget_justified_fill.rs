@@ -25,7 +25,8 @@ use egui_kittest::Harness;
 use egui_kittest::wgpu::{WgpuTestRenderer, create_render_state, default_wgpu_setup};
 use sidm::Engine;
 use sidm::widgets::{
-    DrawingShape, SidmByteIndicator, SidmDrawing, SidmImage, SidmScaleIndicator, SidmSymbol,
+    DrawingShape, SidmByteIndicator, SidmDrawing, SidmEnumComboBox, SidmImage, SidmScaleIndicator,
+    SidmSymbol,
 };
 use siplot::egui;
 
@@ -185,10 +186,13 @@ fn justified_symbol_fills_the_available_rect() {
     let justified = pixel_probe(true, move |ui| drop(filled.show(ui)), count_red);
     let mut native = red_symbol(&engine, "loc://native_symbol?type=int&init=1");
     let plain = pixel_probe(false, move |ui| drop(native.show(ui)), count_red);
-    // The native 80×80 shape covers ~6400 px; filling 400×400 covers far more.
+    // The native 80×80 shape covers ~6400 px; the justified shape must cover
+    // most of the 400×400 harness. An area floor, not a ratio: a one-axis-only
+    // fill (the egui combo-height failure mode) already clears a 4× ratio.
+    eprintln!("symbol: justified={justified} plain={plain}");
     assert!(
-        justified > 4 * plain && plain > 3000,
-        "justified symbol should cover far more pixels: justified={justified} plain={plain}"
+        justified > 100_000 && plain > 3000 && plain < 10_000,
+        "justified symbol should fill both axes: justified={justified} plain={plain}"
     );
 }
 
@@ -217,9 +221,58 @@ fn justified_scale_indicator_fills_the_available_rect() {
     let justified = pixel_probe(true, move |ui| drop(filled.show(ui)), count_red);
     let mut native = red_scale(&engine, "loc://native_scale?type=float&init=100");
     let plain = pixel_probe(false, move |ui| drop(native.show(ui)), count_red);
+    eprintln!("scale: justified={justified} plain={plain}");
     assert!(
-        justified > 4 * plain && plain > 2000,
-        "justified scale should cover far more pixels: justified={justified} plain={plain}"
+        justified > 100_000 && plain > 2000 && plain < 10_000,
+        "justified scale should fill both axes: justified={justified} plain={plain}"
+    );
+}
+
+fn red_combo(engine: &Engine, address: &str) -> SidmEnumComboBox {
+    let combo = SidmEnumComboBox::new(engine, address).expect("connect");
+    assert!(
+        wait_for(
+            || combo.channel().read(|s| s.connected),
+            Duration::from_secs(2)
+        ),
+        "combo channel never connected"
+    );
+    combo
+}
+
+/// The combo face fills from `visuals.widgets.inactive.weak_bg_fill` (the same
+/// override the adl2sidm `bclr` style prelude sets), so painting it red and
+/// counting makes the face size observable.
+#[test]
+fn justified_enum_combo_box_fills_the_available_rect() {
+    let engine = Engine::new();
+    let mut filled = red_combo(&engine, "loc://fill_combo?type=int&init=0");
+    let justified = pixel_probe(
+        true,
+        move |ui| {
+            ui.style_mut().visuals.widgets.inactive.weak_bg_fill =
+                egui::Color32::from_rgb(255, 0, 0);
+            drop(filled.show(ui));
+        },
+        count_red,
+    );
+    let mut native = red_combo(&engine, "loc://native_combo?type=int&init=0");
+    let plain = pixel_probe(
+        false,
+        move |ui| {
+            ui.style_mut().visuals.widgets.inactive.weak_bg_fill =
+                egui::Color32::from_rgb(255, 0, 0);
+            drop(native.show(ui));
+        },
+        count_red,
+    );
+    // Native: the default combo_width face (~100×18) ≈ 2k px. The justified
+    // face must cover most of the 400×400 harness — a ratio alone false-passes,
+    // because egui's combo height (but never its width) tracks the justified
+    // expansion by itself (~100×390 ≈ 39k px, already 19× the native count).
+    assert!(
+        justified > 100_000 && plain > 1000 && plain < 5_000,
+        "justified combo should fill both axes: justified={justified} plain={plain}"
     );
 }
 
@@ -246,9 +299,11 @@ fn justified_byte_divides_the_available_rect_among_bits() {
     let justified = pixel_probe(true, move |ui| drop(filled.show(ui)), count_green);
     let mut native = green_byte(&engine, "loc://native_byte?type=int&init=255");
     let plain = pixel_probe(false, move |ui| drop(native.show(ui)), count_green);
-    // Native: 8 squares of 16×16 ≈ 2k px; justified segments fill 400×400.
+    // Native: 8 squares of 16×16 ≈ 2k px; justified segments fill 400×400
+    // minus the 7 inter-bit gaps. Area floor, not ratio (see the symbol test).
+    eprintln!("byte: justified={justified} plain={plain}");
     assert!(
-        justified > 4 * plain && plain > 1000,
-        "justified byte should cover far more pixels: justified={justified} plain={plain}"
+        justified > 80_000 && plain > 1000 && plain < 5_000,
+        "justified byte should fill both axes: justified={justified} plain={plain}"
     );
 }

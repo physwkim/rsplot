@@ -15,7 +15,7 @@ use siplot::egui;
 
 use crate::channel::{Channel, ChannelState, PvValue};
 use crate::engine::{Engine, EngineError};
-use crate::widgets::base::ChannelBase;
+use crate::widgets::base::{ChannelBase, layout_justify};
 use crate::widgets::enum_choice::{enum_current_index, enum_index_value, enum_options};
 
 /// A drop-down bound to a PV's enum strings (PyDM `PyDMEnumComboBox`).
@@ -71,15 +71,22 @@ impl SidmEnumComboBox {
                 .map(String::as_str)
                 .unwrap_or("");
             let id = egui::Id::new(("pydm_enum_combo", self.base.channel().address().raw()));
-            egui::ComboBox::from_id_salt(id)
-                .selected_text(selected_text)
-                .show_ui(ui, |ui| {
-                    for (i, opt) in options.iter().enumerate() {
-                        if ui.selectable_label(Some(i) == current, opt).clicked() {
-                            chosen = Some(i);
-                        }
+            let mut combo = egui::ComboBox::from_id_salt(id).selected_text(selected_text);
+            // egui's `ComboBox` face never widens under a justified layout — its
+            // width is `content.at_least(width-or-combo_width)` regardless (only
+            // the height tracks the justified expansion) — so a justified axis
+            // must be filled explicitly, like the fixed-size painters do via
+            // `justified_size`.
+            if layout_justify(ui).0 {
+                combo = combo.width(ui.available_width());
+            }
+            combo.show_ui(ui, |ui| {
+                for (i, opt) in options.iter().enumerate() {
+                    if ui.selectable_label(Some(i) == current, opt).clicked() {
+                        chosen = Some(i);
                     }
-                });
+                }
+            });
         });
 
         chosen
