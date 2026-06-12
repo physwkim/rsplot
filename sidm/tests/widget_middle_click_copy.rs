@@ -14,6 +14,7 @@ use std::cell::RefCell;
 use std::time::{Duration, Instant};
 
 use egui_kittest::Harness;
+use egui_kittest::kittest::Queryable;
 use sidm::Engine;
 use sidm::widgets::{DrawingShape, SidmDrawing, SidmLabel, middle_click_copy};
 use siplot::egui;
@@ -149,6 +150,65 @@ fn placeholder_channels_do_not_copy() {
         copies,
         Vec::<String>::new(),
         "a placeholder channel must not reach the clipboard"
+    );
+}
+
+#[test]
+fn address_tooltip_shows_only_while_middle_is_held() {
+    // PyDM shows the address tooltip ON the middle press (show_address_tooltip
+    // is bound to the middle-button event filter), never on plain hover; MEDM
+    // shows no hover tooltip at all.
+    let engine = Engine::new();
+    let address = "loc://copy_tip?type=float&init=3.0";
+    let label = SidmLabel::new(&engine, address).expect("connect");
+    assert!(
+        wait_for(|| label.channel().is_connected(), Duration::from_secs(2)),
+        "label channel never connected"
+    );
+    let label = RefCell::new(label);
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(200.0, 60.0))
+        .with_pixels_per_point(1.0)
+        .build_ui(move |ui| drop(label.borrow_mut().show(ui)));
+    let pos = egui::pos2(20.0, 12.0);
+    harness.step();
+    harness
+        .input_mut()
+        .events
+        .push(egui::Event::PointerMoved(pos));
+    // Hover long enough for egui's tooltip delay to elapse.
+    for _ in 0..120 {
+        harness.step();
+    }
+    assert!(
+        harness.query_by_label(address).is_none(),
+        "plain hover must not show the address tooltip"
+    );
+    harness.input_mut().events.push(egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Middle,
+        pressed: true,
+        modifiers: egui::Modifiers::NONE,
+    });
+    // The plugin records the winner at the end of the press pass; the held
+    // tooltip renders from the following pass.
+    harness.step();
+    harness.step();
+    assert!(
+        harness.query_by_label(address).is_some(),
+        "the held middle button must show the full address tooltip"
+    );
+    harness.input_mut().events.push(egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Middle,
+        pressed: false,
+        modifiers: egui::Modifiers::NONE,
+    });
+    harness.step();
+    harness.step();
+    assert!(
+        harness.query_by_label(address).is_none(),
+        "releasing the middle button must drop the tooltip"
     );
 }
 

@@ -1,5 +1,5 @@
 //! Shared channel-widget behaviour: alarm-severity styling, connection gating,
-//! and the hover tooltip.
+//! and the middle-click PV copy.
 //!
 //! Ports the cross-cutting parts of PyDM's `PyDMWidget` mixin
 //! (`pydm/widgets/base.py`) plus the alarm palette from
@@ -268,8 +268,8 @@ pub struct ChannelBase {
     /// The channel is an internal placeholder rather than a user-named PV
     /// (adl2sidm binds synthetic `loc://` addresses to MEDM widgets that carry
     /// no channel, because every sidm widget requires one). Suppresses the
-    /// PV-facing surfaces — the address hover tooltip and the middle-click PV
-    /// copy — matching MEDM, where Btn2 acts only on elements with records
+    /// PV-facing surface — the middle-click PV copy and its held address
+    /// tooltip — matching MEDM, where Btn2 acts only on elements with records
     /// (`StartDrag` returns without an update task), and PyDM, where a
     /// channel-less widget shows neither.
     pub placeholder_channel: bool,
@@ -337,20 +337,10 @@ impl ChannelBase {
         state.connected && (!writable || state.write_access)
     }
 
-    /// Hover tooltip text: the channel address and its connection state.
-    pub fn tooltip(&self, state: &ChannelState) -> String {
-        let status = if state.connected {
-            "connected"
-        } else {
-            "disconnected"
-        };
-        format!("{} ({status})", self.channel.address().raw())
-    }
-
     /// Lay out `add` inside a severity-styled border, gating the content's
-    /// enabled state on connection + write access and attaching the hover
-    /// tooltip. The returned [`egui::InnerResponse`] carries the content's value
-    /// and the frame's response.
+    /// enabled state on connection + write access and wiring the middle-click
+    /// PV copy. The returned [`egui::InnerResponse`] carries the content's
+    /// value and the frame's response.
     pub fn framed<R>(
         &self,
         ui: &mut egui::Ui,
@@ -410,13 +400,9 @@ impl ChannelBase {
         if let Some(style) = border {
             paint_border(ui.painter(), response.rect, &style);
         }
-        let response = if self.placeholder_channel {
-            response
-        } else {
-            let response = response.on_hover_text(self.tooltip(state));
+        if !self.placeholder_channel {
             middle_click_copy(ui, &response, [self.channel.address().raw()]);
-            response
-        };
+        }
         egui::InnerResponse::new(value, response)
     }
 }
@@ -598,18 +584,5 @@ mod tests {
         assert!(b.enabled(&st(true, true, AlarmSeverity::NoAlarm), true));
         assert!(!b.enabled(&st(true, false, AlarmSeverity::NoAlarm), true));
         assert!(!b.enabled(&st(false, true, AlarmSeverity::NoAlarm), true));
-    }
-
-    #[test]
-    fn tooltip_carries_address_and_connection_state() {
-        let b = base();
-        assert_eq!(
-            b.tooltip(&st(true, true, AlarmSeverity::NoAlarm)),
-            "loc://widget_base_test (connected)"
-        );
-        assert_eq!(
-            b.tooltip(&st(false, false, AlarmSeverity::NoAlarm)),
-            "loc://widget_base_test (disconnected)"
-        );
     }
 }

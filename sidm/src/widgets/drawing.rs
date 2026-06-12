@@ -269,8 +269,8 @@ impl SidmDrawing {
     }
 
     /// Mark the channel as an internal placeholder, not a user-named PV
-    /// (builder style; suppresses the address tooltip and the middle-click PV
-    /// copy — adl2sidm uses this for channel-less MEDM decorations).
+    /// (builder style; suppresses the middle-click PV copy — adl2sidm uses
+    /// this for channel-less MEDM decorations).
     pub fn with_placeholder_channel(mut self) -> Self {
         self.base.placeholder_channel = true;
         self
@@ -297,11 +297,9 @@ impl SidmDrawing {
         if ui.is_rect_visible(rect) {
             self.paint(ui.painter(), rect, fill, border);
         }
-        if self.base.placeholder_channel {
-            return response;
+        if !self.base.placeholder_channel {
+            middle_click_copy(ui, &response, [self.base.channel().address().raw()]);
         }
-        let response = response.on_hover_text(self.base.tooltip(&state));
-        middle_click_copy(ui, &response, [self.base.channel().address().raw()]);
         response
     }
 

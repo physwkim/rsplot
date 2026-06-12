@@ -10,8 +10,8 @@
 //! frame instead wraps a content closure each frame, gating it with
 //! [`egui::Ui::add_enabled_ui`] through [`ChannelBase::framed_with_enabled`]. The
 //! one piece of real logic — the enable decision — is the pure
-//! [`SidmFrame::frame_enabled`], unit-tested; the border/inset/tooltip rendering
-//! is the same primitive the other widgets use (verified by the base widget's
+//! [`SidmFrame::frame_enabled`], unit-tested; the border/inset rendering is the
+//! same primitive the other widgets use (verified by the base widget's
 //! readback test).
 
 use siplot::egui;
@@ -57,8 +57,8 @@ impl SidmFrame {
     }
 
     /// Mark the channel as an internal placeholder, not a user-named PV
-    /// (builder style; suppresses the address tooltip and the middle-click PV
-    /// copy — adl2sidm uses this for MEDM composites that carry no channel).
+    /// (builder style; suppresses the middle-click PV copy — adl2sidm uses
+    /// this for MEDM composites that carry no channel).
     pub fn with_placeholder_channel(mut self) -> Self {
         self.base.placeholder_channel = true;
         self
