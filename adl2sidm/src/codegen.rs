@@ -127,6 +127,10 @@ struct Builder {
     /// Whether any emitted code references `Color32` / `sidm::widgets`.
     needs_color: bool,
     needs_widgets: bool,
+    /// Whether a label-less related display / shell command needs its MEDM icon
+    /// helper (`related_display_icon` / `shell_command_icon`) appended.
+    needs_rd_icon: bool,
+    needs_sc_icon: bool,
     /// Whether any emitted code references `sidm::Channel` (a dynamic visibility
     /// gate field).
     needs_channel: bool,
@@ -1480,18 +1484,35 @@ fn emit_shell_command(b: &mut Builder, widget: &MedmWidget, z: ZLayer) {
     }
 
     let id = b.index();
+    // MEDM captions the button from the widget's own `label` only; a label-less
+    // shell command renders just MEDM's exclamation-mark icon
+    // (medmShellCommand.c `renderShellCommandPixmap`).
+    let caption = medm_button_caption(widget);
+    if caption.is_none() {
+        b.needs_sc_icon = true;
+        b.needs_color = true;
+    }
+    let (icon_fg, _) = icon_color_exprs(widget);
     let body = if let [(_, command)] = entries.as_slice() {
-        // Exactly one command: the button caption is the widget/command label.
-        let label = deferred_button_label(widget, "commands", "Shell Command");
-        format!(
-            "if ui.button({}).clicked() {{\n    {}\n}}",
-            rust_str(&label),
-            spawn_command_stmt(command),
-        )
+        // Exactly one command: a plain button.
+        match &caption {
+            Some(label) => format!(
+                "if ui.button({}).clicked() {{\n    {}\n}}",
+                rust_str(label),
+                spawn_command_stmt(command),
+            ),
+            None => format!(
+                "let __r = ui.button(\"\");\nshell_command_icon(ui, __r.rect, {icon_fg});\nif __r.clicked() {{\n    {}\n}}",
+                spawn_command_stmt(command),
+            ),
+        }
     } else {
-        // Several commands: a menu whose items each run one command, then close.
-        let title = menu_title(widget, "Shell Command");
-        let mut body = format!("ui.menu_button({}, |ui| {{", rust_str(&title));
+        // Several commands: a menu whose items each run one command, then close;
+        // the per-command labels caption only these menu items, never the button.
+        let mut body = match &caption {
+            Some(title) => format!("ui.menu_button({}, |ui| {{", rust_str(title)),
+            None => "let __m = ui.menu_button(\"\", |ui| {".to_string(),
+        };
         for (label, command) in &entries {
             let _ = write!(
                 body,
@@ -1501,6 +1522,12 @@ fn emit_shell_command(b: &mut Builder, widget: &MedmWidget, z: ZLayer) {
             );
         }
         body.push_str("\n});");
+        if caption.is_none() {
+            let _ = write!(
+                body,
+                "\nshell_command_icon(ui, __m.response.rect, {icon_fg});"
+            );
+        }
         body
     };
     // MEDM draws the button/menu in the widget's `clr`/`bclr` with a height-sized
@@ -1573,17 +1600,40 @@ fn spawn_command_stmt(command: &str) -> String {
     )
 }
 
-/// The caption on a multi-target *menu* button (shell command / related display):
-/// the widget's MEDM `label` (sans the leading `-` MEDM uses to hide the icon),
-/// else `generic`.
-fn menu_title(widget: &MedmWidget, generic: &str) -> String {
-    widget
+/// The caption MEDM puts on a related-display / shell-command button, from the
+/// widget's own `label` (medmRelatedDisplay.c / medmShellCommand.c apply
+/// identical rules): an empty label is `None` — MEDM renders only the widget's
+/// icon; a leading `-` is stripped — MEDM then suppresses the icon; any other
+/// label is used as-is (MEDM draws icon + label; the icon is not reproduced
+/// next to a labelled caption here). The per-entry `display[i]`/`command[i]`
+/// labels caption menu *items* only, never the button itself.
+fn medm_button_caption(widget: &MedmWidget) -> Option<String> {
+    let label = widget
         .assignments
         .get("label")
-        .map(|l| l.trim_start_matches('-'))
-        .filter(|l| !l.is_empty())
-        .map(str::to_string)
-        .unwrap_or_else(|| generic.to_string())
+        .map(String::as_str)
+        .unwrap_or("");
+    if label.is_empty() {
+        return None;
+    }
+    Some(label.strip_prefix('-').unwrap_or(label).to_string())
+}
+
+/// The `(fg, bg)` colour expressions for a MEDM button icon: the widget's
+/// `clr`/`bclr` when set, else the scoped egui text colour / button face — the
+/// same colours MEDM passes its `render*Pixmap` helpers.
+fn icon_color_exprs(widget: &MedmWidget) -> (String, String) {
+    let colors = WidgetColors::from_widget(widget);
+    (
+        colors
+            .fg
+            .map(color_expr)
+            .unwrap_or_else(|| "ui.visuals().text_color()".to_string()),
+        colors
+            .bg
+            .map(color_expr)
+            .unwrap_or_else(|| "ui.visuals().widgets.inactive.weak_bg_fill".to_string()),
+    )
 }
 
 /// `embedded display` — inline the referenced screen at code-gen time. MEDM's
@@ -1749,32 +1799,56 @@ fn emit_related_display(b: &mut Builder, widget: &MedmWidget, z: ZLayer) {
     }
 
     let id = b.index();
+    // MEDM captions the button from the widget's own `label` only; a label-less
+    // related display renders just MEDM's overlapping-frames icon
+    // (medmRelatedDisplay.c `renderRelatedDisplayPixmap`).
+    let caption = medm_button_caption(widget);
+    if caption.is_none() {
+        b.needs_rd_icon = true;
+        b.needs_color = true;
+    }
+    let (icon_fg, icon_bg) = icon_color_exprs(widget);
     let body = if let [(_, report)] = entries.as_slice() {
-        // Exactly one target: a plain button captioned by the widget/target label.
-        // A hover tooltip names the target so it is discoverable in the GUI (the
-        // click only logs to stderr); adl2pydm likewise gives the button a tooltip.
-        let label = deferred_button_label(widget, "displays", "Related Display");
-        format!(
-            "if ui.button({}).on_hover_text({}).clicked() {{\n    {}\n}}",
-            rust_str(&label),
-            rust_str(report),
-            eprintln_literal(report),
-        )
+        // Exactly one target: a plain button. A hover tooltip names the target so
+        // it is discoverable in the GUI (the click only logs to stderr);
+        // adl2pydm likewise gives the button a tooltip.
+        match &caption {
+            Some(label) => format!(
+                "if ui.button({}).on_hover_text({}).clicked() {{\n    {}\n}}",
+                rust_str(label),
+                rust_str(report),
+                eprintln_literal(report),
+            ),
+            None => format!(
+                "let __r = ui.button(\"\").on_hover_text({});\nrelated_display_icon(ui, __r.rect, {icon_fg}, {icon_bg});\nif __r.clicked() {{\n    {}\n}}",
+                rust_str(report),
+                eprintln_literal(report),
+            ),
+        }
     } else {
         // Several targets: a menu whose items each report one target, then close.
-        // Each item carries a hover tooltip naming its target (GUI-discoverable).
-        let title = menu_title(widget, "Related Display");
-        let mut body = format!("ui.menu_button({}, |ui| {{", rust_str(&title));
-        for (caption, report) in &entries {
+        // Each item carries a hover tooltip naming its target (GUI-discoverable);
+        // the per-target labels caption only these menu items, never the button.
+        let mut body = match &caption {
+            Some(title) => format!("ui.menu_button({}, |ui| {{", rust_str(title)),
+            None => "let __m = ui.menu_button(\"\", |ui| {".to_string(),
+        };
+        for (item, report) in &entries {
             let _ = write!(
                 body,
                 "\n    if ui.button({}).on_hover_text({}).clicked() {{\n        {}\n        ui.close();\n    }}",
-                rust_str(caption),
+                rust_str(item),
                 rust_str(report),
                 eprintln_literal(report),
             );
         }
         body.push_str("\n});");
+        if caption.is_none() {
+            let _ = write!(
+                body,
+                "\nrelated_display_icon(ui, __m.response.rect, {icon_fg}, {icon_bg});"
+            );
+        }
         body
     };
     // MEDM draws the button/menu in the widget's `clr`/`bclr` with a height-sized
@@ -1839,31 +1913,6 @@ fn related_display_entries(b: &mut Builder, widget: &MedmWidget) -> Vec<(String,
 fn eprintln_literal(msg: &str) -> String {
     let escaped = msg.replace('{', "{{").replace('}', "}}");
     format!("eprintln!({});", rust_str(&escaped))
-}
-
-/// The caption for a deferred-control placeholder button: the widget's MEDM
-/// `label` (sans the leading `-` MEDM uses to hide the menu icon), else the sole
-/// target's `label`/`name` when there is exactly one, else a generic name.
-fn deferred_button_label(widget: &MedmWidget, records_key: &str, generic: &str) -> String {
-    if let Some(trimmed) = widget
-        .assignments
-        .get("label")
-        .map(|l| l.trim_start_matches('-'))
-        .filter(|l| !l.is_empty())
-    {
-        return trimmed.to_string();
-    }
-    if let Some(records) = widget.records.get(records_key)
-        && records.len() == 1
-    {
-        if let Some(l) = records[0].get("label").filter(|s| !s.is_empty()) {
-            return l.clone();
-        }
-        if let Some(n) = records[0].get("name").filter(|s| !s.is_empty()) {
-            return n.clone();
-        }
-    }
-    generic.to_string()
 }
 
 /// Resolve the geometry and channel address common to every channel-bound
@@ -2472,8 +2521,66 @@ fn assemble(b: &Builder, screen: &MedmScreen) -> String {
     let _ = writeln!(s, "}}\n");
 
     emit_place_helper(&mut s, b.use_layout);
+    if b.needs_rd_icon {
+        s.push_str(RELATED_DISPLAY_ICON_HELPER);
+    }
+    if b.needs_sc_icon {
+        s.push_str(SHELL_COMMAND_ICON_HELPER);
+    }
     s
 }
+
+/// The icon MEDM renders on a label-less related-display button: a front
+/// display frame overlapping the corner of a back one. Geometry mirrors
+/// `renderRelatedDisplayPixmap` (medmRelatedDisplay.c) — the `relatedDisplay25`
+/// bitmap in 25ths of the icon square, with the front rectangle's interior
+/// erased to the background before stroking so it hides the back frame.
+const RELATED_DISPLAY_ICON_HELPER: &str = r#"
+/// Paint MEDM's related-display icon (a front display frame overlapping a back
+/// one) centred in `rect` -- what MEDM shows when a related display has no
+/// label (medmRelatedDisplay.c `renderRelatedDisplayPixmap`).
+fn related_display_icon(ui: &egui::Ui, rect: egui::Rect, fg: egui::Color32, bg: egui::Color32) {
+    let side = (rect.height().min(rect.width()) - 8.0).max(4.0);
+    let icon = egui::Rect::from_center_size(rect.center(), egui::Vec2::splat(side));
+    let p = |x: f32, y: f32| icon.min + egui::vec2(x, y) * (side / 25.0);
+    let stroke = egui::Stroke::new(1.0, fg);
+    let painter = ui.painter();
+    painter.line_segment([p(16.0, 9.0), p(22.0, 9.0)], stroke);
+    painter.line_segment([p(22.0, 9.0), p(22.0, 22.0)], stroke);
+    painter.line_segment([p(22.0, 22.0), p(10.0, 22.0)], stroke);
+    painter.line_segment([p(10.0, 22.0), p(10.0, 18.0)], stroke);
+    let front = egui::Rect::from_min_size(p(4.0, 4.0), egui::vec2(13.0, 14.0) * (side / 25.0));
+    painter.rect_filled(front, egui::CornerRadius::ZERO, bg);
+    painter.rect_stroke(front, egui::CornerRadius::ZERO, stroke, egui::StrokeKind::Inside);
+}
+"#;
+
+/// The icon MEDM renders on a label-less shell-command button: an exclamation
+/// mark (bar + dot). Geometry mirrors `renderShellCommandPixmap`
+/// (medmShellCommand.c) — the `shellCommand25` bitmap in 25ths of the icon
+/// square.
+const SHELL_COMMAND_ICON_HELPER: &str = r#"
+/// Paint MEDM's shell-command icon (an exclamation mark) centred in `rect` --
+/// what MEDM shows when a shell command has no label (medmShellCommand.c
+/// `renderShellCommandPixmap`).
+fn shell_command_icon(ui: &egui::Ui, rect: egui::Rect, fg: egui::Color32) {
+    let side = (rect.height().min(rect.width()) - 8.0).max(4.0);
+    let icon = egui::Rect::from_center_size(rect.center(), egui::Vec2::splat(side));
+    let p = |x: f32, y: f32| icon.min + egui::vec2(x, y) * (side / 25.0);
+    let painter = ui.painter();
+    let unit = side / 25.0;
+    painter.rect_filled(
+        egui::Rect::from_min_size(p(12.0, 4.0), egui::vec2(3.0, 14.0) * unit),
+        egui::CornerRadius::ZERO,
+        fg,
+    );
+    painter.rect_filled(
+        egui::Rect::from_min_size(p(12.0, 20.0), egui::vec2(3.0, 3.0) * unit),
+        egui::CornerRadius::ZERO,
+        fg,
+    );
+}
+"#;
 
 /// Emit the `new(cc)` constructor.
 fn emit_new(s: &mut String, b: &Builder) {
@@ -5414,13 +5521,25 @@ composite {
     #[test]
     fn shell_command_emits_a_live_menu_spawning_each_command() {
         let g = deferred();
-        // Two commands and no widget label -> a `menu_button` with the generic
-        // title and one item per command. Each item spawns `sh -c "<name>"` and
-        // closes the menu — a live control, not a disabled placeholder.
+        // Two commands and no widget label -> MEDM renders a caption-less button
+        // carrying the exclamation-mark icon (medmShellCommand.c, empty label
+        // case), so the menu button is empty and the icon paints over its rect.
+        // One item per command; each spawns `sh -c "<name>"` and closes the menu
+        // — a live control, not a disabled placeholder.
+        assert!(
+            g.source.contains("let __m = ui.menu_button(\"\", |ui| {"),
+            "label-less shell command not emitted as an icon menu:\n{}",
+            g.source
+        );
         assert!(
             g.source
-                .contains("ui.menu_button(\"Shell Command\", |ui| {"),
-            "shell command not emitted as a menu:\n{}",
+                .contains("shell_command_icon(ui, __m.response.rect,"),
+            "shell-command icon not painted over the menu button:\n{}",
+            g.source
+        );
+        assert!(
+            g.source.contains("fn shell_command_icon("),
+            "icon helper not emitted:\n{}",
             g.source
         );
         assert!(
@@ -5478,7 +5597,8 @@ composite {
 "#;
         let g = generate(&parse(adl), &Options::default());
         // One command -> a plain button captioned by the widget label, spawning
-        // the joined `"<name> <args>"` string; no menu.
+        // the joined `"<name> <args>"` string; no menu. A labelled widget gets
+        // no MEDM icon, so the helper must not be emitted either.
         assert!(
             g.source.contains("if ui.button(\"Run\").clicked() {"),
             "{}",
@@ -5492,19 +5612,85 @@ composite {
             g.source
         );
         assert!(!g.source.contains("menu_button"), "{}", g.source);
+        assert!(!g.source.contains("shell_command_icon"), "{}", g.source);
+    }
+
+    #[test]
+    fn dash_prefixed_label_strips_the_dash_and_suppresses_the_icon() {
+        // MEDM label rule (medmShellCommand.c / medmRelatedDisplay.c): a label
+        // starting with '-' means "caption without icon" — the text after the
+        // '-' is the caption. Same rule for both widget kinds.
+        let adl = r#"
+"color map" {
+	colors {
+		ffffff,
+	}
+}
+"shell command" {
+	object {
+		x=0
+		y=0
+		width=80
+		height=20
+	}
+	label="-Hide"
+	command[0] {
+		name="make"
+	}
+}
+"related display" {
+	object {
+		x=0
+		y=30
+		width=80
+		height=20
+	}
+	label="-Go"
+	display[0] {
+		label="Detail"
+		name="detail.adl"
+	}
+}
+"#;
+        let g = generate(&parse(adl), &Options::default());
+        assert!(
+            g.source.contains("if ui.button(\"Hide\").clicked() {"),
+            "dash-prefixed shell-command label not stripped:\n{}",
+            g.source
+        );
+        assert!(
+            g.source
+                .contains("if ui.button(\"Go\").on_hover_text(\"related display: open detail.adl\").clicked() {"),
+            "dash-prefixed related-display label not stripped:\n{}",
+            g.source
+        );
+        assert!(!g.source.contains("shell_command_icon"), "{}", g.source);
+        assert!(!g.source.contains("related_display_icon"), "{}", g.source);
     }
 
     #[test]
     fn related_display_emits_a_live_navigation_reporting_button() {
         let g = deferred();
-        // The sole target -> a live, enabled button captioned by the display's
-        // label that logs the target on click (SiDM has no runtime loader to
-        // actually swap screens), at the control (Foreground) layer.
+        // No widget label -> MEDM renders a caption-less button carrying the
+        // overlapping-frames icon (medmRelatedDisplay.c, empty label case): the
+        // button is empty, the icon paints over its rect, the target tooltip is
+        // kept, and a click logs the target (SiDM has no runtime loader to
+        // actually swap screens) — all at the control (Foreground) layer.
         assert!(
             g.source.contains(
-                "if ui.button(\"Open Detail\").on_hover_text(\"related display: open detail.adl\").clicked() {"
+                "let __r = ui.button(\"\").on_hover_text(\"related display: open detail.adl\");"
             ),
-            "related-display button not labelled/tooltipped with its target:\n{}",
+            "label-less related display not emitted as an icon button:\n{}",
+            g.source
+        );
+        assert!(
+            g.source.contains("related_display_icon(ui, __r.rect,"),
+            "related-display icon not painted over the button:\n{}",
+            g.source
+        );
+        assert!(
+            g.source.contains("fn related_display_icon("),
+            "icon helper not emitted:\n{}",
             g.source
         );
         assert!(
@@ -5517,7 +5703,7 @@ composite {
         assert!(!g.source.contains("add_enabled(false"), "{}", g.source);
         let rel = g
             .source
-            .find("Open Detail")
+            .find("related_display_icon(ui,")
             .expect("related display button");
         assert!(
             g.source[..rel].rfind("egui::Order::Foreground").is_some(),
@@ -5608,12 +5794,14 @@ composite {
 "#;
         let g = generate(&parse(adl), &Options::default());
         // Two targets, a widget label -> a menu titled by the label, one item per
-        // target, each logging the target file (and macros where present).
+        // target, each logging the target file (and macros where present). A
+        // labelled widget gets no MEDM icon.
         assert!(
             g.source.contains("ui.menu_button(\"Screens\", |ui| {"),
             "{}",
             g.source
         );
+        assert!(!g.source.contains("related_display_icon"), "{}", g.source);
         assert!(
             g.source.contains(
                 "if ui.button(\"A\").on_hover_text(\"related display: open a.adl\").clicked() {"

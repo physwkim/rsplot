@@ -166,7 +166,7 @@ impl Screen {
             {
                 ui.style_mut().override_font_id = Some(egui::FontId::proportional(13.0 * sy));
                 ui.with_layout(egui::Layout::centered_and_justified(egui::Direction::LeftToRight), |ui| {
-                    ui.menu_button("Shell Command", |ui| {
+                    let __m = ui.menu_button("", |ui| {
                         if ui.button("Date").clicked() {
                             let _ = std::process::Command::new("sh").arg("-c").arg("date").spawn();
                             ui.close();
@@ -176,6 +176,7 @@ impl Screen {
                             ui.close();
                         }
                     });
+                    shell_command_icon(ui, __m.response.rect, ui.visuals().text_color());
                 });
             }
         });
@@ -183,7 +184,9 @@ impl Screen {
             {
                 ui.style_mut().override_font_id = Some(egui::FontId::proportional(13.0 * sy));
                 ui.with_layout(egui::Layout::centered_and_justified(egui::Direction::LeftToRight), |ui| {
-                    if ui.button("Detail").on_hover_text("related display: open detail.adl").clicked() {
+                    let __r = ui.button("").on_hover_text("related display: open detail.adl");
+                    related_display_icon(ui, __r.rect, ui.visuals().text_color(), ui.visuals().widgets.inactive.weak_bg_fill);
+                    if __r.clicked() {
                         eprintln!("related display: open detail.adl");
                     }
                 });
@@ -241,4 +244,43 @@ fn place(
             ui.set_max_size(rect.size());
             add(ui);
         });
+}
+
+/// Paint MEDM's related-display icon (a front display frame overlapping a back
+/// one) centred in `rect` -- what MEDM shows when a related display has no
+/// label (medmRelatedDisplay.c `renderRelatedDisplayPixmap`).
+fn related_display_icon(ui: &egui::Ui, rect: egui::Rect, fg: egui::Color32, bg: egui::Color32) {
+    let side = (rect.height().min(rect.width()) - 8.0).max(4.0);
+    let icon = egui::Rect::from_center_size(rect.center(), egui::Vec2::splat(side));
+    let p = |x: f32, y: f32| icon.min + egui::vec2(x, y) * (side / 25.0);
+    let stroke = egui::Stroke::new(1.0, fg);
+    let painter = ui.painter();
+    painter.line_segment([p(16.0, 9.0), p(22.0, 9.0)], stroke);
+    painter.line_segment([p(22.0, 9.0), p(22.0, 22.0)], stroke);
+    painter.line_segment([p(22.0, 22.0), p(10.0, 22.0)], stroke);
+    painter.line_segment([p(10.0, 22.0), p(10.0, 18.0)], stroke);
+    let front = egui::Rect::from_min_size(p(4.0, 4.0), egui::vec2(13.0, 14.0) * (side / 25.0));
+    painter.rect_filled(front, egui::CornerRadius::ZERO, bg);
+    painter.rect_stroke(front, egui::CornerRadius::ZERO, stroke, egui::StrokeKind::Inside);
+}
+
+/// Paint MEDM's shell-command icon (an exclamation mark) centred in `rect` --
+/// what MEDM shows when a shell command has no label (medmShellCommand.c
+/// `renderShellCommandPixmap`).
+fn shell_command_icon(ui: &egui::Ui, rect: egui::Rect, fg: egui::Color32) {
+    let side = (rect.height().min(rect.width()) - 8.0).max(4.0);
+    let icon = egui::Rect::from_center_size(rect.center(), egui::Vec2::splat(side));
+    let p = |x: f32, y: f32| icon.min + egui::vec2(x, y) * (side / 25.0);
+    let painter = ui.painter();
+    let unit = side / 25.0;
+    painter.rect_filled(
+        egui::Rect::from_min_size(p(12.0, 4.0), egui::vec2(3.0, 14.0) * unit),
+        egui::CornerRadius::ZERO,
+        fg,
+    );
+    painter.rect_filled(
+        egui::Rect::from_min_size(p(12.0, 20.0), egui::vec2(3.0, 3.0) * unit),
+        egui::CornerRadius::ZERO,
+        fg,
+    );
 }
