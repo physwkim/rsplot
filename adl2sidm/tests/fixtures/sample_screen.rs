@@ -75,7 +75,7 @@ impl Screen {
         let w14 = SidmImage::new("logo.gif")
             .with_size(egui::Vec2::new(80.0, 24.0));
         let mut w15 = SidmTimePlot::new(rs, 0).with_time_span(60.0);
-        w15.add_channel(&engine, "ca://DMM1:readback", Color32::from_rgb(0, 0, 255), "$(P)readback").expect("adl2sidm: add strip-chart curve $(P)readback");
+        w15.add_channel(&engine, "ca://DMM1:readback", Color32::from_rgb(0, 0, 255), "DMM1:readback").expect("adl2sidm: add strip-chart curve DMM1:readback");
         let mut w16 = SidmWaveformPlot::new(rs, 1);
         w16.add_xy_channel(&engine, "ca://DMM1:ywave", Some("ca://DMM1:xwave"), Color32::from_rgb(255, 0, 0), "curve 1").expect("adl2sidm: add waveform curve 1");
         let w17 = SidmFrame::new(&engine, "loc://adl2sidm_frame_2")
@@ -97,7 +97,7 @@ impl Screen {
         place(ui, __origin, egui::Order::Background, egui::Id::new(0u64), 10.0, 10.0, 200.0, 20.0, |ui| {
             {
                 ui.style_mut().override_font_id = Some(egui::FontId::proportional(12.0));
-                ui.label(egui::RichText::new("Sample Panel").color(Color32::from_rgb(0, 0, 0)));
+                ui.label(egui::RichText::new("Sample Panel DMM1:").color(Color32::from_rgb(0, 0, 0)));
             }
         });
         place(ui, __origin, egui::Order::Background, egui::Id::new(1u64), 10.0, 475.0, 180.0, 18.0, |ui| {

@@ -32,7 +32,7 @@ text {
 	"basic attribute" {
 		clr=1
 	}
-	textix="Sample Panel"
+	textix="Sample Panel $(P)"
 }
 text {
 	object {

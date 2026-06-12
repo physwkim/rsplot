@@ -34,7 +34,9 @@ const MAX_EMBED_DEPTH: usize = 8;
 pub struct Options {
     /// Channel protocol prefixed onto bare MEDM PV names, e.g. `"ca://"`.
     pub protocol: String,
-    /// `$(name)` / `${name}` macro substitutions applied to channel names.
+    /// `$(name)` / `${name}` macro substitutions, baked into every MEDM string
+    /// (channels and user-visible text: labels, captions, shell commands,
+    /// related-display targets) by [`expand_macros`], mirroring MEDM's lexer.
     pub macros: Vec<(String, String)>,
     /// Translate `cartesian plot` as a scatter plot rather than a waveform plot
     /// (mirrors adl2pydm's `--use-scatterplot`).
@@ -167,6 +169,17 @@ impl Builder {
 
 /// Generate the SiDM Rust source for a parsed MEDM screen.
 pub fn generate(screen: &MedmScreen, options: &Options) -> Generated {
+    // Bake `$(macro)` values into the IR once, before any emitter reads a string:
+    // MEDM expands macros for every token at the lexer, so this single pass makes
+    // the IR the emitters consume macro-free by construction (channels AND
+    // user-visible text). A no-op when no `--macro` was given.
+    let mut screen = screen.clone();
+    expand_macros(&mut screen.widgets, &options.macros);
+    for v in screen.assignments.values_mut() {
+        *v = substitute_macros(v, &options.macros);
+    }
+    let screen = &screen;
+
     let mut b = Builder {
         use_layout: options.use_layout,
         ..Default::default()
@@ -221,7 +234,7 @@ fn emit_widget(b: &mut Builder, widget: &MedmWidget, options: &Options) {
         "polyline" => emit_polyshape(b, widget, options, z, false),
         "image" => emit_image(b, widget, z),
         "embedded display" => emit_embedded_display(b, widget, options, z),
-        "related display" => emit_related_display(b, widget, options, z),
+        "related display" => emit_related_display(b, widget, z),
         "shell command" => emit_shell_command(b, widget, z),
         // Unreachable: every `ADL_WIDGET_SYMBOLS` entry has an arm above. Kept as
         // a defensive backstop so a future symbol can't be silently dropped.
@@ -1607,7 +1620,7 @@ fn emit_embedded_display(b: &mut Builder, widget: &MedmWidget, options: &Options
         }
     };
 
-    let target = parse(&text);
+    let mut target = parse(&text);
     // Resolve the target's channels in the embedded directory (so a nested
     // embedded display resolves relative to *its* file), with the embedded macros
     // taking precedence over the inherited ones.
@@ -1616,6 +1629,10 @@ fn emit_embedded_display(b: &mut Builder, widget: &MedmWidget, options: &Options
         source_dir: canonical.parent().map(PathBuf::from),
         ..options.clone()
     };
+    // Same parse→emit boundary as `generate`: bake this display's macros into its
+    // subtree before inlining (MEDM expands macros per display, embedded values
+    // winning over inherited via `merged_macros`).
+    expand_macros(&mut target.widgets, &child_options.macros);
     let addr = b.synthetic_addr("embed");
 
     b.embed_stack.push(canonical);
@@ -1695,12 +1712,12 @@ fn embed_placeholder(b: &mut Builder, widget: &MedmWidget, z: ZLayer, file: &str
 /// placeholder. One target becomes a plain button; several become an
 /// `egui::menu_button` listing each. Channel-less and Engine-less, so it is
 /// emitted inline at the Foreground z-layer (never occluded).
-fn emit_related_display(b: &mut Builder, widget: &MedmWidget, options: &Options, z: ZLayer) {
+fn emit_related_display(b: &mut Builder, widget: &MedmWidget, z: ZLayer) {
     let Some(geom) = widget.geometry else {
         skip_no_geometry(b, widget);
         return;
     };
-    let entries = related_display_entries(b, widget, options);
+    let entries = related_display_entries(b, widget);
     if entries.is_empty() {
         emit_marker_placeholder(
             b,
@@ -1758,15 +1775,11 @@ fn emit_related_display(b: &mut Builder, widget: &MedmWidget, options: &Options,
 /// The `(caption, report)` pairs for a related-display widget: each `display[N]`'s
 /// button caption (its `label`, else its target `name`) and the message logged on
 /// click — the target file plus any macro `args`. The target `name` and `args`
-/// have the parent `-m` macros substituted, consistent with how channel addresses
-/// resolve macros at convert time (sidm has no runtime macro engine), so the
-/// logged target shows resolved values rather than raw `$(P)` placeholders. A
-/// target with no `name` is dropped with a warning (nothing to open).
-fn related_display_entries(
-    b: &mut Builder,
-    widget: &MedmWidget,
-    options: &Options,
-) -> Vec<(String, String)> {
+/// already had their `$(P)` macros expanded by the IR pass ([`expand_macros`]),
+/// like channel addresses, so the logged target shows resolved values rather than
+/// raw placeholders. A target with no `name` is dropped with a warning (nothing
+/// to open).
+fn related_display_entries(b: &mut Builder, widget: &MedmWidget) -> Vec<(String, String)> {
     let displays = widget
         .records
         .get("displays")
@@ -1774,18 +1787,14 @@ fn related_display_entries(
         .unwrap_or(&[]);
     let mut entries = Vec::new();
     for spec in displays {
-        let Some(raw_name) = spec.get("name").filter(|s| !s.is_empty()) else {
+        let Some(name) = spec.get("name").filter(|s| !s.is_empty()).cloned() else {
             b.warnings.push(format!(
                 "line {}: related display entry has no name; skipped",
                 widget.line
             ));
             continue;
         };
-        let name = substitute_macros(raw_name, &options.macros);
-        let args = substitute_macros(
-            spec.get("args").map(String::as_str).unwrap_or(""),
-            &options.macros,
-        );
+        let args = spec.get("args").map(String::as_str).unwrap_or("");
         let report = if args.is_empty() {
             format!("related display: open {name}")
         } else {
@@ -2284,17 +2293,16 @@ fn dynamic_channel(b: &mut Builder, widget: &MedmWidget, options: &Options, kind
     b.synthetic_addr(kind)
 }
 
-/// Substitute macros and prefix the protocol onto a bare MEDM channel name.
+/// Prefix the protocol onto a MEDM channel name. The channel's `$(macro)`
+/// references are already expanded by [`expand_macros`] at the parse→emit
+/// boundary, so this only joins the protocol.
 fn apply_protocol(chan: &str, options: &Options) -> String {
-    format!(
-        "{}{}",
-        options.protocol,
-        substitute_macros(chan, &options.macros)
-    )
+    format!("{}{}", options.protocol, chan)
 }
 
-/// Substitute `$(name)` and `${name}` macros; unmatched references are left
-/// in place (the user supplies them via `--macro`).
+/// Substitute `$(name)` and `${name}` macros; unmatched references are left in
+/// place (the user supplies them via `--macro`), exactly as MEDM's lexer leaves
+/// an unknown `$(macro)` literal (`medm/medmCommon.c` `getToken`).
 fn substitute_macros(input: &str, macros: &[(String, String)]) -> String {
     let mut out = input.to_string();
     for (name, value) in macros {
@@ -2302,6 +2310,41 @@ fn substitute_macros(input: &str, macros: &[(String, String)]) -> String {
         out = out.replace(&format!("${{{name}}}"), value);
     }
     out
+}
+
+/// Expand every `$(macro)` in a parsed widget subtree *in place* — channels and
+/// user-visible strings (labels, captions, shell commands, related-display
+/// targets) alike. MEDM's lexer substitutes macros for *every* token it reads
+/// (`medm/medmCommon.c` `getToken`, in both the bare-word and quoted-string
+/// states), so the faithful rule is uniform: one pass over the IR, run once at
+/// each parse→emit boundary ([`generate`] and embedded-display inlining). SiDM
+/// has no runtime macro engine, so values are baked in at convert time; after
+/// this pass the IR is macro-free, so no emitter can forget to substitute.
+fn expand_macros(widgets: &mut [MedmWidget], macros: &[(String, String)]) {
+    if macros.is_empty() {
+        return;
+    }
+    for w in widgets {
+        if let Some(title) = &mut w.title {
+            *title = substitute_macros(title, macros);
+        }
+        for v in w.assignments.values_mut() {
+            *v = substitute_macros(v, macros);
+        }
+        for block in w.attributes.values_mut() {
+            for v in block.values_mut() {
+                *v = substitute_macros(v, macros);
+            }
+        }
+        for recs in w.records.values_mut() {
+            for rec in recs.iter_mut() {
+                for v in rec.values_mut() {
+                    *v = substitute_macros(v, macros);
+                }
+            }
+        }
+        expand_macros(&mut w.children, macros);
+    }
 }
 
 /// A Rust string literal for `s`, with escaping (`{:?}` produces exactly that).
@@ -2733,6 +2776,82 @@ text {
         );
         // precDefault -> with_precision.
         assert!(g.source.contains(".with_precision(2)"));
+    }
+
+    #[test]
+    fn macros_expand_in_user_visible_strings_not_just_channels() {
+        // MEDM's lexer substitutes macros for *every* token it reads
+        // (`medm/medmCommon.c` getToken), so a `$(P)` in a static-text label or a
+        // button caption is baked in just like a channel address — not only the
+        // channel path. Regression for the simdetector `$(P)$(R)` labels.
+        let adl = r#"
+"color map" {
+	colors {
+		ffffff,
+		000000,
+	}
+}
+display {
+	object {
+		x=0
+		y=0
+		width=200
+		height=120
+	}
+	clr=1
+	bclr=0
+}
+text {
+	object {
+		x=0
+		y=0
+		width=180
+		height=20
+	}
+	"basic attribute" {
+		clr=1
+	}
+	textix="Hello $(P)"
+}
+"message button" {
+	object {
+		x=0
+		y=30
+		width=80
+		height=24
+	}
+	control {
+		chan="$(P)go"
+	}
+	press_msg="1"
+	label="$(P) Start"
+}
+"#;
+        let options = Options {
+            macros: vec![("P".to_string(), "DEV:".to_string())],
+            ..Options::default()
+        };
+        let g = generate(&parse(adl), &options);
+        // Static-text label: macro baked into the visible string.
+        assert!(
+            g.source.contains("egui::RichText::new(\"Hello DEV:\")"),
+            "static-text label macro not expanded:\n{}",
+            g.source
+        );
+        // Channel: substituted + protocol-prefixed (unchanged behaviour).
+        assert!(g.source.contains("ca://DEV:go"), "{}", g.source);
+        // Message-button caption (a user-visible string, not a channel).
+        assert!(
+            g.source.contains("\"DEV: Start\""),
+            "message-button label macro not expanded:\n{}",
+            g.source
+        );
+        // The IR is macro-free after the pass — no raw `$(P)` leaks anywhere.
+        assert!(
+            !g.source.contains("$(P)"),
+            "raw macro leaked:\n{}",
+            g.source
+        );
     }
 
     #[test]
