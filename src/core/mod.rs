@@ -5,6 +5,7 @@ pub mod background;
 pub mod calibration;
 pub mod color;
 pub mod colormap;
+pub mod colormap_io;
 pub mod complex;
 pub mod decimate;
 pub mod dtime_ticks;

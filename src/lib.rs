@@ -28,6 +28,9 @@ pub use crate::core::colormap::{
     AutoscaleMode, Colormap, ColormapName, DEFAULT_PERCENTILES, Normalization, register_colormap,
     registered_colormap_cursor_color, registered_colormaps,
 };
+pub use crate::core::colormap_io::{
+    ColormapIoError, decode_colormap, encode_colormap, load_colormap, save_colormap,
+};
 pub use crate::core::decimate::min_max_decimate;
 pub use crate::core::dtime_ticks::{
     DateTime, DtUnit, TimeZone, best_unit, calc_ticks, calc_ticks_adaptive, calc_ticks_adaptive_tz,
