@@ -118,6 +118,14 @@ impl std::ops::AddAssign for Vec3 {
     }
 }
 
+impl std::ops::SubAssign for Vec3 {
+    fn sub_assign(&mut self, o: Vec3) {
+        self.x -= o.x;
+        self.y -= o.y;
+        self.z -= o.z;
+    }
+}
+
 /// A row-major 4×4 `f32` matrix (see module docs for conventions).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Mat4 {
@@ -189,6 +197,62 @@ impl Mat4 {
             corrected.rows[2][c] = 0.5 * self.rows[2][c] + 0.5 * self.rows[3][c];
         }
         corrected.to_gpu_cols()
+    }
+
+    /// The matrix inverse, or `None` when the matrix is singular.
+    ///
+    /// Computed by Gauss–Jordan elimination with partial pivoting on the
+    /// row-major storage augmented with the identity. Used for un-projecting NDC
+    /// back to scene coordinates (`camera.transformPoint(direct=False)` in silx),
+    /// which the pan/zoom interaction needs; a general inverse (not just an
+    /// affine one) is required because the clip matrix carries the perspective
+    /// divide.
+    pub fn inverse(&self) -> Option<Mat4> {
+        // Augmented [ self | I ], 4×8.
+        let mut a = [[0.0f32; 8]; 4];
+        for (r, row) in a.iter_mut().enumerate() {
+            row[..4].copy_from_slice(&self.rows[r]);
+            row[4 + r] = 1.0;
+        }
+
+        for col in 0..4 {
+            // Partial pivot: largest-magnitude entry in this column at/below the
+            // diagonal, for numerical stability.
+            let mut pivot = col;
+            for r in (col + 1)..4 {
+                if a[r][col].abs() > a[pivot][col].abs() {
+                    pivot = r;
+                }
+            }
+            if a[pivot][col] == 0.0 {
+                return None; // Singular.
+            }
+            a.swap(col, pivot);
+
+            // Normalize the pivot row, then eliminate this column elsewhere. The
+            // pivot row is copied out so the other rows can borrow `a` mutably.
+            let inv_pivot = 1.0 / a[col][col];
+            for v in a[col].iter_mut() {
+                *v *= inv_pivot;
+            }
+            let pivot_row = a[col];
+            for (r, row) in a.iter_mut().enumerate() {
+                if r != col {
+                    let factor = row[col];
+                    if factor != 0.0 {
+                        for (v, &p) in row.iter_mut().zip(pivot_row.iter()) {
+                            *v -= factor * p;
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut rows = [[0.0f32; 4]; 4];
+        for (r, row) in rows.iter_mut().enumerate() {
+            row.copy_from_slice(&a[r][4..8]);
+        }
+        Some(Mat4 { rows })
     }
 }
 
@@ -468,6 +532,43 @@ mod tests {
         // Build the world point (0,0,-10): corrected z = col2.z*(-10) + col3.z.
         let z_far = cols[2][2] * (-10.0) + cols[3][2];
         approx(z_far, 1.0);
+    }
+
+    #[test]
+    fn inverse_round_trips_to_identity() {
+        fn approx_mat(a: Mat4, b: Mat4) {
+            for r in 0..4 {
+                for c in 0..4 {
+                    approx(a.rows[r][c], b.rows[r][c]);
+                }
+            }
+        }
+        // Affine (translate · rotate) and a non-affine perspective both invert.
+        let affine = mat4_translate(2.0, -3.0, 1.0) * mat4_rotate(0.7, 0.0, 1.0, 0.0);
+        let inv = affine.inverse().expect("affine is invertible");
+        approx_mat(affine * inv, Mat4::IDENTITY);
+        approx_mat(inv * affine, Mat4::IDENTITY);
+
+        let persp = mat4_perspective(30.0, 4.0, 3.0, 0.1, 100.0);
+        let pinv = persp.inverse().expect("perspective is invertible");
+        approx_mat(persp * pinv, Mat4::IDENTITY);
+
+        // A point unprojects back to itself: p → clip → p.
+        let p = Vec3::new(0.4, -0.2, -5.0);
+        let clip = persp.transform_point(p, true);
+        approx_vec(pinv.transform_point(clip, true), p);
+    }
+
+    #[test]
+    fn inverse_of_singular_is_none() {
+        // A zero row makes the matrix singular.
+        let singular = Mat4::from_rows([
+            [1.0, 2.0, 3.0, 4.0],
+            [0.0, 0.0, 0.0, 0.0],
+            [5.0, 6.0, 7.0, 8.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ]);
+        assert!(singular.inverse().is_none());
     }
 
     #[test]

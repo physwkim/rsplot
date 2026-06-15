@@ -460,6 +460,98 @@ impl Camera {
     pub fn size(&self) -> (f32, f32) {
         self.intrinsic.size()
     }
+
+    /// Pan: translate the camera so the scene point under `from_ndc` moves to
+    /// `to_ndc`, both NDC positions sharing a fixed `z` (the pan plane). Port of
+    /// `CameraSelectPan.drag` — un-projects both NDC points to scene space
+    /// through the inverse camera matrix and shifts the camera by their
+    /// difference. A no-op if the camera matrix is singular.
+    pub fn pan(&mut self, from_ndc: Vec3, to_ndc: Vec3) {
+        if let Some(inv) = self.matrix().inverse() {
+            let scene = inv.transform_point(to_ndc, true);
+            let last = inv.transform_point(from_ndc, true);
+            let translation = scene - last;
+            self.extrinsic.position -= translation;
+        }
+    }
+
+    /// Zoom keeping the point under the cursor invariant. Port of
+    /// `CameraWheel._zoomToPosition`: for a perspective camera, move the camera
+    /// toward/away from the un-projected cursor point; for orthographic, widen or
+    /// narrow the clip rectangle around the cursor. `ndc` is the cursor in NDC,
+    /// `ndc_z` the cursor's pan-plane depth (perspective only), `zoom_in` true to
+    /// move closer.
+    pub fn zoom_at(&mut self, ndc: (f32, f32), ndc_z: f32, zoom_in: bool) {
+        // silx: step = 0.2 * (1 if angle<0 else -1); angle>0 (zoom in) → -0.2.
+        let step = 0.2 * if zoom_in { -1.0 } else { 1.0 };
+        match self.intrinsic {
+            Projection::Perspective(_) => {
+                let position = Vec3::new(ndc.0, ndc.1, ndc_z);
+                if let Some(inv) = self.matrix().inverse() {
+                    let positionscene = inv.transform_point(position, true);
+                    let camtopos = self.extrinsic.position - positionscene;
+                    self.extrinsic.position += camtopos * step;
+                }
+            }
+            Projection::Orthographic(mut o) => {
+                let dx = (ndc.0 + 1.0) / 2.0;
+                let stepwidth = step * (o.right - o.left);
+                let left = o.left - dx * stepwidth;
+                let right = o.right + (1.0 - dx) * stepwidth;
+
+                let dy = (ndc.1 + 1.0) / 2.0;
+                let stepheight = step * (o.top - o.bottom);
+                let bottom = o.bottom - dy * stepheight;
+                let top = o.top + (1.0 - dy) * stepheight;
+
+                o.set_clipping(left, right, bottom, top);
+                self.intrinsic = Projection::Orthographic(o);
+            }
+        }
+    }
+
+    /// Update only the near/far depth extent so axis-aligned `bounds` stay inside
+    /// the frustum. Port of `Viewport.adjustCameraDepthExtent`: transform the
+    /// eight box corners into camera space and bracket their z-range. Sight
+    /// direction, up and position are unchanged.
+    pub fn adjust_depth_extent(&mut self, bounds: (Vec3, Vec3)) {
+        let (min, max) = bounds;
+        let corners = [
+            Vec3::new(min.x, min.y, min.z),
+            Vec3::new(max.x, min.y, min.z),
+            Vec3::new(min.x, max.y, min.z),
+            Vec3::new(max.x, max.y, min.z),
+            Vec3::new(min.x, min.y, max.z),
+            Vec3::new(max.x, min.y, max.z),
+            Vec3::new(min.x, max.y, max.z),
+            Vec3::new(max.x, max.y, max.z),
+        ];
+        let ext = self.extrinsic.matrix();
+        let mut zmin = f32::INFINITY;
+        let mut zmax = f32::NEG_INFINITY;
+        for c in corners {
+            let z = ext.transform_point(c, false).z;
+            zmin = zmin.min(z);
+            zmax = zmax.max(z);
+        }
+
+        match self.intrinsic {
+            Projection::Perspective(_) => {
+                // Camera looks down -z, so distances are -z; the nearer corner is
+                // the larger (less negative) z. silx: zbounds = -[zmin, zmax].
+                let near_dist = -zmax;
+                let far_dist = -zmin;
+                let zextent = (far_dist - near_dist).abs().max(0.0001);
+                let near = (zextent / 1000.0).max(0.95 * near_dist);
+                let far = (near + 0.1).max(1.05 * far_dist);
+                self.intrinsic.set_depth_extent(near, far);
+            }
+            Projection::Orthographic(_) => {
+                let border = zmin.abs().max(zmax.abs());
+                self.intrinsic.set_depth_extent(-border, border);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -627,5 +719,86 @@ mod tests {
         let ndc = cam.matrix().transform_point(Vec3::ZERO, false);
         approx(ndc.x, 0.0);
         approx(ndc.y, 0.0);
+    }
+
+    fn perspective_test_camera() -> Camera {
+        Camera::new(
+            30.0,
+            0.1,
+            100.0,
+            (300.0, 300.0),
+            Vec3::new(0.0, 0.0, 5.0),
+            Vec3::new(0.0, 0.0, -1.0),
+            Vec3::new(0.0, 1.0, 0.0),
+        )
+    }
+
+    #[test]
+    fn zoom_at_perspective_moves_toward_and_away_from_centre() {
+        let mut cam = perspective_test_camera();
+        let plane_z = cam.matrix().transform_point(Vec3::ZERO, true).z;
+        let start = cam.extrinsic.position().length();
+
+        // Zoom in at the centre: camera moves closer to the origin.
+        cam.zoom_at((0.0, 0.0), plane_z, true);
+        let after_in = cam.extrinsic.position().length();
+        assert!(
+            after_in < start,
+            "zoom in should reduce distance: {after_in} !< {start}"
+        );
+
+        // Zoom out: camera moves farther again.
+        cam.zoom_at((0.0, 0.0), plane_z, false);
+        let after_out = cam.extrinsic.position().length();
+        assert!(after_out > after_in, "zoom out should increase distance");
+    }
+
+    #[test]
+    fn zoom_at_orthographic_shrinks_clip_on_zoom_in() {
+        let mut cam = Camera {
+            intrinsic: Projection::Orthographic(Orthographic::new(
+                [-2.0, 2.0, -2.0, 2.0],
+                -10.0,
+                10.0,
+                (100.0, 100.0),
+                false,
+            )),
+            extrinsic: CameraExtrinsic::default(),
+        };
+        let width = |c: &Camera| match c.intrinsic {
+            Projection::Orthographic(o) => o.matrix(),
+            _ => unreachable!(),
+        };
+        // Width is encoded as 2/(right-left) in matrix element [0][0]; zoom-in
+        // narrows the clip → larger [0][0].
+        let before = width(&cam).rows[0][0];
+        cam.zoom_at((0.0, 0.0), 0.0, true);
+        let after = width(&cam).rows[0][0];
+        assert!(
+            after > before,
+            "ortho zoom-in should narrow clip: {after} !> {before}"
+        );
+    }
+
+    #[test]
+    fn adjust_depth_extent_brackets_the_bounds() {
+        let mut cam = perspective_test_camera();
+        let bounds = (Vec3::new(-1.0, -1.0, -1.0), Vec3::new(1.0, 1.0, 1.0));
+        cam.adjust_depth_extent(bounds);
+
+        // Every box corner must project to an NDC z within the [-1, 1] frustum.
+        let (min, max) = bounds;
+        for &x in &[min.x, max.x] {
+            for &y in &[min.y, max.y] {
+                for &z in &[min.z, max.z] {
+                    let ndc = cam.matrix().transform_point(Vec3::new(x, y, z), true);
+                    assert!(
+                        (-1.0001..=1.0001).contains(&ndc.z),
+                        "corner ({x},{y},{z}) ndc z {} outside frustum",
+                        ndc.z
+                    );
+                }
+            }
+        }
     }
 }

@@ -5,4 +5,5 @@
 //! Tracked in `doc/plot3d-parity-roadmap.md`.
 
 pub mod camera;
+pub mod interaction;
 pub mod mat4;

@@ -68,6 +68,7 @@ pub use crate::core::scene3d::camera::{
     Camera, CameraDirection, CameraExtrinsic, CameraFace, CameraMove, Orthographic, Perspective,
     Projection,
 };
+pub use crate::core::scene3d::interaction::{OrbitDrag, PanDrag, window_to_ndc};
 pub use crate::core::scene3d::mat4::{
     Mat4, Vec3, mat4_look_at_dir, mat4_orthographic, mat4_perspective, mat4_rotate, mat4_scale,
     mat4_translate,
