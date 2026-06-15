@@ -6733,31 +6733,86 @@ impl PlotWidget {
         }
     }
 
-    /// Show a compact ROI manager panel: a table listing all current ROIs with
-    /// per-row remove buttons, buttons to add each ROI kind, and a clear-all
-    /// button. Mirrors silx `RegionOfInterestTableWidget` / `RegionOfInterestManager`.
+    /// Show a compact ROI manager panel: a table listing all current ROIs — each
+    /// row carries an editable name (silx label column), the geometry shown as a
+    /// make-current selector (silx row selection → `sigCurrentRoiChanged`,
+    /// highlighted when current), and a remove button — followed by buttons to add
+    /// each ROI kind and a clear-all button. Mirrors silx
+    /// `RegionOfInterestTableWidget` / `RegionOfInterestManager`.
+    ///
+    /// Per-row edits are routed through the owner APIs ([`Self::set_roi_name`],
+    /// [`Self::set_current_roi`], [`Self::remove_roi`]) so events fire and the
+    /// current-ROI index stays consistent.
     ///
     /// New ROIs are centered on the current plot view. Returns the index of any
     /// newly added ROI, or `None` when none was added this frame.
     pub fn show_roi_manager(&mut self, ui: &mut egui::Ui) -> Option<usize> {
         let mut added: Option<usize> = None;
         let mut remove_idx: Option<usize> = None;
+        let mut make_current: Option<usize> = None;
+        let mut rename: Option<(usize, String)> = None;
 
-        // --- existing ROI table ---
+        let current = self.current_roi();
+
+        // --- ROI table (silx `RegionOfInterestTableWidget`): one row per ROI, with
+        // an editable name (silx label column), the geometry as a make-current
+        // selector (silx row selection → `sigCurrentRoiChanged`), and a remove
+        // button. Mutations are collected here under the immutable `rois` borrow
+        // and applied through the owner APIs once the borrow ends. ---
         egui::ScrollArea::vertical()
             .max_height(200.0)
             .show(ui, |ui| {
-                for (i, managed) in self.backend.plot().rois.iter().enumerate() {
-                    ui.horizontal(|ui| {
-                        let desc = roi_description(&managed.roi);
-                        ui.label(desc);
-                        if ui.small_button("×").on_hover_text("Remove").clicked() {
-                            remove_idx = Some(i);
+                egui::Grid::new("roi_manager_table")
+                    .num_columns(3)
+                    .striped(true)
+                    .show(ui, |ui| {
+                        ui.label("Name");
+                        ui.label("Region");
+                        ui.label("");
+                        ui.end_row();
+
+                        for (i, managed) in self.backend.plot().rois.iter().enumerate() {
+                            // Editable name (silx editable label column). Bound to a
+                            // per-row clone; a change is recorded and applied via the
+                            // owner after the borrow ends.
+                            let mut name = managed.name.clone();
+                            if ui
+                                .add(
+                                    egui::TextEdit::singleline(&mut name)
+                                        .desired_width(90.0)
+                                        .hint_text("(unnamed)"),
+                                )
+                                .changed()
+                            {
+                                rename = Some((i, name));
+                            }
+
+                            // Geometry, clickable to make this the current ROI
+                            // (highlighted when current).
+                            let desc = roi_description(&managed.roi);
+                            if ui
+                                .selectable_label(current == Some(i), desc)
+                                .on_hover_text("Make current")
+                                .clicked()
+                            {
+                                make_current = Some(i);
+                            }
+
+                            if ui.small_button("×").on_hover_text("Remove").clicked() {
+                                remove_idx = Some(i);
+                            }
+                            ui.end_row();
                         }
                     });
-                }
             });
 
+        if let Some((idx, name)) = rename {
+            self.set_roi_name(idx, name);
+        }
+        if let Some(idx) = make_current {
+            // Route through the owner so `sigCurrentRoiChanged` fires.
+            self.set_current_roi(Some(idx));
+        }
         if let Some(idx) = remove_idx {
             // Route through the owner so the current-ROI index stays consistent.
             self.remove_roi(idx);
