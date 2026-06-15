@@ -1280,6 +1280,281 @@ impl ImageRgba3D {
     }
 }
 
+/// Nearest-neighbour source index for destination index `i` of `dst_len`, onto a
+/// source axis of `src_len` (the silx height-map resample, `floor(i·src/dst)`),
+/// clamped into range.
+fn nearest_src_index(i: usize, dst_len: usize, src_len: usize) -> usize {
+    ((i as f64 * src_len as f64 / dst_len as f64).floor() as usize).min(src_len.saturating_sub(1))
+}
+
+/// World bounds `(min, max)` of a height-field point grid: x ∈ [0, width−1],
+/// y ∈ [0, height−1], z over the height values. `None` when empty.
+fn height_grid_bounds(heights: &[f32], width: usize, height: usize) -> Option<(Vec3, Vec3)> {
+    if heights.is_empty() || width == 0 || height == 0 {
+        return None;
+    }
+    let mut zmin = f32::INFINITY;
+    let mut zmax = f32::NEG_INFINITY;
+    for &z in heights {
+        zmin = zmin.min(z);
+        zmax = zmax.max(z);
+    }
+    Some((
+        Vec3::new(0.0, 0.0, zmin),
+        Vec3::new((width - 1) as f32, (height - 1) as f32, zmax),
+    ))
+}
+
+/// A 2D height field coloured by a colormapped dataset (silx
+/// `plot3d.items.HeightMapData`). Each height-field pixel `(row, col)` becomes a
+/// square point at world `(col, row, height)`, coloured through a [`Colormap`]
+/// over the (separately set) `colormapped` data — silx renders height maps as a
+/// set of size-1 `'s'` points, so this reuses the point-sprite path directly.
+///
+/// When the colormapped data and the height field differ in size the data is
+/// nearest-neighbour resampled to the height grid. (silx's resample indexes the
+/// *column* axis by the field *height* — image.py:318 — which mis-samples
+/// non-square data; this port indexes the column by the field *width*, the
+/// evident intent. For equal-sized data the two agree.)
+#[derive(Clone, Debug)]
+pub struct HeightMapData {
+    heights: Vec<f32>,
+    h_width: usize,
+    h_height: usize,
+    values: Vec<f64>,
+    v_width: usize,
+    v_height: usize,
+    colormap: Colormap,
+}
+
+impl Default for HeightMapData {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl HeightMapData {
+    /// An empty height map with viridis over `[0, 1]`.
+    pub fn new() -> Self {
+        Self {
+            heights: Vec::new(),
+            h_width: 0,
+            h_height: 0,
+            values: Vec::new(),
+            v_width: 0,
+            v_height: 0,
+            colormap: Colormap::new(ColormapName::Viridis, 0.0, 1.0),
+        }
+    }
+
+    /// Set the height field (silx `_HeightMap.setData`), row-major. Returns `false`
+    /// (unchanged) when `heights.len() != width * height`.
+    pub fn set_data(&mut self, heights: &[f32], width: usize, height: usize) -> bool {
+        if heights.len() != width * height {
+            return false;
+        }
+        self.heights = heights.to_vec();
+        self.h_width = width;
+        self.h_height = height;
+        true
+    }
+
+    /// Builder form of [`set_data`](Self::set_data).
+    pub fn with_data(mut self, heights: &[f32], width: usize, height: usize) -> Self {
+        self.set_data(heights, width, height);
+        self
+    }
+
+    /// Set the colormapped data (silx `HeightMapData.setColormappedData`),
+    /// row-major. May differ in size from the height field (nearest-neighbour
+    /// resampled). Returns `false` when `data.len() != width * height`.
+    pub fn set_colormapped_data(&mut self, data: &[f64], width: usize, height: usize) -> bool {
+        if data.len() != width * height {
+            return false;
+        }
+        self.values = data.to_vec();
+        self.v_width = width;
+        self.v_height = height;
+        true
+    }
+
+    /// Builder form of [`set_colormapped_data`](Self::set_colormapped_data).
+    pub fn with_colormapped_data(mut self, data: &[f64], width: usize, height: usize) -> Self {
+        self.set_colormapped_data(data, width, height);
+        self
+    }
+
+    /// Set the colormap.
+    pub fn set_colormap(&mut self, colormap: Colormap) {
+        self.colormap = colormap;
+    }
+
+    /// Builder form of [`set_colormap`](Self::set_colormap).
+    pub fn with_colormap(mut self, colormap: Colormap) -> Self {
+        self.colormap = colormap;
+        self
+    }
+
+    /// Read-only access to the colormap.
+    pub fn colormap(&self) -> &Colormap {
+        &self.colormap
+    }
+
+    /// Mutable access to the colormap.
+    pub fn colormap_mut(&mut self) -> &mut Colormap {
+        &mut self.colormap
+    }
+
+    /// Fit the colormap's value range to the colormapped data with `mode`.
+    pub fn autoscale_colormap(&mut self, mode: AutoscaleMode) -> (f64, f64) {
+        let (vmin, vmax) = mode.range(&self.values, self.colormap.autoscale_percentiles);
+        self.colormap.vmin = vmin;
+        self.colormap.vmax = vmax;
+        (vmin, vmax)
+    }
+
+    /// Height-field dimensions `(width, height)`.
+    pub fn dimensions(&self) -> (usize, usize) {
+        (self.h_width, self.h_height)
+    }
+
+    /// True when nothing would be drawn (no height field or no colour data).
+    pub fn is_empty(&self) -> bool {
+        self.heights.is_empty() || self.values.is_empty()
+    }
+
+    /// World bounds `(min, max)` of the height-field point grid, or `None` when
+    /// the height field is empty (independent of whether colour data is set).
+    pub fn bounds(&self) -> Option<(Vec3, Vec3)> {
+        height_grid_bounds(&self.heights, self.h_width, self.h_height)
+    }
+
+    /// Append the height field as colormapped square points to `geometry`.
+    pub fn append_to(&self, geometry: &mut Scene3dGeometry) {
+        if self.is_empty() {
+            return;
+        }
+        for row in 0..self.h_height {
+            let vr = nearest_src_index(row, self.h_height, self.v_height);
+            for col in 0..self.h_width {
+                let vc = nearest_src_index(col, self.h_width, self.v_width);
+                let z = self.heights[row * self.h_width + col];
+                let [r, g, b, a] = self.colormap.color_at(self.values[vr * self.v_width + vc]);
+                geometry.add_point(
+                    [col as f32, row as f32, z],
+                    Color32::from_rgba_unmultiplied(r, g, b, a),
+                    1.0,
+                    PointMarker::Square,
+                );
+            }
+        }
+    }
+}
+
+/// A 2D height field coloured by an RGB(A) image (silx
+/// `plot3d.items.HeightMapRGBA`). Like [`HeightMapData`] but each square point is
+/// coloured directly by the (separately set, nearest-neighbour resampled) image
+/// pixel rather than through a colormap.
+#[derive(Clone, Debug)]
+pub struct HeightMapRGBA {
+    heights: Vec<f32>,
+    h_width: usize,
+    h_height: usize,
+    colors: Vec<Color32>,
+    c_width: usize,
+    c_height: usize,
+}
+
+impl Default for HeightMapRGBA {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl HeightMapRGBA {
+    /// An empty RGBA height map.
+    pub fn new() -> Self {
+        Self {
+            heights: Vec::new(),
+            h_width: 0,
+            h_height: 0,
+            colors: Vec::new(),
+            c_width: 0,
+            c_height: 0,
+        }
+    }
+
+    /// Set the height field (silx `_HeightMap.setData`), row-major. Returns `false`
+    /// (unchanged) when `heights.len() != width * height`.
+    pub fn set_data(&mut self, heights: &[f32], width: usize, height: usize) -> bool {
+        if heights.len() != width * height {
+            return false;
+        }
+        self.heights = heights.to_vec();
+        self.h_width = width;
+        self.h_height = height;
+        true
+    }
+
+    /// Builder form of [`set_data`](Self::set_data).
+    pub fn with_data(mut self, heights: &[f32], width: usize, height: usize) -> Self {
+        self.set_data(heights, width, height);
+        self
+    }
+
+    /// Set the RGB(A) image (silx `HeightMapRGBA.setColorData`), row-major. May
+    /// differ in size from the height field (nearest-neighbour resampled, by width
+    /// for the column axis — see [`HeightMapData`]). Returns `false` when
+    /// `colors.len() != width * height`.
+    pub fn set_color_data(&mut self, colors: &[Color32], width: usize, height: usize) -> bool {
+        if colors.len() != width * height {
+            return false;
+        }
+        self.colors = colors.to_vec();
+        self.c_width = width;
+        self.c_height = height;
+        true
+    }
+
+    /// Builder form of [`set_color_data`](Self::set_color_data).
+    pub fn with_color_data(mut self, colors: &[Color32], width: usize, height: usize) -> Self {
+        self.set_color_data(colors, width, height);
+        self
+    }
+
+    /// Height-field dimensions `(width, height)`.
+    pub fn dimensions(&self) -> (usize, usize) {
+        (self.h_width, self.h_height)
+    }
+
+    /// True when nothing would be drawn (no height field or no colour image).
+    pub fn is_empty(&self) -> bool {
+        self.heights.is_empty() || self.colors.is_empty()
+    }
+
+    /// World bounds `(min, max)` of the height-field point grid, or `None` when
+    /// the height field is empty.
+    pub fn bounds(&self) -> Option<(Vec3, Vec3)> {
+        height_grid_bounds(&self.heights, self.h_width, self.h_height)
+    }
+
+    /// Append the height field as RGBA square points to `geometry`.
+    pub fn append_to(&self, geometry: &mut Scene3dGeometry) {
+        if self.is_empty() {
+            return;
+        }
+        for row in 0..self.h_height {
+            let cr = nearest_src_index(row, self.h_height, self.c_height);
+            for col in 0..self.h_width {
+                let cc = nearest_src_index(col, self.h_width, self.c_width);
+                let z = self.heights[row * self.h_width + col];
+                let color = self.colors[cr * self.c_width + cc];
+                geometry.add_point([col as f32, row as f32, z], color, 1.0, PointMarker::Square);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1714,5 +1989,92 @@ mod tests {
         assert!(img.is_empty());
         assert!(img.set_data(&[Color32::RED; 4], 2, 2));
         assert_eq!(img.dimensions(), (2, 2));
+    }
+
+    #[test]
+    fn height_map_data_emits_one_square_point_per_pixel() {
+        let cmap = Colormap::new(ColormapName::Viridis, 0.0, 3.0);
+        let heights = [0.0_f32, 1.0, 2.0, 3.0]; // 2×2 field
+        let mut hm = HeightMapData::new().with_colormap(cmap.clone());
+        assert!(hm.set_data(&heights, 2, 2));
+        assert!(hm.set_colormapped_data(&[0.0, 1.0, 2.0, 3.0], 2, 2));
+
+        let mut g = Scene3dGeometry::new();
+        hm.append_to(&mut g);
+        assert_eq!(g.points.len(), 4);
+        for p in &g.points {
+            assert_eq!(p.size, 1.0);
+            assert_eq!(p.marker, PointMarker::Square.id());
+        }
+        // Point (row=1, col=1) — index row*width+col = 3 — sits at world (1, 1, 3).
+        let p11 = &g.points[3];
+        assert_eq!(p11.pos, [1.0, 1.0, 3.0]);
+        let expect = |v: f64| {
+            let [r, gg, b, a] = cmap.color_at(v);
+            egui::Rgba::from(Color32::from_rgba_unmultiplied(r, gg, b, a)).to_array()
+        };
+        assert_eq!(g.points[0].color, expect(0.0));
+        assert_eq!(p11.color, expect(3.0));
+    }
+
+    #[test]
+    fn height_map_data_empty_without_both_fields_and_bounds_from_heights() {
+        let mut hm = HeightMapData::new();
+        assert!(hm.set_data(&[0.0, 5.0, 2.0, 1.0], 2, 2));
+        // Height field set, no colour data → draws nothing, but has spatial bounds.
+        assert!(hm.is_empty());
+        let mut g = Scene3dGeometry::new();
+        hm.append_to(&mut g);
+        assert!(g.points.is_empty());
+        let (min, max) = hm.bounds().expect("bounds from heights");
+        assert_eq!((min.x, min.y, min.z), (0.0, 0.0, 0.0)); // z min = 0.0
+        assert_eq!((max.x, max.y, max.z), (1.0, 1.0, 5.0)); // grid 0..1, z max = 5.0
+    }
+
+    #[test]
+    fn height_map_data_resamples_columns_by_width() {
+        // 4×2 height field, 2×2 colour data: columns 0,1 → colour col 0; 2,3 → col 1.
+        // This distinguishes width-based resample (correct) from silx's
+        // height-based column indexing.
+        let cmap = Colormap::new(ColormapName::Viridis, 0.0, 1.0);
+        let heights = [0.0_f32; 8]; // 4 wide × 2 tall
+        // colour data 2×2: col 0 = value 0.0, col 1 = value 1.0 (both rows).
+        let values = [0.0, 1.0, 0.0, 1.0];
+        let hm = HeightMapData::new()
+            .with_colormap(cmap.clone())
+            .with_data(&heights, 4, 2)
+            .with_colormapped_data(&values, 2, 2);
+
+        let mut g = Scene3dGeometry::new();
+        hm.append_to(&mut g);
+        assert_eq!(g.points.len(), 8);
+
+        let c0 = egui::Rgba::from({
+            let [r, gg, b, a] = cmap.color_at(0.0);
+            Color32::from_rgba_unmultiplied(r, gg, b, a)
+        })
+        .to_array();
+        // Row 0: cols 0,1 sample value-col 0 (0.0); cols 2,3 sample value-col 1.
+        assert_eq!(g.points[0].color, c0); // col 0
+        assert_eq!(g.points[1].color, c0); // col 1 → still value-col 0 (width-based)
+        assert_ne!(g.points[2].color, c0); // col 2 → value-col 1
+    }
+
+    #[test]
+    fn height_map_rgba_colours_points_directly() {
+        let heights = [0.0_f32, 1.0, 2.0, 3.0];
+        let cols = [Color32::RED, Color32::GREEN, Color32::BLUE, Color32::WHITE];
+        let mut hm = HeightMapRGBA::new();
+        assert!(hm.set_data(&heights, 2, 2));
+        assert!(hm.set_color_data(&cols, 2, 2));
+
+        let mut g = Scene3dGeometry::new();
+        hm.append_to(&mut g);
+        assert_eq!(g.points.len(), 4);
+        for (i, &c) in cols.iter().enumerate() {
+            assert_eq!(g.points[i].color, egui::Rgba::from(c).to_array());
+            assert_eq!(g.points[i].marker, PointMarker::Square.id());
+        }
+        assert_eq!(g.points[3].pos, [1.0, 1.0, 3.0]);
     }
 }
