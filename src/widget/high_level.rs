@@ -6863,6 +6863,59 @@ impl PlotWidget {
         self.save_to_path(&path, size)
     }
 
+    /// Save the current ROIs to `path` in the siplot ROI text format (silx
+    /// `CurvesROIWidget.save(filename)`) via [`crate::save_rois`]. The encoder
+    /// is unit-tested (`core::roi_io`); this is the widget-level wrapper.
+    pub fn save_rois_to_path(&self, path: impl AsRef<std::path::Path>) -> std::io::Result<()> {
+        crate::core::roi_io::save_rois(path, self.rois())
+    }
+
+    /// Replace the current ROIs with those loaded from `path` (silx
+    /// `CurvesROIWidget.load(filename)`) via [`crate::load_rois`]. The previous
+    /// set is cleared first, so this emits [`PlotEvent::RoisCleared`] followed by
+    /// one [`PlotEvent::RoiAdded`] per loaded ROI.
+    pub fn load_rois_from_path(
+        &mut self,
+        path: impl AsRef<std::path::Path>,
+    ) -> std::io::Result<()> {
+        let loaded = crate::core::roi_io::load_rois(path)?;
+        self.clear_rois(); // RoisCleared
+        for roi in loaded {
+            self.add_managed_roi(roi); // RoiAdded { index }
+        }
+        Ok(())
+    }
+
+    /// Open a native save-file dialog (silx `CurvesROIWidget` save button) and
+    /// write the current ROIs to the chosen path via [`Self::save_rois_to_path`].
+    /// Returns `Ok(true)` when a file was written, `Ok(false)` on cancel. The
+    /// dialog is a native shim; the save logic it calls is unit-tested.
+    pub fn save_rois_dialog(&self) -> std::io::Result<bool> {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("siplot ROIs", &["rois", "txt"])
+            .save_file()
+        else {
+            return Ok(false);
+        };
+        self.save_rois_to_path(&path)?;
+        Ok(true)
+    }
+
+    /// Open a native open-file dialog (silx `CurvesROIWidget` load button) and
+    /// replace the current ROIs with those from the chosen path via
+    /// [`Self::load_rois_from_path`]. Returns `Ok(true)` when a file was loaded,
+    /// `Ok(false)` on cancel. The dialog is a native shim.
+    pub fn load_rois_dialog(&mut self) -> std::io::Result<bool> {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("siplot ROIs", &["rois", "txt"])
+            .pick_file()
+        else {
+            return Ok(false);
+        };
+        self.load_rois_from_path(&path)?;
+        Ok(true)
+    }
+
     /// Copy a `size` pixel snapshot of the figure to the system clipboard as an
     /// image (silx `CopyAction`, which renders the plot to a bitmap and calls
     /// `QApplication.clipboard().setImage`).

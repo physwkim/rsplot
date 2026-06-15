@@ -59,6 +59,50 @@ fn clear_rois_emits_rois_cleared() {
 }
 
 #[test]
+fn save_then_load_round_trips_rois_through_the_widget() {
+    let rs = create_render_state(default_wgpu_setup());
+    let mut plot = PlotWidget::new(&rs, 0);
+    plot.add_roi(rect(0.0));
+    plot.add_roi(rect(2.0));
+    let before = plot.rois().to_vec();
+    plot.drain_events();
+
+    // Unique per-test path (nextest runs each test in its own process).
+    let path = std::env::temp_dir().join("siplot_roi_events_round_trip.rois");
+    plot.save_rois_to_path(&path)
+        .expect("save_rois_to_path writes");
+
+    // Mutate the live set, then load the file back: the loaded set replaces it.
+    plot.add_roi(rect(9.0));
+    plot.drain_events();
+    plot.load_rois_from_path(&path)
+        .expect("load_rois_from_path reads");
+
+    assert_eq!(
+        plot.rois(),
+        before.as_slice(),
+        "the loaded ROIs replace the live set and match what was saved"
+    );
+
+    // load = clear-all (RoisCleared) then one RoiAdded per loaded ROI.
+    let events = plot.drain_events();
+    assert!(
+        events.iter().any(|e| matches!(e, PlotEvent::RoisCleared)),
+        "load_rois_from_path clears the previous set first, got {events:?}"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e, PlotEvent::RoiAdded { .. }))
+            .count(),
+        before.len(),
+        "load_rois_from_path emits one RoiAdded per loaded ROI, got {events:?}"
+    );
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
 fn remove_roi_out_of_range_emits_nothing() {
     let rs = create_render_state(default_wgpu_setup());
     let mut plot = PlotWidget::new(&rs, 0);
