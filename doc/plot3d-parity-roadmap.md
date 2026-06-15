@@ -64,7 +64,7 @@ Legend: ✅ done · ◐ partial · ☐ not started
 | Wave | Item | silx source | Status |
 |---|---|---|---|
 | P1.1 | Scatter3D (points / spheres) | items/scatter.py, primitives Points/ColorPoints/Spheres | ✅ |
-| P1.2 | Mesh / Box / Cylinder / Hexagon | items/mesh.py, primitives Mesh3D/ColormapMesh3D + Geometry | ☐ |
+| P1.2 | Mesh / Box / Cylinder / Hexagon | items/mesh.py, primitives Mesh3D/ColormapMesh3D + Geometry | ✅ |
 | P1.3 | 3D ImageData / ImageRgba / HeightMap | items/image.py, items/_pick.py, primitives ImageData/ImageRgba | ☐ |
 
 P1.1 notes: `Scatter3D` ports silx's `Points`/`_Points` faithfully — billboarded,
@@ -75,6 +75,21 @@ texture (points are few vs image rasters); per-point picking (`_pickFull`) is
 deferred with the rest of GPU picking (see Architecture); the `Spheres` primitive
 (shaded 3D spheres — not used by silx `Scatter3D`, which renders `Points`) is not
 yet ported.
+
+P1.2 notes: a `scene3d_mesh.wgsl` pipeline shades lit triangles with silx's
+camera-fixed headlight (`DirectionalLight` defaults: ambient 0.3, diffuse 0.7, no
+specular), computed per-frame on the GPU from the view-transformed normal. Items
+in `render::scene3d_items`: `Mesh3D` (uniform/per-vertex colour) and
+`ColormapMesh3D` (per-vertex scalar through a `Colormap`, CPU `color_at` as
+Scatter3D), both supporting `triangles`/`triangle_strip`/`fan` modes + optional
+indices via a single `expand_triangles` owner (strips/fans expand to a triangle
+list, since the GPU path is `TriangleList` only) and a flat-normal fallback when
+no normals are given. `Box3D`/`Cylinder3D`/`Hexagon3D` port
+`_CylindricalVolume`: faceted Box (4 faces) / Hexagon (6), smooth radial-normal
+Cylinder (nb_faces), one or many instances per call. Documented simplifications:
+colormap on CPU (as P1.1); mesh `_pickFull` deferred with GPU picking; lighting
+params are silx's viewport defaults baked in (a lighting on/off + parameter API is
+a later enhancement).
 
 ### Phase 2 — `ScalarFieldView` flagship
 
