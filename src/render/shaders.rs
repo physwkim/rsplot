@@ -73,3 +73,16 @@ fn image_rgba_wgsl_is_valid() {
 fn markers_wgsl_is_valid() {
     validate_wgsl("markers.wgsl", include_str!("shaders/markers.wgsl"));
 }
+
+#[test]
+fn scene3d_wgsl_is_valid() {
+    validate_wgsl("scene3d.wgsl", include_str!("shaders/scene3d.wgsl"));
+}
+
+#[test]
+fn scene3d_blit_wgsl_is_valid() {
+    validate_wgsl(
+        "scene3d_blit.wgsl",
+        include_str!("shaders/scene3d_blit.wgsl"),
+    );
+}

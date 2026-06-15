@@ -55,8 +55,8 @@ Legend: ✅ done · ◐ partial · ☐ not started
 
 | Wave | Item | silx source | Status |
 |---|---|---|---|
-| P0.1 | `Mat4`/`Vec3` + camera math (look-at, perspective, ortho, rotate, orbit, resetCamera) | scene/transform.py, scene/camera.py | ☐ |
-| P0.2 | wgpu line/triangle pipeline + offscreen depth render + blit callback | (siplot infra) | ☐ |
+| P0.1 | `Mat4`/`Vec3` + camera math (look-at, perspective, ortho, rotate, orbit, resetCamera) | scene/transform.py, scene/camera.py | ✅ |
+| P0.2 | wgpu line/triangle pipeline + offscreen depth render + blit callback | (siplot infra) | ✅ |
 | P0.3 | `SceneWidget` + orbit/pan/zoom interaction + bounding box + axes | scene/interaction.py, primitives.py (Lines/Box/Axes/BoxWithAxes), viewport.py, SceneWidget.py | ☐ |
 
 ### Phase 1 — basic 3D items
