@@ -8,3 +8,4 @@ pub mod camera;
 pub mod interaction;
 pub mod marching_cubes;
 pub mod mat4;
+pub mod plane;

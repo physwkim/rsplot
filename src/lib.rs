@@ -74,6 +74,9 @@ pub use crate::core::scene3d::mat4::{
     Mat4, Vec3, mat4_look_at_dir, mat4_orthographic, mat4_perspective, mat4_rotate, mat4_scale,
     mat4_translate,
 };
+pub use crate::core::scene3d::plane::{
+    Plane, angle_between_vectors, box_plane_intersect, segment_plane_intersect,
+};
 pub use crate::core::shape::{Line, Shape, ShapeKind};
 pub use crate::core::stats::{ComCoord, StatScope, Stats};
 pub use crate::core::transform::{Axis, AxisSide, Margins, Scale, Transform, YAxis};
