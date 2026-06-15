@@ -2122,6 +2122,9 @@ fn image_spec_retained_data(spec: &ImageSpec<'_>) -> Option<RetainedItemData> {
             scale: spec.scale,
             colormap: colormap.clone(),
             alpha: spec.alpha,
+            interpolation: spec.interpolation,
+            aggregation: spec.aggregation,
+            aggregation_block: spec.aggregation_block,
         }),
         ImagePixelsSpec::Rgba { .. } => None,
     }
@@ -2416,7 +2419,76 @@ enum RetainedItemData {
         /// [`ActiveImageAlphaSlider`]: crate::widget::alpha_slider::ActiveImageAlphaSlider
         /// [`NamedItemAlphaSlider`]: crate::widget::alpha_slider::NamedItemAlphaSlider
         alpha: f32,
+        /// Data-to-screen interpolation (silx image `interpolation`). Retained
+        /// for the same reason as `alpha`: a re-upload rebuilds the spec via
+        /// [`ImageSpec::scalar`], which would otherwise reset this to the
+        /// [`Nearest`](InterpolationMode::Nearest) default.
+        interpolation: InterpolationMode,
+        /// Block aggregation mode (silx `ImageDataAggregated`), retained across
+        /// re-uploads alongside `aggregation_block`.
+        aggregation: AggregationMode,
+        /// Per-axis aggregation block factors `(block_x, block_y)`, retained so a
+        /// re-upload preserves the level-of-detail reduction.
+        aggregation_block: (u32, u32),
     },
+}
+
+/// The display attributes of a retained scalar image that a re-upload must
+/// carry over — geometry, opacity, interpolation, and aggregation. Bundled so
+/// that [`apply`](Self::apply) is the *single owner* of restoring them onto a
+/// freshly built [`ImageSpec`]: every re-upload path (level edit, autoscale,
+/// median filter, the alpha-slider bindings) rebuilds the spec via
+/// [`ImageSpec::scalar`] — whose builder resets these to defaults — and then
+/// calls `apply`, so a new attribute is preserved everywhere by adding it here
+/// once, and a new re-upload path cannot silently drop them.
+#[derive(Clone, Copy, Debug)]
+struct ImageDisplayAttrs {
+    origin: (f64, f64),
+    scale: (f64, f64),
+    alpha: f32,
+    interpolation: InterpolationMode,
+    aggregation: AggregationMode,
+    aggregation_block: (u32, u32),
+}
+
+impl ImageDisplayAttrs {
+    /// Restore every carried-over display attribute onto a rebuilt scalar
+    /// [`ImageSpec`] (the single owner of the retained→spec restore).
+    fn apply(self, spec: &mut ImageSpec<'_>) {
+        spec.origin = self.origin;
+        spec.scale = self.scale;
+        spec.alpha = self.alpha;
+        spec.interpolation = self.interpolation;
+        spec.aggregation = self.aggregation;
+        spec.aggregation_block = self.aggregation_block;
+    }
+}
+
+impl RetainedItemData {
+    /// The display attributes of a retained scalar image, or `None` for a curve
+    /// (the only other retained variant). Captured by every re-upload path and
+    /// restored via [`ImageDisplayAttrs::apply`].
+    fn image_display_attrs(&self) -> Option<ImageDisplayAttrs> {
+        match self {
+            RetainedItemData::Image {
+                origin,
+                scale,
+                alpha,
+                interpolation,
+                aggregation,
+                aggregation_block,
+                ..
+            } => Some(ImageDisplayAttrs {
+                origin: *origin,
+                scale: *scale,
+                alpha: *alpha,
+                interpolation: *interpolation,
+                aggregation: *aggregation,
+                aggregation_block: *aggregation_block,
+            }),
+            RetainedItemData::Curve { .. } => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -6458,23 +6530,19 @@ impl PlotWidget {
     /// `None` when the active item is not a scalar image with retained data.
     pub fn autoscale_active_image(&mut self, mode: AutoscaleMode) -> Option<(f64, f64)> {
         let handle = self.active_item?;
-        let (data, width, height, origin, scale, base, alpha) = match self.retained_data(handle)? {
-            RetainedItemData::Image {
+        let (data, width, height, base, attrs) = match self.retained_data(handle)? {
+            retained @ RetainedItemData::Image {
                 data,
                 width,
                 height,
-                origin,
-                scale,
                 colormap,
-                alpha,
+                ..
             } => (
                 data.clone(),
                 *width,
                 *height,
-                *origin,
-                *scale,
                 (**colormap).clone(),
-                *alpha,
+                retained.image_display_attrs()?,
             ),
             RetainedItemData::Curve { .. } => return None,
         };
@@ -6482,9 +6550,7 @@ impl PlotWidget {
         let limits = (cm.vmin, cm.vmax);
         let pixels: Vec<f32> = data.iter().map(|&v| v as f32).collect();
         let mut spec = ImageSpec::scalar(width as u32, height as u32, &pixels, cm);
-        spec.origin = origin;
-        spec.scale = scale;
-        spec.alpha = alpha;
+        attrs.apply(&mut spec);
         self.update_image_spec(handle, spec);
         Some(limits)
     }
@@ -6501,23 +6567,21 @@ impl PlotWidget {
         let Some(handle) = self.active_item else {
             return false;
         };
-        let (data, width, height, origin, scale, mut cm, alpha) = match self.retained_data(handle) {
-            Some(RetainedItemData::Image {
-                data,
-                width,
-                height,
-                origin,
-                scale,
-                colormap,
-                alpha,
-            }) => (
+        let (data, width, height, mut cm, attrs) = match self.retained_data(handle) {
+            Some(
+                retained @ RetainedItemData::Image {
+                    data,
+                    width,
+                    height,
+                    colormap,
+                    ..
+                },
+            ) => (
                 data.clone(),
                 *width,
                 *height,
-                *origin,
-                *scale,
                 (**colormap).clone(),
-                *alpha,
+                retained.image_display_attrs().expect("image has attrs"),
             ),
             _ => return false,
         };
@@ -6525,9 +6589,7 @@ impl PlotWidget {
         cm.vmax = vmax;
         let pixels: Vec<f32> = data.iter().map(|&v| v as f32).collect();
         let mut spec = ImageSpec::scalar(width as u32, height as u32, &pixels, cm);
-        spec.origin = origin;
-        spec.scale = scale;
-        spec.alpha = alpha;
+        attrs.apply(&mut spec);
         self.update_image_spec(handle, spec)
     }
 
@@ -6563,30 +6625,30 @@ impl PlotWidget {
     /// [`ActiveImageAlphaSlider`]: crate::widget::alpha_slider::ActiveImageAlphaSlider
     /// [`NamedItemAlphaSlider`]: crate::widget::alpha_slider::NamedItemAlphaSlider
     pub fn set_image_alpha(&mut self, handle: ItemHandle, alpha: f32) -> bool {
-        let (data, width, height, origin, scale, cm) = match self.retained_data(handle) {
-            Some(RetainedItemData::Image {
-                data,
-                width,
-                height,
-                origin,
-                scale,
-                colormap,
-                ..
-            }) => (
+        let (data, width, height, cm, mut attrs) = match self.retained_data(handle) {
+            Some(
+                retained @ RetainedItemData::Image {
+                    data,
+                    width,
+                    height,
+                    colormap,
+                    ..
+                },
+            ) => (
                 data.clone(),
                 *width,
                 *height,
-                *origin,
-                *scale,
                 (**colormap).clone(),
+                retained.image_display_attrs().expect("image has attrs"),
             ),
             _ => return false,
         };
+        // Override only the opacity; every other display attribute is carried
+        // over unchanged (silx setAlpha leaves interpolation/aggregation intact).
+        attrs.alpha = alpha.clamp(0.0, 1.0);
         let pixels: Vec<f32> = data.iter().map(|&v| v as f32).collect();
         let mut spec = ImageSpec::scalar(width as u32, height as u32, &pixels, cm);
-        spec.origin = origin;
-        spec.scale = scale;
-        spec.alpha = alpha.clamp(0.0, 1.0);
+        attrs.apply(&mut spec);
         self.update_image_spec(handle, spec)
     }
 
@@ -6664,24 +6726,21 @@ impl PlotWidget {
             Some(h) => h,
             None => return false,
         };
-        let (data, width, height, origin, scale, colormap, alpha) = match self.retained_data(handle)
-        {
-            Some(RetainedItemData::Image {
-                data,
-                width,
-                height,
-                origin,
-                scale,
-                colormap,
-                alpha,
-            }) => (
+        let (data, width, height, colormap, attrs) = match self.retained_data(handle) {
+            Some(
+                retained @ RetainedItemData::Image {
+                    data,
+                    width,
+                    height,
+                    colormap,
+                    ..
+                },
+            ) => (
                 data.clone(),
                 *width,
                 *height,
-                *origin,
-                *scale,
                 (**colormap).clone(),
-                *alpha,
+                retained.image_display_attrs().expect("image has attrs"),
             ),
             _ => return false,
         };
@@ -6697,9 +6756,7 @@ impl PlotWidget {
 
         let pixels: Vec<f32> = filtered.iter().map(|&v| v as f32).collect();
         let mut spec = ImageSpec::scalar(width as u32, height as u32, &pixels, colormap);
-        spec.origin = origin;
-        spec.scale = scale;
-        spec.alpha = alpha;
+        attrs.apply(&mut spec);
         self.update_image_spec(handle, spec);
         true
     }
@@ -14412,6 +14469,9 @@ mod tests {
             scale: (1.0, 1.0),
             colormap: Box::new(Colormap::viridis(0.0, 1.0)),
             alpha: 1.0,
+            interpolation: InterpolationMode::Nearest,
+            aggregation: AggregationMode::None,
+            aggregation_block: (1, 1),
         };
         let input = retained_data_to_stats_input(&data);
         let mut w = StatsWidget::new();
@@ -14431,6 +14491,44 @@ mod tests {
     }
 
     #[test]
+    fn image_display_attrs_round_trip_preserves_every_reupload_field() {
+        // A scalar image with non-default opacity, interpolation, and
+        // aggregation: capturing it to RetainedItemData and restoring onto a
+        // fresh ImageSpec::scalar (as every re-upload path does) must carry
+        // *every* display field via the single-owner ImageDisplayAttrs::apply —
+        // not just geometry. This is the structural guard against a re-upload
+        // path silently resetting interpolation/aggregation to scalar() defaults
+        // (the same defect family the retained alpha closed).
+        let pixels = [1.0f32, 2.0, 3.0, 4.0];
+        let mut spec = ImageSpec::scalar(2, 2, &pixels, Colormap::viridis(0.0, 4.0));
+        spec.origin = (5.0, 6.0);
+        spec.scale = (2.0, 3.0);
+        spec.alpha = 0.4;
+        spec.interpolation = InterpolationMode::Linear;
+        spec.aggregation = AggregationMode::Max;
+        spec.aggregation_block = (2, 2);
+
+        let retained = image_spec_retained_data(&spec).expect("scalar image retains data");
+        let attrs = retained
+            .image_display_attrs()
+            .expect("image has display attrs");
+
+        // A fresh spec starts at the scalar() defaults (Nearest / None / unit).
+        let mut rebuilt = ImageSpec::scalar(2, 2, &pixels, Colormap::viridis(0.0, 4.0));
+        assert_eq!(rebuilt.interpolation, InterpolationMode::Nearest);
+        assert_eq!(rebuilt.aggregation, AggregationMode::None);
+        assert_eq!(rebuilt.alpha, 1.0);
+        attrs.apply(&mut rebuilt);
+
+        assert_eq!(rebuilt.origin, (5.0, 6.0));
+        assert_eq!(rebuilt.scale, (2.0, 3.0));
+        assert_eq!(rebuilt.alpha, 0.4);
+        assert_eq!(rebuilt.interpolation, InterpolationMode::Linear);
+        assert_eq!(rebuilt.aggregation, AggregationMode::Max);
+        assert_eq!(rebuilt.aggregation_block, (2, 2));
+    }
+
+    #[test]
     fn roi_stats_rows_image_match_image_roi_stats_per_roi() {
         // Item 110: one row per ROI, each reduced over the active image's pixels
         // inside that ROI via image_roi_stats (identical geometry/cast). The
@@ -14445,6 +14543,9 @@ mod tests {
             scale: (1.0, 1.0),
             colormap: Box::new(Colormap::viridis(0.0, 1.0)),
             alpha: 1.0,
+            interpolation: InterpolationMode::Nearest,
+            aggregation: AggregationMode::None,
+            aggregation_block: (1, 1),
         };
         let mut named = ManagedRoi::new(Roi::Rect {
             x: (0.0, 2.0),
@@ -14587,6 +14688,9 @@ mod tests {
             scale: (1.0, 1.0),
             colormap: Box::new(Colormap::viridis(0.0, 1.0)),
             alpha: 1.0,
+            interpolation: InterpolationMode::Nearest,
+            aggregation: AggregationMode::None,
+            aggregation_block: (1, 1),
         };
         assert!(retained_curve_xy(&image).is_none());
     }
