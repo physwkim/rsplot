@@ -127,12 +127,12 @@ pub use crate::widget::high_level::{
     ImageGeometry, ImageHistogramAxis, ImageProfileHistogram, ImageStats, ImageView, ItemStats,
     LegendAction, LegendResponse, Plot1D, Plot2D, PlotDataError, PlotEvent, PlotItemKind,
     PlotWidget, PlotWindow, PlotWithToolbarResponse, ProfileMethod, ProfileMode, ScatterPick,
-    ScatterView, ScatterVisualization, StackPerspective, StackProfile, StackView, ToolbarResponse,
-    ValueStats, aligned_profile_values, compare_pixel_at, default_dimension_label,
-    dimension_axis_labels, histogram_edges, histogram_step_values, horizontal_profile_values,
-    line_profile_band, line_profile_values, pick_histogram, rect_profile_values,
-    scatter_pick_pixels, scatter_position_info, stack_aligned_profile, stack_frame,
-    stack_frame_count, stack_line_profile, vertical_profile_values,
+    ScatterView, ScatterVisualization, StackPerspective, StackProfile, StackProfileDimension,
+    StackView, ToolbarResponse, ValueStats, aligned_profile_values, compare_pixel_at,
+    default_dimension_label, dimension_axis_labels, histogram_edges, histogram_step_values,
+    horizontal_profile_values, line_profile_band, line_profile_values, pick_histogram,
+    rect_profile_values, scatter_pick_pixels, scatter_position_info, stack_aligned_profile,
+    stack_frame, stack_frame_count, stack_line_profile, vertical_profile_values,
 };
 pub use crate::widget::histogram_colorbar::{
     Handle as HistogramColorBarHandle, HistogramColorBar, HistogramColorBarResponse,
@@ -173,6 +173,7 @@ pub use crate::widget::scene_widget::{
     PICK_POINT_TOLERANCE_PX, ScenePick, ScenePickKind, SceneWidget, viewpoint_menu,
 };
 pub use crate::widget::scene_window::SceneWindow;
+pub use crate::widget::stack_profile_window::StackProfileWindow;
 pub use crate::widget::stats_widget::{
     StatsInput, StatsWidget, UpdateMode, format_significant, format_stat,
 };

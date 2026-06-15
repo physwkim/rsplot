@@ -11317,6 +11317,22 @@ pub struct StackProfile {
     pub values: Vec<f64>,
 }
 
+/// Which profile a [`StackView`]'s Profile3D tool extracts — silx
+/// `_DefaultImageStackProfileRoiMixIn.profileType` (`"1D"` / `"2D"`,
+/// `tools/profile/rois.py:1063-1075`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StackProfileDimension {
+    /// A 1D profile of the currently displayed frame (silx `"1D"`, the default),
+    /// shown in the [`ProfileWindow`](crate::widget::profile_window::ProfileWindow)
+    /// curve window.
+    #[default]
+    OneD,
+    /// A 2D profile stacked over every frame (silx `"2D"`), shown in the
+    /// [`StackProfileWindow`](crate::widget::stack_profile_window::StackProfileWindow)
+    /// image window.
+    TwoD,
+}
+
 /// Apply a single-frame profile extractor to every frame of a stack and stack
 /// the results — the pure core behind [`stack_aligned_profile`] /
 /// [`stack_line_profile`], mirroring silx `ProfileImageStack*`.
@@ -11498,10 +11514,30 @@ pub struct StackView {
     /// Per-axis block factors `(block_x, block_y)` for [`aggregation`] (silx
     /// level-of-detail `(lodx, lody)`); each `>= 1`, `(1, 1)` is a no-op.
     aggregation_block: (u32, u32),
+    /// Armed profile-ROI tool of the Profile3D toolbar (silx
+    /// `Profile3DToolBar`'s `ProfileImageStack*ROI` actions); [`ProfileMode::None`]
+    /// when no profile tool is active.
+    profile_mode: ProfileMode,
+    /// Whether the profile tool extracts a 1D current-frame profile or a 2D
+    /// stacked profile (silx `_DefaultImageStackProfileRoiMixIn.profileType`).
+    profile_dimension: StackProfileDimension,
+    /// Data-space start of the in-progress profile drag, set on `drag_started`
+    /// and cleared on `drag_stopped` (silx profile ROI first point).
+    profile_drag_start: Option<(f64, f64)>,
+    /// Side window for the 1D current-frame profile (silx profileType `"1D"`),
+    /// fed from `self.frames[self.current_frame]`.
+    profile_window: crate::widget::profile_window::ProfileWindow,
+    /// Side window for the 2D stacked profile over all frames (silx profileType
+    /// `"2D"`), the distinguishing feature of the Profile3D toolbar.
+    stack_profile_window: crate::widget::stack_profile_window::StackProfileWindow,
 }
 
 impl StackView {
     /// Create a new `StackView`.
+    ///
+    /// Reserves three plot ids: `id` for the image plot, `id + 1` for the 1D
+    /// profile window, and `id + 2` for the 2D stacked-profile window (mirroring
+    /// [`ImageView`], which reserves a small id range for its profile window).
     pub fn new(render_state: &RenderState, id: PlotId) -> Self {
         let mut inner = Plot2D::new(render_state, id);
         inner.set_keep_data_aspect_ratio(true);
@@ -11525,6 +11561,14 @@ impl StackView {
             calibrations: [Calibration::None; 3],
             aggregation: AggregationMode::None,
             aggregation_block: (1, 1),
+            profile_mode: ProfileMode::None,
+            profile_dimension: StackProfileDimension::default(),
+            profile_drag_start: None,
+            profile_window: crate::widget::profile_window::ProfileWindow::new(render_state, id + 1),
+            stack_profile_window: crate::widget::stack_profile_window::StackProfileWindow::new(
+                render_state,
+                id + 2,
+            ),
         }
     }
 
@@ -11742,6 +11786,211 @@ impl StackView {
         stack_line_profile(data, *shape, self.perspective, start, end)
     }
 
+    /// The armed profile-ROI tool of the Profile3D toolbar (silx
+    /// `Profile3DToolBar`).
+    pub fn profile_mode(&self) -> ProfileMode {
+        self.profile_mode
+    }
+
+    /// Arm or disarm the Profile3D ROI tool (silx `Profile3DToolBar`'s
+    /// `ProfileImageStack*ROI` actions). While armed, a primary drag on the image
+    /// extracts a profile and shows it in the 1D or 2D profile window per
+    /// [`profile_dimension`](Self::profile_dimension). [`ProfileMode::None`]
+    /// disables the tool and closes both windows.
+    pub fn set_profile_mode(&mut self, mode: ProfileMode) {
+        self.profile_mode = mode;
+        if mode == ProfileMode::None {
+            self.profile_drag_start = None;
+            self.profile_window.set_open(false);
+            self.stack_profile_window.set_open(false);
+        }
+    }
+
+    /// Whether the profile tool yields a 1D current-frame profile or a 2D
+    /// stacked profile (silx `_DefaultImageStackProfileRoiMixIn.profileType`).
+    pub fn profile_dimension(&self) -> StackProfileDimension {
+        self.profile_dimension
+    }
+
+    /// Switch between the 1D current-frame and 2D stacked profile (silx
+    /// `setProfileType`). Closes the now-inactive profile window so only the
+    /// active profile is shown.
+    pub fn set_profile_dimension(&mut self, dimension: StackProfileDimension) {
+        if dimension == self.profile_dimension {
+            return;
+        }
+        self.profile_dimension = dimension;
+        match dimension {
+            StackProfileDimension::OneD => self.stack_profile_window.set_open(false),
+            StackProfileDimension::TwoD => self.profile_window.set_open(false),
+        }
+    }
+
+    /// The 1D current-frame profile window (silx profileType `"1D"`).
+    pub fn profile_window(&self) -> &crate::widget::profile_window::ProfileWindow {
+        &self.profile_window
+    }
+
+    /// Mutable access to the 1D current-frame profile window.
+    pub fn profile_window_mut(&mut self) -> &mut crate::widget::profile_window::ProfileWindow {
+        &mut self.profile_window
+    }
+
+    /// The 2D stacked-profile window (silx profileType `"2D"`).
+    pub fn stack_profile_window(&self) -> &crate::widget::stack_profile_window::StackProfileWindow {
+        &self.stack_profile_window
+    }
+
+    /// Mutable access to the 2D stacked-profile window.
+    pub fn stack_profile_window_mut(
+        &mut self,
+    ) -> &mut crate::widget::stack_profile_window::StackProfileWindow {
+        &mut self.stack_profile_window
+    }
+
+    /// Compute and display the profile for a drag between data-space `(col, row)`
+    /// endpoints, routing to the 1D or 2D window per the current
+    /// [`profile_dimension`](Self::profile_dimension) and the armed
+    /// [`profile_mode`](Self::profile_mode). The shared body of the interactive
+    /// drag ([`handle_profile_drag`](Self::handle_profile_drag)); also callable
+    /// directly to drive the profile without a `Ui`. Returns `true` when a
+    /// profile was produced and its window opened.
+    ///
+    /// In 2D mode the stacked profile requires a loaded volume
+    /// ([`set_volume`](Self::set_volume)); in flat-frames mode it returns `false`.
+    /// [`ProfileMode::Rectangle`] has no silx stack-profile ROI, so 2D mode
+    /// ignores it (silx `Profile3DToolBar` offers only h-line / v-line / line).
+    pub fn show_profile(&mut self, start: (f64, f64), end: (f64, f64)) -> bool {
+        if self.frames.is_empty() {
+            return false;
+        }
+        match self.profile_dimension {
+            StackProfileDimension::OneD => {
+                let Some(roi) = profile_roi_from_drag(self.profile_mode, start, end) else {
+                    return false;
+                };
+                let frame = &self.frames[self.current_frame];
+                self.profile_window
+                    .update_profile(self.width, self.height, frame, &roi);
+                self.profile_window.set_open(true);
+                true
+            }
+            StackProfileDimension::TwoD => {
+                let profile = match self.profile_mode {
+                    ProfileMode::Line => self.stack_line_profile(start, end),
+                    ProfileMode::Horizontal => {
+                        self.stack_aligned_profile(end.1.floor(), 1, true, ProfileMethod::Mean)
+                    }
+                    ProfileMode::Vertical => {
+                        self.stack_aligned_profile(end.0.floor(), 1, false, ProfileMethod::Mean)
+                    }
+                    ProfileMode::Rectangle | ProfileMode::None => None,
+                };
+                let Some(profile) = profile else {
+                    return false;
+                };
+                self.stack_profile_window
+                    .set_profile(&profile, self.colormap.clone());
+                self.stack_profile_window.set_open(true);
+                true
+            }
+        }
+    }
+
+    /// Track a profile drag on the image plot and extract the profile live, the
+    /// Profile3D analogue of [`ImageView::handle_profile_drag`]. Maps the drag
+    /// start/current pixels to data-space `(col, row)` via the plot transform and
+    /// feeds [`show_profile`](Self::show_profile). Gated on an armed
+    /// [`profile_mode`](Self::profile_mode) so pan / zoom never extract a profile.
+    fn handle_profile_drag(&mut self, plot_response: &PlotResponse) {
+        if self.profile_mode == ProfileMode::None || self.frames.is_empty() {
+            self.profile_drag_start = None;
+            return;
+        }
+        let response = &plot_response.response;
+        let transform = &plot_response.transform;
+
+        if response.drag_started()
+            && let Some(p) = response.interact_pointer_pos()
+        {
+            self.profile_drag_start = Some(transform.pixel_to_data(p));
+        }
+
+        if response.dragged()
+            && let (Some(start), Some(p)) =
+                (self.profile_drag_start, response.interact_pointer_pos())
+        {
+            let end = transform.pixel_to_data(p);
+            self.show_profile(start, end);
+        }
+
+        if response.drag_stopped() {
+            self.profile_drag_start = None;
+        }
+    }
+
+    /// Show the Profile3D toolbar — the profile-ROI tool buttons plus the 1D/2D
+    /// dimension toggle (silx `Profile3DToolBar`: the `ProfileImageStack*ROI`
+    /// actions over a [`StackView`]). The selected tool/dimension drives the
+    /// interactive drag in [`show`](Self::show).
+    pub fn show_profile3d_toolbar(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            let mut mode = self.profile_mode;
+            if ui
+                .selectable_label(mode == ProfileMode::None, "○")
+                .on_hover_text("No profile")
+                .clicked()
+            {
+                mode = ProfileMode::None;
+            }
+            if ui
+                .selectable_label(mode == ProfileMode::Horizontal, "H")
+                .on_hover_text("Horizontal line profile over the stack")
+                .clicked()
+            {
+                mode = ProfileMode::Horizontal;
+            }
+            if ui
+                .selectable_label(mode == ProfileMode::Vertical, "V")
+                .on_hover_text("Vertical line profile over the stack")
+                .clicked()
+            {
+                mode = ProfileMode::Vertical;
+            }
+            if ui
+                .selectable_label(mode == ProfileMode::Line, "L")
+                .on_hover_text("Line profile over the stack (draw a line)")
+                .clicked()
+            {
+                mode = ProfileMode::Line;
+            }
+            if mode != self.profile_mode {
+                self.set_profile_mode(mode);
+            }
+
+            ui.separator();
+            ui.label("Profile:");
+            let mut dimension = self.profile_dimension;
+            if ui
+                .selectable_label(dimension == StackProfileDimension::OneD, "1D")
+                .on_hover_text("Profile of the current frame")
+                .clicked()
+            {
+                dimension = StackProfileDimension::OneD;
+            }
+            if ui
+                .selectable_label(dimension == StackProfileDimension::TwoD, "2D")
+                .on_hover_text("Profile stacked over all frames")
+                .clicked()
+            {
+                dimension = StackProfileDimension::TwoD;
+            }
+            if dimension != self.profile_dimension {
+                self.set_profile_dimension(dimension);
+            }
+        });
+    }
+
     /// Number of frames in the stack.
     pub fn frame_count(&self) -> usize {
         self.frames.len()
@@ -11902,7 +12151,14 @@ impl StackView {
             }
             self.dirty = false;
         }
-        self.inner.show(ui)
+        let response = self.inner.show(ui);
+        // Profile3D tool: a drag on the image extracts a profile (1D current
+        // frame or 2D stacked over all frames) and shows it in the matching
+        // side window (silx `Profile3DToolBar`).
+        self.handle_profile_drag(&response);
+        self.profile_window.show(ui.ctx());
+        self.stack_profile_window.show(ui.ctx());
+        response
     }
 }
 
