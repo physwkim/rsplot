@@ -190,6 +190,11 @@ The `high_level_*` examples deliberately mirror common silx examples from
 | `cargo run --example scene3d` | Low-level 3D scene: colormapped `Scatter3D` helix + lit `Mesh3D` saddle, with orbit/pan/zoom. |
 | `cargo run --example scalar_field_view` | `ScalarFieldView` flagship — `sinc` volume iso-surface (silx `viewer3DVolume`). |
 | `cargo run --example scene_window` | `SceneWindow` — iso-surfaces + jet cut plane + viewpoint toolbar, properties panel, and X/Y/Z/Data pick readout. |
+| `cargo run --example scene3d_scatter` | `Scatter3D` value-coloured point cloud (silx `plot3dSceneWindow` scatter). |
+| `cargo run --example scene3d_mesh` | `ColormapMesh3D` ripple surface + `Box3D` / `Cylinder3D` / `Hexagon3D` volumes. |
+| `cargo run --example scene3d_image` | `ImageData3D` + `ImageRgba3D` quads + a `HeightMapData` surface (silx `17_3d_image_heightmap`). |
+| `cargo run --example scene3d_update` | Live-updating `Scatter3D` re-uploaded each frame (silx `plot3dUpdateScatterFromThread`). |
+| `cargo run --example complex_field3d` | `ComplexField3D` iso-surface with a selectable `ComplexMode` projection. |
 
 See [`doc/high-level-api.md`](doc/high-level-api.md) for the full silx-example
 mapping.

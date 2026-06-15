@@ -237,3 +237,23 @@ path = "examples/scalar_field_view.rs"
 [[example]]
 name = "scene_window"
 path = "examples/scene_window.rs"
+
+[[example]]
+name = "scene3d_scatter"
+path = "examples/scene3d_scatter.rs"
+
+[[example]]
+name = "scene3d_mesh"
+path = "examples/scene3d_mesh.rs"
+
+[[example]]
+name = "scene3d_image"
+path = "examples/scene3d_image.rs"
+
+[[example]]
+name = "scene3d_update"
+path = "examples/scene3d_update.rs"
+
+[[example]]
+name = "complex_field3d"
+path = "examples/complex_field3d.rs"
