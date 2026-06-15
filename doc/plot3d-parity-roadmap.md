@@ -71,10 +71,11 @@ P1.1 notes: `Scatter3D` ports silx's `Points`/`_Points` faithfully — billboard
 pixel-sized markers (all eight `_Points` symbols) via `scene3d_points.wgsl`.
 Documented simplifications: colour is mapped through the colormap on the CPU
 (`Colormap::color_at`) at geometry-build time rather than in a GPU colormap
-texture (points are few vs image rasters); per-point picking (`_pickFull`) is
-deferred with the rest of GPU picking (see Architecture); the `Spheres` primitive
-(shaded 3D spheres — not used by silx `Scatter3D`, which renders `Points`) is not
-yet ported.
+texture (points are few vs image rasters); the `Spheres` primitive (shaded 3D
+spheres — not used by silx `Scatter3D`, which renders `Points`) is not yet ported.
+Per-point picking lands in **Phase 4**: `SceneWidget::pick` returns the hit point's
+index (`ScenePickKind::Point`); silx's `_pickFull` per-point *data* payload beyond
+the index is the documented remaining tail.
 
 P1.3 notes: `ImageData3D`/`ImageRgba3D` render a 2D image as one textured quad
 (`scene3d_image.wgsl` + `Scene3dImageLayer`, an `Rgba8Unorm` texture per layer),
@@ -86,8 +87,10 @@ render the height field as size-1 square points — exactly how silx renders the
 (`primitives.Points`, marker `'s'`) — reusing the point pipeline; mismatched
 colour/height sizes are nearest-neighbour resampled. Documented divergence: silx's
 resample indexes the column axis by the field *height* (image.py:318/390, a bug on
-non-square data); this port uses *width* (agrees for equal-sized data). Image
-`_pickFull` (plane intersect / NDC point picking) deferred with GPU picking.
+non-square data); this port uses *width* (agrees for equal-sized data).
+`HeightMap` points are picked by `SceneWidget::pick` (Phase 4); silx's image
+`_pickFull` pixel-index resolution (mapping a quad hit to a texel index) is the
+documented remaining tail there.
 
 P1.2 notes: a `scene3d_mesh.wgsl` pipeline shades lit triangles with silx's
 camera-fixed headlight (`DirectionalLight` defaults: ambient 0.3, diffuse 0.7, no
@@ -100,9 +103,10 @@ list, since the GPU path is `TriangleList` only) and a flat-normal fallback when
 no normals are given. `Box3D`/`Cylinder3D`/`Hexagon3D` port
 `_CylindricalVolume`: faceted Box (4 faces) / Hexagon (6), smooth radial-normal
 Cylinder (nb_faces), one or many instances per call. Documented simplifications:
-colormap on CPU (as P1.1); mesh `_pickFull` deferred with GPU picking; lighting
-params are silx's viewport defaults baked in (a lighting on/off + parameter API is
-a later enhancement).
+colormap on CPU (as P1.1); lighting params are silx's viewport defaults baked in
+(a lighting on/off + parameter API is a later enhancement). Mesh picking lands in
+**Phase 4** — the mesh triangles are picked by `SceneWidget::pick` (CPU
+ray/triangle).
 
 ### Phase 2 — `ScalarFieldView` flagship
 
@@ -132,9 +136,11 @@ mirroring silx — `set_data` frames the camera to the volume box only on the
 the new `SceneWidget::set_bounds_keep_view`), with `add_isosurface` /
 `add_auto_isosurface` / `remove_isosurface` / `clear_isosurfaces` mapping 1:1 to
 silx, the cut plane configured via `field_mut` + `rebuild`. Geometry is uploaded
-eagerly on data-layer change (not per frame), matching `SceneWidget`. **Deferred
-(documented):** the `setComplexMode`/iso-surface re-resolve UI panel and 3D
-picking remain with the Phase 3 tools and the standing GPU-picking deferral.
+eagerly on data-layer change (not per frame), matching `SceneWidget`. The
+`setComplexMode`/iso-surface re-resolve UI panel lands with the Phase 3 tools;
+3D picking of the field (surfaces + cut plane → value) lands in **Phase 4**
+(`ScalarFieldView::pick`, CPU ray-geometry — not the "GPU picking" the earlier
+notes assumed).
 
 P2.2 notes: the plane math (`src/core/scene3d/plane.rs`) ports silx
 `scene.utils.Plane` + the box/segment intersection helpers (`boxPlaneIntersect`,
@@ -172,15 +178,17 @@ marching cubes and emitted as a lit solid-colour mesh (P1.2 path), mapping the
 `(z,y,x)` vertices to world `(x+0.5, y+0.5, z+0.5)` — silx's `_isogroup` swap
 matrix + `Translate(0.5,0.5,0.5)`. Field bounds are the full volume box (silx
 `BoundedGroup`). Auto-level (`mean_plus_std`, silx's documented default) re-resolves
-on data change. Documented simplifications: the cut plane is P2.2; iso-surface
-`_pickFull` (ray/marching-cubes-per-bin) is deferred with GPU picking; lighting
-uses the baked-in viewport defaults (as P1.2).
+on data change. Documented simplifications: the cut plane is P2.2; lighting
+uses the baked-in viewport defaults (as P1.2). Iso-surface picking lands in
+**Phase 4** — the surface triangles are picked by `SceneWidget::pick` (CPU
+ray/triangle, not the "GPU picking" framing); silx's `_pickFull`
+marching-cubes-per-bin *index* resolution is the documented remaining tail there.
 
 ### Phase 3 — tools / window / parity tail
 
 | Wave | Item | silx source | Status |
 |---|---|---|---|
-| P3.1 | Viewpoint presets (+ PositionInfo deferred-with-picking; GroupProperties → P3.2) | actions/viewpoint.py, tools/ViewpointTools.py | ◐ |
+| P3.1 | Viewpoint presets (PositionInfo → Phase 4; GroupProperties → P3.2) | actions/viewpoint.py, tools/ViewpointTools.py | ✅ |
 | P3.2 | 3D colorbar + egui parameter panel (GroupProperties) | tools/GroupPropertiesWidget.py | ✅ |
 | P3.3 | SceneWindow composition + io snapshot + roadmap reconcile | SceneWindow.py, actions/io.py | ✅ |
 
@@ -213,9 +221,10 @@ parts that are ported — the `viewpoint_menu` drop-down (P3.1), a
 `ScalarFieldView` scene (P2.3c), and a toggleable `ScalarFieldProperties` panel
 (P3.2) — composed with the established `show_inside` panel idiom (`Panel::top`
 toolbar + `Panel::left` properties + `CentralPanel` scene) so the scene gets a
-real pixel rect. Not composed (deferred upstream, documented): the
-`PositionInfoWidget` (needs 3D picking, see P3.1/P2.1) and the generic
-`ParamTreeView` (`plot3d._model`, see P3.2 / the N/A list). **P3.3b** ports the
+real pixel rect. The `PositionInfoWidget` was deferred here (needs 3D picking) and
+is added in **Phase 4 (PK4)** as a `Panel::bottom` readout fed by the cursor pick.
+Not composed (documented): the generic `ParamTreeView` (`plot3d._model`, see P3.2
+/ the N/A list). **P3.3b** ports the
 save-snapshot capability behind silx `actions/io.py` (`CopyAction`/`SaveAction`/
 `PrintAction`, all built on `Plot3DWidget.grabGL()` → a `QImage` saved as
 PNG/JPEG): `SceneWidget::snapshot(render_state, size_px)` and the underlying
@@ -246,14 +255,91 @@ the existing `CameraFace`); `SceneWidget::rotate_scene(angle_degrees)` ports
 the caller animates. `viewpoint_menu` (`widget::scene_widget`) ports
 `tools.ViewpointTools.ViewpointToolButton` — a "View" drop-down whose items invoke
 the presets, verified end-to-end through an AccessKit harness click
-(`tests/scene_viewpoint_render.rs`). **Deferred / relocated (documented, not
-dropped):** `tools.PositionInfoWidget` is built entirely on
-`SceneWidget.pickItems(x, y, …)` — 3D scene picking, which is deferred alongside
-the iso-surface `_pickFull` GPU-picking work (see P2.1 notes); it cannot be ported
-faithfully without that picker, so it stays deferred rather than stubbed with a
-non-functional readout. The `GroupPropertiesWidget` properties panel is scoped with
+(`tests/scene_viewpoint_render.rs`). **Relocated (now delivered):**
+`tools.PositionInfoWidget` is built entirely on `SceneWidget.pickItems(x, y, …)`
+— 3D scene picking — so it could not ship in P3.1 without that picker. Picking is
+CPU ray-geometry (not GPU readback, as the earlier notes wrongly framed it) and is
+ported in **Phase 4** (PK1–PK4); the readout (`ScenePositionInfo`) ships in **PK4**.
+The `GroupPropertiesWidget` properties panel is scoped with
 the egui parameter panel in **P3.2** (its silx `tools/GroupProperties.py` +
-`_model/*` source), so P3.1 stops at the viewpoint tools.
+`_model/*` source), so P3.1 stops at the viewpoint tools. The
+`PositionInfoWidget` it depends on is delivered in **Phase 4**.
+
+### Phase 4 — picking + PositionInfoWidget
+
+| Wave | Item | silx source | Status |
+|---|---|---|---|
+| PK1 | Pick ray + segment/triangle intersection (CPU core) | items/_pick.py `PickContext.getPickingSegment`, scene/utils.py `segmentTrianglesIntersection` | ✅ |
+| PK2 | `SceneWidget::pick` traversal (surfaces + points) | items/_pick.py `_pickFull`, scene/viewport.py | ✅ |
+| PK3 | `ScalarField3D` cut-plane / volume value pick | items/volume.py `CutPlane._pickFull`, scene/utils.py | ✅ |
+| PK4 | `ScenePositionInfo` (PositionInfoWidget) + SceneWindow wiring | tools/PositionInfoWidget.py | ✅ |
+
+**Framing correction (supersedes the "deferred with GPU picking" notes
+above).** Earlier waves described 3D picking as *GPU picking* awaiting a
+colour-id readback pass. That was wrong: silx 3D picking is **CPU
+ray-geometry intersection**, no GPU readback. `PickContext.getPickingSegment`
+(`items/_pick.py`) unprojects the click to a near→far segment over the full
+NDC z-range (`viewport.pick` is a no-op stub), and each item's `_pickFull`
+runs `segmentTrianglesIntersection` (signed-tetrahedron volumes,
+Kensler–Shirley 2006), `segmentVolumeIntersect`, or a segment/plane test —
+all on CPU geometry siplot already holds. Phase 4 ports that; no GPU-picking
+pass exists to defer.
+
+PK1 notes: `core::scene3d::pick` (`src/core/scene3d/pick.rs`) is the pure CPU
+core, depending only on `Camera` + `Mat4` (core layer). `picking_segment(camera,
+ndc)` unprojects screen NDC to a world near→far segment via
+`camera.matrix().inverse()` (the silx-convention [-1,1] NDC matrix, so its
+inverse unprojects from silx NDC; near at z=-1, far at z=+1, with perspective
+divide) — the analogue of `getPickingSegment(frame='scene')`.
+`segment_triangles_intersection(segment, &[[Vec3;3]])` is a line-for-line port of
+silx `segmentTrianglesIntersection` (signed-tetrahedron-volume test, skip
+degenerate, parametric `t ∈ [0,1]`), returning `TriangleHit { triangle, t,
+barycentric }` sorted near→far. Unit-tested incl. a `picking_segment` round-trip.
+
+PK2 notes: `SceneWidget::pick(ndc) -> Option<ScenePick>` (`widget::scene_widget`)
+traverses the widget's own CPU geometry (no GPU): it builds the segment, runs
+`segment_triangles_intersection` over `Scene3dGeometry::pick_triangles()` (the
+triangles channel + the mesh channel, via `chunks_exact(3)`), and tests
+`pick_points()` by projecting each point to NDC and taking those within
+`PICK_POINT_TOLERANCE_PX` (7 px). Nearest by NDC depth wins; `ScenePick` carries
+the world `position`, `ndc_depth`, and `kind` (`Surface` or `Point { index }`).
+`Scene3dGeometry` owns its vertex layout via the `pick_triangles`/`pick_points`
+accessors, so the widget never reaches into vertex structs. Covers every
+triangle item (mesh / iso-surface / box / cylinder / hexagon) and every point
+item (scatter / height-map) — the work the P1.x/P2.x notes called "`_pickFull`
+deferred". Verified render-free (`tests/scene_pick.rs`).
+
+PK3 notes: `ScalarField3D::value_at(world) -> Option<f32>` samples the field at a
+world position (box test, then the voxel-centre sampler used by the cut plane,
+honouring its interpolation), and `ScalarField3D::pick_cut_plane(segment)` returns
+the segment/plane intersection when the cut plane is visible and the hit lies
+inside the volume box (`segment_plane_intersect` + `value_at`). The cut plane is a
+textured mesh (not in the triangle channel), so it is picked against the field
+directly rather than through `SceneWidget::pick`. Unit-tested over a ramp field,
+keyed to the voxel-centre convention (world z=2.5 ⇒ z-index 2).
+
+PK4 notes: `ScalarFieldView::pick(ndc) -> Option<FieldPick>` unifies the two
+channels silx's `PositionInfoWidget` reduces to for a `ScalarFieldView` — the
+data surfaces / scatter (`SceneWidget::pick`) and the cut plane
+(`ScalarField3D::pick_cut_plane`) — taking the nearest by NDC depth and sampling
+the value at the chosen world position with `value_at` (one value path for
+surface and cut-plane hits alike). `FieldPick { position, value }` is the data
+silx reads from a `PickingResult`. `ScenePositionInfo`
+(`widget::scene_position_info`) ports `tools.PositionInfoWidget`: an X/Y/Z/Data
+readout (silx `_xLabel`/`_yLabel`/`_zLabel`/`_dataLabel`), each `-` when nothing
+is picked. `SceneWindow` composes it in a `Panel::bottom` row and feeds it the
+cursor pick each frame (one-frame lag — the scene rect it picks against is only
+known after the central panel lays out, the idiomatic egui immediate-mode
+trade-off). **N/A (Qt chrome):** silx's interactive picking-mode toggle action is
+Qt-shell, like the rest of the `SceneWindow` toolbars. **Remaining tail
+(documented, not blocking):** silx's per-item `_pickFull` returns richer payloads
+than world-position + sampled value — data-index/bin resolution for scatter, image
+pixel indices for `ImageData3D`, marching-cubes bin for iso-surfaces. siplot's
+pick returns world position + field value + point index, which is exactly what the
+`PositionInfoWidget` consumes; the richer per-item index payloads are a later
+enhancement, not a separate "GPU picking" effort. Verified
+`tests/scalar_field_pick.rs` (cut-plane hit + value, and the empty-pick case) and
+the `Data: -` readout assertion in `tests/scene_window_render.rs`.
 
 ## Verification
 

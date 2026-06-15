@@ -41,9 +41,18 @@ blits into egui's color-only render pass. Tracked wave by wave in
   off-screen **scene snapshot** (`SceneWidget::snapshot` / `snapshot_scene3d`)
   reading the rendered scene back as RGBA8 for `encode_png` (the analogue of
   silx `grabGL` + save-as-PNG).
+- **3D picking + `PositionInfoWidget`**: CPU ray-geometry picking ported from
+  silx (`PickContext.getPickingSegment` + `segmentTrianglesIntersection`, *not* a
+  GPU colour-id readback). `SceneWidget::pick` unprojects a click to a world
+  segment and intersects the scene's own triangles/points;
+  `ScalarField3D::pick_cut_plane` / `value_at` pick the cut plane and sample the
+  volume; `ScalarFieldView::pick` unifies both into a `FieldPick` (world position
+  + field value). The composed `SceneWindow` shows a `ScenePositionInfo` readout
+  (port of `PositionInfoWidget`: X/Y/Z/Data) fed by the cursor pick each frame.
 - **Documented simplifications**: colormaps are applied on the CPU at
-  geometry-build time (not via a GPU colormap texture); 3D scene picking
-  (`_pickFull` / `PositionInfoWidget`) and silx's generic `plot3d._model`
+  geometry-build time (not via a GPU colormap texture); silx's per-item
+  `_pickFull` richer payloads (data-index/bin resolution, image pixel indices —
+  beyond world position + sampled value) and its generic `plot3d._model`
   scene-graph tree editor are deferred, noted in the roadmap rather than stubbed.
 
 ## [0.2.0] - 2026-06-13

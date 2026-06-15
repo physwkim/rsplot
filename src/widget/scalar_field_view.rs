@@ -27,9 +27,25 @@
 use egui::{Color32, Response, Ui};
 use egui_wgpu::RenderState;
 
+use crate::core::scene3d::mat4::Vec3;
+use crate::core::scene3d::pick::picking_segment;
 use crate::render::gpu_scene3d::{Scene3dGeometry, Scene3dId};
 use crate::render::scene3d_items::ScalarField3D;
 use crate::widget::scene_widget::SceneWidget;
+
+/// The result of picking a [`ScalarFieldView`] at a screen position: the nearest
+/// hit's world-space position and the field value sampled there (`None` when the
+/// hit lies outside the volume box). Port of the data silx
+/// `PositionInfoWidget.pick` reads from a `PickingResult` (scene position + data
+/// value).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FieldPick {
+    /// World-space position of the nearest hit.
+    pub position: Vec3,
+    /// Field value at the hit, sampled through the cut plane's interpolation, or
+    /// `None` if the position is outside the field box.
+    pub value: Option<f32>,
+}
 
 /// An interactive 3D view of one [`ScalarField3D`] (iso-surfaces + a cut plane).
 ///
@@ -162,6 +178,43 @@ impl ScalarFieldView {
         let mut geometry = Scene3dGeometry::new();
         self.field.append_to(&mut geometry);
         self.scene.set_geometry(render_state, geometry);
+    }
+
+    /// Pick the field under a click at normalized device coordinates `ndc`
+    /// (`x, y ∈ [-1, 1]`), returning the nearest hit's world position and the
+    /// field value there, or `None` if the ray misses everything.
+    ///
+    /// Combines the two pick channels silx's `PositionInfoWidget` reduces to for
+    /// a [`ScalarFieldView`]: the iso-surfaces / scatter geometry
+    /// ([`SceneWidget::pick`]) and the cut plane
+    /// ([`ScalarField3D::pick_cut_plane`]). The nearest by NDC depth wins; the
+    /// value is sampled with [`ScalarField3D::value_at`] at the chosen position.
+    /// Call after [`show`](ScalarFieldView::show) so the camera aspect is current.
+    pub fn pick(&self, ndc: (f32, f32)) -> Option<FieldPick> {
+        let camera = self.scene.camera();
+        let mvp = camera.matrix();
+
+        // Nearest data surface / scatter point, by NDC depth.
+        let mut best: Option<(f32, Vec3)> = None;
+        if let Some(hit) = self.scene.pick(ndc) {
+            best = Some((hit.ndc_depth, hit.position));
+        }
+        // The cut plane (textured mesh, not in the triangle channel) is picked
+        // against the field directly.
+        if let Some(segment) = picking_segment(camera, ndc)
+            && let Some(pos) = self.field.pick_cut_plane(segment)
+        {
+            let depth = mvp.transform_point(pos, true).z;
+            if best.is_none_or(|(d, _)| depth < d) {
+                best = Some((depth, pos));
+            }
+        }
+
+        let (_, position) = best?;
+        Some(FieldPick {
+            position,
+            value: self.field.value_at(position),
+        })
     }
 
     /// Lay out the view, handle orbit/pan/zoom interaction, and paint. Returns

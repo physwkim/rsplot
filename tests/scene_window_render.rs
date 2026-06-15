@@ -94,6 +94,12 @@ fn scene_window_composes_toolbar_scene_and_properties() {
         harness.query_by_label("Autoscale").is_some(),
         "the properties panel must be shown by default"
     );
+    // The position/value readout (silx PositionInfoWidget) is present; with no
+    // cursor over the scene it reads "-" for the data value.
+    assert!(
+        harness.query_by_label("Data: -").is_some(),
+        "the position/value readout must be present, empty when nothing is picked"
+    );
 
     // Hide the properties panel via the toolbar toggle.
     assert!(app.borrow().window.properties_visible());
