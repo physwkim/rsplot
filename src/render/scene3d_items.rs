@@ -11,8 +11,10 @@ use egui::Color32;
 use crate::core::colormap::{AutoscaleMode, Colormap, ColormapName};
 use crate::core::scene3d::marching_cubes::isosurface as marching_cubes_isosurface;
 use crate::core::scene3d::mat4::{Mat4, Vec3, mat4_rotate};
+use crate::core::scene3d::plane::{Plane, box_plane_intersect};
 use crate::render::gpu_scene3d::{
-    ImageInterpolation, PointMarker, Scene3dGeometry, Scene3dImageLayer, flat_normal,
+    ImageInterpolation, PointMarker, Scene3dGeometry, Scene3dImageLayer, Scene3dTexturedMesh,
+    flat_normal,
 };
 
 /// silx's default plot symbol size in pixels (`_config.DEFAULT_PLOT_SYMBOL_SIZE`).
@@ -1655,6 +1657,274 @@ impl Isosurface {
     }
 }
 
+/// Default cut-plane grid resolution: the slice is rasterised onto a
+/// `resolution × resolution` texture (see [`CutPlane`]).
+pub const DEFAULT_CUT_PLANE_RESOLUTION: usize = 256;
+
+/// A colormapped cutting plane through a [`ScalarField3D`] (silx
+/// `plot3d.items.volume.CutPlane`). It carries only presentation state — the
+/// plane geometry, the [`Colormap`], the sampling [`ImageInterpolation`], and a
+/// visibility flag — and reads the field samples from its owning `ScalarField3D`
+/// (silx wires the data with `copy=False`; the data has one owner). Hidden by
+/// default, matching silx (`ScalarField3D` creates its cut plane with
+/// `setVisible(False)`).
+///
+/// Rendering (built by the owner in [`ScalarField3D::append_to`]): the plane is
+/// intersected with the volume box `(0,0,0)..(width,height,depth)` to get the
+/// contour polygon ([`box_plane_intersect`]); the slice is sampled on a
+/// `resolution × resolution` grid in the plane, each sample coloured through the
+/// colormap (CPU [`Colormap::color_at`], as the other 3D items), and the polygon
+/// is fan-triangulated and emitted as one [`Scene3dTexturedMesh`].
+///
+/// Documented simplification: silx samples the 3D data texture per fragment
+/// (continuous); this port rasterises the slice onto a 2D grid texture, so the
+/// slice sharpness is bounded by `resolution` (the same CPU-colormap deviation as
+/// P1.1–P2.1). The CPU sampler matches silx's texture convention — voxel centre
+/// `(ix,iy,iz)` sits at world `(ix+0.5, iy+0.5, iz+0.5)` — with clamp-to-edge
+/// outside the box; `interpolation` selects nearest vs trilinear sampling and is
+/// also applied to the 2D texture.
+#[derive(Clone, Debug)]
+pub struct CutPlane {
+    plane: Plane,
+    colormap: Colormap,
+    interpolation: ImageInterpolation,
+    resolution: usize,
+    visible: bool,
+}
+
+impl Default for CutPlane {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl CutPlane {
+    /// A hidden cut plane with silx defaults: normal `(0, 1, 0)` through the
+    /// origin, the viridis colormap over `[0, 1]`, linear interpolation.
+    pub fn new() -> Self {
+        Self {
+            plane: Plane::new(Vec3::new(0.0, 0.0, 0.0), Vec3::new(0.0, 1.0, 0.0)),
+            colormap: Colormap::new(ColormapName::Viridis, 0.0, 1.0),
+            interpolation: ImageInterpolation::Linear,
+            resolution: DEFAULT_CUT_PLANE_RESOLUTION,
+            visible: false,
+        }
+    }
+
+    /// The cutting plane (point + unit normal).
+    pub fn plane(&self) -> &Plane {
+        &self.plane
+    }
+
+    /// Mutable access to the cutting plane (point/normal setters).
+    pub fn plane_mut(&mut self) -> &mut Plane {
+        &mut self.plane
+    }
+
+    /// Set a point the plane passes through (silx `PlaneMixIn.setPoint`).
+    pub fn set_point(&mut self, point: Vec3) {
+        self.plane.set_point(point);
+    }
+
+    /// Set the plane normal; the zero vector leaves the plane unoriented
+    /// (silx `PlaneMixIn.setNormal`).
+    pub fn set_normal(&mut self, normal: Vec3) {
+        self.plane.set_normal(normal);
+    }
+
+    /// Read-only access to the colormap.
+    pub fn colormap(&self) -> &Colormap {
+        &self.colormap
+    }
+
+    /// Mutable access to the colormap (e.g. to set its value range directly).
+    pub fn colormap_mut(&mut self) -> &mut Colormap {
+        &mut self.colormap
+    }
+
+    /// Set the colormap (silx `ColormapMixIn.setColormap`).
+    pub fn set_colormap(&mut self, colormap: Colormap) {
+        self.colormap = colormap;
+    }
+
+    /// Builder form of [`set_colormap`](Self::set_colormap).
+    pub fn with_colormap(mut self, colormap: Colormap) -> Self {
+        self.colormap = colormap;
+        self
+    }
+
+    /// The texture interpolation (silx `InterpolationMixIn`).
+    pub fn interpolation(&self) -> ImageInterpolation {
+        self.interpolation
+    }
+
+    /// Set the texture interpolation (silx `setInterpolation`).
+    pub fn set_interpolation(&mut self, interpolation: ImageInterpolation) {
+        self.interpolation = interpolation;
+    }
+
+    /// The grid resolution (texels per axis of the slice texture).
+    pub fn resolution(&self) -> usize {
+        self.resolution
+    }
+
+    /// Set the grid resolution (clamped to ≥ 1).
+    pub fn set_resolution(&mut self, resolution: usize) {
+        self.resolution = resolution.max(1);
+    }
+
+    /// Whether the cut plane is drawn (silx `setVisible`).
+    pub fn is_visible(&self) -> bool {
+        self.visible
+    }
+
+    /// Show or hide the cut plane (silx `setVisible`).
+    pub fn set_visible(&mut self, visible: bool) {
+        self.visible = visible;
+    }
+}
+
+/// An orthonormal in-plane basis `(e1, e2)` for the plane with unit `normal`:
+/// `e1 ⟂ normal`, `e2 = normal × e1`. The seed axis is whichever of x/y is least
+/// aligned with `normal`, so the cross product never collapses.
+fn plane_basis(normal: Vec3) -> (Vec3, Vec3) {
+    let seed = if normal.x.abs() < 0.9 {
+        Vec3::new(1.0, 0.0, 0.0)
+    } else {
+        Vec3::new(0.0, 1.0, 0.0)
+    };
+    let e1 = normal.cross(seed).normalized();
+    let e2 = normal.cross(e1).normalized();
+    (e1, e2)
+}
+
+/// Sample the `(depth, height, width)` field (`zyx`, `width` contiguous) at world
+/// point `p`, following silx's texture convention: voxel centre `(ix,iy,iz)` is
+/// at world `(ix+0.5, iy+0.5, iz+0.5)`, and coordinates clamp to the edge voxel
+/// outside the box. `Nearest` rounds to the nearest voxel; `Linear` trilinearly
+/// interpolates the eight surrounding voxels.
+fn sample_field_value(
+    data: &[f32],
+    depth: usize,
+    height: usize,
+    width: usize,
+    p: Vec3,
+    interpolation: ImageInterpolation,
+) -> f32 {
+    let idx = |ix: usize, iy: usize, iz: usize| data[(iz * height + iy) * width + ix];
+    // World → continuous voxel coordinate (voxel centre at integer position).
+    let (fx, fy, fz) = (p.x - 0.5, p.y - 0.5, p.z - 0.5);
+    match interpolation {
+        ImageInterpolation::Nearest => {
+            let clamp = |f: f32, n: usize| (f.round().max(0.0) as usize).min(n - 1);
+            idx(clamp(fx, width), clamp(fy, height), clamp(fz, depth))
+        }
+        ImageInterpolation::Linear => {
+            // Clamp the centre coordinate to [0, n-1] (clamp-to-edge), then
+            // interpolate towards the next voxel.
+            let lo = |f: f32, n: usize| -> (usize, usize, f32) {
+                let c = f.clamp(0.0, (n - 1) as f32);
+                let i0 = c.floor() as usize;
+                let i1 = (i0 + 1).min(n - 1);
+                (i0, i1, c - i0 as f32)
+            };
+            let (x0, x1, dx) = lo(fx, width);
+            let (y0, y1, dy) = lo(fy, height);
+            let (z0, z1, dz) = lo(fz, depth);
+            let lerp = |a: f32, b: f32, t: f32| a + (b - a) * t;
+            let c00 = lerp(idx(x0, y0, z0), idx(x1, y0, z0), dx);
+            let c10 = lerp(idx(x0, y1, z0), idx(x1, y1, z0), dx);
+            let c01 = lerp(idx(x0, y0, z1), idx(x1, y0, z1), dx);
+            let c11 = lerp(idx(x0, y1, z1), idx(x1, y1, z1), dx);
+            lerp(lerp(c00, c10, dy), lerp(c01, c11, dy), dz)
+        }
+    }
+}
+
+/// Build the cut-plane textured mesh for `cut_plane` over the `(depth, height,
+/// width)` field, or `None` when the plane does not slice the volume (fewer than
+/// three contour vertices) or the field is empty. The single owner of the
+/// cut-plane geometry, called from [`ScalarField3D::append_to`].
+fn build_cut_plane_mesh(
+    data: &[f32],
+    depth: usize,
+    height: usize,
+    width: usize,
+    cut_plane: &CutPlane,
+) -> Option<Scene3dTexturedMesh> {
+    if data.is_empty() {
+        return None;
+    }
+    let normal = cut_plane.plane.normal();
+    let bounds = (
+        Vec3::new(0.0, 0.0, 0.0),
+        Vec3::new(width as f32, height as f32, depth as f32),
+    );
+    let contour = box_plane_intersect(bounds, normal, cut_plane.plane.point());
+    if contour.len() < 3 {
+        return None;
+    }
+
+    // Plane-space coordinates (s along e1, t along e2) of every contour vertex,
+    // measured from the first vertex.
+    let (e1, e2) = plane_basis(normal);
+    let origin = contour[0];
+    let st: Vec<(f32, f32)> = contour
+        .iter()
+        .map(|&v| {
+            let d = v - origin;
+            (d.dot(e1), d.dot(e2))
+        })
+        .collect();
+    let (mut smin, mut smax) = (f32::INFINITY, f32::NEG_INFINITY);
+    let (mut tmin, mut tmax) = (f32::INFINITY, f32::NEG_INFINITY);
+    for &(s, t) in &st {
+        smin = smin.min(s);
+        smax = smax.max(s);
+        tmin = tmin.min(t);
+        tmax = tmax.max(t);
+    }
+    let sspan = (smax - smin).max(f32::MIN_POSITIVE);
+    let tspan = (tmax - tmin).max(f32::MIN_POSITIVE);
+
+    // Rasterise the slice onto a res×res grid (row-major, row 0 = t at tmin),
+    // colouring each sample through the colormap → premultiplied-linear RGBA8.
+    let res = cut_plane.resolution.max(1);
+    let mut pixels = Vec::with_capacity(res * res * 4);
+    for j in 0..res {
+        let t = tmin + (j as f32 + 0.5) / res as f32 * tspan;
+        for i in 0..res {
+            let s = smin + (i as f32 + 0.5) / res as f32 * sspan;
+            let p = origin + e1 * s + e2 * t;
+            let value = sample_field_value(data, depth, height, width, p, cut_plane.interpolation);
+            let [r, g, b, a] = cut_plane.colormap.color_at(value as f64);
+            pixels.extend_from_slice(&premul_linear_rgba8(Color32::from_rgba_unmultiplied(
+                r, g, b, a,
+            )));
+        }
+    }
+
+    // Fan-triangulate the contour; each vertex's UV is its plane coordinate
+    // normalised to the grid's bounding rect.
+    let uv = |k: usize| [(st[k].0 - smin) / sspan, (st[k].1 - tmin) / tspan];
+    let mut vertices = Vec::with_capacity((contour.len() - 2) * 3);
+    let mut uvs = Vec::with_capacity((contour.len() - 2) * 3);
+    for k in 1..contour.len() - 1 {
+        for &idx in &[0usize, k, k + 1] {
+            vertices.push(contour[idx].to_array());
+            uvs.push(uv(idx));
+        }
+    }
+    Some(Scene3dTexturedMesh {
+        pixels,
+        width: res as u32,
+        height: res as u32,
+        vertices,
+        uvs,
+        interpolation: cut_plane.interpolation,
+    })
+}
+
 /// A 3D scalar field on a regular grid, rendered as marching-cubes iso-surfaces.
 ///
 /// Port of silx `plot3d.items.volume.ScalarField3D`. Holds the `(depth, height,
@@ -1666,8 +1936,10 @@ impl Isosurface {
 /// field bounds are the full volume box `(0,0,0)..(width,height,depth)` (silx
 /// `BoundedGroup`), independent of any iso-surface extent.
 ///
-/// The cut plane (silx's `CutPlane`) is a separate wave (P2.2); this item covers
-/// the iso-surface side of `ScalarField3D`.
+/// It also owns one [`CutPlane`] (silx `ScalarField3D` owns a single cut plane),
+/// hidden by default; when visible, [`append_to`](Self::append_to) builds its
+/// colormapped slice from the field data (the data has one owner, as silx wires
+/// the plane with `copy=False`).
 #[derive(Clone, Debug)]
 pub struct ScalarField3D {
     data: Vec<f32>,
@@ -1676,6 +1948,7 @@ pub struct ScalarField3D {
     width: usize,
     data_range: Option<(f32, f32, f32)>,
     isosurfaces: Vec<Isosurface>,
+    cut_plane: CutPlane,
 }
 
 impl Default for ScalarField3D {
@@ -1685,7 +1958,7 @@ impl Default for ScalarField3D {
 }
 
 impl ScalarField3D {
-    /// An empty scalar field with no iso-surfaces.
+    /// An empty scalar field with no iso-surfaces and a hidden cut plane.
     pub fn new() -> Self {
         Self {
             data: Vec::new(),
@@ -1694,6 +1967,7 @@ impl ScalarField3D {
             width: 0,
             data_range: None,
             isosurfaces: Vec::new(),
+            cut_plane: CutPlane::new(),
         }
     }
 
@@ -1791,6 +2065,33 @@ impl ScalarField3D {
         self.isosurfaces.clear();
     }
 
+    /// Read-only access to the cut plane (silx `getCutPlanes()[0]`).
+    pub fn cut_plane(&self) -> &CutPlane {
+        &self.cut_plane
+    }
+
+    /// Mutable access to the cut plane — set its position/normal, colormap,
+    /// interpolation, resolution, or visibility.
+    pub fn cut_plane_mut(&mut self) -> &mut CutPlane {
+        &mut self.cut_plane
+    }
+
+    /// Fit the cut plane's colormap range to the field with `mode` (silx
+    /// autoscales the cut-plane colormap over the volume data), returning the new
+    /// `(vmin, vmax)`. A no-op leaving the range unchanged when the field is
+    /// empty.
+    pub fn autoscale_cut_plane_colormap(&mut self, mode: AutoscaleMode) -> (f64, f64) {
+        if self.data.is_empty() {
+            let cm = &self.cut_plane.colormap;
+            return (cm.vmin, cm.vmax);
+        }
+        let values: Vec<f64> = self.data.iter().map(|&v| v as f64).collect();
+        let (vmin, vmax) = mode.range(&values, self.cut_plane.colormap.autoscale_percentiles);
+        self.cut_plane.colormap.vmin = vmin;
+        self.cut_plane.colormap.vmax = vmax;
+        (vmin, vmax)
+    }
+
     /// The volume bounding box `(0,0,0)..(width,height,depth)`, or `None` when no
     /// data is set (silx `BoundedGroup` data bounds, in world `xyz`).
     pub fn bounds(&self) -> Option<(Vec3, Vec3)> {
@@ -1843,6 +2144,18 @@ impl ScalarField3D {
                 });
                 geometry.add_mesh_triangle(p, iso.color, n);
             }
+        }
+        // The cut plane (when visible): a colormapped slice of the volume.
+        if self.cut_plane.visible
+            && let Some(mesh) = build_cut_plane_mesh(
+                &self.data,
+                self.depth,
+                self.height,
+                self.width,
+                &self.cut_plane,
+            )
+        {
+            geometry.add_textured_mesh(mesh);
         }
     }
 }
@@ -2554,5 +2867,148 @@ mod tests {
         let mut g = Scene3dGeometry::new();
         sf.append_to(&mut g);
         assert!(g.meshes.is_empty(), "NaN level → no triangles");
+    }
+
+    #[test]
+    fn cut_plane_hidden_by_default_emits_nothing() {
+        let (data, d, h, w) = blob_field();
+        let sf = ScalarField3D::new().with_data(&data, d, h, w);
+        assert!(!sf.cut_plane().is_visible(), "cut plane hidden by default");
+        let mut g = Scene3dGeometry::new();
+        sf.append_to(&mut g);
+        assert!(g.textured_meshes.is_empty(), "hidden cut plane → no mesh");
+    }
+
+    #[test]
+    fn cut_plane_config_setters() {
+        let mut sf = ScalarField3D::new();
+        let cp = sf.cut_plane_mut();
+        cp.set_visible(true);
+        cp.set_point(Vec3::new(1.0, 2.0, 3.0));
+        cp.set_normal(Vec3::new(0.0, 0.0, 2.0)); // normalised to (0,0,1)
+        cp.set_interpolation(ImageInterpolation::Nearest);
+        cp.set_resolution(0); // clamps to ≥1
+        assert!(sf.cut_plane().is_visible());
+        assert_eq!(sf.cut_plane().plane().point().to_array(), [1.0, 2.0, 3.0]);
+        assert_eq!(sf.cut_plane().plane().normal().to_array(), [0.0, 0.0, 1.0]);
+        assert_eq!(sf.cut_plane().interpolation(), ImageInterpolation::Nearest);
+        assert_eq!(sf.cut_plane().resolution(), 1);
+    }
+
+    #[test]
+    fn plane_basis_is_orthonormal() {
+        for n in [
+            Vec3::new(0.0, 0.0, 1.0),
+            Vec3::new(0.0, 1.0, 0.0),
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(1.0, 2.0, 3.0).normalized(),
+        ] {
+            let (e1, e2) = plane_basis(n);
+            assert!((e1.length() - 1.0).abs() < 1e-5, "e1 unit");
+            assert!((e2.length() - 1.0).abs() < 1e-5, "e2 unit");
+            assert!(e1.dot(n).abs() < 1e-5, "e1 ⟂ n");
+            assert!(e2.dot(n).abs() < 1e-5, "e2 ⟂ n");
+            assert!(e1.dot(e2).abs() < 1e-5, "e1 ⟂ e2");
+        }
+    }
+
+    #[test]
+    fn sample_field_value_nearest_and_linear() {
+        // 2×2×2 field with distinct values: data[(z*2+y)*2+x] = index.
+        let data: Vec<f32> = (0..8).map(|i| i as f32).collect();
+        let (d, h, w) = (2usize, 2usize, 2usize);
+        // Sample exactly at voxel centre (1,0,1) → world (1.5, 0.5, 1.5).
+        let v = sample_field_value(
+            &data,
+            d,
+            h,
+            w,
+            Vec3::new(1.5, 0.5, 1.5),
+            ImageInterpolation::Nearest,
+        );
+        assert_eq!(v, data[h * w + 1]); // (z=1, y=0, x=1) → (1*h+0)*w+1
+        // Midway between the two x-voxels at y=0, z=0: world x=1.0 → fx=0.5.
+        let v = sample_field_value(
+            &data,
+            d,
+            h,
+            w,
+            Vec3::new(1.0, 0.5, 0.5),
+            ImageInterpolation::Linear,
+        );
+        assert!((v - 0.5).abs() < 1e-5, "midpoint trilinear, got {v}");
+        // Clamp-to-edge: far outside the box → the far-corner voxel (1,1,1).
+        let v = sample_field_value(
+            &data,
+            d,
+            h,
+            w,
+            Vec3::new(99.0, 99.0, 99.0),
+            ImageInterpolation::Nearest,
+        );
+        assert_eq!(v, data[7], "clamps to far-corner voxel");
+    }
+
+    #[test]
+    fn visible_axis_cut_plane_emits_textured_mesh() {
+        let (data, d, h, w) = blob_field(); // 5×5×5, central 3×3×3 block = 1.0
+        let mut sf = ScalarField3D::new().with_data(&data, d, h, w);
+        sf.autoscale_cut_plane_colormap(AutoscaleMode::MinMax);
+        {
+            let cp = sf.cut_plane_mut();
+            cp.set_normal(Vec3::new(0.0, 0.0, 1.0));
+            cp.set_point(Vec3::new(2.5, 2.5, 2.5));
+            cp.set_resolution(16);
+            cp.set_visible(true);
+        }
+        let mut g = Scene3dGeometry::new();
+        sf.append_to(&mut g);
+        assert_eq!(g.textured_meshes.len(), 1, "one cut-plane mesh");
+        let m = &g.textured_meshes[0];
+        // The z=2.5 plane ∩ the box is a square (4 contour verts) → fan = 2
+        // triangles = 6 vertices.
+        assert_eq!(m.vertices.len(), 6);
+        assert_eq!(m.uvs.len(), 6);
+        assert_eq!((m.width, m.height), (16, 16));
+        assert_eq!(m.pixels.len(), 16 * 16 * 4, "res×res premultiplied RGBA8");
+        // Every vertex lies on z=2.5 and the contour spans the full box face.
+        let (mut lo, mut hi) = ([f32::INFINITY; 3], [f32::NEG_INFINITY; 3]);
+        for v in &m.vertices {
+            assert!((v[2] - 2.5).abs() < 1e-4, "on the z=2.5 plane");
+            for k in 0..3 {
+                lo[k] = lo[k].min(v[k]);
+                hi[k] = hi[k].max(v[k]);
+            }
+        }
+        assert_eq!([lo[0], lo[1]], [0.0, 0.0]);
+        assert_eq!([hi[0], hi[1]], [5.0, 5.0]);
+    }
+
+    #[test]
+    fn autoscale_cut_plane_colormap_fits_data_range() {
+        let (data, d, h, w) = blob_field();
+        let mut sf = ScalarField3D::new().with_data(&data, d, h, w);
+        let (vmin, vmax) = sf.autoscale_cut_plane_colormap(AutoscaleMode::MinMax);
+        assert_eq!((vmin, vmax), (0.0, 1.0));
+        assert_eq!(sf.cut_plane().colormap().vmin, 0.0);
+        assert_eq!(sf.cut_plane().colormap().vmax, 1.0);
+    }
+
+    #[test]
+    fn cut_plane_not_slicing_the_volume_emits_nothing() {
+        let (data, d, h, w) = blob_field();
+        let mut sf = ScalarField3D::new().with_data(&data, d, h, w);
+        {
+            let cp = sf.cut_plane_mut();
+            cp.set_normal(Vec3::new(0.0, 0.0, 1.0));
+            cp.set_point(Vec3::new(2.5, 2.5, 100.0)); // z=100, outside the box
+            cp.set_visible(true);
+        }
+        let mut g = Scene3dGeometry::new();
+        sf.append_to(&mut g);
+        assert!(
+            g.textured_meshes.is_empty(),
+            "plane misses the volume → no mesh"
+        );
     }
 }

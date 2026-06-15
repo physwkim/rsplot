@@ -109,8 +109,33 @@ a later enhancement).
 | Wave | Item | silx source | Status |
 |---|---|---|---|
 | P2.1 | Marching-cubes isosurface + ScalarField3D | items/volume.py, silx.math.marchingcubes | ✅ |
-| P2.2 | Cut planes + colormap | scene/cutplane.py, primitives PlaneInGroup/ClipPlane | ☐ |
+| P2.2 | Cut planes + colormap | scene/cutplane.py, primitives PlaneInGroup/ClipPlane | ✅ |
 | P2.3 | ScalarFieldView widget + ComplexField3D | ScalarFieldView.py, items/volume.py | ☐ |
+
+P2.2 notes: the plane math (`src/core/scene3d/plane.rs`) ports silx
+`scene.utils.Plane` + the box/segment intersection helpers (`boxPlaneIntersect`,
+`segmentPlaneIntersect`, `angleBetweenVectors`). The GPU side generalises the
+P1.3 image quad into `Scene3dTexturedMesh` (`render::gpu_scene3d`) — an
+arbitrary world-space triangle list sampling one texture through the same
+premultiplied-alpha `image_pipeline` (a shared `build_image_texture_bind_group`
+owner; quads and meshes collect into one draw list keyed by `vertex_count`).
+`CutPlane` (`render::scene3d_items`) ports silx `items.volume.CutPlane`: a
+config item (plane + colormap + interpolation + resolution + visibility) owned by
+`ScalarField3D`, hidden by default, reading the field samples from its parent
+(silx wires the data `copy=False` — one owner). `ScalarField3D::append_to`
+intersects the plane with the volume box (`box_plane_intersect`) → the contour
+polygon, rasterises the slice onto a `resolution × resolution` grid (CPU field
+sampler matching silx's texture convention — voxel centre `(ix,iy,iz)` at world
+`(ix+0.5,…)`, clamp-to-edge, nearest/trilinear), colours it through the colormap
+(CPU `color_at`), and emits the fan-triangulated polygon as one textured mesh.
+Documented simplifications: the slice is a 2D grid texture rather than silx's
+per-fragment 3D-texture sampling, so sharpness is bounded by `resolution` (the
+same CPU-colormap deviation as P1.1–P2.1). **Deferred (documented):** silx's
+`ClipPlane` (`scene/primitives.py` `ClipPlane` — a scene-graph geometry-clipping
+plane that sets a per-fragment `gl_ClipDistance`, cross-cutting every shader) is
+not ported; it is not used by `ScalarField3D`'s cut plane and would require a
+clip-distance uniform threaded through all 3D pipelines — a separate enhancement,
+not part of the cut-plane flagship.
 
 P2.1 notes: `marching_cubes` (`src/core/scene3d/marching_cubes.rs`) is a
 line-for-line port of silx's C++ `mc.hpp` slice-by-slice algorithm + the verbatim
