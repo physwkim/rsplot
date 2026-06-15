@@ -253,6 +253,9 @@ fn format_event(event: PlotEvent) -> String {
         PlotEvent::CurrentRoiChanged { previous, current } => {
             format!("current roi {previous:?} -> {current:?}")
         }
+        PlotEvent::RoiInteractionModeChanged { index, mode } => {
+            format!("roi #{index} mode {}", mode.label())
+        }
         PlotEvent::MarkerMoved { handle } => format!("marker moved #{handle}"),
         PlotEvent::MarkerDragStarted { handle } => format!("marker drag start #{handle}"),
         PlotEvent::MarkerDragFinished { handle } => format!("marker drag finish #{handle}"),

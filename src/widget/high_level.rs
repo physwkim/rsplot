@@ -22,7 +22,7 @@ use crate::core::colormap::{AutoscaleMode, Colormap, Normalization};
 use crate::core::items::{Baseline, LineStyle, ScalarMask, Symbol};
 use crate::core::marker::{Marker, MarkerKind, MarkerSymbol};
 use crate::core::plot::{DataMargins, DataRange, GraphGrid, Plot, PlotId};
-use crate::core::roi::{ManagedRoi, Roi, RoiLineStyle};
+use crate::core::roi::{ManagedRoi, Roi, RoiInteractionMode, RoiLineStyle};
 use crate::core::scatter_viz::{GridImage, ScatterLineProfile};
 use crate::core::shape::{Shape, ShapeKind};
 use crate::core::transform::{AxisSide, Margins, Scale, YAxis};
@@ -348,6 +348,14 @@ pub enum PlotEvent {
     CurrentRoiChanged {
         previous: Option<usize>,
         current: Option<usize>,
+    },
+    /// A ROI's handle-editing interaction mode changed, via the right-click
+    /// interaction-mode submenu or [`PlotWidget::set_roi_interaction_mode`] (silx
+    /// `InteractionModeMixIn.sigInteractionModeChanged`). Carries the ROI index
+    /// and its new [`RoiInteractionMode`].
+    RoiInteractionModeChanged {
+        index: usize,
+        mode: RoiInteractionMode,
     },
     /// A draggable marker was moved, either by an on-screen drag or by
     /// [`PlotWidget::set_marker_position`] (silx `markerMoving` /
@@ -3220,6 +3228,9 @@ impl PlotWidget {
         // remove-after-select interaction consistent.
         if let Some(index) = response.roi_make_current {
             self.set_current_roi(Some(index));
+        }
+        if let Some((index, mode)) = response.roi_set_interaction_mode {
+            self.set_roi_interaction_mode(index, mode);
         }
         if let Some(index) = response.roi_removed {
             self.remove_roi(index);
@@ -6623,6 +6634,33 @@ impl PlotWidget {
         let index = self.backend.plot().rois.len() - 1;
         self.events.push(PlotEvent::RoiAdded { index });
         index
+    }
+
+    /// The current handle-editing interaction mode of the ROI at `index` (silx
+    /// `InteractionModeMixIn.getInteractionMode`). `None` for an out-of-range
+    /// index or a ROI kind without interaction modes (everything but Arc/Band).
+    #[must_use]
+    pub fn roi_interaction_mode(&self, index: usize) -> Option<RoiInteractionMode> {
+        self.backend.plot().rois.get(index)?.interaction_mode()
+    }
+
+    /// Switch the interaction mode of the ROI at `index` (silx
+    /// `InteractionModeMixIn.setInteractionMode`). Emits
+    /// [`PlotEvent::RoiInteractionModeChanged`] and returns `true` only when the
+    /// index is valid and `mode` is one of that ROI's
+    /// [`Roi::available_interaction_modes`](crate::Roi::available_interaction_modes);
+    /// an out-of-range index or a mode foreign to the kind is ignored (no event).
+    pub fn set_roi_interaction_mode(&mut self, index: usize, mode: RoiInteractionMode) -> bool {
+        let Some(roi) = self.backend.plot_mut().rois.get_mut(index) else {
+            return false;
+        };
+        if roi.set_interaction_mode(mode) {
+            self.events
+                .push(PlotEvent::RoiInteractionModeChanged { index, mode });
+            true
+        } else {
+            false
+        }
     }
 
     /// Set the per-ROI color override at `index` (silx `RegionOfInterest.setColor`).

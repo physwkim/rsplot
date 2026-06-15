@@ -16,7 +16,7 @@
 use egui::{PointerButton, Pos2, Rect, Sense, Stroke, Ui};
 
 use crate::core::plot::Plot;
-use crate::core::roi::ManagedRoi;
+use crate::core::roi::{ManagedRoi, RoiInteractionMode};
 use crate::core::transform::{Scale, Transform};
 use crate::widget::interaction::{RoiDrawKind, RoiGrab};
 
@@ -78,6 +78,11 @@ struct Interaction {
     /// frame, or `None`. Applied by the caller via `set_current_roi` so the
     /// `CurrentRoiChanged` event fires.
     roi_make_current: Option<usize>,
+    /// `(index, mode)` chosen this frame from a ROI's right-click interaction-mode
+    /// submenu (silx `createMenuForInteractionMode`), or `None`. Applied by the
+    /// caller via `set_roi_interaction_mode` so the `RoiInteractionModeChanged`
+    /// event fires; the menu only signals intent.
+    roi_set_interaction_mode: Option<(usize, RoiInteractionMode)>,
     /// In-progress ROI-creation preview this frame: the draw mode plus the
     /// data-space preview vertices, painted by the caller via `draw_overlay`
     /// (the same overlay the box-zoom selection uses). `None` when no
@@ -187,6 +192,11 @@ pub struct PlotResponse {
     /// [`PlotWidget::set_current_roi`] (emitting
     /// [`crate::PlotEvent::CurrentRoiChanged`]).
     pub roi_make_current: Option<usize>,
+    /// `(index, mode)` chosen this frame from a ROI's right-click
+    /// interaction-mode submenu (silx `createMenuForInteractionMode`), or `None`.
+    /// `PlotWidget::show` applies it via [`PlotWidget::set_roi_interaction_mode`]
+    /// (emitting [`crate::PlotEvent::RoiInteractionModeChanged`]).
+    pub roi_set_interaction_mode: Option<(usize, RoiInteractionMode)>,
     /// Handle of the marker an on-screen drag moved this frame (silx
     /// `markerMoving`), or `None`. The mirror `Plot::markers` is already updated
     /// for this frame's render; `PlotWidget::show` persists the change back to
@@ -333,6 +343,7 @@ impl<'a> PlotView<'a> {
             roi_created,
             roi_removed,
             roi_make_current,
+            roi_set_interaction_mode,
             roi_preview,
             marker_moved,
             marker_drag_started,
@@ -612,6 +623,7 @@ impl<'a> PlotView<'a> {
             roi_created,
             roi_removed,
             roi_make_current,
+            roi_set_interaction_mode,
             marker_moved,
             marker_drag_started,
             marker_drag_finished,
@@ -1295,6 +1307,7 @@ fn apply_interaction(
         _ => None,
     };
     let mut roi_make_current = None;
+    let mut roi_set_interaction_mode = None;
     let roi_menu_id = response.id.with("roi_context_target");
     if response.secondary_clicked()
         && let Some(p) = response.interact_pointer_pos()
@@ -1312,11 +1325,11 @@ fn apply_interaction(
     // alongside, matching silx emitting the click signal while showing the menu.
     response.context_menu(|ui| {
         // ROI submenu (silx `_createMenuForRoi`): when the right-click landed on a
-        // ROI, offer make-current + remove above the zoom items. silx also nests an
-        // interaction-mode submenu for `InteractionModeMixIn` ROIs (e.g. ArcROI),
-        // which siplot's ROIs do not expose (the Arc start-angle-vs-radius and Band
-        // rotation sub-modes are a deferred redesign), so only make-current/remove
-        // are shown.
+        // ROI, offer make-current + remove above the zoom items, plus — for ROI
+        // kinds that mix in silx's `InteractionModeMixIn` (Arc, Band) — a nested
+        // interaction-mode submenu (silx `createMenuForInteractionMode`). The menu
+        // only signals intent; `high_level.rs` applies it through the owning APIs
+        // so the ROI events fire.
         let target: Option<usize> = ui.data(|d| d.get_temp(roi_menu_id)).flatten();
         if let Some(index) = target
             && index < plot.rois.len()
@@ -1331,6 +1344,26 @@ fn apply_interaction(
             if ui.button("Make current").clicked() {
                 roi_make_current = Some(index);
                 ui.close();
+            }
+            // Interaction-mode submenu for InteractionModeMixIn ROIs (silx
+            // `createMenuForInteractionMode`): one exclusive entry per available
+            // mode, the current one checked. Hidden for kinds with no modes.
+            let managed = &plot.rois[index];
+            let modes = managed.roi.available_interaction_modes();
+            if !modes.is_empty() {
+                let current = managed.interaction_mode();
+                ui.menu_button("Interaction mode", |ui| {
+                    for &mode in modes {
+                        if ui
+                            .radio(current == Some(mode), mode.label())
+                            .on_hover_text(mode.description())
+                            .clicked()
+                        {
+                            roi_set_interaction_mode = Some((index, mode));
+                            ui.close();
+                        }
+                    }
+                });
             }
             if ui.button("Remove").clicked() {
                 roi_removed = Some(index);
@@ -1380,6 +1413,7 @@ fn apply_interaction(
         roi_created,
         roi_removed,
         roi_make_current,
+        roi_set_interaction_mode,
         roi_preview,
         marker_moved,
         marker_drag_started,

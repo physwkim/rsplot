@@ -5,12 +5,22 @@
 //! API and the events it pushes are asserted.
 
 use egui_kittest::wgpu::{create_render_state, default_wgpu_setup};
-use siplot::{PlotEvent, PlotWidget, Roi};
+use siplot::{PlotEvent, PlotWidget, Roi, RoiInteractionMode};
 
 fn rect(x: f64) -> Roi {
     Roi::Rect {
         x: (x, x + 1.0),
         y: (0.0, 1.0),
+    }
+}
+
+fn arc() -> Roi {
+    Roi::Arc {
+        center: (0.0, 0.0),
+        inner_radius: 1.0,
+        outer_radius: 2.0,
+        start_angle: 0.0,
+        end_angle: std::f64::consts::FRAC_PI_2,
     }
 }
 
@@ -100,6 +110,52 @@ fn save_then_load_round_trips_rois_through_the_widget() {
     );
 
     let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn set_roi_interaction_mode_switches_mode_and_emits_event() {
+    let rs = create_render_state(default_wgpu_setup());
+    let mut plot = PlotWidget::new(&rs, 0);
+    plot.add_roi(arc());
+    plot.drain_events();
+    // An Arc seeds the silx default (ThreePoint).
+    assert_eq!(
+        plot.roi_interaction_mode(0),
+        Some(RoiInteractionMode::ArcThreePoint)
+    );
+
+    // An available mode switches and emits RoiInteractionModeChanged.
+    assert!(plot.set_roi_interaction_mode(0, RoiInteractionMode::ArcPolar));
+    assert_eq!(
+        plot.roi_interaction_mode(0),
+        Some(RoiInteractionMode::ArcPolar)
+    );
+    let events = plot.drain_events();
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            PlotEvent::RoiInteractionModeChanged {
+                index: 0,
+                mode: RoiInteractionMode::ArcPolar
+            }
+        )),
+        "set_roi_interaction_mode must emit RoiInteractionModeChanged, got {events:?}"
+    );
+
+    // A mode foreign to the kind is rejected — mode unchanged, no event.
+    assert!(!plot.set_roi_interaction_mode(0, RoiInteractionMode::BandBounded));
+    assert_eq!(
+        plot.roi_interaction_mode(0),
+        Some(RoiInteractionMode::ArcPolar)
+    );
+    assert!(
+        plot.drain_events().is_empty(),
+        "a rejected mode change emits no event"
+    );
+
+    // An out-of-range index changes nothing and emits no event.
+    assert!(!plot.set_roi_interaction_mode(9, RoiInteractionMode::ArcThreePoint));
+    assert!(plot.drain_events().is_empty());
 }
 
 #[test]
