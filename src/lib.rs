@@ -64,6 +64,14 @@ pub use crate::core::scatter_viz::{
     interpolate, irregular_grid_image, irregular_grid_pick, irregular_grid_triangles,
     regular_grid_pick, scatter_line_profile, solid_triangles,
 };
+pub use crate::core::scene3d::camera::{
+    Camera, CameraDirection, CameraExtrinsic, CameraFace, CameraMove, Orthographic, Perspective,
+    Projection,
+};
+pub use crate::core::scene3d::mat4::{
+    Mat4, Vec3, mat4_look_at_dir, mat4_orthographic, mat4_perspective, mat4_rotate, mat4_scale,
+    mat4_translate,
+};
 pub use crate::core::shape::{Line, Shape, ShapeKind};
 pub use crate::core::stats::{ComCoord, StatScope, Stats};
 pub use crate::core::transform::{Axis, AxisSide, Margins, Scale, Transform, YAxis};

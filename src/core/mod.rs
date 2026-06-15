@@ -16,6 +16,7 @@ pub mod plot;
 pub mod roi;
 pub mod roi_io;
 pub mod scatter_viz;
+pub mod scene3d;
 pub mod shape;
 pub mod stats;
 pub mod transform;
