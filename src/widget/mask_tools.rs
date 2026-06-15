@@ -419,6 +419,14 @@ impl MaskToolsWidget {
         self.is_dirty = true;
     }
 
+    /// The current overlay transparency in `[0, 1]` (silx
+    /// `transparencySlider.value() / maximum()`). Symmetric with
+    /// [`set_transparency`](Self::set_transparency); defaults to `0.8`
+    /// (silx `transparencySlider` default `8/10`).
+    pub fn transparency(&self) -> f32 {
+        self.alpha
+    }
+
     /// Set the overlay color of one mask level, or of all levels.
     ///
     /// Mirrors silx `setMaskColors(rgb, level)`
