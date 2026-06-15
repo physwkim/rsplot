@@ -247,6 +247,33 @@ impl ProfileWindow {
     /// the current line width and reduction method.
     pub fn update_profile(&mut self, width: u32, height: u32, data: &[f32], roi: &Roi) {
         let curves = profiles_for_roi(width, height, data, roi, self.line_width, self.method);
+        self.set_curves(curves);
+    }
+
+    /// Display a single precomputed `(x, y)` profile curve, for tool bars whose
+    /// profile is sampled directly rather than re-derived from an image + ROI
+    /// (silx `ScatterProfileToolBar` / `Profile3DToolBar`, whose profiles come
+    /// from [`crate::core::scatter_viz::scatter_line_profile`] / a stack
+    /// reduction). `label` names the curve in the legend; `color` is its stroke.
+    /// An empty `x` is ignored (the previous profile stays shown).
+    pub fn set_profile_curve(
+        &mut self,
+        label: &'static str,
+        color: Color32,
+        x: Vec<f64>,
+        y: Vec<f64>,
+    ) {
+        if x.is_empty() {
+            return;
+        }
+        self.set_curves(vec![ProfileCurve { label, color, x, y }]);
+    }
+
+    /// Push `curves` into the backing [`Plot1D`] and auto-scale, the shared body
+    /// of [`Self::update_profile`] and [`Self::set_profile_curve`]. An empty list
+    /// leaves the current profile untouched (so a no-op extraction does not blank
+    /// the window).
+    fn set_curves(&mut self, curves: Vec<ProfileCurve>) {
         if curves.is_empty() {
             return;
         }

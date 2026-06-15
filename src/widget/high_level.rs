@@ -10222,10 +10222,18 @@ pub struct ScatterView {
     /// `ScatterView._positionInfo`, updated on `sigMouseMoved`); `None` until the
     /// pointer has moved over the data area.
     cursor: Option<[f64; 2]>,
+    /// Side window showing the 1D line profile sampled across the scatter (silx
+    /// `ScatterProfileToolBar`'s profile window). Fed by [`Self::show_line_profile`]
+    /// and drawn by [`Self::show`] when open.
+    profile_window: crate::widget::profile_window::ProfileWindow,
 }
 
 impl ScatterView {
     /// Create a new scatter-view widget.
+    ///
+    /// Reserves two plot ids: `id` for the scatter plot and `id + 1` for the
+    /// line-profile side window (mirroring `Plot2D`, which reserves a small id
+    /// range for its profile window).
     pub fn new(render_state: &RenderState, id: PlotId) -> Self {
         let mut inner = PlotWidget::new(render_state, id);
         inner.set_graph_cursor(true);
@@ -10243,6 +10251,7 @@ impl ScatterView {
             show_colorbar: true,
             alpha: None,
             cursor: None,
+            profile_window: crate::widget::profile_window::ProfileWindow::new(render_state, id + 1),
         }
     }
 
@@ -10354,6 +10363,46 @@ impl ScatterView {
             return None;
         }
         Some(profile)
+    }
+
+    /// Sample the line profile `start`..`end` (with `n_points` samples) across the
+    /// scatter and show it in the side profile window as a value-vs-distance curve
+    /// (silx `ScatterProfileToolBar`: draw a profile line ROI → the profile window
+    /// plots the interpolated profile). Opens the window and returns `true` when a
+    /// profile was produced; returns `false` (leaving the window untouched) when
+    /// there is no data, fewer than 3 non-collinear points, or the whole segment
+    /// falls outside the scatter's convex hull (see [`Self::line_profile`]).
+    pub fn show_line_profile(
+        &mut self,
+        start: (f64, f64),
+        end: (f64, f64),
+        n_points: usize,
+    ) -> bool {
+        let Some(profile) = self.line_profile(start, end, n_points) else {
+            return false;
+        };
+        let (distance, value) = profile.distance_value_curve();
+        // matplotlib C0 blue, silx's default first-curve color.
+        self.profile_window.set_profile_curve(
+            "Profile",
+            Color32::from_rgb(31, 119, 180),
+            distance,
+            value,
+        );
+        self.profile_window.set_open(true);
+        true
+    }
+
+    /// The line-profile side window (silx `ScatterProfileToolBar` profile window),
+    /// fed by [`Self::show_line_profile`].
+    pub fn profile_window(&self) -> &crate::widget::profile_window::ProfileWindow {
+        &self.profile_window
+    }
+
+    /// Mutable access to the line-profile side window (e.g. to set its band width
+    /// / reduction method or to close it).
+    pub fn profile_window_mut(&mut self) -> &mut crate::widget::profile_window::ProfileWindow {
+        &mut self.profile_window
     }
 
     /// Set the scatter visualization mode (silx `Scatter.setVisualization`).
@@ -10904,18 +10953,23 @@ impl ScatterView {
         // labels clip at the window's right edge (see `row_content_width`).
         let spacing = ui.spacing().item_spacing.x;
         let plot_w = row_content_width(avail.x, colorbar_w, u32::from(colorbar_w > 0.0), spacing);
-        ui.horizontal(|ui| {
-            let response = ui
-                .allocate_ui(egui::vec2(plot_w, avail.y), |ui| self.inner.show(ui))
-                .inner;
-            if colorbar_w > 0.0
-                && let Some(bar) = colorbar
-            {
-                bar.ui(ui, egui::vec2(colorbar_w, avail.y));
-            }
-            response
-        })
-        .inner
+        let response = ui
+            .horizontal(|ui| {
+                let response = ui
+                    .allocate_ui(egui::vec2(plot_w, avail.y), |ui| self.inner.show(ui))
+                    .inner;
+                if colorbar_w > 0.0
+                    && let Some(bar) = colorbar
+                {
+                    bar.ui(ui, egui::vec2(colorbar_w, avail.y));
+                }
+                response
+            })
+            .inner;
+        // Draw the line-profile side window (silx `ScatterProfileToolBar`'s
+        // profile window) when open; it lives in its own viewport beside the plot.
+        self.profile_window.show(ui.ctx());
+        response
     }
 }
 

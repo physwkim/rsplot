@@ -619,6 +619,29 @@ pub struct ScatterLineProfile {
     pub values: Vec<Option<f64>>,
 }
 
+impl ScatterLineProfile {
+    /// Convert the profile to a `(distance, value)` curve for plotting against
+    /// distance along the segment — the form silx `ScatterProfileToolBar` shows
+    /// in its profile window. `distance[i]` is the Euclidean distance from the
+    /// first sample to `points[i]` (`0` at the start, increasing along the line);
+    /// `value[i]` is the interpolated value with out-of-hull samples (`None`)
+    /// mapped to `f64::NAN` so they render as gaps (silx keeps them `NaN`).
+    /// Returns empty vectors for an empty profile.
+    #[must_use]
+    pub fn distance_value_curve(&self) -> (Vec<f64>, Vec<f64>) {
+        let Some(&[x0, y0]) = self.points.first() else {
+            return (Vec::new(), Vec::new());
+        };
+        let distance = self
+            .points
+            .iter()
+            .map(|&[x, y]| (x - x0).hypot(y - y0))
+            .collect();
+        let value = self.values.iter().map(|v| v.unwrap_or(f64::NAN)).collect();
+        (distance, value)
+    }
+}
+
 /// Sample a line profile across scattered `(x, y, values)` data — silx
 /// `ScatterProfileToolBar` / `_computeProfile` (`tools/profile/rois.py:737-762`).
 ///
@@ -1434,6 +1457,27 @@ mod tests {
         let prof = scatter_line_profile(&x, &y, &values, (0.0, 0.0), (1.0, 1.0), 2);
         assert_eq!(prof.points.len(), 2);
         assert!(prof.values.iter().all(Option::is_none));
+    }
+
+    #[test]
+    fn distance_value_curve_is_distance_from_start_with_nan_gaps() {
+        // Samples at (0,0),(3,4),(6,8): distances from the first are 0, 5, 10.
+        // The middle value is None (out of hull) -> NaN in the curve.
+        let prof = ScatterLineProfile {
+            points: vec![[0.0, 0.0], [3.0, 4.0], [6.0, 8.0]],
+            values: vec![Some(1.0), None, Some(2.0)],
+        };
+        let (distance, value) = prof.distance_value_curve();
+        assert_eq!(distance, vec![0.0, 5.0, 10.0]);
+        assert_eq!(value[0], 1.0);
+        assert!(value[1].is_nan(), "out-of-hull sample maps to NaN");
+        assert_eq!(value[2], 2.0);
+    }
+
+    #[test]
+    fn distance_value_curve_empty_profile_is_empty() {
+        let prof = ScatterLineProfile::default();
+        assert_eq!(prof.distance_value_curve(), (Vec::new(), Vec::new()));
     }
 
     // --- IRREGULAR_GRID image -----------------------------------------------
