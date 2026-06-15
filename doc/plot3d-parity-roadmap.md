@@ -181,8 +181,29 @@ uses the baked-in viewport defaults (as P1.2).
 | Wave | Item | silx source | Status |
 |---|---|---|---|
 | P3.1 | Viewpoint presets (+ PositionInfo deferred-with-picking; GroupProperties → P3.2) | actions/viewpoint.py, tools/ViewpointTools.py | ◐ |
-| P3.2 | 3D colorbar + egui parameter panel (+ GroupProperties) | tools/GroupProperties.py, _model/* (→ egui) | ☐ |
+| P3.2 | 3D colorbar + egui parameter panel (GroupProperties) | tools/GroupPropertiesWidget.py | ✅ |
 | P3.3 | SceneWindow composition + io snapshot + roadmap reconcile | SceneWindow.py, actions/io.py | ☐ |
+
+P3.2 notes: ports silx `tools.GroupPropertiesWidget` as `ScalarFieldProperties`
+(`widget::scalar_field_properties`) — an egui form that sets a `ScalarFieldView`'s
+presentation and rebuilds it. silx's `GroupPropertiesWidget` applies one property
+(colormap / marker / marker-size / line-width) to *all* matching items in a group;
+a `ScalarFieldView` owns one colormapped item (the cut plane) plus solid-colour
+iso-surfaces, so the panel exposes exactly those: cut-plane visibility, colormap
+name (the new `Colormap::set_name`, faithful to silx `Colormap.setName` — rebuilds
+the LUT in place keeping the value range), value range, autoscale-over-the-volume
+(`autoscale_cut_plane_colormap`), and per-iso level/colour/remove + add
+(`addIsosurface`/`removeIsosurface`). The **3D colorbar** reuses the existing 2D
+`ColorBarWidget` driven by the cut-plane colormap; silx's `plot3d` package ships
+**no** colorbar of its own (verified — nothing matches `colorbar` under
+`gui/plot3d/`), so this is a siplot convenience, not silx parity, and is labelled
+as such. Verified through an AccessKit harness (`tests/scalar_field_properties_render.rs`):
+the Visible checkbox shows the cut plane, Autoscale fits `[5,10] → [0,1]`, and Add
+appends an iso-surface at the data-range midpoint. **Deferred (documented):** silx's
+generic `plot3d._model` (`core.py`/`items.py`/`model.py` — a `QAbstractItemModel`
+tree editor of the whole scene graph) is not ported; it is a generic scene-graph
+editor whose faithful port would be speculative for the current item set, and the
+concrete per-field form covers a `ScalarFieldView`'s editable properties.
 
 P3.1 notes: ports silx's **viewpoint presets** in full. `SceneWidget::set_viewpoint`
 mirrors `actions/viewpoint.py._SetViewpointAction` — `camera.extrinsic.reset(face)`

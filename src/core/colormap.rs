@@ -606,6 +606,14 @@ impl Colormap {
         Self::new(ColormapName::Viridis, vmin, vmax)
     }
 
+    /// Rebuild the LUT from a catalog `name`, keeping the value range,
+    /// normalization, gamma, and the other settings (silx `Colormap.setName`).
+    /// siplot stores the LUT rather than the name, so this replaces the 256
+    /// entries in place.
+    pub fn set_name(&mut self, name: ColormapName) {
+        self.lut = name.build_lut();
+    }
+
     /// Reverse the LUT (low and high colors swap) while keeping the value range.
     pub fn reversed(mut self) -> Self {
         self.lut.reverse();

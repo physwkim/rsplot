@@ -29,6 +29,7 @@ pub mod radar_view;
 pub mod roi_manager;
 pub mod roi_stats;
 pub mod roi_stats_widget;
+pub mod scalar_field_properties;
 pub mod scalar_field_view;
 pub mod scatter_mask;
 pub mod scene_widget;
