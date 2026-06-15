@@ -11,8 +11,9 @@
 use egui_kittest::Harness;
 use egui_kittest::wgpu::{WgpuTestRenderer, create_render_state, default_wgpu_setup};
 use siplot::egui;
+use siplot::egui::Color32;
 use siplot::egui_wgpu::RenderState;
-use siplot::{SceneWidget, Vec3};
+use siplot::{Box3D, Scene3dGeometry, SceneWidget, Vec3};
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -121,5 +122,72 @@ fn scene_widget_renders_axes_and_orbits_on_drag() {
     assert!(
         changed > 200,
         "left-drag orbit should change the rendered image; only {changed} byte diffs"
+    );
+}
+
+/// A `SceneWidget` carrying a content data-item (a lit box) that fills the bounds.
+struct ContentApp {
+    scene: SceneWidget,
+    last_rect: Option<egui::Rect>,
+}
+
+impl ContentApp {
+    fn new(rs: &RenderState) -> Self {
+        let mut scene = SceneWidget::new(rs, 1);
+        scene.set_bounds(rs, (Vec3::ZERO, Vec3::new(1.0, 1.0, 1.0)));
+        // A magenta box filling the bounds — magenta (r&b high, g low) is a colour
+        // the chrome (grey wireframe + pure R/G/B axes) cannot produce, so its
+        // presence proves the mesh channel is forwarded and rendered.
+        let mut bx = Box3D::new();
+        bx.set_data(
+            [1.0, 1.0, 1.0],
+            &[Color32::from_rgb(255, 0, 255)],
+            &[[0.5, 0.5, 0.5]],
+            (0.0, [0.0, 0.0, 1.0]),
+        );
+        let mut g = Scene3dGeometry::new();
+        bx.append_to(&mut g);
+        scene.set_geometry(rs, g);
+        Self {
+            scene,
+            last_rect: None,
+        }
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui) {
+        let resp = self.scene.show(ui);
+        self.last_rect = Some(resp.rect);
+    }
+}
+
+#[test]
+fn scene_widget_forwards_and_renders_content_mesh() {
+    let rs = create_render_state(default_wgpu_setup());
+    let app = Rc::new(RefCell::new(ContentApp::new(&rs)));
+    let renderer = WgpuTestRenderer::from_render_state(rs);
+
+    let app_ui = app.clone();
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(WIN, WIN))
+        .with_pixels_per_point(1.0)
+        .renderer(renderer)
+        .build_ui(move |ui| app_ui.borrow_mut().ui(ui));
+
+    harness.step();
+    let image = harness.render().expect("headless wgpu render");
+    let (iw, ih) = (image.width() as usize, image.height() as usize);
+    let raw = image.as_raw();
+
+    // Count magenta pixels: red and blue both high, green low. Lit faces of the
+    // box carry this; the chrome cannot.
+    let magenta = (0..iw * ih)
+        .filter(|&px| {
+            let i = px * 4;
+            raw[i] > 120 && raw[i + 2] > 120 && raw[i + 1] < 80
+        })
+        .count();
+    assert!(
+        magenta > 200,
+        "the content box (magenta) must render through the widget; only {magenta} px"
     );
 }

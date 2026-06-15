@@ -9,7 +9,9 @@
 //! Port of silx `Plot3DWidget` + `SceneWidget`'s default `RotateCameraControl`:
 //! left-drag orbits around the scene centre, right-drag pans, the wheel zooms.
 //! The scene chrome (bounding box + RGB axes) is generated from the bounds via
-//! [`Scene3dGeometry::add_bounding_box_with_axes`]; data items arrive in Phase 1.
+//! [`Scene3dGeometry::add_bounding_box_with_axes`]; data-item geometry set with
+//! [`SceneWidget::set_geometry`] is merged in beneath the chrome (every channel,
+//! via [`Scene3dGeometry::extend_from`]).
 
 use egui::{Color32, PointerButton, Pos2, Response, Sense, Ui};
 use egui_wgpu::RenderState;
@@ -128,12 +130,10 @@ impl SceneWidget {
     fn upload(&self, render_state: &RenderState) {
         let mut geometry = Scene3dGeometry::new();
         geometry.add_bounding_box_with_axes(self.bounds, self.box_color);
-        // Append the data-item content beneath the chrome (same crate → the
-        // line/triangle buffers are visible).
-        geometry.lines.extend_from_slice(&self.content.lines);
-        geometry
-            .triangles
-            .extend_from_slice(&self.content.triangles);
+        // Append every data-item channel beneath the chrome (points, meshes,
+        // images, and textured meshes too — not only lines/triangles), so the
+        // P1.x/P2.x items render through the widget.
+        geometry.extend_from(&self.content);
         set_scene3d(render_state, self.id, &geometry);
     }
 

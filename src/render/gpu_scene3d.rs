@@ -351,6 +351,20 @@ impl Scene3dGeometry {
         self.textured_meshes.push(mesh);
     }
 
+    /// Append all of `other`'s primitives onto this geometry, every channel
+    /// (lines, triangles, points, meshes, images, textured meshes). The single
+    /// owner of the geometry-merge rule, so a composite (e.g. chrome + data
+    /// items) forwards every primitive kind, not a hand-picked subset.
+    pub fn extend_from(&mut self, other: &Scene3dGeometry) {
+        self.lines.extend_from_slice(&other.lines);
+        self.triangles.extend_from_slice(&other.triangles);
+        self.points.extend_from_slice(&other.points);
+        self.meshes.extend_from_slice(&other.meshes);
+        self.images.extend_from_slice(&other.images);
+        self.textured_meshes
+            .extend_from_slice(&other.textured_meshes);
+    }
+
     /// Append a line segment `a→b` in one solid [`Color32`].
     pub fn add_line(&mut self, a: [f32; 3], b: [f32; 3], color: Color32) {
         let rgba = egui::Rgba::from(color).to_array();
@@ -1637,5 +1651,48 @@ mod tests {
             g.lines.iter().any(|v| v.pos == [2.0, 3.0, 4.0]),
             "the far corner (max) should be a box-edge endpoint"
         );
+    }
+
+    #[test]
+    fn extend_from_forwards_every_channel() {
+        // A source geometry carrying one primitive in each of the six channels.
+        let mut src = Scene3dGeometry::new();
+        src.add_line([0.0; 3], [1.0; 3], Color32::WHITE); // 2 line verts
+        src.add_triangle([0.0; 3], [1.0; 3], [2.0; 3], Color32::RED); // 3 tri verts
+        src.add_point([0.0; 3], Color32::GREEN, 4.0, PointMarker::Square); // 1 point
+        src.add_mesh_triangle_flat([0.0; 3], [1.0; 3], [2.0; 3], Color32::BLUE); // 3 mesh verts
+        src.add_image_layer(Scene3dImageLayer {
+            pixels: vec![0; 4],
+            width: 1,
+            height: 1,
+            origin: [0.0; 3],
+            scale: [1.0; 2],
+            interpolation: ImageInterpolation::Nearest,
+        });
+        src.add_textured_mesh(Scene3dTexturedMesh {
+            pixels: vec![0; 4],
+            width: 1,
+            height: 1,
+            vertices: vec![[0.0; 3], [1.0; 3], [2.0; 3]],
+            uvs: vec![[0.0; 2], [1.0, 0.0], [1.0; 2]],
+            interpolation: ImageInterpolation::Nearest,
+        });
+
+        let mut dst = Scene3dGeometry::new();
+        assert!(dst.is_empty());
+        dst.extend_from(&src);
+
+        // Every channel must be forwarded — not a hand-picked subset.
+        assert_eq!(dst.lines.len(), 2);
+        assert_eq!(dst.triangles.len(), 3);
+        assert_eq!(dst.points.len(), 1);
+        assert_eq!(dst.meshes.len(), 3);
+        assert_eq!(dst.images.len(), 1);
+        assert_eq!(dst.textured_meshes.len(), 1);
+
+        // A second extend appends (does not replace).
+        dst.extend_from(&src);
+        assert_eq!(dst.lines.len(), 4);
+        assert_eq!(dst.textured_meshes.len(), 2);
     }
 }
