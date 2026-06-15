@@ -94,7 +94,8 @@ pub use crate::render::save::{
     rgba_to_rgb, save_graph, save_graph_with_format,
 };
 pub use crate::render::scene3d_items::{
-    ColormapMesh3D, DEFAULT_SCATTER3D_SIZE, Mesh3D, MeshColor, MeshDrawMode, Scatter3D,
+    Box3D, ColormapMesh3D, Cylinder3D, DEFAULT_SCATTER3D_SIZE, Hexagon3D, Mesh3D, MeshColor,
+    MeshDrawMode, Scatter3D,
 };
 pub use crate::widget::actions;
 pub use crate::widget::actions::io::{SaveTarget, curve_to_csv};
