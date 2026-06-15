@@ -248,6 +248,7 @@ fn format_event(event: PlotEvent) -> String {
             format!("drawing {mode:?} ({} pts)", points.len())
         }
         PlotEvent::DrawingFinished { mode, .. } => format!("drawing finished {mode:?}"),
+        PlotEvent::RoiAboutToBeRemoved { index } => format!("roi #{index} about to be removed"),
         PlotEvent::RoisCleared => "rois cleared".to_owned(),
         PlotEvent::CurrentRoiChanged { previous, current } => {
             format!("current roi {previous:?} -> {current:?}")

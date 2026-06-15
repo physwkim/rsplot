@@ -72,7 +72,7 @@ struct Interaction {
     /// Index of the ROI a right-click context-menu "Remove" targeted this frame
     /// (silx `_createMenuForRoi` remove action), or `None`. The caller
     /// (`high_level.rs`) performs the removal through its owning API so the
-    /// `RoisCleared` event fires; the menu only signals intent.
+    /// `RoiAboutToBeRemoved` event fires; the menu only signals intent.
     roi_removed: Option<usize>,
     /// Index of the ROI a right-click context-menu "Make current" targeted this
     /// frame, or `None`. Applied by the caller via `set_current_roi` so the
@@ -180,7 +180,7 @@ pub struct PlotResponse {
     /// Index of the ROI a right-click context-menu "Remove" targeted this frame
     /// (silx `_createMenuForRoi` remove action), or `None`. `PlotWidget::show`
     /// performs the removal via [`PlotWidget::remove_roi`] (emitting
-    /// [`crate::PlotEvent::RoisCleared`]); the menu only signals intent.
+    /// [`crate::PlotEvent::RoiAboutToBeRemoved`]); the menu only signals intent.
     pub roi_removed: Option<usize>,
     /// Index of the ROI a right-click context-menu "Make current" targeted this
     /// frame, or `None`. `PlotWidget::show` applies it via

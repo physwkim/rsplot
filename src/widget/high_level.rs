@@ -333,8 +333,14 @@ pub enum PlotEvent {
     /// [`Self::RoiCreated`] is emitted on the same frame (the ROI is built on top
     /// of the finished draw, mirroring silx's `RegionOfInterestManager`).
     DrawingFinished { mode: DrawMode, params: DrawParams },
-    /// The ROI collection changed by a clear-all or a single-ROI removal
-    /// (re-read `rois()`).
+    /// A single ROI at `index` is about to be removed, emitted *before* the
+    /// removal so a listener can still read the ROI being dropped (silx
+    /// `RegionOfInterestManager.sigRoiAboutToBeRemoved`). After this the ROI is
+    /// gone and indices past it shift down by one.
+    RoiAboutToBeRemoved { index: usize },
+    /// All ROIs were cleared in one operation via [`PlotWidget::clear_rois`]
+    /// (re-read `rois()`). A single-ROI removal emits [`Self::RoiAboutToBeRemoved`]
+    /// instead — `RoisCleared` means the whole collection was emptied.
     RoisCleared,
     /// The current/highlighted ROI changed, by a manager selection or
     /// [`PlotWidget::set_current_roi`] (silx `sigCurrentRoiChanged`). Carries the
@@ -3208,7 +3214,7 @@ impl PlotWidget {
         // ROI context-menu choices (silx `_createMenuForRoi`): the plot only
         // signals intent; the mutation + event emission happens here through the
         // owning APIs (`set_current_roi` → CurrentRoiChanged, `remove_roi` →
-        // RoisCleared) so the right-click path fires the same events as the
+        // RoiAboutToBeRemoved) so the right-click path fires the same events as the
         // manager. "Make current" before "Remove": they come from distinct menu
         // clicks (never the same frame), and applying the highlight first keeps a
         // remove-after-select interaction consistent.
@@ -6595,14 +6601,16 @@ impl PlotWidget {
 
     /// Remove the ROI at `index`, keeping the current-ROI selection consistent
     /// via the [`Plot`] owner (silx `RegionOfInterestManager.removeRoi`). Emits
-    /// [`PlotEvent::RoisCleared`] (the ROI collection changed) when a ROI was
-    /// actually removed; an out-of-range index is ignored.
+    /// [`PlotEvent::RoiAboutToBeRemoved`] *before* the removal (silx
+    /// `sigRoiAboutToBeRemoved`), so a listener can still read the ROI being
+    /// dropped; an out-of-range index is ignored (no event).
     pub fn remove_roi(&mut self, index: usize) {
-        let before = self.backend.plot().rois.len();
-        self.backend.plot_mut().remove_roi(index);
-        if self.backend.plot().rois.len() != before {
-            self.events.push(PlotEvent::RoisCleared);
+        if index >= self.backend.plot().rois.len() {
+            return; // out of range: nothing removed, no signal
         }
+        // silx emits sigRoiAboutToBeRemoved before the ROI leaves the list.
+        self.events.push(PlotEvent::RoiAboutToBeRemoved { index });
+        self.backend.plot_mut().remove_roi(index);
     }
 
     /// Append a fully-specified [`ManagedRoi`] (geometry + appearance) and
