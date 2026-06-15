@@ -1164,16 +1164,18 @@ impl Scene3dGpu {
     }
 
     /// Encode the offscreen depth-tested pass (clear → triangles → lines) into
-    /// `encoder`. Runs in `prepare()`, before the blit samples the result.
+    /// `encoder`, targeting `color_view` + `depth_view`. The on-screen path
+    /// (`prepare`) passes the persistent blit target; [`Scene3dResources::snapshot_scene`]
+    /// passes a transient copyable target — the draw sequence is identical, so
+    /// the snapshot is pixel-for-pixel the rendered scene.
     fn encode_offscreen(
         &self,
         encoder: &mut wgpu::CommandEncoder,
         pipeline: &Scene3dPipeline,
+        color_view: &wgpu::TextureView,
+        depth_view: &wgpu::TextureView,
         background: [f32; 4],
     ) {
-        let (Some(color_view), Some(depth_view)) = (&self.color_view, &self.depth_view) else {
-            return;
-        };
         let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("siplot scene3d offscreen pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -1482,7 +1484,133 @@ impl Scene3dResources {
             normal_mat: frame.view,
         };
         queue.write_buffer(&scene.mesh_params_buf, 0, bytemuck::bytes_of(&mesh_params));
-        scene.encode_offscreen(encoder, pipeline, frame.background);
+        if let (Some(color_view), Some(depth_view)) =
+            (scene.color_view.as_ref(), scene.depth_view.as_ref())
+        {
+            scene.encode_offscreen(encoder, pipeline, color_view, depth_view, frame.background);
+        }
+    }
+
+    /// Render scene `frame.id` into a transient copyable target at `frame.size_px`
+    /// and read it back as tightly packed RGBA8 (`width * height * 4`). Returns
+    /// `None` if the scene has no uploaded geometry yet or the GPU readback fails.
+    ///
+    /// The per-scene uniforms are (re)written for `frame`'s camera and size, then
+    /// the same [`Scene3dGpu::encode_offscreen`] draw runs into a fresh
+    /// `RENDER_ATTACHMENT | COPY_SRC` color target (the persistent blit target is
+    /// `TEXTURE_BINDING`-only, so it cannot be copied). Synchronous: it submits and
+    /// blocks on the readback, independent of the egui frame loop.
+    fn snapshot_scene(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        frame: &Scene3dFrame,
+    ) -> Option<Vec<u8>> {
+        use crate::render::save::{padded_bytes_per_row, rows_to_rgba8};
+
+        let Self { pipeline, scenes } = self;
+        let scene = scenes.get(&frame.id)?;
+        let (w, h) = (frame.size_px[0].max(1), frame.size_px[1].max(1));
+
+        // Stamp this snapshot's uniforms (mirrors `prepare_scene`). The next
+        // on-screen frame rewrites these, so clobbering them here is harmless.
+        let params = Scene3dParams { mvp: frame.mvp };
+        queue.write_buffer(&scene.params_buf, 0, bytemuck::bytes_of(&params));
+        let point_params = Scene3dPointParams {
+            mvp: frame.mvp,
+            viewport: [w as f32, h as f32],
+            _pad: [0.0, 0.0],
+        };
+        queue.write_buffer(
+            &scene.point_params_buf,
+            0,
+            bytemuck::bytes_of(&point_params),
+        );
+        let mesh_params = Scene3dMeshParams {
+            mvp: frame.mvp,
+            normal_mat: frame.view,
+        };
+        queue.write_buffer(&scene.mesh_params_buf, 0, bytemuck::bytes_of(&mesh_params));
+
+        let extent = wgpu::Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: 1,
+        };
+        let color = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("siplot scene3d snapshot color"),
+            size: extent,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: pipeline.target_format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let depth = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("siplot scene3d snapshot depth"),
+            size: extent,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: DEPTH_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let color_view = color.create_view(&wgpu::TextureViewDescriptor::default());
+        let depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("siplot scene3d snapshot"),
+        });
+        scene.encode_offscreen(
+            &mut encoder,
+            pipeline,
+            &color_view,
+            &depth_view,
+            frame.background,
+        );
+
+        // Copy the target into a readback buffer with a padded row stride.
+        let bpr = padded_bytes_per_row(w);
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("siplot scene3d snapshot readback"),
+            size: (bpr as u64) * (h as u64),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &color,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(bpr),
+                    rows_per_image: Some(h),
+                },
+            },
+            extent,
+        );
+        queue.submit([encoder.finish()]);
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        buffer.slice(..).map_async(wgpu::MapMode::Read, move |r| {
+            let _ = tx.send(r);
+        });
+        device.poll(wgpu::PollType::wait_indefinitely()).ok()?;
+        rx.recv().ok()?.ok()?;
+
+        let rgba = {
+            let mapped = buffer.slice(..).get_mapped_range();
+            rows_to_rgba8(&mapped, w, h, bpr, pipeline.target_format)
+        };
+        buffer.unmap();
+        Some(rgba)
     }
 }
 
@@ -1555,6 +1683,43 @@ pub fn paint_scene3d(
             },
         },
     ));
+}
+
+/// Render scene `id` at `size_px` physical pixels from `camera`'s viewpoint on
+/// `background`, reading the result back as tightly packed RGBA8
+/// (`width * height * 4`, top row first). Returns `None` if the scene has no
+/// uploaded geometry or the GPU readback fails.
+///
+/// The passed `camera` is not mutated; its aspect is taken from `size_px` for
+/// this render, exactly as [`paint_scene3d`] does — so the snapshot matches the
+/// on-screen scene at that size. Unlike [`paint_scene3d`], this renders
+/// synchronously off the egui frame loop into its own copyable target, suiting a
+/// "save scene to image" action (pair with [`crate::render::save::encode_png`]).
+///
+/// Requires [`install_scene3d`] + [`set_scene3d`].
+pub fn snapshot_scene3d(
+    render_state: &RenderState,
+    id: Scene3dId,
+    camera: &Camera,
+    background: Color32,
+    size_px: (u32, u32),
+) -> Option<Vec<u8>> {
+    let (w, h) = (size_px.0.max(1), size_px.1.max(1));
+    let mut cam = *camera;
+    cam.set_size((w as f32, h as f32));
+    let mvp = cam.matrix().to_gpu_clip_cols();
+    let view = cam.extrinsic.matrix().to_gpu_cols();
+    let background = egui::Rgba::from(background).to_array();
+    let frame = Scene3dFrame {
+        id,
+        mvp,
+        view,
+        size_px: [w, h],
+        background,
+    };
+    let renderer = render_state.renderer.read();
+    let res: &Scene3dResources = renderer.callback_resources.get()?;
+    res.snapshot_scene(&render_state.device, &render_state.queue, &frame)
 }
 
 /// The per-frame render request for one scene: which scene, the camera MVP, the

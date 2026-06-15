@@ -20,7 +20,7 @@ use crate::core::scene3d::camera::{Camera, CameraDirection, CameraFace};
 use crate::core::scene3d::interaction::{OrbitDrag, PanDrag, window_to_ndc};
 use crate::core::scene3d::mat4::Vec3;
 use crate::render::gpu_scene3d::{
-    Scene3dGeometry, Scene3dId, install_scene3d, paint_scene3d, set_scene3d,
+    Scene3dGeometry, Scene3dId, install_scene3d, paint_scene3d, set_scene3d, snapshot_scene3d,
 };
 
 /// Default scene background (a dark neutral grey, as in silx's 3D views).
@@ -240,6 +240,21 @@ impl SceneWidget {
 
         paint_scene3d(ui, rect, self.id, &self.camera, self.background);
         response
+    }
+
+    /// Render the current scene at `size_px` physical pixels from the widget's
+    /// camera, returning it as tightly packed RGBA8 (`width * height * 4`, top
+    /// row first), or `None` if the GPU readback fails. Off-screen and
+    /// synchronous — independent of the egui frame loop — so it suits saving a
+    /// scene to an image file (pair with [`crate::encode_png`]).
+    pub fn snapshot(&self, render_state: &RenderState, size_px: (u32, u32)) -> Option<Vec<u8>> {
+        snapshot_scene3d(
+            render_state,
+            self.id,
+            &self.camera,
+            self.background,
+            size_px,
+        )
     }
 }
 
