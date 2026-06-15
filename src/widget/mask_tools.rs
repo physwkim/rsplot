@@ -1341,6 +1341,104 @@ impl MaskToolsWidget {
     pub fn load_mask_edf(&mut self, path: &str) -> io::Result<bool> {
         self.load_edf(path)
     }
+
+    /// Open a native save-file dialog (silx `MaskToolsWidget._saveMask`) and
+    /// write the current mask to the chosen path, dispatching to the `.npy` or
+    /// `.edf` codec by file extension — the two mask formats siplot encodes
+    /// without an external crate (silx also offers TIFF/HDF5/msk, which are
+    /// crate-bound and remain unsupported here). An extensionless path defaults
+    /// to `.npy` (silx's default kind); an unsupported extension is rejected
+    /// (faithful to silx `save` raising on an unknown kind). Returns `Ok(true)`
+    /// when a file was written, `Ok(false)` on cancel. The picker is a native
+    /// shim; the codecs and the extension dispatch ([`resolve_mask_save_format`])
+    /// are unit-tested.
+    pub fn save_mask_dialog(&self) -> io::Result<bool> {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("NumPy mask", &["npy"])
+            .add_filter("EDF mask", &["edf"])
+            .save_file()
+        else {
+            return Ok(false);
+        };
+        match resolve_mask_save_format(&path)? {
+            MaskFileFormat::Npy => self.save_npy(&path)?,
+            MaskFileFormat::Edf => self.save_edf(&path)?,
+        }
+        Ok(true)
+    }
+
+    /// Open a native open-file dialog (silx `MaskToolsWidget._loadMask`) and load
+    /// a mask from the chosen path, dispatching by extension (`.npy`/`.edf`) and
+    /// cropping/padding to the current image. Returns `Ok(Some(resized))` — where
+    /// `resized` is `true` when the loaded shape differed from the current image
+    /// — or `Ok(None)` on cancel. An unknown extension is rejected (faithful to
+    /// silx `load` raising on an unknown extension). Native shim; the codecs and
+    /// the extension dispatch ([`resolve_mask_load_format`]) are unit-tested.
+    pub fn load_mask_dialog(&mut self) -> io::Result<Option<bool>> {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("NumPy mask", &["npy"])
+            .add_filter("EDF mask", &["edf"])
+            .pick_file()
+        else {
+            return Ok(None);
+        };
+        let resized = match resolve_mask_load_format(&path)? {
+            MaskFileFormat::Npy => self.load_npy(&path)?,
+            MaskFileFormat::Edf => self.load_edf(&path)?,
+        };
+        Ok(Some(resized))
+    }
+}
+
+/// The mask file formats siplot can encode/decode without an external crate
+/// (silx `MaskToolsWidget` save/load also handle TIFF/HDF5/msk, which are
+/// crate-bound and unsupported here).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MaskFileFormat {
+    Npy,
+    Edf,
+}
+
+/// Map a (case-insensitive) file extension to its [`MaskFileFormat`], or `None`
+/// for an extension siplot cannot handle. Single owner of the extension→format
+/// mapping shared by the save and load dialogs (silx dispatches the same way via
+/// `os.path.splitext(filename).lower()`).
+fn mask_format_for_ext(ext: &str) -> Option<MaskFileFormat> {
+    match ext.to_ascii_lowercase().as_str() {
+        "npy" => Some(MaskFileFormat::Npy),
+        "edf" => Some(MaskFileFormat::Edf),
+        _ => None,
+    }
+}
+
+/// Resolve the save format for `path`: a known extension picks the codec, a
+/// missing extension defaults to `.npy` (silx's default kind), and an
+/// unsupported extension is rejected rather than silently coerced.
+fn resolve_mask_save_format(path: &std::path::Path) -> io::Result<MaskFileFormat> {
+    match path.extension().and_then(|e| e.to_str()) {
+        None => Ok(MaskFileFormat::Npy),
+        Some(ext) => mask_format_for_ext(ext).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("unsupported mask format: .{ext} (siplot writes .npy/.edf)"),
+            )
+        }),
+    }
+}
+
+/// Resolve the load format for `path` by extension; a missing or unsupported
+/// extension is rejected (a file's format cannot be guessed, faithful to silx
+/// `load` raising on an unknown extension).
+fn resolve_mask_load_format(path: &std::path::Path) -> io::Result<MaskFileFormat> {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .and_then(mask_format_for_ext)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "unsupported mask format (siplot reads .npy/.edf)",
+            )
+        })
 }
 
 /// Map each mask level through the 256-entry overlay LUT to per-pixel RGBA.
@@ -1665,6 +1763,54 @@ pub fn line_coords(row0: i64, col0: i64, row1: i64, col1: i64, width: i64) -> (V
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mask_save_format_dispatches_by_extension_defaulting_to_npy() {
+        use std::path::Path;
+        assert_eq!(
+            resolve_mask_save_format(Path::new("m.npy")).unwrap(),
+            MaskFileFormat::Npy
+        );
+        assert_eq!(
+            resolve_mask_save_format(Path::new("m.edf")).unwrap(),
+            MaskFileFormat::Edf
+        );
+        // Case-insensitive (silx lowercases the extension).
+        assert_eq!(
+            resolve_mask_save_format(Path::new("M.EDF")).unwrap(),
+            MaskFileFormat::Edf
+        );
+        // A missing extension defaults to npy (silx's default kind).
+        assert_eq!(
+            resolve_mask_save_format(Path::new("mask")).unwrap(),
+            MaskFileFormat::Npy
+        );
+        // An unsupported extension is rejected, not silently written as npy.
+        assert!(resolve_mask_save_format(Path::new("m.tif")).is_err());
+        assert!(resolve_mask_save_format(Path::new("m.h5")).is_err());
+    }
+
+    #[test]
+    fn mask_load_format_requires_a_known_extension() {
+        use std::path::Path;
+        assert_eq!(
+            resolve_mask_load_format(Path::new("m.npy")).unwrap(),
+            MaskFileFormat::Npy
+        );
+        assert_eq!(
+            resolve_mask_load_format(Path::new("m.edf")).unwrap(),
+            MaskFileFormat::Edf
+        );
+        assert_eq!(
+            resolve_mask_load_format(Path::new("m.Npy")).unwrap(),
+            MaskFileFormat::Npy
+        );
+        // A file's format cannot be guessed: a missing or unsupported extension
+        // errors (faithful to silx `load` raising on an unknown extension).
+        assert!(resolve_mask_load_format(Path::new("mask")).is_err());
+        assert!(resolve_mask_load_format(Path::new("m.tif")).is_err());
+        assert!(resolve_mask_load_format(Path::new("m.h5")).is_err());
+    }
 
     #[test]
     fn pencil_preview_circle_lies_on_radius_around_center() {
