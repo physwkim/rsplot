@@ -17,11 +17,14 @@
 //! The pure snapping kernel (PositionInfo.py:236-292) is provided by
 //! [`snap_to_nearest`] / [`SNAP_THRESHOLD_DIST`]: given the cursor and
 //! candidate data points already projected to pixel space, it returns the
-//! nearest point within the snap radius. Selecting *which* items become
-//! candidates (silx `SNAPPING_CURVE`/`SNAPPING_SCATTER`/`SNAPPING_ACTIVE_ONLY`
-//! and the data→pixel projection) needs live plot/GPU state and stays the
-//! caller's responsibility; the live `PlotWidget` event wiring
-//! (`sigPlotSignal`) is likewise out of scope.
+//! nearest point within the snap radius. Candidate *selection*
+//! (`SNAPPING_CURVE`/`SNAPPING_SCATTER`/`SNAPPING_ACTIVE_ONLY`/…) is
+//! [`snapping_candidates`]. The two are wired against a live plot by
+//! [`PlotWidget::snap_cursor`](crate::widget::high_level::PlotWidget::snap_cursor),
+//! which builds the [`SnapItem`] list from the plot's items, projects each
+//! candidate curve's vertices through the cached display transform, and returns
+//! the [`Snap`]; the host then feeds `snap.data` to [`PositionInfo::ui_snapped`],
+//! which reddens the labels in the no-snap state (silx :200).
 
 /// A converter mapping cursor data coordinates `(x, y)` to a display string.
 ///
@@ -132,6 +135,30 @@ impl PositionInfo {
             for ((label, _func), value) in self.converters.iter().zip(values) {
                 ui.strong(format!("{label}:"));
                 ui.label(value);
+                ui.add_space(8.0);
+            }
+        });
+    }
+
+    /// Render the readout bar, reddening the value labels when `snapped` is
+    /// `false` (silx PositionInfo's "not snapped" red style, PositionInfo.py:200;
+    /// the normal style is restored when the cursor snaps to a point, :288).
+    ///
+    /// Use with [`PlotWidget::snap_cursor`](crate::widget::high_level::PlotWidget::snap_cursor)
+    /// while a [`SnappingMode`] is engaged: pass the snapped data coordinate as
+    /// `cursor` (or the raw cursor when nothing snapped) and `snapped =
+    /// snap.is_some()`. When snapping is *disabled*, call the plain [`Self::ui`]
+    /// instead — silx only reddens once snapping is engaged but unmatched.
+    pub fn ui_snapped(&self, ui: &mut egui::Ui, cursor: Option<[f64; 2]>, snapped: bool) {
+        ui.horizontal(|ui| {
+            let values = self.values(cursor);
+            for ((label, _func), value) in self.converters.iter().zip(values) {
+                ui.strong(format!("{label}:"));
+                if snapped {
+                    ui.label(value);
+                } else {
+                    ui.colored_label(egui::Color32::RED, value);
+                }
                 ui.add_space(8.0);
             }
         });

@@ -33,6 +33,10 @@ use crate::render::gpu_image::{AggregationMode, ImageData, ImagePixels, Interpol
 use crate::render::save::{SaveError, SaveFormat};
 use crate::widget::interaction::{DrawEvent, DrawMode, DrawParams, MouseButton, RoiDrawKind};
 use crate::widget::plot_widget::{PlotInteractionMode, PlotResponse, PlotView};
+use crate::widget::position_info::{
+    SNAP_THRESHOLD_DIST, Snap, SnapItem, SnapItemKind, SnappingMode, snap_to_nearest,
+    snapping_candidates,
+};
 
 /// Live profile extraction mode (silx profile toolbar).
 ///
@@ -267,6 +271,17 @@ impl PlotItemKind {
     /// `true` for item families that live on the image layer (Image, Mask).
     pub fn is_image_like(self) -> bool {
         matches!(self, Self::Image | Self::Mask)
+    }
+}
+
+/// Map a [`PlotItemKind`] to the [`SnapItemKind`] used by the `PositionInfo`
+/// snapping classifier (silx snaps only curves, histograms, and scatters).
+fn snap_item_kind(kind: PlotItemKind) -> SnapItemKind {
+    match kind {
+        PlotItemKind::Curve => SnapItemKind::Curve,
+        PlotItemKind::Histogram => SnapItemKind::Histogram,
+        PlotItemKind::Scatter => SnapItemKind::Scatter,
+        _ => SnapItemKind::Other,
     }
 }
 
@@ -6799,6 +6814,82 @@ impl PlotWidget {
 
     pub fn plot_bounds_in_pixels(&self) -> Option<egui::Rect> {
         self.backend.plot_bounds_in_pixels()
+    }
+
+    /// Snap the data-space `cursor` to the nearest data point under the live
+    /// `mode`, porting silx `PositionInfo._updateStatusBar`'s snap
+    /// (PositionInfo.py:196-292) against this widget's retained items.
+    ///
+    /// Builds a [`SnapItem`] per item (kind, `is_item_visible`, whether it shows
+    /// a symbol, whether it is the active item), runs [`snapping_candidates`] to
+    /// pick the participating items for `mode`, projects every candidate's
+    /// retained vertices to pixels through the cached display transform
+    /// (axis-aware, so a y2 curve snaps in its own axis), and returns the
+    /// [`snap_to_nearest`] result within [`SNAP_THRESHOLD_DIST`] logical pixels —
+    /// its `data` is the snapped coordinate to show in a [`PositionInfo`], with a
+    /// `None` result meaning "no snap" (feed `false` to
+    /// [`PositionInfo::ui_snapped`](crate::widget::position_info::PositionInfo::ui_snapped)).
+    ///
+    /// Curves, histograms, and scatters all participate: each is stored with
+    /// retained `RetainedItemData::Curve { x, y }` vertices (a scatter is a
+    /// symbol-only curve-kind item, [`Self::add_scatter`]), so a `SCATTER`-mode
+    /// snap matches scatter points and a `CURVE`-mode snap matches curve and
+    /// histogram vertices. Items whose data is not retained as vertices (images,
+    /// triangles, shapes, markers) classify as [`SnapItemKind::Other`] and are
+    /// never candidates.
+    ///
+    /// Returns `None` when snapping is not engaged (no `CURVE`/`SCATTER` flag),
+    /// nothing is within the radius, or no frame has been rendered yet (the
+    /// transform is uncached). The [`SnappingMode::CROSSHAIR`] gate is the
+    /// caller's precondition (silx :198), as is the empty/`None`-cursor case.
+    pub fn snap_cursor(&self, cursor: [f64; 2], mode: SnappingMode) -> Option<Snap> {
+        // SnapItems in item-record order so candidate indices map back to records.
+        let items: Vec<SnapItem> = self
+            .item_records
+            .iter()
+            .map(|record| SnapItem {
+                kind: snap_item_kind(record.kind),
+                visible: self.is_item_visible(record.handle),
+                has_symbol: record
+                    .curve_data
+                    .as_ref()
+                    .and_then(|curve| curve.symbol)
+                    .is_some(),
+                active: self.active_item == Some(record.handle),
+            })
+            .collect();
+        let candidates = snapping_candidates(mode, &items);
+        if candidates.is_empty() {
+            return None;
+        }
+
+        // Project every candidate curve's vertices to pixels, paired with their
+        // data coordinate (silx projects each item's points then snaps).
+        let mut points: Vec<([f64; 2], [f64; 2])> = Vec::new();
+        for &index in &candidates {
+            let record = &self.item_records[index];
+            let axis = record
+                .curve_data
+                .as_ref()
+                .map_or(YAxis::Left, |curve| curve.y_axis);
+            // Curves, histograms, and scatters all retain Curve{x,y} vertices;
+            // items without retained vertices (images/shapes/markers) never
+            // reach here because they classify as SnapItemKind::Other.
+            if let Some(RetainedItemData::Curve { x, y }) = &record.data {
+                for (&dx, &dy) in x.iter().zip(y) {
+                    if let Some(px) = self.data_to_pixel(dx, dy, axis) {
+                        points.push(([px.x as f64, px.y as f64], [dx, dy]));
+                    }
+                }
+            }
+        }
+
+        let cursor_px = self.data_to_pixel(cursor[0], cursor[1], YAxis::Left)?;
+        snap_to_nearest(
+            [cursor_px.x as f64, cursor_px.y as f64],
+            &points,
+            SNAP_THRESHOLD_DIST,
+        )
     }
 
     pub fn add_roi(&mut self, roi: Roi) -> usize {
