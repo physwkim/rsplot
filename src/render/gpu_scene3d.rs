@@ -180,6 +180,62 @@ const SCENE3D_MESH_ATTRS: [wgpu::VertexAttribute; 3] = [
     },
 ];
 
+/// One textured-quad vertex: world-space position + texture UV. `repr(C)` so the
+/// 20-byte stride matches [`SCENE3D_IMAGE_ATTRS`] and `scene3d_image.wgsl`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct Scene3dImageVertex {
+    pos: [f32; 3],
+    uv: [f32; 2],
+}
+
+/// Per-vertex attributes for [`Scene3dImageVertex`]: pos at location 0 (offset 0),
+/// uv at 1 (offset 12).
+const SCENE3D_IMAGE_ATTRS: [wgpu::VertexAttribute; 2] = [
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x3,
+        offset: 0,
+        shader_location: 0,
+    },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x2,
+        offset: 12,
+        shader_location: 1,
+    },
+];
+
+/// Texture sampling for an image layer (silx `InterpolationMixIn`: 'nearest' vs
+/// 'linear').
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum ImageInterpolation {
+    /// Nearest-neighbour — crisp pixels (silx default for `ImageData`/`ImageRgba`).
+    #[default]
+    Nearest,
+    /// Bilinear — smooth.
+    Linear,
+}
+
+/// One image layer: a `width × height` premultiplied-linear RGBA8 raster placed
+/// as a quad in the scene. The quad spans pixel-corner `origin` to
+/// `origin + (width·scale.x, height·scale.y)` in the `z = origin.z` plane (silx
+/// `ImageData`/`ImageRgba`: pixel `(col, row)` → world `(x, y)`). `pixels` is
+/// row-major (row 0 first), length `width · height · 4`.
+#[derive(Clone, Debug)]
+pub struct Scene3dImageLayer {
+    /// Premultiplied-linear RGBA8, row-major, length `width · height · 4`.
+    pub pixels: Vec<u8>,
+    /// Image width in pixels.
+    pub width: u32,
+    /// Image height in pixels.
+    pub height: u32,
+    /// World position of pixel-corner `(0, 0)`.
+    pub origin: [f32; 3],
+    /// World size of one pixel along x and y.
+    pub scale: [f32; 2],
+    /// Nearest vs linear sampling.
+    pub interpolation: ImageInterpolation,
+}
+
 /// Uniform block for `scene3d.wgsl`: the column-major, clip-corrected MVP.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -224,6 +280,8 @@ pub struct Scene3dGeometry {
     /// Triples of vertices, each triple one triangle of a **lit** mesh (carries
     /// per-vertex normals; `TriangleList` topology).
     pub(crate) meshes: Vec<Scene3dMeshVertex>,
+    /// Textured image quads (one texture each), drawn after the opaque geometry.
+    pub(crate) images: Vec<Scene3dImageLayer>,
 }
 
 impl Scene3dGeometry {
@@ -238,6 +296,7 @@ impl Scene3dGeometry {
             && self.triangles.is_empty()
             && self.points.is_empty()
             && self.meshes.is_empty()
+            && self.images.is_empty()
     }
 
     /// Drop all geometry, keeping allocated capacity for reuse.
@@ -246,6 +305,12 @@ impl Scene3dGeometry {
         self.triangles.clear();
         self.points.clear();
         self.meshes.clear();
+        self.images.clear();
+    }
+
+    /// Append a textured image layer (see [`Scene3dImageLayer`]).
+    pub fn add_image_layer(&mut self, layer: Scene3dImageLayer) {
+        self.images.push(layer);
     }
 
     /// Append a line segment `a→b` in one solid [`Color32`].
@@ -423,6 +488,14 @@ struct Scene3dPipeline {
     mesh_bgl: wgpu::BindGroupLayout,
     /// Depth-tested, headlight-shaded `TriangleList` mesh pipeline (no culling).
     mesh_pipeline: wgpu::RenderPipeline,
+    /// `group(1)` layout for an image layer (sampled texture + sampler, fragment).
+    image_tex_bgl: wgpu::BindGroupLayout,
+    /// Depth-tested, alpha-blended textured-quad pipeline (group 0 = scene MVP).
+    image_pipeline: wgpu::RenderPipeline,
+    /// Nearest-filtering, clamp-to-edge sampler for crisp image pixels.
+    image_sampler_nearest: wgpu::Sampler,
+    /// Linear-filtering, clamp-to-edge sampler for smooth images.
+    image_sampler_linear: wgpu::Sampler,
     /// `group(0)` layout for the blit (sampled texture + sampler, fragment stage).
     blit_bgl: wgpu::BindGroupLayout,
     /// Depth-less full-screen blit pipeline (offscreen color → egui pass).
@@ -448,6 +521,10 @@ impl Scene3dPipeline {
         let mesh_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("siplot scene3d mesh"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shaders/scene3d_mesh.wgsl").into()),
+        });
+        let image_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("siplot scene3d image"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/scene3d_image.wgsl").into()),
         });
 
         let scene_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -650,6 +727,95 @@ impl Scene3dPipeline {
             cache: None,
         });
 
+        // Textured image quads: group 0 reuses the scene MVP uniform; group 1 is
+        // the per-image texture + sampler. Depth-tested, premultiplied-alpha
+        // blended (opaque images write fully; RGBA images composite).
+        let image_tex_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("siplot scene3d image tex bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let image_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("siplot scene3d image layout"),
+            bind_group_layouts: &[Some(&scene_bgl), Some(&image_tex_bgl)],
+            immediate_size: 0,
+        });
+        let image_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("siplot scene3d image"),
+            layout: Some(&image_layout),
+            vertex: wgpu::VertexState {
+                module: &image_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<Scene3dImageVertex>() as u64,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &SCENE3D_IMAGE_ATTRS,
+                }],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &image_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: target_format,
+                    blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::Less),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        let image_sampler_nearest = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("siplot scene3d image sampler (nearest)"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            ..Default::default()
+        });
+        let image_sampler_linear = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("siplot scene3d image sampler (linear)"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            ..Default::default()
+        });
+
         let blit_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("siplot scene3d blit bgl"),
             entries: &[
@@ -723,11 +889,23 @@ impl Scene3dPipeline {
             point_pipeline,
             mesh_bgl,
             mesh_pipeline,
+            image_tex_bgl,
+            image_pipeline,
+            image_sampler_nearest,
+            image_sampler_linear,
             blit_bgl,
             blit_pipeline,
             sampler,
         }
     }
+}
+
+/// One uploaded image layer: its quad vertex buffer (6 verts) and the group(1)
+/// bind group over its texture + the chosen sampler. Rebuilt on each
+/// [`Scene3dGpu::upload`].
+struct Scene3dImageGpu {
+    vbuf: wgpu::Buffer,
+    bind_group: wgpu::BindGroup,
 }
 
 /// Per-scene GPU data: vertex buffers, the MVP uniform, and the offscreen
@@ -757,6 +935,8 @@ struct Scene3dGpu {
     /// Lit-mesh vertices; `None` while empty (skip the draw).
     mesh_vbuf: Option<wgpu::Buffer>,
     mesh_count: u32,
+    /// Uploaded image layers (texture + quad), drawn in order after the meshes.
+    images: Vec<Scene3dImageGpu>,
     /// Pixel size of the current offscreen target (`[0, 0]` until first sized).
     size: [u32; 2],
     /// Offscreen color view (target format); the blit samples this.
@@ -826,6 +1006,7 @@ impl Scene3dGpu {
             mesh_bind_group,
             mesh_vbuf: None,
             mesh_count: 0,
+            images: Vec::new(),
             size: [0, 0],
             color_view: None,
             depth_view: None,
@@ -833,8 +1014,15 @@ impl Scene3dGpu {
         }
     }
 
-    /// Replace the line + triangle + point buffers from `geometry`.
-    fn upload(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, geometry: &Scene3dGeometry) {
+    /// Replace the line + triangle + point + mesh buffers and the image layers
+    /// from `geometry`.
+    fn upload(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        pipeline: &Scene3dPipeline,
+        geometry: &Scene3dGeometry,
+    ) {
         self.line_vbuf = make_vertex_buffer(device, queue, &geometry.lines, "siplot scene3d lines");
         self.line_count = geometry.lines.len() as u32;
         self.tri_vbuf =
@@ -846,6 +1034,11 @@ impl Scene3dGpu {
         self.mesh_vbuf =
             make_vertex_buffer(device, queue, &geometry.meshes, "siplot scene3d meshes");
         self.mesh_count = geometry.meshes.len() as u32;
+        self.images = geometry
+            .images
+            .iter()
+            .filter_map(|layer| build_image_gpu(device, queue, pipeline, layer))
+            .collect();
     }
 
     /// Ensure the offscreen color+depth target matches `size` (in physical
@@ -965,6 +1158,18 @@ impl Scene3dGpu {
             rp.set_vertex_buffer(0, buf.slice(..));
             rp.draw(0..self.mesh_count, 0..1);
         }
+        // Textured image quads (group 0 = scene MVP, group 1 = per-image texture).
+        // Premultiplied-alpha blended and depth-tested; drawn after the opaque
+        // geometry, before the point overlays.
+        if !self.images.is_empty() {
+            rp.set_pipeline(&pipeline.image_pipeline);
+            rp.set_bind_group(0, &self.scene_bind_group, &[]);
+            for image in &self.images {
+                rp.set_bind_group(1, &image.bind_group, &[]);
+                rp.set_vertex_buffer(0, image.vbuf.slice(..));
+                rp.draw(0..6, 0..1);
+            }
+        }
         // Point sprites last: alpha-blended billboards over the opaque geometry.
         // Six vertices (two triangles) per instance, one instance per point.
         if let (Some(buf), true) = (&self.point_vbuf, self.point_count > 0) {
@@ -1008,6 +1213,95 @@ fn make_vertex_buffer<T: bytemuck::Pod>(
     });
     queue.write_buffer(&buffer, 0, bytes);
     Some(buffer)
+}
+
+/// Build the per-image GPU state for one [`Scene3dImageLayer`]: upload its pixels
+/// to an `Rgba8Unorm` texture, build the group(1) bind group (texture + the
+/// nearest/linear sampler), and the six-vertex quad (two triangles) at the
+/// layer's world rect with corner UVs. Returns `None` for a degenerate layer
+/// (zero dimensions or a pixel buffer of the wrong length).
+fn build_image_gpu(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    pipeline: &Scene3dPipeline,
+    layer: &Scene3dImageLayer,
+) -> Option<Scene3dImageGpu> {
+    let (w, h) = (layer.width, layer.height);
+    if w == 0 || h == 0 || layer.pixels.len() != (w as usize * h as usize * 4) {
+        return None;
+    }
+    let extent = wgpu::Extent3d {
+        width: w,
+        height: h,
+        depth_or_array_layers: 1,
+    };
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("siplot scene3d image texture"),
+        size: extent,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        // Premultiplied-linear RGBA stored verbatim (no sRGB decode), so the
+        // sampled colour matches the geometry path's linear convention.
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        &layer.pixels,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(w * 4),
+            rows_per_image: Some(h),
+        },
+        extent,
+    );
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    let sampler = match layer.interpolation {
+        ImageInterpolation::Nearest => &pipeline.image_sampler_nearest,
+        ImageInterpolation::Linear => &pipeline.image_sampler_linear,
+    };
+    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("siplot scene3d image bind group"),
+        layout: &pipeline.image_tex_bgl,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(sampler),
+            },
+        ],
+    });
+
+    // Quad corners in the z = origin.z plane: (0,0) → (w·sx, h·sy). UV (0,0) at
+    // the origin corner, (1,1) at the far corner (row 0 first → v increases with
+    // y, no flip).
+    let [ox, oy, oz] = layer.origin;
+    let (sx, sy) = (layer.scale[0], layer.scale[1]);
+    let (x1, y1) = (ox + w as f32 * sx, oy + h as f32 * sy);
+    let v = |x: f32, y: f32, u: f32, vv: f32| Scene3dImageVertex {
+        pos: [x, y, oz],
+        uv: [u, vv],
+    };
+    let verts = [
+        v(ox, oy, 0.0, 0.0),
+        v(x1, oy, 1.0, 0.0),
+        v(x1, y1, 1.0, 1.0),
+        v(ox, oy, 0.0, 0.0),
+        v(x1, y1, 1.0, 1.0),
+        v(ox, y1, 0.0, 1.0),
+    ];
+    let vbuf = make_vertex_buffer(device, queue, &verts, "siplot scene3d image quad")?;
+    Some(Scene3dImageGpu { vbuf, bind_group })
 }
 
 /// Persistent 3D GPU resources, stored in `egui_wgpu`'s `callback_resources`.
@@ -1089,7 +1383,12 @@ pub fn set_scene3d(render_state: &RenderState, id: Scene3dId, geometry: &Scene3d
     let scene = scenes
         .entry(id)
         .or_insert_with(|| Scene3dGpu::new(&render_state.device, pipeline));
-    scene.upload(&render_state.device, &render_state.queue, geometry);
+    scene.upload(
+        &render_state.device,
+        &render_state.queue,
+        pipeline,
+        geometry,
+    );
 }
 
 /// Register the paint callback that renders scene `id` into `rect` from

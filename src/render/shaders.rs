@@ -102,3 +102,11 @@ fn scene3d_mesh_wgsl_is_valid() {
         include_str!("shaders/scene3d_mesh.wgsl"),
     );
 }
+
+#[test]
+fn scene3d_image_wgsl_is_valid() {
+    validate_wgsl(
+        "scene3d_image.wgsl",
+        include_str!("shaders/scene3d_image.wgsl"),
+    );
+}

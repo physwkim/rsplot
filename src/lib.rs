@@ -86,8 +86,9 @@ pub use crate::render::gpu_image::{
     AggregationMode, ImageData, ImagePixels, InterpolationMode, aggregate_blocks,
 };
 pub use crate::render::gpu_scene3d::{
-    PointMarker, Scene3dGeometry, Scene3dId, Scene3dMeshVertex, Scene3dPoint, Scene3dResources,
-    Scene3dVertex, install_scene3d, paint_scene3d, set_scene3d,
+    ImageInterpolation, PointMarker, Scene3dGeometry, Scene3dId, Scene3dImageLayer,
+    Scene3dMeshVertex, Scene3dPoint, Scene3dResources, Scene3dVertex, install_scene3d,
+    paint_scene3d, set_scene3d,
 };
 pub use crate::render::save::{
     SaveError, SaveFormat, encode_eps, encode_pdf, encode_png, encode_ppm, encode_svg, encode_tiff,
