@@ -20,6 +20,7 @@ pub mod roi_io;
 pub mod scatter_viz;
 pub mod scene3d;
 pub mod shape;
+pub mod sift_align;
 pub mod stats;
 pub mod transform;
 pub mod triangles;

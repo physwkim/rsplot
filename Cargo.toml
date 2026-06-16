@@ -52,6 +52,15 @@ printers = "2.3.0"
 # NaN-reduced "highest-of-two-central" case is handled in analysis.rs to stay
 # byte-faithful to the silx C++ median<T>().
 medians = "3.0.12"
+# SIFT keypoint registration for CompareImages AUTO alignment (silx
+# `CompareImages` AUTO mode = `silx.image.sift` SiftPlan + MatchPlan +
+# matching_correction + LinearAlign). `lowe-sift` is a pure-Rust implementation
+# of Lowe's SIFT (DoG scale space, 128-d descriptors, the distance-ratio
+# matcher) plus `geometry::estimate_affine_from_pairs` — the same 6-param affine
+# least squares silx solves in `matching_correction`. `default-features = false`
+# drops its optional `image`-crate conversion helpers; siplot feeds raw `f32`
+# pixels through `GrayImage::new`, so no extra dependency is pulled.
+lowe-sift = { version = "0.2", default-features = false }
 # IANA tz database for DST-aware named-zone offsets on date-time axes (silx
 # Axis.setTimeZone with a dateutil.tz zone / tz=None local time). `tzdb` bundles
 # the compiled database (deterministic, no system tzdb dependency) and resolves

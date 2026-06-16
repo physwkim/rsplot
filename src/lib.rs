@@ -85,6 +85,10 @@ pub use crate::core::scene3d::plane::{
     Plane, angle_between_vectors, box_plane_intersect, segment_plane_intersect,
 };
 pub use crate::core::shape::{Line, Shape, ShapeKind, triangulate_simple_polygon};
+pub use crate::core::sift_align::{
+    AffineTransformation, MATCH_RATIO_THRESHOLD, MatchedKeypoint, SiftAlignment, decompose_affine,
+    sift_auto_align,
+};
 pub use crate::core::stats::{ComCoord, StatScope, Stats};
 pub use crate::core::transform::{Axis, AxisSide, Margins, Scale, Transform, YAxis};
 pub use crate::core::triangles::Triangles;

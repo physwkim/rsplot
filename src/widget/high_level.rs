@@ -25,6 +25,7 @@ use crate::core::plot::{DataMargins, DataRange, GraphGrid, Plot, PlotId};
 use crate::core::roi::{ManagedRoi, Roi, RoiInteractionMode, RoiLineStyle};
 use crate::core::scatter_viz::{GridImage, ScatterLineProfile};
 use crate::core::shape::{Shape, ShapeKind};
+use crate::core::sift_align::{SiftAlignment, sift_auto_align};
 use crate::core::transform::{AxisSide, Margins, Scale, YAxis};
 use crate::core::triangles::Triangles;
 use crate::render::backend_wgpu::WgpuBackend;
@@ -8096,11 +8097,12 @@ pub enum CompareMode {
 /// How the two compared images are placed on a common grid when they differ in
 /// shape, mirroring silx `AlignmentMode` (`tools/compare/core.py`).
 ///
-/// siplot implements the three resampling-free / bilinear modes. silx's `AUTO`
-/// mode (SIFT keypoint registration + affine warp) needs a heavy
-/// computer-vision dependency and is not provided; consequently silx's
-/// `getTransformation` — which returns the affine *only* for the SIFT path and
-/// `None` for every mode below — is also omitted.
+/// The first three are resampling-free / bilinear placements. [`Auto`] is the
+/// silx `AUTO` mode: SIFT keypoint registration + affine warp
+/// ([`crate::sift_auto_align`]), the only mode for which silx's
+/// `getTransformation` returns an affine (it is `None` for the others).
+///
+/// [`Auto`]: CompareAlignment::Auto
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum CompareAlignment {
     /// Both images anchored at the top-left origin on a common
@@ -8116,6 +8118,14 @@ pub enum CompareAlignment {
     /// shape (silx `STRETCH`: `data1 = raw1`, `data2 = __rescaleImage(raw2,
     /// raw1.shape)`).
     Stretch,
+    /// SIFT keypoint registration: both images are padded to the common
+    /// `max × max` grid, SIFT-matched, and image B is affine-warped onto image
+    /// A's frame (silx `AUTO`: `__createSiftData` → `LinearAlign`). The estimated
+    /// affine transform and matched keypoints are computed and cached for
+    /// read-out (silx `getTransformation`). If fewer than three keypoints match,
+    /// the widget falls back to [`Origin`](Self::Origin) (silx
+    /// `__setDefaultAlignmentMode`).
+    Auto,
 }
 
 /// A retained widget that displays two co-registered images with a draggable
@@ -8169,6 +8179,12 @@ pub struct CompareImages {
     /// rebuilding the pixels.
     composite_w: u32,
     composite_h: u32,
+    /// Cached result of the last [`CompareAlignment::Auto`] SIFT registration
+    /// (silx `__createSiftData` output): image B warped onto A's grid plus the
+    /// estimated affine and matched keypoints. Recomputed only when the images or
+    /// alignment change (SIFT is expensive); `None` in every other alignment mode
+    /// and when registration found too few keypoints.
+    auto: Option<SiftAlignment>,
 }
 
 impl CompareImages {
@@ -8196,6 +8212,7 @@ impl CompareImages {
             separator_dragging: false,
             composite_w: 0,
             composite_h: 0,
+            auto: None,
         }
     }
 
@@ -8356,6 +8373,11 @@ impl CompareImages {
                     "Stretch image B to image A's shape (bilinear)",
                     CompareAlignment::Stretch,
                 ),
+                (
+                    "auto",
+                    "Auto-align image B to A by SIFT keypoint registration",
+                    CompareAlignment::Auto,
+                ),
             ] {
                 if ui
                     .selectable_label(self.alignment == a, label)
@@ -8375,6 +8397,19 @@ impl CompareImages {
     /// Render the comparison image in `ui`.
     pub fn show(&mut self, ui: &mut egui::Ui) -> PlotResponse {
         if self.dirty && !self.data_a.is_empty() {
+            // AUTO alignment runs the (expensive) SIFT registration here, only
+            // when something changed, and caches it for build_composite /
+            // raw_pixel_data. On too few keypoints silx falls back to the default
+            // alignment mode (`__setDefaultAlignmentMode`); siplot falls back to
+            // ORIGIN so the images still display.
+            if self.alignment == CompareAlignment::Auto {
+                self.auto = self.compute_auto_alignment();
+                if self.auto.is_none() {
+                    self.alignment = CompareAlignment::Origin;
+                }
+            } else {
+                self.auto = None;
+            }
             let (composite, cw, ch) = self.build_composite();
             self.composite_w = cw;
             self.composite_h = ch;
@@ -8511,15 +8546,25 @@ impl CompareImages {
     /// `compare_aligned_coords`. Each value is `None` when that image has no
     /// data or the mapped position is outside it.
     pub fn raw_pixel_data(&self, x: f64, y: f64) -> (Option<f32>, Option<f32>) {
-        let ((xa, ya), (xb, yb)) = compare_aligned_coords(
-            self.alignment,
-            x,
-            y,
-            self.width_a,
-            self.height_a,
-            self.width_b,
-            self.height_b,
-        );
+        // AUTO maps the display (A-grid) coordinate to B through the estimated
+        // affine `(x_b, y_b) = matrix·(x, y) + offset`; A is identity (padded
+        // top-left). Every other mode uses the analytic per-mode remap.
+        let ((xa, ya), (xb, yb)) = match (self.alignment, self.auto.as_ref()) {
+            (CompareAlignment::Auto, Some(al)) => {
+                let [[a, b], [c, d]] = al.matrix;
+                let (tx, ty) = al.offset;
+                ((x, y), (a * x + b * y + tx, c * x + d * y + ty))
+            }
+            _ => compare_aligned_coords(
+                self.alignment,
+                x,
+                y,
+                self.width_a,
+                self.height_a,
+                self.width_b,
+                self.height_b,
+            ),
+        };
         (
             compare_pixel_at(self.width_a, self.height_a, &self.data_a, xa, ya),
             compare_pixel_at(self.width_b, self.height_b, &self.data_b, xb, yb),
@@ -8560,16 +8605,49 @@ impl CompareImages {
     /// [`align_compare_images`] per the alignment mode (silx
     /// `__updateData`); every visualization mode then operates on the aligned
     /// `data1`/`data2`, which always have identical shape.
-    fn build_composite(&self) -> (Vec<[u8; 4]>, u32, u32) {
-        let (data1, data2, cw, ch) = align_compare_images(
-            self.alignment,
+    /// Run SIFT registration of B onto A for [`CompareAlignment::Auto`] (silx
+    /// `__createSiftData`), returning the cached alignment or `None` when too few
+    /// keypoints match. Pure data layer ([`sift_auto_align`]); only invoked from
+    /// the dirty path in [`Self::show`].
+    fn compute_auto_alignment(&self) -> Option<SiftAlignment> {
+        sift_auto_align(
             &self.data_a,
-            self.width_a,
-            self.height_a,
+            self.width_a as usize,
+            self.height_a as usize,
             &self.data_b,
-            self.width_b,
-            self.height_b,
-        );
+            self.width_b as usize,
+            self.height_b as usize,
+        )
+    }
+
+    fn build_composite(&self) -> (Vec<[u8; 4]>, u32, u32) {
+        // AUTO uses the cached SIFT result (B already warped onto the common
+        // grid); A is padded top-left onto the same grid (silx pads to max before
+        // SIFT). Every other mode places both images via `align_compare_images`.
+        let (data1, data2, cw, ch) = match (self.alignment, self.auto.as_ref()) {
+            (CompareAlignment::Auto, Some(al)) => {
+                let cw = al.width as u32;
+                let ch = al.height as u32;
+                let data1 = margin_image(
+                    &self.data_a,
+                    self.width_a as usize,
+                    self.height_a as usize,
+                    al.width,
+                    al.height,
+                    false,
+                );
+                (data1, al.aligned.clone(), cw, ch)
+            }
+            _ => align_compare_images(
+                self.alignment,
+                &self.data_a,
+                self.width_a,
+                self.height_a,
+                &self.data_b,
+                self.width_b,
+                self.height_b,
+            ),
+        };
         let w = cw as usize;
         let h = ch as usize;
 
@@ -8747,6 +8825,18 @@ fn align_compare_images(
             let d2 = rescale_array(b, wb as usize, hb as usize, wa as usize, ha as usize);
             (a.to_vec(), d2, wa, ha)
         }
+        // AUTO is served from the cached SIFT result in `build_composite`; this
+        // arm is only reached if it is ever called without that cache, in which
+        // case the ORIGIN top-left placement is the safe fallback (silx falls
+        // back to the default alignment mode when SIFT fails).
+        CompareAlignment::Auto => {
+            let cw = wa.max(wb);
+            let ch = ha.max(hb);
+            let (cwu, chu) = (cw as usize, ch as usize);
+            let d1 = margin_image(a, wa as usize, ha as usize, cwu, chu, false);
+            let d2 = margin_image(b, wb as usize, hb as usize, cwu, chu, false);
+            (d1, d2, cw, ch)
+        }
     }
 }
 
@@ -8790,6 +8880,10 @@ fn compare_aligned_coords(
             let yb = y * hb as f64 / ha as f64;
             ((x, y), (xb, yb))
         }
+        // AUTO's B mapping is the estimated affine, which lives on the widget;
+        // `raw_pixel_data` handles it directly. This identity arm is the fallback
+        // for the no-registration case (then AUTO has degraded to ORIGIN).
+        CompareAlignment::Auto => ((x, y), (x, y)),
     }
 }
 
