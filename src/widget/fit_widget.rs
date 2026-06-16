@@ -260,8 +260,14 @@ pub enum FitModelChoice {
     IterativeGaussian,
     /// Iterative Gaussian (area parameterisation).
     IterativeGaussianArea,
+    /// Iterative asymmetric (split) Gaussian.
+    IterativeSplitGaussian,
     /// Iterative Lorentzian.
     IterativeLorentzian,
+    /// Iterative Lorentzian (area parameterisation).
+    IterativeLorentzianArea,
+    /// Iterative asymmetric (split) Lorentzian.
+    IterativeSplitLorentzian,
     /// Iterative pseudo-Voigt.
     IterativePseudoVoigt,
     /// Iterative step down (descending erf edge).
@@ -279,12 +285,15 @@ pub enum FitModelChoice {
 
 impl FitModelChoice {
     /// All choices, in display order.
-    pub const ALL: [FitModelChoice; 11] = [
+    pub const ALL: [FitModelChoice; 14] = [
         FitModelChoice::Linear,
         FitModelChoice::GaussianEstimate,
         FitModelChoice::IterativeGaussian,
         FitModelChoice::IterativeGaussianArea,
+        FitModelChoice::IterativeSplitGaussian,
         FitModelChoice::IterativeLorentzian,
+        FitModelChoice::IterativeLorentzianArea,
+        FitModelChoice::IterativeSplitLorentzian,
         FitModelChoice::IterativePseudoVoigt,
         FitModelChoice::IterativeStepDown,
         FitModelChoice::IterativeStepUp,
@@ -300,7 +309,10 @@ impl FitModelChoice {
             FitModelChoice::GaussianEstimate => "Gaussian (Estimate)",
             FitModelChoice::IterativeGaussian => "Gaussian (Iterative)",
             FitModelChoice::IterativeGaussianArea => "Gaussian Area (Iterative)",
+            FitModelChoice::IterativeSplitGaussian => "Split Gaussian (Iterative)",
             FitModelChoice::IterativeLorentzian => "Lorentzian (Iterative)",
+            FitModelChoice::IterativeLorentzianArea => "Lorentzian Area (Iterative)",
+            FitModelChoice::IterativeSplitLorentzian => "Split Lorentzian (Iterative)",
             FitModelChoice::IterativePseudoVoigt => "Pseudo-Voigt (Iterative)",
             FitModelChoice::IterativeStepDown => "Step Down (Iterative)",
             FitModelChoice::IterativeStepUp => "Step Up (Iterative)",
@@ -316,7 +328,10 @@ impl FitModelChoice {
         match self {
             FitModelChoice::IterativeGaussian => Some(PeakModel::Gaussian),
             FitModelChoice::IterativeGaussianArea => Some(PeakModel::GaussianArea),
+            FitModelChoice::IterativeSplitGaussian => Some(PeakModel::SplitGaussian),
             FitModelChoice::IterativeLorentzian => Some(PeakModel::Lorentzian),
+            FitModelChoice::IterativeLorentzianArea => Some(PeakModel::LorentzianArea),
+            FitModelChoice::IterativeSplitLorentzian => Some(PeakModel::SplitLorentzian),
             FitModelChoice::IterativePseudoVoigt => Some(PeakModel::PseudoVoigt),
             FitModelChoice::IterativeStepDown => Some(PeakModel::StepDown),
             FitModelChoice::IterativeStepUp => Some(PeakModel::StepUp),
@@ -1009,8 +1024,20 @@ mod tests {
             Some(PeakModel::GaussianArea)
         );
         assert_eq!(
+            FitModelChoice::IterativeSplitGaussian.peak_model(),
+            Some(PeakModel::SplitGaussian)
+        );
+        assert_eq!(
             FitModelChoice::IterativeLorentzian.peak_model(),
             Some(PeakModel::Lorentzian)
+        );
+        assert_eq!(
+            FitModelChoice::IterativeLorentzianArea.peak_model(),
+            Some(PeakModel::LorentzianArea)
+        );
+        assert_eq!(
+            FitModelChoice::IterativeSplitLorentzian.peak_model(),
+            Some(PeakModel::SplitLorentzian)
         );
         assert_eq!(
             FitModelChoice::IterativePseudoVoigt.peak_model(),
@@ -1022,11 +1049,11 @@ mod tests {
 
     #[test]
     fn all_choices_listed_once_in_order() {
-        assert_eq!(FitModelChoice::ALL.len(), 11);
+        assert_eq!(FitModelChoice::ALL.len(), 14);
         assert_eq!(FitModelChoice::ALL[0], FitModelChoice::Linear);
-        assert_eq!(FitModelChoice::ALL[5], FitModelChoice::IterativePseudoVoigt);
-        assert_eq!(FitModelChoice::ALL[9], FitModelChoice::IterativeAtanStepUp);
-        assert_eq!(FitModelChoice::ALL[10], FitModelChoice::MultiGaussian);
+        assert_eq!(FitModelChoice::ALL[8], FitModelChoice::IterativePseudoVoigt);
+        assert_eq!(FitModelChoice::ALL[12], FitModelChoice::IterativeAtanStepUp);
+        assert_eq!(FitModelChoice::ALL[13], FitModelChoice::MultiGaussian);
         // Only the single-peak iterative choices map to one `PeakModel`; the
         // analytical (Linear / Gaussian-estimate) and composite (multi-peak)
         // choices have none.

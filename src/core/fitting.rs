@@ -1238,6 +1238,73 @@ pub fn pseudo_voigt_model(x: &[f64], params: &[f64]) -> Vec<f64> {
         .collect()
 }
 
+/// Evaluate a Lorentzian peak (area parameterisation) plus flat background.
+///
+/// `params = [area, centroid, fwhm, background]`. Mirrors C `sum_alorentz`:
+/// `dhelp = (x-c)/(0.5*fwhm)`, `y = area/(0.5*pi*fwhm*(1 + dhelp^2))`.
+pub fn lorentzian_area_model(x: &[f64], params: &[f64]) -> Vec<f64> {
+    let (area, centroid, fwhm, bg) = (params[0], params[1], params[2], params[3]);
+    x.iter()
+        .map(|&xi| {
+            let mut y = bg;
+            if fwhm != 0.0 {
+                let dhelp = (xi - centroid) / (0.5 * fwhm);
+                y += area / (0.5 * std::f64::consts::PI * fwhm * (1.0 + dhelp * dhelp));
+            }
+            y
+        })
+        .collect()
+}
+
+/// Evaluate an asymmetric (split) Gaussian peak plus flat background.
+///
+/// `params = [height, centroid, fwhm1, fwhm2, background]`. Mirrors C
+/// `sum_splitgauss`: `sigma_i = fwhm_i/(2*sqrt(2*LOG2))`; the low side
+/// (`x <= centroid`) uses `fwhm1`, the high side (`x > centroid`) uses `fwhm2`;
+/// C guard `(x-c)/sigma <= 20`.
+pub fn split_gaussian_model(x: &[f64], params: &[f64]) -> Vec<f64> {
+    let (height, centroid, fwhm1, fwhm2, bg) =
+        (params[0], params[1], params[2], params[3], params[4]);
+    let sigma1 = fwhm1 / fwhm_to_sigma_factor();
+    let sigma2 = fwhm2 / fwhm_to_sigma_factor();
+    x.iter()
+        .map(|&xi| {
+            let mut y = bg;
+            let diff = xi - centroid;
+            let sigma = if diff > 0.0 { sigma2 } else { sigma1 };
+            if sigma != 0.0 {
+                let dhelp = diff / sigma;
+                if dhelp <= 20.0 {
+                    y += height * (-0.5 * dhelp * dhelp).exp();
+                }
+            }
+            y
+        })
+        .collect()
+}
+
+/// Evaluate an asymmetric (split) Lorentzian peak plus flat background.
+///
+/// `params = [height, centroid, fwhm1, fwhm2, background]`. Mirrors C
+/// `sum_splitlorentz`: `dhelp = (x-c)/(0.5*fwhm)` with `fwhm1` for
+/// `x <= centroid` and `fwhm2` for `x > centroid`; `y = height/(1 + dhelp^2)`.
+pub fn split_lorentzian_model(x: &[f64], params: &[f64]) -> Vec<f64> {
+    let (height, centroid, fwhm1, fwhm2, bg) =
+        (params[0], params[1], params[2], params[3], params[4]);
+    x.iter()
+        .map(|&xi| {
+            let mut y = bg;
+            let diff = xi - centroid;
+            let fwhm = if diff > 0.0 { fwhm2 } else { fwhm1 };
+            if fwhm != 0.0 {
+                let dhelp = diff / (0.5 * fwhm);
+                y += height / (1.0 + dhelp * dhelp);
+            }
+            y
+        })
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // Step / slit models (non-peak fit theories).
 //
@@ -1454,6 +1521,32 @@ pub fn estimate_pseudo_voigt(x: &[f64], y: &[f64]) -> Option<Vec<f64>> {
     Some(vec![h, c, f, 0.5, bg])
 }
 
+/// Seed for [`lorentzian_area_model`]: `[area, centroid, fwhm, background]`.
+///
+/// Area conversion mirrors silx `estimate_alorentz`: `area = height * fwhm * 0.5 * pi`.
+pub fn estimate_lorentzian_area(x: &[f64], y: &[f64]) -> Option<Vec<f64>> {
+    let (h, c, f, bg) = estimate_height_position_fwhm(x, y)?;
+    let area = h * f * 0.5 * std::f64::consts::PI;
+    Some(vec![area, c, f, bg])
+}
+
+/// Seed for [`split_gaussian_model`]: `[height, centroid, fwhm1, fwhm2, background]`.
+///
+/// Mirrors silx `estimate_splitgauss`: the second FWHM seeds equal to the first.
+pub fn estimate_split_gaussian(x: &[f64], y: &[f64]) -> Option<Vec<f64>> {
+    let (h, c, f, bg) = estimate_height_position_fwhm(x, y)?;
+    Some(vec![h, c, f, f, bg])
+}
+
+/// Seed for [`split_lorentzian_model`]: `[height, centroid, fwhm1, fwhm2, background]`.
+///
+/// silx's "Split Lorentz" theory reuses `estimate_splitgauss` (fittheories
+/// `THEORY`), so the seed matches [`estimate_split_gaussian`]: `fwhm2 = fwhm1`.
+pub fn estimate_split_lorentzian(x: &[f64], y: &[f64]) -> Option<Vec<f64>> {
+    let (h, c, f, bg) = estimate_height_position_fwhm(x, y)?;
+    Some(vec![h, c, f, f, bg])
+}
+
 /// `numpy.convolve(y, kernel, mode="valid")`: the kernel is applied reversed,
 /// and the output length is `y.len() - kernel.len() + 1` (empty when `y` is
 /// shorter than `kernel`).
@@ -1577,8 +1670,14 @@ pub enum PeakModel {
     Gaussian,
     /// Gaussian, area parameterisation: `[area, centroid, fwhm, bg]`.
     GaussianArea,
+    /// Asymmetric (split) Gaussian: `[height, centroid, fwhm1, fwhm2, bg]`.
+    SplitGaussian,
     /// Lorentzian, height parameterisation: `[height, centroid, fwhm, bg]`.
     Lorentzian,
+    /// Lorentzian, area parameterisation: `[area, centroid, fwhm, bg]`.
+    LorentzianArea,
+    /// Asymmetric (split) Lorentzian: `[height, centroid, fwhm1, fwhm2, bg]`.
+    SplitLorentzian,
     /// Pseudo-Voigt: `[height, centroid, fwhm, eta, bg]`.
     PseudoVoigt,
     /// Step down (descending erf edge): `[height, centroid, fwhm, bg]`.
@@ -1597,7 +1696,10 @@ impl PeakModel {
         match self {
             PeakModel::Gaussian => "Gaussian",
             PeakModel::GaussianArea => "Gaussian (Area)",
+            PeakModel::SplitGaussian => "Split Gaussian",
             PeakModel::Lorentzian => "Lorentzian",
+            PeakModel::LorentzianArea => "Lorentzian (Area)",
+            PeakModel::SplitLorentzian => "Split Lorentzian",
             PeakModel::PseudoVoigt => "Pseudo-Voigt",
             PeakModel::StepDown => "Step Down",
             PeakModel::StepUp => "Step Up",
@@ -1622,8 +1724,21 @@ impl PeakModel {
                 owned("FWHM"),
                 owned("Background"),
             ],
+            PeakModel::SplitGaussian | PeakModel::SplitLorentzian => vec![
+                owned("Height"),
+                owned("Center"),
+                owned("FWHM1"),
+                owned("FWHM2"),
+                owned("Background"),
+            ],
             PeakModel::Lorentzian => vec![
                 owned("Height"),
+                owned("Center"),
+                owned("FWHM"),
+                owned("Background"),
+            ],
+            PeakModel::LorentzianArea => vec![
+                owned("Area"),
                 owned("Center"),
                 owned("FWHM"),
                 owned("Background"),
@@ -1662,7 +1777,10 @@ impl PeakModel {
         match self {
             PeakModel::Gaussian => gaussian_model(x, params),
             PeakModel::GaussianArea => gaussian_area_model(x, params),
+            PeakModel::SplitGaussian => split_gaussian_model(x, params),
             PeakModel::Lorentzian => lorentzian_model(x, params),
+            PeakModel::LorentzianArea => lorentzian_area_model(x, params),
+            PeakModel::SplitLorentzian => split_lorentzian_model(x, params),
             PeakModel::PseudoVoigt => pseudo_voigt_model(x, params),
             PeakModel::StepDown => stepdown_model(x, params),
             PeakModel::StepUp => stepup_model(x, params),
@@ -1676,7 +1794,10 @@ impl PeakModel {
         match self {
             PeakModel::Gaussian => estimate_gaussian(x, y),
             PeakModel::GaussianArea => estimate_gaussian_area(x, y),
+            PeakModel::SplitGaussian => estimate_split_gaussian(x, y),
             PeakModel::Lorentzian => estimate_lorentzian(x, y),
+            PeakModel::LorentzianArea => estimate_lorentzian_area(x, y),
+            PeakModel::SplitLorentzian => estimate_split_lorentzian(x, y),
             PeakModel::PseudoVoigt => estimate_pseudo_voigt(x, y),
             PeakModel::StepDown => estimate_stepdown(x, y),
             PeakModel::StepUp => estimate_stepup(x, y),
@@ -2316,6 +2437,86 @@ mod tests {
         assert!((p[3] - 0.4).abs() < 5e-2, "eta {}", p[3]);
         assert!((p[4] - 0.5).abs() < 5e-2, "bg {}", p[4]);
         assert!(fit.reduced_chisq().unwrap() < 1e-4);
+    }
+
+    #[test]
+    fn lorentzian_area_model_recovers_own_peak() {
+        // Build data from the area model with a known area; fit recovers it.
+        let xs = linspace(0.0, 20.0, 201);
+        let area = 9.0;
+        let ys = lorentzian_area_model(&xs, &[area, 11.0, 3.0, 0.5]);
+        let fit = IterativeFit::new(PeakModel::LorentzianArea)
+            .fit_full(&xs, &ys)
+            .unwrap();
+        let p = &fit.fit.parameters;
+        assert!((p[0] - area).abs() < 5e-2, "area {}", p[0]);
+        assert!((p[1] - 11.0).abs() < 1e-3, "center {}", p[1]);
+        assert!((p[2] - 3.0).abs() < 1e-2, "fwhm {}", p[2]);
+        assert!((p[3] - 0.5).abs() < 1e-2, "bg {}", p[3]);
+        assert!(fit.reduced_chisq().unwrap() < 1e-6);
+    }
+
+    #[test]
+    fn lorentzian_area_peak_value_matches_area_conversion() {
+        // At the centroid, sum_alorentz reaches area / (0.5*pi*fwhm); silx's
+        // estimate_alorentz converts a height seed via area = height*fwhm*0.5*pi,
+        // so feeding that area back yields exactly the original height at the peak.
+        let height = 4.0;
+        let fwhm = 2.5;
+        let area = height * fwhm * 0.5 * std::f64::consts::PI;
+        let peak = lorentzian_area_model(&[7.0], &[area, 7.0, fwhm, 0.0])[0];
+        assert!(
+            (peak - height).abs() < 1e-12,
+            "peak {peak} vs height {height}"
+        );
+    }
+
+    #[test]
+    fn split_gaussian_model_recovers_asymmetric_peak() {
+        let xs = linspace(0.0, 20.0, 401);
+        let ys = split_gaussian_model(&xs, &[5.0, 10.0, 2.0, 4.0, 0.3]);
+        let fit = IterativeFit::new(PeakModel::SplitGaussian)
+            .fit_full(&xs, &ys)
+            .unwrap();
+        let p = &fit.fit.parameters;
+        assert!((p[0] - 5.0).abs() < 5e-2, "height {}", p[0]);
+        assert!((p[1] - 10.0).abs() < 1e-2, "center {}", p[1]);
+        assert!((p[2] - 2.0).abs() < 5e-2, "fwhm1 {}", p[2]);
+        assert!((p[3] - 4.0).abs() < 5e-2, "fwhm2 {}", p[3]);
+        assert!((p[4] - 0.3).abs() < 1e-2, "bg {}", p[4]);
+        assert!(fit.reduced_chisq().unwrap() < 1e-4);
+    }
+
+    #[test]
+    fn split_lorentzian_model_recovers_asymmetric_peak() {
+        let xs = linspace(0.0, 20.0, 401);
+        let ys = split_lorentzian_model(&xs, &[6.0, 9.0, 2.0, 5.0, 0.4]);
+        let fit = IterativeFit::new(PeakModel::SplitLorentzian)
+            .fit_full(&xs, &ys)
+            .unwrap();
+        let p = &fit.fit.parameters;
+        assert!((p[0] - 6.0).abs() < 5e-2, "height {}", p[0]);
+        assert!((p[1] - 9.0).abs() < 1e-2, "center {}", p[1]);
+        assert!((p[2] - 2.0).abs() < 5e-2, "fwhm1 {}", p[2]);
+        assert!((p[3] - 5.0).abs() < 5e-2, "fwhm2 {}", p[3]);
+        assert!((p[4] - 0.4).abs() < 1e-2, "bg {}", p[4]);
+        assert!(fit.reduced_chisq().unwrap() < 1e-4);
+    }
+
+    #[test]
+    fn split_models_reduce_to_symmetric_when_fwhms_equal() {
+        // fwhm1 == fwhm2 collapses the split models onto the symmetric ones.
+        let xs = linspace(0.0, 20.0, 101);
+        let sg = split_gaussian_model(&xs, &[5.0, 10.0, 3.0, 3.0, 0.0]);
+        let g = gaussian_model(&xs, &[5.0, 10.0, 3.0, 0.0]);
+        for (a, b) in sg.iter().zip(&g) {
+            assert!((a - b).abs() < 1e-12, "split gauss {a} vs gauss {b}");
+        }
+        let sl = split_lorentzian_model(&xs, &[5.0, 10.0, 3.0, 3.0, 0.0]);
+        let l = lorentzian_model(&xs, &[5.0, 10.0, 3.0, 0.0]);
+        for (a, b) in sl.iter().zip(&l) {
+            assert!((a - b).abs() < 1e-12, "split lorentz {a} vs lorentz {b}");
+        }
     }
 
     #[test]
