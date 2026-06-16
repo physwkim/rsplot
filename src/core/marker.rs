@@ -10,7 +10,7 @@
 
 use egui::{Color32, Pos2};
 
-use crate::core::items::LineStyle;
+use crate::core::items::{LineStyle, Symbol};
 use crate::core::transform::{Transform, YAxis};
 
 /// Default point-marker symbol size (full extent) in logical points.
@@ -21,31 +21,15 @@ pub const DEFAULT_MARKER_SIZE: f32 = 8.0;
 /// `size / 2 + this`; a line's pick half-width is `this + line_width / 2`.
 pub const MARKER_PICK_TOLERANCE_PX: f32 = 5.0;
 
-/// Symbol drawn at a point marker (silx `addMarker` `symbol`). The catalog
-/// matches silx's marker symbols, which differ from the GPU curve's scatter
-/// symbols ([`crate::Symbol`]) — markers add the diamond, point, and pixel
-/// glyphs and are drawn with egui's painter rather than an SDF shader.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum MarkerSymbol {
-    /// Filled circle. silx `'o'`.
-    Circle,
-    /// Small filled dot. silx `'.'`.
-    Point,
-    /// A single pixel. silx `','`.
-    Pixel,
-    /// Upright "+". silx `'+'`.
-    Plus,
-    /// Diagonal "×". silx `'x'`.
-    Cross,
-    /// Filled diamond. silx `'d'`.
-    Diamond,
-    /// Filled square. silx `'s'`.
-    Square,
-}
-
 /// What a marker is and where it sits. The illegal combinations (a line with a
 /// symbol, a point without one) are unrepresentable: only [`MarkerKind::Point`]
 /// carries a symbol/size, only the lines span an axis.
+///
+/// A point marker is drawn with the same [`Symbol`] catalog as a curve vertex:
+/// silx's `Marker` subclasses `SymbolSingleSizeMixIn(SymbolMixIn)`, so markers
+/// and curves share the one `_SUPPORTED_SYMBOLS` set (`core.py`). The on-plot
+/// painter ([`crate::widget::chrome::draw_markers`]) draws it with egui rather
+/// than the GPU scatter SDF shader, but the symbol vocabulary is identical.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum MarkerKind {
     /// A point marker at data `(x, y)`, drawn with `symbol` at `size` (logical
@@ -53,7 +37,7 @@ pub enum MarkerKind {
     Point {
         x: f64,
         y: f64,
-        symbol: MarkerSymbol,
+        symbol: Symbol,
         size: f32,
     },
     /// A vertical line at data `x`, spanning the data-area height. silx: `y` `None`.
@@ -263,7 +247,7 @@ impl Marker {
         Self::with_kind(MarkerKind::Point {
             x,
             y,
-            symbol: MarkerSymbol::Circle,
+            symbol: Symbol::Circle,
             size: DEFAULT_MARKER_SIZE,
         })
     }
@@ -319,7 +303,7 @@ impl Marker {
 
     /// Set the symbol of a point marker. No-op on the line kinds, which have no
     /// symbol.
-    pub fn with_symbol(mut self, symbol: MarkerSymbol) -> Self {
+    pub fn with_symbol(mut self, symbol: Symbol) -> Self {
         if let MarkerKind::Point { symbol: s, .. } = &mut self.kind {
             *s = symbol;
         }
@@ -527,7 +511,7 @@ mod tests {
             MarkerKind::Point {
                 x: 1.0,
                 y: 2.0,
-                symbol: MarkerSymbol::Circle,
+                symbol: Symbol::Circle,
                 size: DEFAULT_MARKER_SIZE,
             }
         );
@@ -543,7 +527,7 @@ mod tests {
             .with_color(Color32::RED)
             .with_text("peak")
             .with_bgcolor(Color32::BLACK)
-            .with_symbol(MarkerSymbol::Diamond)
+            .with_symbol(Symbol::Diamond)
             .with_symbol_size(12.0)
             .with_y_axis(YAxis::Right);
         assert_eq!(m.color, Color32::RED);
@@ -555,7 +539,7 @@ mod tests {
             MarkerKind::Point {
                 x: 0.0,
                 y: 0.0,
-                symbol: MarkerSymbol::Diamond,
+                symbol: Symbol::Diamond,
                 size: 12.0,
             }
         );
@@ -565,7 +549,7 @@ mod tests {
     fn symbol_builders_are_noops_on_line_markers() {
         // A vertical line has no symbol/size; the builders leave the kind intact.
         let v = Marker::vline(3.0)
-            .with_symbol(MarkerSymbol::Square)
+            .with_symbol(Symbol::Square)
             .with_symbol_size(20.0);
         assert_eq!(v.kind, MarkerKind::VLine { x: 3.0 });
         // Line style/width builders apply.

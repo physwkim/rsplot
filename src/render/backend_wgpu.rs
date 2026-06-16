@@ -1515,7 +1515,7 @@ mod tests {
 
     use crate::core::colormap::Colormap;
     use crate::core::items::{Baseline, ErrorBars, LineStyle, Symbol};
-    use crate::core::marker::{MarkerConstraint, MarkerKind, MarkerSymbol};
+    use crate::core::marker::{MarkerConstraint, MarkerKind};
     use crate::render::gpu_image::{ImagePixels, InterpolationMode};
 
     #[test]
@@ -1632,7 +1632,7 @@ mod tests {
             y: Some(2.0),
             text: Some("peak"),
             color: Color32::RED,
-            symbol: Some(MarkerSymbol::Diamond),
+            symbol: Some(Symbol::Diamond),
             symbol_size: 11.0,
             line_style: LineStyle::Dotted,
             line_width: 3.0,
@@ -1647,7 +1647,7 @@ mod tests {
             MarkerKind::Point {
                 x: 1.0,
                 y: 2.0,
-                symbol: MarkerSymbol::Diamond,
+                symbol: Symbol::Diamond,
                 size: 11.0,
             }
         );
@@ -1659,6 +1659,36 @@ mod tests {
         assert_eq!(marker.y_axis, YAxis::Right);
         assert!(marker.is_draggable);
         assert_eq!(marker.constraint, MarkerConstraint::Vertical);
+    }
+
+    #[test]
+    fn marker_accepts_full_symbol_catalog_not_just_the_old_seven() {
+        // Markers share the curve `Symbol` catalog (silx `Marker` is a
+        // `SymbolMixIn`). `CaretUp` was unreachable under the deleted 7-variant
+        // `MarkerSymbol`; it must now round-trip through the spec conversion.
+        let marker = marker_from_spec(MarkerSpec {
+            x: Some(0.0),
+            y: Some(0.0),
+            text: None,
+            color: Color32::WHITE,
+            symbol: Some(Symbol::CaretUp),
+            symbol_size: 8.0,
+            line_style: LineStyle::Solid,
+            line_width: 1.0,
+            y_axis: YAxis::Left,
+            bg_color: None,
+            is_draggable: false,
+            constraint: MarkerConstraint::None,
+        });
+        assert_eq!(
+            marker.kind,
+            MarkerKind::Point {
+                x: 0.0,
+                y: 0.0,
+                symbol: Symbol::CaretUp,
+                size: 8.0,
+            }
+        );
     }
 
     #[test]

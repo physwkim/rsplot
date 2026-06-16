@@ -20,7 +20,7 @@ use crate::core::backend::{
 use crate::core::calibration::Calibration;
 use crate::core::colormap::{AutoscaleMode, Colormap, Normalization};
 use crate::core::items::{Baseline, LineStyle, ScalarMask, Symbol};
-use crate::core::marker::{Marker, MarkerConstraint, MarkerKind, MarkerSymbol};
+use crate::core::marker::{Marker, MarkerConstraint, MarkerKind};
 use crate::core::plot::{DataMargins, DataRange, GraphGrid, Plot, PlotId};
 use crate::core::roi::{ManagedRoi, Roi, RoiInteractionMode, RoiLineStyle};
 use crate::core::scatter_viz::{GridImage, ScatterLineProfile};
@@ -4478,7 +4478,7 @@ impl PlotWidget {
         x: f64,
         y: f64,
         color: Color32,
-        symbol: MarkerSymbol,
+        symbol: Symbol,
     ) -> ItemHandle {
         self.add_marker(MarkerSpec {
             x: Some(x),

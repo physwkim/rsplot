@@ -10,7 +10,7 @@
 //! Run with: `cargo run --example plot_markers`
 
 use eframe::egui;
-use siplot::{LineStyle, Marker, MarkerSymbol, Plot, PlotView, install};
+use siplot::{LineStyle, Marker, Plot, PlotView, Symbol, install};
 
 struct MarkerApp {
     plot: Plot,
@@ -30,41 +30,13 @@ impl MarkerApp {
 
         // One point marker per symbol, evenly spaced, each labeled.
         let symbols = [
-            (
-                MarkerSymbol::Circle,
-                "o",
-                egui::Color32::from_rgb(120, 180, 255),
-            ),
-            (
-                MarkerSymbol::Point,
-                ".",
-                egui::Color32::from_rgb(120, 255, 180),
-            ),
-            (
-                MarkerSymbol::Pixel,
-                ",",
-                egui::Color32::from_rgb(200, 200, 200),
-            ),
-            (
-                MarkerSymbol::Plus,
-                "+",
-                egui::Color32::from_rgb(255, 220, 120),
-            ),
-            (
-                MarkerSymbol::Cross,
-                "x",
-                egui::Color32::from_rgb(255, 150, 200),
-            ),
-            (
-                MarkerSymbol::Diamond,
-                "d",
-                egui::Color32::from_rgb(180, 160, 255),
-            ),
-            (
-                MarkerSymbol::Square,
-                "s",
-                egui::Color32::from_rgb(255, 130, 120),
-            ),
+            (Symbol::Circle, "o", egui::Color32::from_rgb(120, 180, 255)),
+            (Symbol::Point, ".", egui::Color32::from_rgb(120, 255, 180)),
+            (Symbol::Pixel, ",", egui::Color32::from_rgb(200, 200, 200)),
+            (Symbol::Plus, "+", egui::Color32::from_rgb(255, 220, 120)),
+            (Symbol::Cross, "x", egui::Color32::from_rgb(255, 150, 200)),
+            (Symbol::Diamond, "d", egui::Color32::from_rgb(180, 160, 255)),
+            (Symbol::Square, "s", egui::Color32::from_rgb(255, 130, 120)),
         ];
         for (i, (symbol, label, color)) in symbols.into_iter().enumerate() {
             let x = 1.0 + i as f64;

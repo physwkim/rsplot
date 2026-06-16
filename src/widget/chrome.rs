@@ -11,8 +11,8 @@ use egui::{Align2, Color32, FontId, Painter, Pos2, Rect, Stroke, Visuals, pos2, 
 
 use crate::core::colormap::{Colormap, Normalization};
 use crate::core::dtime_ticks::{self, DateTime, TimeZone};
-use crate::core::items::LineStyle;
-use crate::core::marker::{Marker, MarkerKind, MarkerSymbol, TextAnchor};
+use crate::core::items::{LineStyle, Symbol};
+use crate::core::marker::{Marker, MarkerKind, TextAnchor};
 use crate::core::plot::{GraphGrid, TickMode};
 use crate::core::roi::{HandleKind, ManagedRoi, Roi, RoiInteractionMode};
 use crate::core::shape::{Line, Shape, ShapeKind, triangulate_simple_polygon};
@@ -1291,33 +1291,42 @@ fn draw_styled_line(
 }
 
 /// Draw one marker symbol centered at `c` with full extent `size` (logical
-/// points). Filled glyphs use `color`; the stroked glyphs (+ ×) use a line
-/// weight scaled from the size.
-fn draw_marker_symbol(painter: &Painter, c: Pos2, symbol: MarkerSymbol, size: f32, color: Color32) {
+/// points). Filled glyphs use `color`; the stroked glyphs (+ × lines ticks
+/// carets) use a line weight scaled from the size. Covers the full silx
+/// `_SUPPORTED_SYMBOLS` catalog ([`Symbol`]) — markers share it with curve
+/// vertices (silx `Marker` is a `SymbolMixIn`); the on-plot sizing here is the
+/// backend analogue of [`crate::widget::high_level`]'s legend-icon painter,
+/// which uses fixed-size geometry instead.
+fn draw_marker_symbol(painter: &Painter, c: Pos2, symbol: Symbol, size: f32, color: Color32) {
     let r = (size * 0.5).max(1.0);
     let stroke = Stroke::new((size * 0.18).max(1.0), color);
+    // Apex-then-arms helper for the open carets (mirrors the legend painter).
+    let caret = |apex: Pos2, arm_a: Pos2, arm_b: Pos2| {
+        painter.line_segment([apex, arm_a], stroke);
+        painter.line_segment([apex, arm_b], stroke);
+    };
     match symbol {
-        MarkerSymbol::Circle => {
+        Symbol::Circle => {
             painter.add(egui::Shape::circle_filled(c, r, color));
         }
-        MarkerSymbol::Point => {
+        Symbol::Point => {
             painter.add(egui::Shape::circle_filled(c, (r * 0.4).max(1.5), color));
         }
-        MarkerSymbol::Pixel => {
+        Symbol::Pixel => {
             painter.add(egui::Shape::rect_filled(
                 Rect::from_center_size(c, vec2(1.0, 1.0)),
                 egui::CornerRadius::ZERO,
                 color,
             ));
         }
-        MarkerSymbol::Square => {
+        Symbol::Square => {
             painter.add(egui::Shape::rect_filled(
                 Rect::from_center_size(c, vec2(size, size)),
                 egui::CornerRadius::ZERO,
                 color,
             ));
         }
-        MarkerSymbol::Diamond => {
+        Symbol::Diamond => {
             let pts = vec![
                 pos2(c.x, c.y - r),
                 pos2(c.x + r, c.y),
@@ -1326,13 +1335,84 @@ fn draw_marker_symbol(painter: &Painter, c: Pos2, symbol: MarkerSymbol, size: f3
             ];
             painter.add(egui::Shape::convex_polygon(pts, color, Stroke::NONE));
         }
-        MarkerSymbol::Plus => {
+        Symbol::Triangle => {
+            let pts = vec![
+                pos2(c.x, c.y - r),
+                pos2(c.x + r, c.y + r),
+                pos2(c.x - r, c.y + r),
+            ];
+            painter.add(egui::Shape::convex_polygon(pts, color, Stroke::NONE));
+        }
+        Symbol::Plus => {
             painter.line_segment([pos2(c.x - r, c.y), pos2(c.x + r, c.y)], stroke);
             painter.line_segment([pos2(c.x, c.y - r), pos2(c.x, c.y + r)], stroke);
         }
-        MarkerSymbol::Cross => {
+        Symbol::Cross => {
             painter.line_segment([pos2(c.x - r, c.y - r), pos2(c.x + r, c.y + r)], stroke);
             painter.line_segment([pos2(c.x - r, c.y + r), pos2(c.x + r, c.y - r)], stroke);
+        }
+        Symbol::VerticalLine => {
+            painter.line_segment([pos2(c.x, c.y - r), pos2(c.x, c.y + r)], stroke);
+        }
+        Symbol::HorizontalLine => {
+            painter.line_segment([pos2(c.x - r, c.y), pos2(c.x + r, c.y)], stroke);
+        }
+        Symbol::TickLeft => {
+            painter.line_segment([pos2(c.x - r, c.y), c], stroke);
+        }
+        Symbol::TickRight => {
+            painter.line_segment([c, pos2(c.x + r, c.y)], stroke);
+        }
+        Symbol::TickUp => {
+            painter.line_segment([pos2(c.x, c.y - r), c], stroke);
+        }
+        Symbol::TickDown => {
+            painter.line_segment([c, pos2(c.x, c.y + r)], stroke);
+        }
+        Symbol::CaretLeft => caret(
+            pos2(c.x - r, c.y),
+            pos2(c.x + r, c.y - r),
+            pos2(c.x + r, c.y + r),
+        ),
+        Symbol::CaretRight => caret(
+            pos2(c.x + r, c.y),
+            pos2(c.x - r, c.y - r),
+            pos2(c.x - r, c.y + r),
+        ),
+        Symbol::CaretUp => caret(
+            pos2(c.x, c.y - r),
+            pos2(c.x - r, c.y + r),
+            pos2(c.x + r, c.y + r),
+        ),
+        Symbol::CaretDown => caret(
+            pos2(c.x, c.y + r),
+            pos2(c.x - r, c.y - r),
+            pos2(c.x + r, c.y - r),
+        ),
+        Symbol::Heart => {
+            // Two upper humps + a lower point: the egui-painter heart standing in
+            // for the GPU cardioid marker (silx '♥'), sized to the marker extent.
+            let hump = r * 0.5;
+            let hy = c.y - r * 0.35;
+            painter.add(egui::Shape::circle_filled(
+                pos2(c.x - r * 0.45, hy),
+                hump,
+                color,
+            ));
+            painter.add(egui::Shape::circle_filled(
+                pos2(c.x + r * 0.45, hy),
+                hump,
+                color,
+            ));
+            painter.add(egui::Shape::convex_polygon(
+                vec![
+                    pos2(c.x - r * 0.95, hy),
+                    pos2(c.x + r * 0.95, hy),
+                    pos2(c.x, c.y + r * 0.95),
+                ],
+                color,
+                Stroke::NONE,
+            ));
         }
     }
 }

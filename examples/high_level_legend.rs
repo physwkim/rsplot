@@ -7,8 +7,8 @@
 
 use eframe::egui;
 use siplot::{
-    Colormap, GraphGrid, ImageGeometry, LineStyle, MarkerSymbol, PlotEvent, PlotInteractionMode,
-    PlotItemKind, PlotWidget, ShapeSpec, YAxis,
+    Colormap, GraphGrid, ImageGeometry, LineStyle, PlotEvent, PlotInteractionMode, PlotItemKind,
+    PlotWidget, ShapeSpec, Symbol, YAxis,
 };
 
 const WIDTH: u32 = 120;
@@ -140,7 +140,7 @@ impl LegendDemoApp {
             7.3,
             2.5,
             egui::Color32::from_rgb(230, 120, 255),
-            MarkerSymbol::Diamond,
+            Symbol::Diamond,
         );
         plot.set_item_legend(marker, "peak marker");
 

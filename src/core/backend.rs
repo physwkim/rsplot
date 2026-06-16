@@ -12,7 +12,7 @@ use egui::{Color32, Pos2, Rect};
 
 use crate::core::colormap::Colormap;
 use crate::core::items::{Baseline, ErrorBars, LineStyle, Symbol};
-use crate::core::marker::{MarkerConstraint, MarkerSymbol};
+use crate::core::marker::MarkerConstraint;
 use crate::core::shape::ShapeKind;
 use crate::core::transform::{Margins, YAxis};
 use crate::render::gpu_image::{AggregationMode, InterpolationMode};
@@ -220,7 +220,7 @@ pub struct MarkerSpec<'a> {
     pub y: Option<f64>,
     pub text: Option<&'a str>,
     pub color: Color32,
-    pub symbol: Option<MarkerSymbol>,
+    pub symbol: Option<Symbol>,
     pub symbol_size: f32,
     pub line_style: LineStyle,
     pub line_width: f32,

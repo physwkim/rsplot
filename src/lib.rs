@@ -50,8 +50,7 @@ pub use crate::core::fitting::{
 };
 pub use crate::core::items::{Baseline, ErrorBars, LineStyle, ScalarMask, Symbol};
 pub use crate::core::marker::{
-    DEFAULT_MARKER_SIZE, Marker, MarkerConstraint, MarkerKind, MarkerSymbol, TextAnchor,
-    apply_constraint,
+    DEFAULT_MARKER_SIZE, Marker, MarkerConstraint, MarkerKind, TextAnchor, apply_constraint,
 };
 pub use crate::core::peaks::{
     DEFAULT_PEAK_SENSITIVITY, Peak, guess_fwhm, peak_search, peak_search_range,
