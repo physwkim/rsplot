@@ -187,6 +187,51 @@ fn lazy_load_failure_is_terminal_and_not_retried() {
 }
 
 #[test]
+fn prefetch_loads_neighbours_without_navigating() {
+    let loader = Arc::new(CountingLoader::new());
+    let rs = create_render_state(default_wgpu_setup());
+    siplot::install(&rs);
+
+    let mut stack = ImageStack::new(&rs, 0);
+    stack.set_loader(loader.clone());
+    stack.set_n_prefetch(1); // one neighbour each side.
+    stack.set_sources((0..5).map(|_| "2x2".to_string()).collect());
+    stack.set_current(2); // middle slot.
+
+    let app = Rc::new(RefCell::new(stack));
+    let app_ui = app.clone();
+    let renderer = WgpuTestRenderer::from_render_state(rs.clone());
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(400.0, 400.0))
+        .with_pixels_per_point(1.0)
+        .renderer(renderer)
+        .build_ui(move |ui| {
+            app_ui.borrow_mut().ui(ui);
+        });
+
+    // current(2) + radius 1 => slots 1, 2, 3 are loaded in the background
+    // without the user browsing to 1 or 3.
+    let counting = loader.clone();
+    assert!(
+        step_until(&mut harness, &app, move |_| counting.call_count() >= 3),
+        "prefetch did not load the current slot and both neighbours"
+    );
+
+    // Settle: slots 0 and 4 are outside the radius and never load, so the count
+    // stays at the three in-window slots.
+    for _ in 0..5 {
+        harness.step();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(
+        loader.call_count(),
+        3,
+        "only the current slot and its two radius-1 neighbours should load"
+    );
+    assert_eq!(app.borrow().n_prefetch(), 1);
+}
+
+#[test]
 fn navigating_to_a_new_slot_loads_it() {
     let loader = Arc::new(CountingLoader::new());
     let (app, mut harness) =

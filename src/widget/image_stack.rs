@@ -8,8 +8,10 @@
 //! - **Lazy** ([`ImageStack::set_sources`] + [`ImageStack::set_loader`]): a list
 //!   of opaque source strings whose frames are loaded on demand on background
 //!   threads through a pluggable [`FrameLoader`] (silx `UrlLoader` /
-//!   `setUrlLoaderClass`); the current slot is loaded as you browse to it and
-//!   the result is drained back on the UI thread (silx `_urlLoaded`).
+//!   `setUrlLoaderClass`); the current slot — and a configurable prefetch radius
+//!   of neighbours on each side ([`ImageStack::set_n_prefetch`], silx
+//!   `_preFetch` / `N_PRELOAD`) — is loaded as you browse and the results are
+//!   drained back on the UI thread (silx `_urlLoaded`).
 //!
 //! Either mode reproduces the navigation behaviour:
 //!
@@ -165,6 +167,32 @@ impl LoadSchedule {
         }
         out
     }
+}
+
+/// The slots to (consider) loading for a current position with prefetch radius
+/// `n`: the current slot first, then the next `n` slots, then the previous `n`
+/// slots, each clamped to `[0, len)` (silx `setCurrentUrl` loads the current url
+/// then `_preFetch(_getNNextUrls(n))` and `_preFetch(_getNPreviousUrls(n))`).
+///
+/// Nearer neighbours come first on each side; `n == 0` yields just the current
+/// slot, and an empty stack yields nothing. Pure, so the prefetch window is
+/// unit-testable without threads.
+fn prefetch_candidates(current: usize, len: usize, n: usize) -> Vec<usize> {
+    if len == 0 {
+        return Vec::new();
+    }
+    let mut out = vec![current];
+    for k in 1..=n {
+        if current + k < len {
+            out.push(current + k);
+        }
+    }
+    for k in 1..=n {
+        if let Some(prev) = current.checked_sub(k) {
+            out.push(prev);
+        }
+    }
+    out
 }
 
 /// Pure frame-navigation state: the ordered frame slots, the current index, the
@@ -391,6 +419,10 @@ pub struct ImageStack {
     /// Per-slot source strings for the lazy path (silx `_urls`); empty in the
     /// in-memory [`Self::set_frames`] mode.
     sources: Vec<String>,
+    /// Prefetch radius: how many neighbours on each side of the current slot to
+    /// preload (silx `__n_prefetch` / `N_PRELOAD`, default 10). `0` disables
+    /// prefetch (only the current slot loads).
+    n_prefetch: usize,
     /// Loader used to turn a source into a [`Frame`] off-thread (silx
     /// `_url_loader`); `None` until [`Self::set_loader`] is called.
     loader: Option<Arc<dyn FrameLoader>>,
@@ -419,6 +451,8 @@ impl ImageStack {
             auto_reset_zoom: true,
             show_table: true,
             sources: Vec::new(),
+            // silx ImageStack defaults N_PRELOAD = 10 (each side).
+            n_prefetch: 10,
             loader: None,
             schedule: LoadSchedule::default(),
             load_tx,
@@ -467,6 +501,19 @@ impl ImageStack {
     /// in-memory [`Self::set_frames`] mode). Mirrors silx `getUrls`.
     pub fn sources(&self) -> &[String] {
         &self.sources
+    }
+
+    /// Set the prefetch radius: the number of neighbouring slots on *each* side
+    /// of the current slot to preload in the background (silx `setNPrefetch`,
+    /// `ImageStack.py` :294-304 — "in total 2*n DataUrls"). `0` disables
+    /// prefetch. The new radius takes effect on the next render.
+    pub fn set_n_prefetch(&mut self, n: usize) {
+        self.n_prefetch = n;
+    }
+
+    /// The prefetch radius (slots preloaded on each side; silx `getNPrefetch`).
+    pub fn n_prefetch(&self) -> usize {
+        self.n_prefetch
     }
 
     /// Number of frame slots in the stack.
@@ -577,13 +624,12 @@ impl ImageStack {
         &mut self.plot
     }
 
-    /// The slot indices that should be loaded given the current position: just
-    /// the current slot (the displayed frame). The prefetch radius extends this.
+    /// The slot indices that should be loaded given the current position: the
+    /// current slot first, then its prefetch neighbours (silx
+    /// `setCurrentUrl` loads the current url, then `_preFetch`es the next and
+    /// previous `n_prefetch`).
     fn load_candidates(&self) -> Vec<usize> {
-        if self.nav.is_empty() {
-            return Vec::new();
-        }
-        vec![self.nav.current]
+        prefetch_candidates(self.nav.current, self.nav.len(), self.n_prefetch)
     }
 
     /// Move every completed background load into its slot and update its load
@@ -1024,6 +1070,38 @@ mod tests {
         s.mark_loaded(1);
         // 1 is loaded (dropped); 5 is out of range (dropped); 2 repeats (deduped).
         assert_eq!(s.to_dispatch([0, 1, 2, 2, 5]), vec![0, 2]);
+    }
+
+    // ── prefetch_candidates window (silx _getNNextUrls/_getNPreviousUrls) ────
+
+    #[test]
+    fn prefetch_window_in_the_middle_is_current_then_next_then_prev() {
+        // current first, then next n (nearest first), then prev n (nearest first).
+        assert_eq!(prefetch_candidates(5, 10, 2), vec![5, 6, 7, 4, 3]);
+    }
+
+    #[test]
+    fn prefetch_window_clamps_at_both_ends() {
+        // At the start: no previous slots.
+        assert_eq!(prefetch_candidates(0, 4, 2), vec![0, 1, 2]);
+        // At the end: no next slots.
+        assert_eq!(prefetch_candidates(3, 4, 2), vec![3, 2, 1]);
+    }
+
+    #[test]
+    fn prefetch_window_zero_radius_is_just_current() {
+        assert_eq!(prefetch_candidates(2, 5, 0), vec![2]);
+    }
+
+    #[test]
+    fn prefetch_window_empty_stack_is_empty() {
+        assert_eq!(prefetch_candidates(0, 0, 3), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn prefetch_window_radius_exceeds_length() {
+        // n larger than the stack: every other slot, no out-of-range indices.
+        assert_eq!(prefetch_candidates(1, 3, 10), vec![1, 2, 0]);
     }
 
     // ── frame_label fallbacks ───────────────────────────────────────────────
