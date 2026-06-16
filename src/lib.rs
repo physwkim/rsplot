@@ -110,9 +110,9 @@ pub use crate::render::save::{
 };
 pub use crate::render::scene3d_items::{
     Box3D, ColormapMesh3D, ComplexField3D, CutPlane, Cylinder3D, DEFAULT_CUT_PLANE_RESOLUTION,
-    DEFAULT_ISOSURFACE_COLOR, DEFAULT_SCATTER3D_SIZE, HeightMapData, HeightMapRGBA, Hexagon3D,
-    ImageData3D, ImageRgba3D, Isosurface, Mesh3D, MeshColor, MeshDrawMode, ScalarField3D,
-    Scatter3D, mean_plus_std,
+    DEFAULT_ISOSURFACE_COLOR, DEFAULT_SCATTER2D_LINE_WIDTH, DEFAULT_SCATTER3D_SIZE, HeightMapData,
+    HeightMapRGBA, Hexagon3D, ImageData3D, ImageRgba3D, Isosurface, Mesh3D, MeshColor,
+    MeshDrawMode, ScalarField3D, Scatter2D, Scatter2DVisualization, Scatter3D, mean_plus_std,
 };
 pub use crate::widget::actions;
 pub use crate::widget::actions::io::{SaveTarget, curve_to_csv};

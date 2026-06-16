@@ -63,7 +63,7 @@ Legend: ✅ done · ◐ partial · ☐ not started
 
 | Wave | Item | silx source | Status |
 |---|---|---|---|
-| P1.1 | Scatter3D (points / spheres) | items/scatter.py, primitives Points/ColorPoints/Spheres | ✅ |
+| P1.1 | Scatter3D (points / spheres) + Scatter2D (points / lines / solid) | items/scatter.py, primitives Points/ColorPoints/Spheres | ✅ |
 | P1.2 | Mesh / Box / Cylinder / Hexagon | items/mesh.py, primitives Mesh3D/ColormapMesh3D + Geometry | ✅ |
 | P1.3 | 3D ImageData / ImageRgba / HeightMap | items/image.py, items/_pick.py, primitives ImageData/ImageRgba | ✅ |
 
@@ -76,6 +76,25 @@ spheres — not used by silx `Scatter3D`, which renders `Points`) is not yet por
 Per-point picking lands in **Phase 4**: `SceneWidget::pick` returns the hit point's
 index (`ScenePickKind::Point`); silx's `_pickFull` per-point *data* payload beyond
 the index is the documented remaining tail.
+
+`Scatter2D` ports silx's `Scatter2D` (`DataItem3D` + `ColormapMixIn` + `SymbolMixIn`
++ `ScatterVisualizationMixIn`): `(x, y, value)` data on the `z = 0` plane, lifted to
+`z = value` in height-map mode, drawn in one of three visualization modes —
+`Points` (marker sprites, reusing the `Scatter3D` point path), `Lines` (the edges
+of the points' Delaunay triangulation), or `Solid` (the filled triangles). The
+LINES/SOLID triangulation reuses the existing CPU `core::scatter_viz::delaunay`
+(silx's matplotlib `Triangulation`) — no new dependency; LINES emits the unique
+undirected edges (silx `triangleToLineIndices(unicity=True)`) as per-endpoint-coloured
+gradient segments (silx's per-vertex `ColormapMesh3D(mode='lines')`, enabled here by
+a new `Scene3dGeometry::add_line_gradient`), and SOLID emits per-vertex-coloured lit
+triangles with one flat face normal each (silx's `(0,0,1)` plane normal when flat,
+per-triangle normals in height-map mode). Documented simplifications (shared with
+`Scatter3D`): value→colour is mapped on the CPU via `Colormap::color_at` rather than
+a GPU colormap texture. A degenerate input (fewer than 3 points or all collinear)
+triangulates empty and draws nothing, matching silx skipping the renderer when the
+Delaunay tesselation fails. Verified by `scene3d_scatter2d_render.rs` (each mode
+rasterizes; SOLID fills far more than the LINES edges) plus per-mode unit tests in
+`render::scene3d_items`.
 
 P1.3 notes: `ImageData3D`/`ImageRgba3D` render a 2D image as one textured quad
 (`scene3d_image.wgsl` + `Scene3dImageLayer`, an `Rgba8Unorm` texture per layer),

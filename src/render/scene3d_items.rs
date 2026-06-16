@@ -6,10 +6,13 @@
 //! live in [`crate::render::gpu_scene3d`]; this module is the headless item layer
 //! (color mapping + bounds), unit-tested without a GPU.
 
+use std::collections::BTreeSet;
+
 use egui::Color32;
 
 use crate::core::colormap::{AutoscaleMode, Colormap, ColormapName};
 use crate::core::complex::ComplexMode;
+use crate::core::scatter_viz::delaunay;
 use crate::core::scene3d::marching_cubes::isosurface as marching_cubes_isosurface;
 use crate::core::scene3d::mat4::{Mat4, Vec3, mat4_rotate};
 use crate::core::scene3d::plane::{Plane, box_plane_intersect, segment_plane_intersect};
@@ -179,6 +182,298 @@ impl Scatter3D {
                 self.size,
                 self.marker,
             );
+        }
+    }
+}
+
+/// silx default line width for a [`Scatter2D`] in LINES mode
+/// (`Scatter2D.__init__`: `self._lineWidth = 1.0`).
+pub const DEFAULT_SCATTER2D_LINE_WIDTH: f32 = 1.0;
+
+/// How a [`Scatter2D`]'s `(x, y, value)` data is drawn (silx
+/// `ScatterVisualizationMixIn.Visualization`, restricted to the three modes
+/// `Scatter2D` supports).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Scatter2DVisualization {
+    /// A marker sprite at each point, coloured by its value (silx `POINTS` —
+    /// uses `symbol` + `symbolSize`).
+    #[default]
+    Points,
+    /// The edges of the points' Delaunay triangulation, coloured by value (silx
+    /// `LINES` — uses `lineWidth`).
+    Lines,
+    /// The filled Delaunay triangles, coloured by value (silx `SOLID`).
+    Solid,
+}
+
+/// A 2D scatter `(x, y, value)` placed in the 3D scene: the points lie on the
+/// `z = 0` plane, or are lifted to `z = value` in height-map mode. The value
+/// drives a [`Colormap`], and the data is drawn as markers, triangulation edges,
+/// or filled triangles per its [`Scatter2DVisualization`].
+///
+/// Port of silx `plot3d.items.Scatter2D` (`DataItem3D` + `ColormapMixIn` +
+/// `SymbolMixIn` + `ScatterVisualizationMixIn`). The LINES/SOLID modes triangulate
+/// `(x, y)` with [`delaunay`] (silx's matplotlib `Triangulation`); as for
+/// [`Scatter3D`] the value→colour mapping is done on the CPU via
+/// [`Colormap::color_at`] rather than silx's GPU colormap texture. SOLID uses one
+/// flat face normal per triangle (silx's per-triangle normals in height-map mode;
+/// the `(0, 0, 1)` plane normal when flat).
+#[derive(Clone, Debug)]
+pub struct Scatter2D {
+    x: Vec<f64>,
+    y: Vec<f64>,
+    values: Vec<f64>,
+    colormap: Colormap,
+    marker: PointMarker,
+    size: f32,
+    line_width: f32,
+    height_map: bool,
+    visualization: Scatter2DVisualization,
+}
+
+impl Default for Scatter2D {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Scatter2D {
+    /// An empty scatter with silx defaults: the viridis colormap over `[0, 1]`,
+    /// circle markers at [`DEFAULT_SCATTER3D_SIZE`], POINTS visualization, flat
+    /// (not height-map).
+    pub fn new() -> Self {
+        Self {
+            x: Vec::new(),
+            y: Vec::new(),
+            values: Vec::new(),
+            colormap: Colormap::new(ColormapName::Viridis, 0.0, 1.0),
+            marker: PointMarker::Circle,
+            size: DEFAULT_SCATTER3D_SIZE,
+            line_width: DEFAULT_SCATTER2D_LINE_WIDTH,
+            height_map: false,
+            visualization: Scatter2DVisualization::Points,
+        }
+    }
+
+    /// Replace the point data (silx `Scatter2D.setData`). The three arrays must be
+    /// the same length; on a length mismatch the data is left unchanged and
+    /// `false` is returned (silx asserts equal lengths).
+    pub fn set_data(&mut self, x: &[f64], y: &[f64], values: &[f64]) -> bool {
+        let n = x.len();
+        if y.len() != n || values.len() != n {
+            return false;
+        }
+        self.x = x.to_vec();
+        self.y = y.to_vec();
+        self.values = values.to_vec();
+        true
+    }
+
+    /// Builder form of [`set_data`](Self::set_data); a length mismatch leaves the
+    /// data empty.
+    pub fn with_data(mut self, x: &[f64], y: &[f64], values: &[f64]) -> Self {
+        self.set_data(x, y, values);
+        self
+    }
+
+    /// Set the colormap (silx `ColormapMixIn.setColormap`).
+    pub fn set_colormap(&mut self, colormap: Colormap) {
+        self.colormap = colormap;
+    }
+
+    /// Builder form of [`set_colormap`](Self::set_colormap).
+    pub fn with_colormap(mut self, colormap: Colormap) -> Self {
+        self.colormap = colormap;
+        self
+    }
+
+    /// Read-only access to the colormap.
+    pub fn colormap(&self) -> &Colormap {
+        &self.colormap
+    }
+
+    /// Mutable access to the colormap (e.g. to set the value range directly).
+    pub fn colormap_mut(&mut self) -> &mut Colormap {
+        &mut self.colormap
+    }
+
+    /// Fit the colormap's value range to the current data with `mode`, returning
+    /// the new `(vmin, vmax)` (as [`Scatter3D::autoscale_colormap`]).
+    pub fn autoscale_colormap(&mut self, mode: AutoscaleMode) -> (f64, f64) {
+        let (vmin, vmax) = mode.range(&self.values, self.colormap.autoscale_percentiles);
+        self.colormap.vmin = vmin;
+        self.colormap.vmax = vmax;
+        (vmin, vmax)
+    }
+
+    /// Set the visualization mode (silx `ScatterVisualizationMixIn.setVisualization`).
+    pub fn set_visualization(&mut self, visualization: Scatter2DVisualization) {
+        self.visualization = visualization;
+    }
+
+    /// Builder form of [`set_visualization`](Self::set_visualization).
+    pub fn with_visualization(mut self, visualization: Scatter2DVisualization) -> Self {
+        self.visualization = visualization;
+        self
+    }
+
+    /// The current visualization mode.
+    pub fn visualization(&self) -> Scatter2DVisualization {
+        self.visualization
+    }
+
+    /// Display the value as the `z` coordinate (silx `Scatter2D.setHeightMap`);
+    /// when `false` the points lie on the `z = 0` plane.
+    pub fn set_height_map(&mut self, height_map: bool) {
+        self.height_map = height_map;
+    }
+
+    /// Builder form of [`set_height_map`](Self::set_height_map).
+    pub fn with_height_map(mut self, height_map: bool) -> Self {
+        self.height_map = height_map;
+        self
+    }
+
+    /// Whether the value is displayed as a height map (silx `isHeightMap`).
+    pub fn is_height_map(&self) -> bool {
+        self.height_map
+    }
+
+    /// Set the marker shape used in POINTS mode (silx `SymbolMixIn.setSymbol`).
+    pub fn set_marker(&mut self, marker: PointMarker) {
+        self.marker = marker;
+    }
+
+    /// Builder form of [`set_marker`](Self::set_marker).
+    pub fn with_marker(mut self, marker: PointMarker) -> Self {
+        self.marker = marker;
+        self
+    }
+
+    /// Set the marker size in pixels used in POINTS mode
+    /// (silx `SymbolMixIn.setSymbolSize`), clamped to be non-negative.
+    pub fn set_size(&mut self, size: f32) {
+        self.size = size.max(0.0);
+    }
+
+    /// Builder form of [`set_size`](Self::set_size).
+    pub fn with_size(mut self, size: f32) -> Self {
+        self.set_size(size);
+        self
+    }
+
+    /// Set the line width in pixels used in LINES mode (silx
+    /// `Scatter2D.setLineWidth`), clamped to silx's `>= 1.0`.
+    pub fn set_line_width(&mut self, width: f32) {
+        self.line_width = width.max(1.0);
+    }
+
+    /// Builder form of [`set_line_width`](Self::set_line_width).
+    pub fn with_line_width(mut self, width: f32) -> Self {
+        self.set_line_width(width);
+        self
+    }
+
+    /// The line width used in LINES mode.
+    pub fn line_width(&self) -> f32 {
+        self.line_width
+    }
+
+    /// Number of points.
+    pub fn len(&self) -> usize {
+        self.x.len()
+    }
+
+    /// True when there are no points.
+    pub fn is_empty(&self) -> bool {
+        self.x.is_empty()
+    }
+
+    /// The `z` coordinate of point `i`: its value in height-map mode, else the
+    /// `z = 0` plane (silx `_updateScene`: `z = value if heightMap else 0.0`).
+    fn z(&self, i: usize) -> f32 {
+        if self.height_map {
+            self.values[i] as f32
+        } else {
+            0.0
+        }
+    }
+
+    /// World position of point `i`.
+    fn position(&self, i: usize) -> [f32; 3] {
+        [self.x[i] as f32, self.y[i] as f32, self.z(i)]
+    }
+
+    /// Linear-premultiplied RGBA of point `i` through the colormap.
+    fn color_rgba(&self, i: usize) -> [f32; 4] {
+        let [r, g, b, a] = self.colormap.color_at(self.values[i]);
+        egui::Rgba::from(Color32::from_rgba_unmultiplied(r, g, b, a)).to_array()
+    }
+
+    /// Axis-aligned data bounds `(min, max)` over the points (silx
+    /// `DataItem3D.getBounds`), or `None` when empty. In flat mode `z` collapses
+    /// to `[0, 0]`; in height-map mode it spans the value range.
+    pub fn bounds(&self) -> Option<(Vec3, Vec3)> {
+        if self.is_empty() {
+            return None;
+        }
+        let positions: Vec<[f32; 3]> = (0..self.len()).map(|i| self.position(i)).collect();
+        positions_bounds(&positions)
+    }
+
+    /// Append this scatter's geometry to `geometry` per its visualization mode,
+    /// ready to upload via [`crate::render::gpu_scene3d::set_scene3d`]. LINES and
+    /// SOLID triangulate `(x, y)`; a degenerate input (fewer than 3 points or all
+    /// collinear) yields an empty triangulation and so draws nothing, matching
+    /// silx skipping the renderer when the Delaunay tesselation fails.
+    pub fn append_to(&self, geometry: &mut Scene3dGeometry) {
+        if self.is_empty() {
+            return;
+        }
+        match self.visualization {
+            Scatter2DVisualization::Points => {
+                for i in 0..self.len() {
+                    let [r, g, b, a] = self.colormap.color_at(self.values[i]);
+                    geometry.add_point(
+                        self.position(i),
+                        Color32::from_rgba_unmultiplied(r, g, b, a),
+                        self.size,
+                        self.marker,
+                    );
+                }
+            }
+            Scatter2DVisualization::Lines => {
+                let tri = delaunay(&self.x, &self.y);
+                // Unique undirected edges of the triangulation (silx
+                // `triangleToLineIndices(unicity=True)`), sorted for determinism.
+                let mut edges: BTreeSet<(usize, usize)> = BTreeSet::new();
+                for &[i0, i1, i2] in &tri.triangles {
+                    for (a, b) in [(i0, i1), (i1, i2), (i2, i0)] {
+                        edges.insert((a.min(b), a.max(b)));
+                    }
+                }
+                for (a, b) in edges {
+                    geometry.add_line_gradient(
+                        self.position(a),
+                        self.position(b),
+                        self.color_rgba(a),
+                        self.color_rgba(b),
+                    );
+                }
+            }
+            Scatter2DVisualization::Solid => {
+                let tri = delaunay(&self.x, &self.y);
+                for &[i0, i1, i2] in &tri.triangles {
+                    let p = [self.position(i0), self.position(i1), self.position(i2)];
+                    let rgba = [
+                        self.color_rgba(i0),
+                        self.color_rgba(i1),
+                        self.color_rgba(i2),
+                    ];
+                    let normal = flat_normal(p[0], p[1], p[2]);
+                    geometry.add_mesh_triangle_rgba(p, rgba, [normal; 3]);
+                }
+            }
         }
     }
 }
@@ -2565,6 +2860,135 @@ mod tests {
         let (min, max) = s.bounds().expect("non-empty bounds");
         assert_eq!((min.x, min.y, min.z), (-1.0, -2.0, -1.0));
         assert_eq!((max.x, max.y, max.z), (2.0, 3.0, 4.0));
+    }
+
+    #[test]
+    fn scatter2d_set_data_rejects_length_mismatch() {
+        let mut s = Scatter2D::new();
+        assert!(!s.set_data(&[0.0, 1.0], &[0.0], &[0.0, 1.0]));
+        assert!(s.is_empty(), "rejected data must not be partially stored");
+        assert!(s.set_data(&[0.0, 1.0], &[2.0, 3.0], &[4.0, 5.0]));
+        assert_eq!(s.len(), 2);
+    }
+
+    #[test]
+    fn scatter2d_points_mode_lies_on_z0_plane_or_lifts_to_value() {
+        let cmap = Colormap::new(ColormapName::Viridis, 0.0, 4.0);
+        // Flat (default): z = 0 for every point.
+        let flat = Scatter2D::new()
+            .with_colormap(cmap.clone())
+            .with_marker(PointMarker::Square)
+            .with_size(8.0)
+            .with_data(&[0.0, 1.0, 2.0], &[0.0, 0.0, 0.0], &[0.0, 2.0, 4.0]);
+        let mut g = Scene3dGeometry::new();
+        flat.append_to(&mut g);
+        assert_eq!(g.points.len(), 3);
+        for p in &g.points {
+            assert_eq!(p.pos[2], 0.0, "flat scatter sits on z=0");
+            assert_eq!(p.size, 8.0);
+            assert_eq!(p.marker, PointMarker::Square.id());
+        }
+        // Colour is driven by value (same CPU colormap lookup as Scatter3D).
+        let expect = |v: f64| {
+            let [r, gg, b, a] = cmap.color_at(v);
+            egui::Rgba::from(Color32::from_rgba_unmultiplied(r, gg, b, a)).to_array()
+        };
+        assert_eq!(g.points[0].color, expect(0.0));
+        assert_eq!(g.points[2].color, expect(4.0));
+        assert_ne!(g.points[0].color, g.points[2].color);
+
+        // Height-map mode: z = value.
+        let hm = Scatter2D::new()
+            .with_data(&[0.0, 1.0, 2.0], &[0.0, 0.0, 0.0], &[0.0, 2.0, 4.0])
+            .with_height_map(true);
+        let mut g2 = Scene3dGeometry::new();
+        hm.append_to(&mut g2);
+        assert_eq!(g2.points[0].pos[2], 0.0);
+        assert_eq!(g2.points[1].pos[2], 2.0);
+        assert_eq!(g2.points[2].pos[2], 4.0);
+    }
+
+    #[test]
+    fn scatter2d_lines_mode_emits_unique_triangulation_edges() {
+        // Unit square → 2 Delaunay triangles sharing a diagonal → 5 unique edges.
+        let s = Scatter2D::new()
+            .with_data(
+                &[0.0, 1.0, 0.0, 1.0],
+                &[0.0, 0.0, 1.0, 1.0],
+                &[0.0, 1.0, 2.0, 3.0],
+            )
+            .with_visualization(Scatter2DVisualization::Lines);
+        let mut g = Scene3dGeometry::new();
+        s.append_to(&mut g);
+        // 5 segments, two vertices each; all flat on z = 0.
+        assert_eq!(g.lines.len(), 10);
+        for v in &g.lines {
+            assert_eq!(v.pos[2], 0.0);
+        }
+        // The first edge is (index 0, index 1); its endpoints carry their own
+        // colormap colour, so the segment gradients (values 0 vs 1 differ).
+        assert_ne!(g.lines[0].color, g.lines[1].color);
+        // Nothing emitted to the point / mesh channels.
+        assert!(g.points.is_empty());
+        assert!(g.meshes.is_empty());
+    }
+
+    #[test]
+    fn scatter2d_solid_mode_fills_triangles_coloured_by_value() {
+        let s = Scatter2D::new()
+            .with_data(
+                &[0.0, 1.0, 0.0, 1.0],
+                &[0.0, 0.0, 1.0, 1.0],
+                &[0.0, 1.0, 2.0, 3.0],
+            )
+            .with_visualization(Scatter2DVisualization::Solid);
+        let mut g = Scene3dGeometry::new();
+        s.append_to(&mut g);
+        // 2 triangles × 3 vertices.
+        assert_eq!(g.meshes.len(), 6);
+        for v in &g.meshes {
+            assert_eq!(v.pos[2], 0.0, "flat solid sits on z=0");
+            // Flat z=0 triangles → the ±Z plane normal (winding-agnostic check).
+            assert!(
+                (v.normal[2].abs() - 1.0).abs() < 1e-5,
+                "expected plane normal, got {:?}",
+                v.normal
+            );
+        }
+        assert!(g.points.is_empty());
+        assert!(g.lines.is_empty());
+    }
+
+    #[test]
+    fn scatter2d_degenerate_input_draws_nothing_in_triangulated_modes() {
+        // Collinear points → empty Delaunay → no edges / triangles (silx skips the
+        // renderer when the tesselation fails).
+        let collinear =
+            Scatter2D::new().with_data(&[0.0, 1.0, 2.0], &[0.0, 1.0, 2.0], &[0.0, 1.0, 2.0]);
+        let mut g = Scene3dGeometry::new();
+        collinear
+            .clone()
+            .with_visualization(Scatter2DVisualization::Lines)
+            .append_to(&mut g);
+        assert!(g.lines.is_empty());
+        let mut g2 = Scene3dGeometry::new();
+        collinear
+            .with_visualization(Scatter2DVisualization::Solid)
+            .append_to(&mut g2);
+        assert!(g2.meshes.is_empty());
+    }
+
+    #[test]
+    fn scatter2d_bounds_flat_collapses_z_height_map_spans_value() {
+        assert!(Scatter2D::new().bounds().is_none());
+        // Flat: the z bracket collapses to [0, 0].
+        let flat = Scatter2D::new().with_data(&[-1.0, 2.0], &[3.0, -2.0], &[5.0, 10.0]);
+        let (min, max) = flat.bounds().expect("non-empty");
+        assert_eq!((min.x, min.y, min.z), (-1.0, -2.0, 0.0));
+        assert_eq!((max.x, max.y, max.z), (2.0, 3.0, 0.0));
+        // Height map: z spans the value range.
+        let (min, max) = flat.with_height_map(true).bounds().expect("non-empty");
+        assert_eq!((min.z, max.z), (5.0, 10.0));
     }
 
     // A flat, camera-facing triangle in the z=0 plane (CCW seen from +z).

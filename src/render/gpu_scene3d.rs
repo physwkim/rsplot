@@ -417,6 +417,28 @@ impl Scene3dGeometry {
         });
     }
 
+    /// Append a line segment `a→b` whose endpoints carry their own linear-
+    /// premultiplied RGBA, so the segment gradients between them. The analogue of
+    /// silx colouring line vertices through a colormap (`ColormapMesh3D` with
+    /// `mode='lines'`), used by [`Scatter2D`](crate::render::scene3d_items::Scatter2D)'s
+    /// LINES visualization.
+    pub fn add_line_gradient(
+        &mut self,
+        a: [f32; 3],
+        b: [f32; 3],
+        rgba_a: [f32; 4],
+        rgba_b: [f32; 4],
+    ) {
+        self.lines.push(Scene3dVertex {
+            pos: a,
+            color: rgba_a,
+        });
+        self.lines.push(Scene3dVertex {
+            pos: b,
+            color: rgba_b,
+        });
+    }
+
     /// Append a triangle `a, b, c` in one solid [`Color32`].
     pub fn add_triangle(&mut self, a: [f32; 3], b: [f32; 3], c: [f32; 3], color: Color32) {
         let rgba = egui::Rgba::from(color).to_array();
