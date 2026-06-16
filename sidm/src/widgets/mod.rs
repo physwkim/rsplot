@@ -11,6 +11,7 @@
 pub mod base;
 pub mod byte;
 pub mod checkbox;
+pub mod datetime_edit;
 pub mod datetime_label;
 pub mod display_format;
 pub mod drawing;
@@ -42,6 +43,7 @@ pub use base::{
 };
 pub use byte::{Orientation, SidmByteIndicator, extract_bits};
 pub use checkbox::SidmCheckbox;
+pub use datetime_edit::{SidmDateTimeEdit, parse_datetime_ms, send_value_epoch_ms};
 pub use datetime_label::{SidmDateTimeLabel, TimeBase, format_datetime_ms, value_epoch_ms};
 pub use display_format::{DisplayFormat, FormatSpec, format_value};
 pub use drawing::{DrawingShape, SidmDrawing, effective_colors};

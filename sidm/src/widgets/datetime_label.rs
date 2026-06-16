@@ -32,7 +32,7 @@ pub enum TimeBase {
     Seconds,
 }
 
-const MS_PER_DAY: i64 = 86_400_000;
+pub(crate) const MS_PER_DAY: i64 = 86_400_000;
 
 /// Convert the channel `raw` value to epoch milliseconds (PyDM `value_changed`):
 /// the value is truncated to an integer in its base unit (PyDM `int(new_val)`),
@@ -83,8 +83,22 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
     (year + i64::from(month <= 2), month as u32, day)
 }
 
+/// Count of days since 1970-01-01 for a civil date `(year, month, day)`
+/// (Howard Hinnant's `days_from_civil`; the exact inverse of
+/// [`civil_from_days`], valid for the proleptic Gregorian calendar including
+/// dates before the epoch). `month` is 1–12, `day` is 1–31.
+pub(crate) fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
+    let m = i64::from(month);
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = (if y >= 0 { y } else { y - 399 }) / 400;
+    let yoe = y - era * 400; // [0, 399]
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + i64::from(day) - 1; // [0, 365]
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // [0, 146096]
+    era * 146_097 + doe - 719_468
+}
+
 /// Current wall-clock time in epoch milliseconds (UTC).
-fn now_epoch_ms() -> i64 {
+pub(crate) fn now_epoch_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
@@ -198,6 +212,24 @@ mod tests {
             value_epoch_ms(5000.0, TimeBase::Milliseconds, true, 1_000_000),
             1_005_000
         );
+    }
+
+    #[test]
+    fn days_from_civil_inverts_civil_from_days() {
+        // Round-trip several dates spanning the epoch and a leap day.
+        for (y, m, d) in [
+            (1970, 1, 1),
+            (2021, 1, 1),
+            (2020, 2, 29),
+            (1969, 12, 31),
+            (1900, 3, 1),
+            (2000, 2, 29),
+        ] {
+            let days = days_from_civil(y, m, d);
+            assert_eq!(civil_from_days(days), (y, m, d), "round trip {y}/{m}/{d}");
+        }
+        // 1970-01-01 is day 0.
+        assert_eq!(days_from_civil(1970, 1, 1), 0);
     }
 
     #[test]
