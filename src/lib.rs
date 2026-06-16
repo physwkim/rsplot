@@ -158,6 +158,9 @@ pub use crate::widget::position_info::{
     PositionInfo, SNAP_THRESHOLD_DIST, Snap, SnapItem, SnapItemKind, SnappingMode, format_value,
     snap_to_nearest, snapping_candidates,
 };
+pub use crate::widget::print_preview::{
+    CommentPosition, PrintPreview, compose_page, resize_item_rect,
+};
 pub use crate::widget::profile_window::ProfileWindow;
 pub use crate::widget::radar_view::{
     DataRect, RadarMapping, RadarResponse, RadarView, clamp_viewport, point_in_rect,

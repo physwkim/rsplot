@@ -24,6 +24,7 @@ pub mod mask_tools;
 pub mod plot_widget;
 pub mod position_info;
 pub mod print_dialog;
+pub mod print_preview;
 pub mod profile_window;
 pub mod radar_view;
 pub mod roi_manager;

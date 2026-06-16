@@ -1011,7 +1011,12 @@ impl SaveFormat {
 /// return the readback as tightly packed RGBA8. Captures the data layer (clear,
 /// image, curves); chrome is not included. Requires [`crate::install`] to have
 /// run on `render_state`.
-fn render_plot_rgba(
+///
+/// This is the single owner of the plot→pixels readback: [`save_graph`] and
+/// [`save_graph_with_format`] encode its output to a file, and the print-preview
+/// page editor ([`crate::PrintPreview::add_image`]) takes the same RGBA in memory
+/// to place the plot on a printable page.
+pub fn render_plot_rgba(
     render_state: &RenderState,
     plot: &Plot,
     size: (u32, u32),
