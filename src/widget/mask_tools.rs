@@ -186,6 +186,83 @@ impl MaskHistory {
 /// eraser clears it back to `0`.
 ///
 /// [`level`]: Self::level
+/// Which silx `DatasetDialog` mode the HDF5 dataset picker is in.
+///
+/// Mirrors `DatasetDialog.LoadMode`/`SaveMode`: load offers only the existing 2D
+/// datasets to read; save lets the user name the dataset to write (a new name or
+/// an existing one to overwrite).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum H5PickerMode {
+    Load,
+    Save,
+}
+
+/// Cross-frame state of the HDF5 "Select a 2D dataset" picker (silx
+/// `DatasetDialog`).
+///
+/// The dataset-choice *logic* is a pure, headlessly-tested seam
+/// ([`for_load`](Self::for_load)/[`for_save`](Self::for_save)/
+/// [`resolved_path`](Self::resolved_path)); only the modal that drives it is an
+/// egui UI shim (rendered by [`MaskToolsWidget::show_toolbar`]).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct H5DatasetPicker {
+    /// The HDF5 file the dataset choice applies to.
+    path: std::path::PathBuf,
+    /// The existing 2D datasets in the file (silx tree filtered to datasets).
+    /// Load offers these to pick; save shows them as overwrite shortcuts.
+    datasets: Vec<String>,
+    mode: H5PickerMode,
+    /// The chosen (load) or typed (save) dataset path. Load seeds it to the
+    /// first existing dataset; save seeds it to silx's default `mask`.
+    name: String,
+    /// The last load/save error, shown inline so the modal stays open for a
+    /// retry instead of swallowing the failure (the rfd dialogs return
+    /// `io::Result`; the modal completes across frames so it surfaces it here).
+    error: Option<String>,
+}
+
+impl H5DatasetPicker {
+    /// A load picker over the existing 2D datasets, seeded to the first one
+    /// (silx `DatasetDialog.LoadMode`).
+    fn for_load(path: std::path::PathBuf, datasets: Vec<String>) -> Self {
+        let name = datasets.first().cloned().unwrap_or_default();
+        Self {
+            path,
+            datasets,
+            mode: H5PickerMode::Load,
+            name,
+            error: None,
+        }
+    }
+
+    /// A save picker seeded to silx's default `mask` dataset name, showing the
+    /// existing datasets as overwrite shortcuts (silx `DatasetDialog.SaveMode`).
+    fn for_save(path: std::path::PathBuf, datasets: Vec<String>) -> Self {
+        Self {
+            path,
+            datasets,
+            mode: H5PickerMode::Save,
+            name: "mask".to_string(),
+            error: None,
+        }
+    }
+
+    /// The resolved dataset path, or `None` when nothing is selectable (silx
+    /// leaves OK disabled then).
+    ///
+    /// Mirrors silx `DatasetDialog._updateUrl`'s new-name rule
+    /// (`newDatasetName.lstrip("/")`): strip leading `/`, and treat an empty
+    /// result as no selection.
+    fn resolved_path(&self) -> Option<String> {
+        let p = self.name.trim_start_matches('/');
+        if p.is_empty() {
+            None
+        } else {
+            Some(p.to_string())
+        }
+    }
+}
+
 pub struct MaskToolsWidget {
     /// Per-pixel mask level in image (row, col) order: `0` is unmasked,
     /// `1..=255` is a mask level.
@@ -261,6 +338,13 @@ pub struct MaskToolsWidget {
     /// current level via [`Self::fill_from_draw`]. Cleared on a geometry change
     /// (the old draw refers to stale coordinates) and when leaving a shape tool.
     shape_draw: Option<DrawState>,
+
+    /// Cross-frame state for the HDF5 "Select a 2D dataset" picker (silx
+    /// `DatasetDialog`, opened by `_selectDataset`). The rfd file dialog resolves
+    /// first (blocking, native); the dataset choice is then made in the egui
+    /// modal rendered by [`show_toolbar`](Self::show_toolbar) across frames, so
+    /// the request is parked here meanwhile. `None` when no HDF5 pick is pending.
+    pending_h5: Option<H5DatasetPicker>,
 }
 
 impl MaskToolsWidget {
@@ -297,6 +381,7 @@ impl MaskToolsWidget {
             last_pencil_pos: None,
             stroke_do_mask: None,
             shape_draw: None,
+            pending_h5: None,
         }
     }
 
@@ -663,7 +748,31 @@ impl MaskToolsWidget {
                 self.clear_all();
                 self.commit();
             }
+
+            // Load.../Save... file actions (silx `loadAction`/`saveAction`,
+            // _BaseMaskToolsWidget.py:631-643). The native rfd picker resolves
+            // the file; for HDF5 the dataset choice then runs through the modal
+            // below. Errors from the native shims are swallowed like silx's
+            // QMessageBox warnings (no in-app caller to surface them to here).
+            ui.separator();
+            if ui
+                .button("Load...")
+                .on_hover_text("Load mask from file")
+                .clicked()
+            {
+                let _ = self.load_mask_dialog();
+            }
+            if ui
+                .button("Save...")
+                .on_hover_text("Save mask to file")
+                .clicked()
+            {
+                let _ = self.save_mask_dialog();
+            }
         });
+
+        // The HDF5 "Select a 2D dataset" modal, when a load/save is pending.
+        self.show_h5_picker(ui);
     }
 
     /// The effective mask/unmask direction for a draw, given the draw's base
@@ -1534,6 +1643,151 @@ impl MaskToolsWidget {
         crate::render::save::list_mask_datasets_hdf5(path.as_ref())
     }
 
+    /// Save the current mask to a named 2D dataset of an HDF5 file (silx
+    /// `_saveToHdf5` with an explicit `_selectDataset` choice).
+    ///
+    /// The explicit-name counterpart of [`save_h5`](Self::save_h5) (which always
+    /// uses `mask`); used by the "Select a 2D dataset" save picker. Faithful to
+    /// silx's "a" append mode via [`write_mask_hdf5`](crate::render::save::write_mask_hdf5).
+    pub fn save_h5_dataset(
+        &self,
+        path: impl AsRef<std::path::Path>,
+        data_path: &str,
+    ) -> io::Result<()> {
+        crate::render::save::write_mask_hdf5(
+            path.as_ref(),
+            data_path,
+            self.height,
+            self.width,
+            &self.mask,
+        )
+    }
+
+    /// Open the HDF5 "Select a 2D dataset" picker for a load (silx
+    /// `_loadFromHdf5` → `_selectDataset(LoadMode)`).
+    ///
+    /// Enumerates the file's 2D datasets and parks a load picker; the actual read
+    /// happens when the modal — rendered by [`show_toolbar`](Self::show_toolbar) —
+    /// is confirmed. The [`load_mask_dialog`](Self::load_mask_dialog) HDF5 branch
+    /// calls this after the native file picker resolves; a host can also call it
+    /// directly to open the picker for a known file.
+    pub fn begin_h5_load(&mut self, path: std::path::PathBuf) -> io::Result<()> {
+        let datasets = crate::render::save::list_mask_datasets_hdf5(&path)?;
+        self.pending_h5 = Some(H5DatasetPicker::for_load(path, datasets));
+        Ok(())
+    }
+
+    /// Open the HDF5 "Select a 2D dataset" picker for a save (silx `_saveToHdf5`
+    /// → `_selectDataset(SaveMode)`).
+    ///
+    /// Shows the existing datasets (if the file already exists) as overwrite
+    /// shortcuts and seeds the name to silx's default `mask`; the write happens
+    /// when the modal — rendered by [`show_toolbar`](Self::show_toolbar) — is
+    /// confirmed. The [`save_mask_dialog`](Self::save_mask_dialog) HDF5 branch
+    /// calls this after the native file picker resolves; a host can also call it
+    /// directly to open the picker for a known file.
+    pub fn begin_h5_save(&mut self, path: std::path::PathBuf) -> io::Result<()> {
+        // A save target may not exist yet; only an existing file has datasets to
+        // list (and to offer as overwrite shortcuts).
+        let datasets = if path.exists() {
+            crate::render::save::list_mask_datasets_hdf5(&path)?
+        } else {
+            Vec::new()
+        };
+        self.pending_h5 = Some(H5DatasetPicker::for_save(path, datasets));
+        Ok(())
+    }
+
+    /// Apply a confirmed HDF5 dataset pick: load from / save to the resolved
+    /// dataset path (the modal's OK action; also the testable seam).
+    ///
+    /// Returns `Ok(Some(resized))` for a load (whether the loaded shape differed
+    /// from the image), `Ok(None)` for a save. An unselectable picker
+    /// ([`resolved_path`](H5DatasetPicker::resolved_path) `None`) is a no-op
+    /// returning `Ok(None)`.
+    pub(crate) fn apply_h5_pick(&mut self, picker: &H5DatasetPicker) -> io::Result<Option<bool>> {
+        let Some(data_path) = picker.resolved_path() else {
+            return Ok(None);
+        };
+        match picker.mode {
+            H5PickerMode::Load => Ok(Some(self.load_h5_dataset(&picker.path, &data_path)?)),
+            H5PickerMode::Save => {
+                self.save_h5_dataset(&picker.path, &data_path)?;
+                Ok(None)
+            }
+        }
+    }
+
+    /// Render the HDF5 "Select a 2D dataset" modal when a pick is pending (silx
+    /// `DatasetDialog`); a no-op otherwise.
+    ///
+    /// Load lists the existing datasets to choose; save adds a name field
+    /// (default `mask`) with the existing datasets as overwrite shortcuts. OK
+    /// applies the pick via [`apply_h5_pick`](Self::apply_h5_pick) (errors stay
+    /// inline so the modal can be retried); Cancel drops it. UI shim — the
+    /// choice logic and `apply_h5_pick` are headlessly tested.
+    fn show_h5_picker(&mut self, ui: &mut egui::Ui) {
+        let Some(mut picker) = self.pending_h5.take() else {
+            return;
+        };
+        // None = still open, Some(true) = OK, Some(false) = Cancel.
+        let mut action: Option<bool> = None;
+        egui::Window::new("Select a 2D dataset")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ui.ctx(), |ui| {
+                ui.label(match picker.mode {
+                    H5PickerMode::Load => "Select a dataset",
+                    H5PickerMode::Save => "Select a dataset or type a new dataset name",
+                });
+                if picker.datasets.is_empty() {
+                    ui.weak("(no 2D datasets in this file)");
+                } else {
+                    egui::ScrollArea::vertical()
+                        .max_height(160.0)
+                        .show(ui, |ui| {
+                            for ds in &picker.datasets {
+                                ui.selectable_value(&mut picker.name, ds.clone(), ds);
+                            }
+                        });
+                }
+                if picker.mode == H5PickerMode::Save {
+                    ui.horizontal(|ui| {
+                        ui.label("Dataset:");
+                        ui.text_edit_singleline(&mut picker.name);
+                    });
+                }
+                if let Some(err) = &picker.error {
+                    ui.colored_label(egui::Color32::RED, err);
+                }
+                ui.separator();
+                ui.horizontal(|ui| {
+                    let can_ok = picker.resolved_path().is_some();
+                    if ui.add_enabled(can_ok, egui::Button::new("OK")).clicked() {
+                        action = Some(true);
+                    }
+                    if ui.button("Cancel").clicked() {
+                        action = Some(false);
+                    }
+                });
+            });
+        match action {
+            // OK: apply; on error keep the modal open with the message shown.
+            Some(true) => match self.apply_h5_pick(&picker) {
+                Ok(_) => {}
+                Err(e) => {
+                    picker.error = Some(e.to_string());
+                    self.pending_h5 = Some(picker);
+                }
+            },
+            // Cancel: drop the pending pick.
+            Some(false) => {}
+            // Still open: keep the (possibly edited) picker for the next frame.
+            None => self.pending_h5 = Some(picker),
+        }
+    }
+
     /// Save the current mask to an HDF5 file at the given in-app path string
     /// (silx `MaskToolsWidget.save(filename, "h5")`).
     ///
@@ -1559,10 +1813,11 @@ impl MaskToolsWidget {
     /// extension. An extensionless path defaults to `.npy` (silx's default kind);
     /// an unsupported extension is rejected
     /// (faithful to silx `save` raising on an unknown kind). Returns `Ok(true)`
-    /// when a file was written, `Ok(false)` on cancel. The picker is a native
-    /// shim; the codecs and the extension dispatch ([`resolve_mask_save_format`])
-    /// are unit-tested.
-    pub fn save_mask_dialog(&self) -> io::Result<bool> {
+    /// when a file was written, `Ok(false)` on cancel or when an HDF5 dataset
+    /// choice is pending (the modal completes the write later). The picker is a
+    /// native shim; the codecs and the extension dispatch
+    /// ([`resolve_mask_save_format`]) are unit-tested.
+    pub fn save_mask_dialog(&mut self) -> io::Result<bool> {
         let Some(path) = rfd::FileDialog::new()
             .add_filter("NumPy mask", &["npy"])
             .add_filter("EDF mask", &["edf"])
@@ -1577,7 +1832,12 @@ impl MaskToolsWidget {
             MaskFileFormat::Npy => self.save_npy(&path)?,
             MaskFileFormat::Edf => self.save_edf(&path)?,
             MaskFileFormat::Tiff => self.save_tiff(&path)?,
-            MaskFileFormat::H5 => self.save_h5(&path)?,
+            // HDF5 defers to the "Select a 2D dataset" modal (silx
+            // `_selectDataset(SaveMode)`); the write runs on confirm.
+            MaskFileFormat::H5 => {
+                self.begin_h5_save(path)?;
+                return Ok(false);
+            }
             MaskFileFormat::Msk => self.save_msk(&path)?,
         }
         Ok(true)
@@ -1588,7 +1848,8 @@ impl MaskToolsWidget {
     /// (`.npy`/`.edf`/`.tif`/`.tiff`/`.h5`/`.msk`) and cropping/padding to the
     /// current image.
     /// Returns `Ok(Some(resized))` — where `resized` is `true` when the loaded
-    /// shape differed from the current image — or `Ok(None)` on cancel. An
+    /// shape differed from the current image — `Ok(None)` on cancel or when an
+    /// HDF5 dataset choice is pending (the modal completes the read later). An
     /// unknown extension is rejected (faithful to silx `load` raising on an
     /// unknown extension). Native shim; the codecs and the extension dispatch
     /// ([`resolve_mask_load_format`]) are unit-tested.
@@ -1607,7 +1868,12 @@ impl MaskToolsWidget {
             MaskFileFormat::Npy => self.load_npy(&path)?,
             MaskFileFormat::Edf => self.load_edf(&path)?,
             MaskFileFormat::Tiff => self.load_tiff(&path)?,
-            MaskFileFormat::H5 => self.load_h5(&path)?,
+            // HDF5 defers to the "Select a 2D dataset" modal (silx
+            // `_selectDataset(LoadMode)`); the read runs on confirm.
+            MaskFileFormat::H5 => {
+                self.begin_h5_load(path)?;
+                return Ok(None);
+            }
             MaskFileFormat::Msk => self.load_msk(&path)?,
         };
         Ok(Some(resized))
@@ -3046,6 +3312,84 @@ mod tests {
         dst.load_h5(&path).expect("load h5");
         assert_eq!(dst.mask, vec![9, 8, 7, 6], "re-save must replace the mask");
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn h5_picker_load_lists_datasets_seeds_first_and_loads_choice() {
+        // The load picker (silx _selectDataset LoadMode): begin_h5_load parks a
+        // Load picker listing every 2D dataset seeded to the first (sorted);
+        // apply_h5_pick reads the chosen one.
+        let path = h5_temp_path("pickload");
+        let pathbuf = std::path::Path::new(&path).to_path_buf();
+        let mut src = MaskToolsWidget::new(2, 2);
+        src.mask = vec![1, 2, 3, 4];
+        src.save_h5(&path).expect("write mask dataset");
+        crate::render::save::write_mask_hdf5(&pathbuf, "other", 2, 2, &[9, 9, 9, 9])
+            .expect("write other dataset");
+
+        let mut w = MaskToolsWidget::new(2, 2);
+        w.begin_h5_load(pathbuf.clone()).expect("begin load");
+        let picker = w.pending_h5.clone().expect("a load pick is pending");
+        assert_eq!(picker.mode, H5PickerMode::Load);
+        assert_eq!(
+            picker.datasets,
+            vec!["mask".to_string(), "other".to_string()]
+        );
+        assert_eq!(
+            picker.name, "mask",
+            "load seeds to the first dataset (sorted)"
+        );
+
+        // Choose the second dataset and confirm.
+        let mut choose = picker;
+        choose.name = "other".to_string();
+        w.apply_h5_pick(&choose).expect("apply load");
+        assert_eq!(w.mask, vec![9, 9, 9, 9]);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn h5_picker_save_defaults_to_mask_and_writes_named_dataset() {
+        // The save picker (silx _selectDataset SaveMode): begin_h5_save on a new
+        // file parks a Save picker (no existing datasets) seeded to silx's
+        // default `mask`; apply_h5_pick writes the typed name (leading slash
+        // stripped, silx lstrip('/')).
+        let path = h5_temp_path("picksave");
+        let pathbuf = std::path::Path::new(&path).to_path_buf();
+        let mut w = MaskToolsWidget::new(2, 2);
+        w.mask = vec![7, 7, 7, 7];
+        w.begin_h5_save(pathbuf.clone()).expect("begin save");
+        let mut picker = w.pending_h5.clone().expect("a save pick is pending");
+        assert_eq!(picker.mode, H5PickerMode::Save);
+        assert!(picker.datasets.is_empty(), "a new file has no datasets yet");
+        assert_eq!(picker.name, "mask", "save seeds to silx default 'mask'");
+
+        picker.name = "/custom".to_string();
+        w.apply_h5_pick(&picker).expect("apply save");
+
+        let (_, _, data) =
+            crate::render::save::read_mask_hdf5(&pathbuf, "custom").expect("read named dataset");
+        assert_eq!(data, vec![7, 7, 7, 7], "slash-stripped name written");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn h5_picker_resolved_path_strips_slashes_and_rejects_empty() {
+        // silx DatasetDialog._updateUrl new-name rule: lstrip('/'), empty → no
+        // selection (OK disabled).
+        let p = std::path::PathBuf::from("/tmp/x.h5");
+        let mut picker = H5DatasetPicker::for_save(p, Vec::new());
+        assert_eq!(picker.resolved_path().as_deref(), Some("mask"));
+        picker.name = "/leading/slash".to_string();
+        assert_eq!(picker.resolved_path().as_deref(), Some("leading/slash"));
+        picker.name = String::new();
+        assert_eq!(picker.resolved_path(), None);
+        picker.name = "///".to_string();
+        assert_eq!(
+            picker.resolved_path(),
+            None,
+            "all-slashes resolves to empty"
+        );
     }
 
     #[test]
