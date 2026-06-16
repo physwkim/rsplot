@@ -1282,6 +1282,35 @@ impl MaskToolsWidget {
         Ok(self.apply_loaded_mask(height, width, data))
     }
 
+    /// Write the current mask as an Andy Hammersley fit2d `.msk` stream.
+    ///
+    /// Mirrors silx `MaskToolsWidget.save(filename, "msk")` (via fabio
+    /// `Fit2dMaskImage`); the byte format lives in the single-owner codec
+    /// [`crate::render::save::encode_mask_msk`]. fit2d masks are **binary**: every
+    /// non-zero mask level is written as a set bit, so multi-level information is
+    /// collapsed to masked/unmasked (faithful to fabio writing `data != 0`).
+    pub fn write_msk(&self, w: &mut impl Write) -> io::Result<()> {
+        w.write_all(&crate::render::save::encode_mask_msk(
+            self.height,
+            self.width,
+            &self.mask,
+        ))
+    }
+
+    /// Read a fit2d `.msk` mask and apply it, cropping or padding to the current
+    /// image geometry (silx `MaskToolsWidget.load`, msk branch via fabio).
+    ///
+    /// The loaded mask is binary (`1` where masked). Returns `Ok(true)` when the
+    /// loaded shape differed from the current image (a resize occurred), `Ok(false)`
+    /// when it matched. Decoded by the single-owner codec
+    /// [`crate::render::save::decode_mask_msk`].
+    pub fn read_msk(&mut self, mut r: impl Read) -> io::Result<bool> {
+        let mut bytes = Vec::new();
+        r.read_to_end(&mut bytes)?;
+        let (height, width, data) = crate::render::save::decode_mask_msk(&bytes)?;
+        Ok(self.apply_loaded_mask(height, width, data))
+    }
+
     /// Save the current mask to a `.npy` file.
     ///
     /// File wrapper over [`write_npy`](Self::write_npy); see it for the format.
@@ -1409,6 +1438,42 @@ impl MaskToolsWidget {
         self.load_tiff(path)
     }
 
+    /// Save the current mask to a fit2d `.msk` file.
+    ///
+    /// File wrapper over [`write_msk`](Self::write_msk); see it for the (binary)
+    /// format.
+    pub fn save_msk(&self, path: impl AsRef<std::path::Path>) -> io::Result<()> {
+        let file = std::fs::File::create(path)?;
+        let mut writer = io::BufWriter::new(file);
+        self.write_msk(&mut writer)?;
+        writer.flush()
+    }
+
+    /// Load a mask from a fit2d `.msk` file, cropping/padding to the current image.
+    ///
+    /// File wrapper over [`read_msk`](Self::read_msk); returns `Ok(true)` when the
+    /// loaded shape differed from the current image (resize occurred).
+    pub fn load_msk(&mut self, path: impl AsRef<std::path::Path>) -> io::Result<bool> {
+        let file = std::fs::File::open(path)?;
+        let reader = io::BufReader::new(file);
+        self.read_msk(reader)
+    }
+
+    /// Save the current mask to a fit2d `.msk` file at the given in-app path string
+    /// (silx `MaskToolsWidget.save(filename, "msk")`). Thin shim over
+    /// [`save_msk`](Self::save_msk).
+    pub fn save_mask_msk(&self, path: &str) -> io::Result<()> {
+        self.save_msk(path)
+    }
+
+    /// Load a mask from a fit2d `.msk` file at the given in-app path string,
+    /// cropping or padding to the current image geometry (silx
+    /// `MaskToolsWidget.load`, msk branch). Thin shim over
+    /// [`load_msk`](Self::load_msk).
+    pub fn load_mask_msk(&mut self, path: &str) -> io::Result<bool> {
+        self.load_msk(path)
+    }
+
     /// Save the current mask to an HDF5 file, into a dataset named `mask`.
     ///
     /// Mirrors silx `MaskToolsWidget.save(filename, "h5")` →
@@ -1488,9 +1553,9 @@ impl MaskToolsWidget {
 
     /// Open a native save-file dialog (silx `MaskToolsWidget._saveMask`) and
     /// write the current mask to the chosen path, dispatching to the `.npy`,
-    /// `.edf`, `.tif`/`.tiff`, or `.h5` (HDF5) codec by file extension (silx also
-    /// offers fit2d `.msk`, unsupported here). An extensionless path defaults to
-    /// `.npy` (silx's default kind); an unsupported extension is rejected
+    /// `.edf`, `.tif`/`.tiff`, `.h5` (HDF5), or `.msk` (fit2d) codec by file
+    /// extension. An extensionless path defaults to `.npy` (silx's default kind);
+    /// an unsupported extension is rejected
     /// (faithful to silx `save` raising on an unknown kind). Returns `Ok(true)`
     /// when a file was written, `Ok(false)` on cancel. The picker is a native
     /// shim; the codecs and the extension dispatch ([`resolve_mask_save_format`])
@@ -1501,6 +1566,7 @@ impl MaskToolsWidget {
             .add_filter("EDF mask", &["edf"])
             .add_filter("TIFF mask", &["tif", "tiff"])
             .add_filter("HDF5 mask", &["h5", "nx5", "nxs", "hdf", "hdf5", "cxi"])
+            .add_filter("Fit2D mask", &["msk"])
             .save_file()
         else {
             return Ok(false);
@@ -1510,14 +1576,15 @@ impl MaskToolsWidget {
             MaskFileFormat::Edf => self.save_edf(&path)?,
             MaskFileFormat::Tiff => self.save_tiff(&path)?,
             MaskFileFormat::H5 => self.save_h5(&path)?,
+            MaskFileFormat::Msk => self.save_msk(&path)?,
         }
         Ok(true)
     }
 
     /// Open a native open-file dialog (silx `MaskToolsWidget._loadMask`) and load
     /// a mask from the chosen path, dispatching by extension
-    /// (`.npy`/`.edf`/`.tif`/`.tiff`/`.h5`) and cropping/padding to the current
-    /// image.
+    /// (`.npy`/`.edf`/`.tif`/`.tiff`/`.h5`/`.msk`) and cropping/padding to the
+    /// current image.
     /// Returns `Ok(Some(resized))` — where `resized` is `true` when the loaded
     /// shape differed from the current image — or `Ok(None)` on cancel. An
     /// unknown extension is rejected (faithful to silx `load` raising on an
@@ -1529,6 +1596,7 @@ impl MaskToolsWidget {
             .add_filter("EDF mask", &["edf"])
             .add_filter("TIFF mask", &["tif", "tiff"])
             .add_filter("HDF5 mask", &["h5", "nx5", "nxs", "hdf", "hdf5", "cxi"])
+            .add_filter("Fit2D mask", &["msk"])
             .pick_file()
         else {
             return Ok(None);
@@ -1538,20 +1606,22 @@ impl MaskToolsWidget {
             MaskFileFormat::Edf => self.load_edf(&path)?,
             MaskFileFormat::Tiff => self.load_tiff(&path)?,
             MaskFileFormat::H5 => self.load_h5(&path)?,
+            MaskFileFormat::Msk => self.load_msk(&path)?,
         };
         Ok(Some(resized))
     }
 }
 
-/// The mask file formats siplot can encode/decode. HDF5 is handled by the
-/// pure-Rust `rust-hdf5` crate. silx also handles fit2d `.msk` via fabio, which
-/// remains unsupported here (no local fabio reference for its binary layout).
+/// The mask file formats siplot can encode/decode — the full silx
+/// `MaskToolsWidget` set: NumPy `.npy`, ESRF `.edf`, `.tif`/`.tiff`, HDF5 (via
+/// the pure-Rust `rust-hdf5` crate), and Andy Hammersley fit2d `.msk` (binary).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MaskFileFormat {
     Npy,
     Edf,
     Tiff,
     H5,
+    Msk,
 }
 
 /// Map a (case-insensitive) file extension to its [`MaskFileFormat`], or `None`
@@ -1565,6 +1635,7 @@ fn mask_format_for_ext(ext: &str) -> Option<MaskFileFormat> {
         "tif" | "tiff" => Some(MaskFileFormat::Tiff),
         // silx NEXUS_HDF5_EXT (silx/io/utils.py): .h5 .nx5 .nxs .hdf .hdf5 .cxi
         "h5" | "nx5" | "nxs" | "hdf" | "hdf5" | "cxi" => Some(MaskFileFormat::H5),
+        "msk" => Some(MaskFileFormat::Msk),
         _ => None,
     }
 }
@@ -1578,7 +1649,7 @@ fn resolve_mask_save_format(path: &std::path::Path) -> io::Result<MaskFileFormat
         Some(ext) => mask_format_for_ext(ext).ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
-                format!("unsupported mask format: .{ext} (siplot writes .npy/.edf/.tif/.h5)"),
+                format!("unsupported mask format: .{ext} (siplot writes .npy/.edf/.tif/.h5/.msk)"),
             )
         }),
     }
@@ -1594,7 +1665,7 @@ fn resolve_mask_load_format(path: &std::path::Path) -> io::Result<MaskFileFormat
         .ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "unsupported mask format (siplot reads .npy/.edf/.tif/.h5)",
+                "unsupported mask format (siplot reads .npy/.edf/.tif/.h5/.msk)",
             )
         })
 }
@@ -1961,8 +2032,17 @@ mod tests {
             resolve_mask_save_format(Path::new("m.NXS")).unwrap(),
             MaskFileFormat::H5
         );
-        // fit2d .msk stays unsupported (no local fabio reference for its layout).
-        assert!(resolve_mask_save_format(Path::new("m.msk")).is_err());
+        // fit2d .msk (case-insensitive) now resolves too (ported from fabio).
+        assert_eq!(
+            resolve_mask_save_format(Path::new("m.msk")).unwrap(),
+            MaskFileFormat::Msk
+        );
+        assert_eq!(
+            resolve_mask_save_format(Path::new("M.MSK")).unwrap(),
+            MaskFileFormat::Msk
+        );
+        // A genuinely unknown extension is still rejected, not silently npy.
+        assert!(resolve_mask_save_format(Path::new("m.bogus")).is_err());
     }
 
     #[test]
@@ -1994,10 +2074,15 @@ mod tests {
             resolve_mask_load_format(Path::new("m.HDF5")).unwrap(),
             MaskFileFormat::H5
         );
-        // A file's format cannot be guessed: a missing or unsupported extension
+        // fit2d .msk now resolves too.
+        assert_eq!(
+            resolve_mask_load_format(Path::new("m.msk")).unwrap(),
+            MaskFileFormat::Msk
+        );
+        // A file's format cannot be guessed: a missing or unknown extension
         // errors (faithful to silx `load` raising on an unknown extension).
         assert!(resolve_mask_load_format(Path::new("mask")).is_err());
-        assert!(resolve_mask_load_format(Path::new("m.msk")).is_err());
+        assert!(resolve_mask_load_format(Path::new("m.bogus")).is_err());
     }
 
     #[test]
@@ -2806,6 +2891,41 @@ mod tests {
         let resized = small.read_tiff(buf.as_slice()).unwrap();
         assert!(resized, "shape mismatch must report a resize");
         assert_eq!(small.mask, vec![1, 2, 4, 5]);
+    }
+
+    #[test]
+    fn msk_round_trips_as_binary_via_read_write() {
+        // fit2d .msk is a binary format: multi-level mask values collapse to 1
+        // on write and read back as 1. Same shape -> no resize.
+        let mut src = MaskToolsWidget::new(5, 2); // width 5, height 2
+        src.mask = vec![0, 3, 0, 250, 1, /**/ 0, 0, 7, 0, 0];
+        let mut buf = Vec::new();
+        src.write_msk(&mut buf).unwrap();
+
+        let mut dst = MaskToolsWidget::new(5, 2);
+        let resized = dst.read_msk(buf.as_slice()).unwrap();
+        assert!(!resized, "same shape must not report a resize");
+        assert_eq!(dst.mask, vec![0, 1, 0, 1, 1, /**/ 0, 0, 1, 0, 0]);
+        assert!(dst.can_undo(), "load must commit to history");
+    }
+
+    #[test]
+    fn msk_load_crops_larger_mask() {
+        // A 3x3 .msk loaded into a 2x2 widget crops to the top-left 2x2 (binary)
+        // and reports a resize (the shared apply_loaded_mask crop/pad owner).
+        let mut big = MaskToolsWidget::new(3, 3);
+        big.mask = vec![
+            1, 0, 9, //
+            0, 5, 0, //
+            7, 0, 2, //
+        ];
+        let mut buf = Vec::new();
+        big.write_msk(&mut buf).unwrap();
+
+        let mut small = MaskToolsWidget::new(2, 2);
+        let resized = small.read_msk(buf.as_slice()).unwrap();
+        assert!(resized, "shape mismatch must report a resize");
+        assert_eq!(small.mask, vec![1, 0, 0, 1]);
     }
 
     fn h5_temp_path(tag: &str) -> String {

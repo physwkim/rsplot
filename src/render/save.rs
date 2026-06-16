@@ -556,6 +556,85 @@ pub fn read_mask_hdf5_auto(path: &std::path::Path) -> std::io::Result<(u32, u32,
     read_mask_hdf5(path, first)
 }
 
+/// Encode a 2D mask as an Andy Hammersley fit2d `.msk` byte stream.
+///
+/// Faithful port of fabio `Fit2dMaskImage.write` (fabio/fit2dmaskimage.py:118-142).
+/// The format is a 1024-byte header (`MASK` magic — bytes 0/4/8/12 = `M`/`A`/`S`/`K`
+/// — `dim1`=width at byte 16 and `dim2`=height at byte 20 as little-endian `u32`,
+/// byte 24 = 1) followed by one bit per pixel, LSB-first, packed into rows of
+/// `((width + 31) / 32)` 32-bit ints (`num_ints * 4` bytes/row, trailing bits
+/// zero). fit2d masks are **binary**: every non-zero mask level is written as a
+/// set bit, so multi-level information is collapsed to masked/unmasked (exactly
+/// as fabio writes `self.data != 0`). Infallible (an in-memory buffer), like the
+/// npy/edf codecs; `data` is expected to be `height * width` bytes.
+pub fn encode_mask_msk(height: u32, width: u32, data: &[u8]) -> Vec<u8> {
+    let (h, w) = (height as usize, width as usize);
+    let num_ints = w.div_ceil(32);
+    let bytes_per_row = num_ints * 4;
+    let mut out = vec![0u8; 1024 + h * bytes_per_row];
+    // Header magic + dimensions (little-endian), mirroring fabio's writer.
+    out[0] = b'M';
+    out[4] = b'A';
+    out[8] = b'S';
+    out[12] = b'K';
+    out[16..20].copy_from_slice(&width.to_le_bytes());
+    out[20..24].copy_from_slice(&height.to_le_bytes());
+    out[24] = 1;
+    // Bit-pack each row: pixel column c -> byte c/8, bit c%8 (LSB-first).
+    for y in 0..h {
+        let row = 1024 + y * bytes_per_row;
+        for x in 0..w {
+            if data[y * w + x] != 0 {
+                out[row + (x >> 3)] |= 1 << (x & 7);
+            }
+        }
+    }
+    out
+}
+
+/// Decode a fit2d `.msk` byte stream into `(height, width, data)` in C
+/// (row-major) order; the returned mask is binary (`0`/`1`).
+///
+/// Faithful port of fabio `Fit2dMaskImage._readheader` + `read`
+/// (fabio/fit2dmaskimage.py:55-116): the 1024-byte header is validated against
+/// the `MASK` magic, `dim1`/`dim2` give width/height, and the bit-packed body
+/// (LSB-first, `((width + 31) / 32)` 32-bit ints per row) is expanded to one
+/// `uint8` per pixel (`1` where the bit is set). A missing/short header, a bad
+/// magic, or a body shorter than `height * ((width + 31) / 32) * 4` bytes is an
+/// [`std::io::ErrorKind::InvalidData`] error.
+pub fn decode_mask_msk(bytes: &[u8]) -> std::io::Result<(u32, u32, Vec<u8>)> {
+    let invalid = |msg: &str| std::io::Error::new(std::io::ErrorKind::InvalidData, msg.to_string());
+    if bytes.len() < 1024 {
+        return Err(invalid(
+            "fit2d mask file is shorter than its 1024-byte header",
+        ));
+    }
+    // Magic: 'M','A','S','K' at byte offsets 0/4/8/12 (one per 32-bit slot).
+    if bytes[0] != b'M' || bytes[4] != b'A' || bytes[8] != b'S' || bytes[12] != b'K' {
+        return Err(invalid("Not a fit2d mask file (bad MASK magic)"));
+    }
+    let width = u32::from_le_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]);
+    let height = u32::from_le_bytes([bytes[20], bytes[21], bytes[22], bytes[23]]);
+    let (h, w) = (height as usize, width as usize);
+    let num_ints = w.div_ceil(32);
+    let bytes_per_row = num_ints * 4;
+    let total = h * bytes_per_row;
+    if bytes.len() < 1024 + total {
+        return Err(invalid(
+            "fit2d mask body is shorter than its (height, width) shape requires",
+        ));
+    }
+    let mut data = vec![0u8; w * h];
+    for y in 0..h {
+        let row = 1024 + y * bytes_per_row;
+        for x in 0..w {
+            let bit = (bytes[row + (x >> 3)] >> (x & 7)) & 1;
+            data[y * w + x] = bit;
+        }
+    }
+    Ok((height, width, data))
+}
+
 /// Standard base64 alphabet (RFC 4648), used by [`encode_svg`].
 const BASE64_ALPHABET: &[u8; 64] =
     b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -1399,6 +1478,71 @@ mod tests {
         let rgb_tiff = cursor.into_inner();
         let err = decode_mask_tiff(&rgb_tiff).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn mask_msk_round_trips_as_binary_with_odd_width() {
+        // A width that is not a multiple of 32 exercises the bit-padding
+        // (width 33 -> num_ints 2 -> 8 bytes/row, 31 trailing pad bits). The
+        // fit2d format is binary: every non-zero level collapses to 1.
+        let (h, w) = (2u32, 33u32);
+        let mut data = vec![0u8; (h * w) as usize];
+        data[0] = 5; // non-zero level -> bit set -> reads back as 1
+        data[32] = 200; // last column of row 0 (index 32) -> bit set
+        data[(w as usize) + 1] = 1; // row 1, column 1
+        let bytes = encode_mask_msk(h, w, &data);
+        // Header is 1024 bytes; body is height * ((w+31)/32)*4 = 2*8 = 16 bytes.
+        assert_eq!(bytes.len(), 1024 + 16);
+        let (dh, dw, out) = decode_mask_msk(&bytes).expect("decode");
+        assert_eq!((dh, dw), (h, w));
+        let mut expected = vec![0u8; (h * w) as usize];
+        expected[0] = 1;
+        expected[32] = 1;
+        expected[(w as usize) + 1] = 1;
+        assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn mask_msk_rejects_bad_magic_and_short_header() {
+        // A buffer shorter than the 1024-byte header, and a full-size buffer
+        // with the wrong magic, are both rejected (faithful to fabio's
+        // "Not a fit2d mask file").
+        assert_eq!(
+            decode_mask_msk(&[0u8; 16]).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+        let mut buf = vec![0u8; 1024 + 4];
+        buf[0] = b'X'; // not 'M'
+        assert_eq!(
+            decode_mask_msk(&buf).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+    }
+
+    #[test]
+    fn mask_msk_matches_fabio_reference_bytes() {
+        // Byte-for-byte parity with fabio Fit2dMaskImage.save: the reference was
+        // generated by `fabio.fit2dmaskimage` on the mask [[0,1,0,1,1],[0,0,1,0,0]]
+        // (h=2, w=5) and produces a 1032-byte file — magic M/A/S/K at bytes
+        // 0/4/8/12, dim1=5 @16, dim2=2 @20, byte 24 = 1, then the 8-byte
+        // bit-packed body `1a00000004000000` (row0 cols 1/3/4 -> 0x1A,
+        // row1 col 2 -> 0x04). Our encoder must reproduce this exactly.
+        let data: Vec<u8> = vec![0, 1, 0, 1, 1, /**/ 0, 0, 1, 0, 0];
+        let mut expected = vec![0u8; 1024 + 8];
+        expected[0] = b'M';
+        expected[4] = b'A';
+        expected[8] = b'S';
+        expected[12] = b'K';
+        expected[16] = 5; // dim1 = width, LE
+        expected[20] = 2; // dim2 = height, LE
+        expected[24] = 1;
+        expected[1024] = 0x1A;
+        expected[1028] = 0x04;
+        assert_eq!(encode_mask_msk(2, 5, &data), expected);
+        // And the reference bytes decode back to the same binary mask.
+        let (h, w, out) = decode_mask_msk(&expected).expect("decode");
+        assert_eq!((h, w), (2, 5));
+        assert_eq!(out, data);
     }
 
     #[test]
