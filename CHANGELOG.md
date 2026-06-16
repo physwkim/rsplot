@@ -11,6 +11,39 @@ library), **sidm** (a PyDM-style EPICS display layer built on siplot), and
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-06-16
+
+Post-`0.3.0` deep-audit pass over the `silx.gui.plot` fit subsystem and marker
+set: completes every silx `FitManager` fit theory and the last missing marker
+glyph. `siplot` only; `sidm` and `adl2sidm` are re-released in lockstep (no
+functional change).
+
+### Added — `siplot` fit theories (silx `FitManager` parity)
+
+A FitWidget audit found siplot exposed only **8 of silx's 19 `FitManager`
+theories** (`silx/math/fit/fittheories.py`). The missing 11 are now ported,
+byte-faithful to silx `funs.c`, each a new `PeakModel` + `FitModelChoice`
+variant fitted through the existing iterative path. **All 19 silx fit theories
+are now implemented.**
+
+- **Area Lorentz** (`sum_alorentz`), **Split Gaussian** (`sum_splitgauss`),
+  **Split Lorentz** (`sum_splitlorentz`).
+- **Area Pseudo-Voigt** (`sum_apvoigt`), **Split Pseudo-Voigt**
+  (`sum_splitpvoigt`), **Split Pseudo-Voigt 2** (`sum_splitpvoigt2`).
+- **Degree 2–5 Polynomial** fit theories (`fitfuns.poly` / `estimate_poly`),
+  reusing the numpy-convention `polyfit`/`poly_eval` — distinct from the
+  polynomial *background* theory.
+- **Hypermet** (`sum_ahypermet`): a Gaussian with short-tail, long-tail and step
+  terms (`tail_flags = 15`, silx's default `HypermetTails`). Tail ratios seed to
+  silx's `Initial*` CONFIG values; silx's per-tail `CFIXED`/`CQUOTED` defaults
+  are reachable through the existing per-parameter constraint UI (consistent with
+  siplot's all-`Free` default-constraint invariant).
+
+### Added — `siplot` markers
+
+- **Heart** (`♥`) marker glyph (silx `HEART`), a cardioid SDF in the marker
+  shader plus the CPU legend icon — completing all 18 silx marker symbols.
+
 ## [0.3.0] - 2026-06-16
 
 This release completes the `silx.gui.plot` 2D parity port (the queue is now
@@ -202,7 +235,8 @@ instead of Qt `.ui` XML.
 - siplot is now the root of a three-crate workspace; `sidm` reaches egui/wgpu
   through `siplot::egui` to keep a single egui/wgpu in the tree.
 
-[Unreleased]: https://github.com/physwkim/siplot/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/physwkim/siplot/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/physwkim/siplot/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/physwkim/siplot/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/physwkim/siplot/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/physwkim/siplot/releases/tag/v0.1.0
