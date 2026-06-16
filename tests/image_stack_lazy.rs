@@ -16,6 +16,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use egui_kittest::Harness;
+use egui_kittest::kittest::Queryable;
 use egui_kittest::wgpu::{WgpuTestRenderer, create_render_state, default_wgpu_setup};
 use siplot::egui;
 use siplot::{Frame, FrameLoader, ImageStack};
@@ -229,6 +230,53 @@ fn prefetch_loads_neighbours_without_navigating() {
         "only the current slot and its two radius-1 neighbours should load"
     );
     assert_eq!(app.borrow().n_prefetch(), 1);
+}
+
+#[test]
+fn lazy_table_shows_urls_and_remove_realigns() {
+    let rs = create_render_state(default_wgpu_setup());
+    siplot::install(&rs);
+
+    let mut stack = ImageStack::new(&rs, 0);
+    // No loader installed: slots stay empty and the table rows show their URLs.
+    stack.set_sources(vec![
+        "alpha::0".to_string(),
+        "beta::1".to_string(),
+        "gamma::2".to_string(),
+    ]);
+
+    let app = Rc::new(RefCell::new(stack));
+    let app_ui = app.clone();
+    let renderer = WgpuTestRenderer::from_render_state(rs.clone());
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(500.0, 500.0))
+        .with_pixels_per_point(1.0)
+        .renderer(renderer)
+        .build_ui(move |ui| {
+            app_ui.borrow_mut().ui(ui);
+        });
+    harness.step();
+
+    // The URL text appears in the table rows (silx UrlList).
+    let _ = harness.get_by_label("alpha::0");
+    let _ = harness.get_by_label("beta::1");
+    let _ = harness.get_by_label("gamma::2");
+
+    // Remove the middle source (silx removeUrl): the lanes realign.
+    app.borrow_mut().remove_source(1);
+    harness.step();
+
+    assert_eq!(
+        app.borrow().sources(),
+        &["alpha::0".to_string(), "gamma::2".to_string()]
+    );
+    assert_eq!(app.borrow().len(), 2);
+    let _ = harness.get_by_label("alpha::0");
+    let _ = harness.get_by_label("gamma::2");
+    assert!(
+        harness.query_by_label("beta::1").is_none(),
+        "the removed URL must disappear from the table"
+    );
 }
 
 #[test]

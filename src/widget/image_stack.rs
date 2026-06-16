@@ -173,6 +173,14 @@ impl LoadSchedule {
         self.state = vec![LoadState::NotRequested; len];
     }
 
+    /// Drop the state for slot `index`, keeping the lane aligned with the
+    /// shrunken source/frame lists (silx `removeUrl`). Out-of-range is a no-op.
+    fn remove(&mut self, index: usize) {
+        if index < self.state.len() {
+            self.state.remove(index);
+        }
+    }
+
     /// `true` when slot `i` has not yet been dispatched, so it is eligible to
     /// load. `InFlight`/`Loaded`/`Failed` slots return `false` (no re-dispatch).
     fn needs_load(&self, i: usize) -> bool {
@@ -263,6 +271,30 @@ impl FrameNav {
         self.frames = frames;
         self.current = 0;
         self.dirty = true;
+    }
+
+    /// Remove frame slot `index`, keeping `frames`/`visible` aligned and
+    /// adjusting the current index so the displayed frame is preserved where
+    /// possible (silx `removeUrl` re-indexes then keeps the current url):
+    /// removing a slot *before* the current one shifts the current index down by
+    /// one (same frame stays shown); removing the current slot leaves the index
+    /// pointing at the next frame (clamped to the new last), which is a content
+    /// change (`dirty`); removing a slot *after* the current one is index-neutral.
+    /// Out-of-range is a no-op.
+    fn remove(&mut self, index: usize) {
+        if index >= self.frames.len() {
+            return;
+        }
+        self.frames.remove(index);
+        self.visible.remove(index);
+        if self.frames.is_empty() {
+            self.current = 0;
+        } else if index < self.current {
+            self.current -= 1; // same frame, lower index; no content change.
+        } else if index == self.current {
+            self.current = self.current.min(self.frames.len() - 1);
+            self.dirty = true; // a different frame now occupies this index.
+        }
     }
 
     fn len(&self) -> usize {
@@ -544,6 +576,40 @@ impl ImageStack {
         &self.sources
     }
 
+    /// Remove slot `index` from a lazy-mode stack (silx `removeUrl` /
+    /// `sigUrlRemoved`): drops its source, its frame/visibility, and its load
+    /// state together so the four parallel lanes stay aligned, then keeps the
+    /// displayed frame where possible (the nav adjusts its current index: a
+    /// removal before the current shifts it down, removing the current points at
+    /// the next frame clamped to the new last, removing after is index-neutral).
+    /// Out-of-range,
+    /// or a call in the in-memory [`Self::set_frames`] mode, is a no-op.
+    ///
+    /// This is the single owner of slot removal: every lane (`sources`,
+    /// `schedule`, the nav's `frames`/`visible`) is mutated here in lockstep, so
+    /// `sources.len() == frames.len()` holds by construction.
+    pub fn remove_source(&mut self, index: usize) {
+        if index >= self.sources.len() {
+            return;
+        }
+        self.sources.remove(index);
+        self.schedule.remove(index);
+        self.nav.remove(index);
+        // The displayed image's slot may have shifted/changed; drop the handle so
+        // the next render rebuilds from the (possibly new) current slot.
+        self.image_handle = None;
+    }
+
+    /// The label shown for slot `index` in the table. In lazy mode the row shows
+    /// the source string (the URL, silx `UrlList`); otherwise it falls back to
+    /// the frame's own label / `Frame N` (silx in-memory rows).
+    fn row_label(&self, index: usize) -> String {
+        match self.sources.get(index) {
+            Some(source) => source.clone(),
+            None => self.nav.frame_label(index),
+        }
+    }
+
     /// Set the prefetch radius: the number of neighbouring slots on *each* side
     /// of the current slot to preload in the background (silx `setNPrefetch`,
     /// `ImageStack.py` :294-304 — "in total 2*n DataUrls"). `0` disables
@@ -788,8 +854,10 @@ impl ImageStack {
     }
 
     /// The frame/URL table: one selectable row per frame slot with a per-frame
-    /// visibility checkbox (silx `_ToggleableUrlSelectionTable` + `UrlList`,
-    /// extended with the visibility toggle the task requires).
+    /// visibility checkbox and, in lazy mode, a remove button (silx
+    /// `_ToggleableUrlSelectionTable` + `UrlList`, extended with the visibility
+    /// toggle the task requires). Lazy rows show the source/URL text (silx
+    /// `UrlList`); in-memory rows show the frame label.
     fn frame_table_ui(&mut self, ui: &mut egui::Ui) {
         let len = self.nav.len();
         if len == 0 {
@@ -797,6 +865,8 @@ impl ImageStack {
             return;
         }
         let current = self.nav.current;
+        let lazy = !self.sources.is_empty();
+        let mut to_remove = None;
         egui::ScrollArea::vertical()
             .max_height(120.0)
             .show(ui, |ui| {
@@ -810,13 +880,25 @@ impl ImageStack {
                         {
                             self.nav.set_visible(index, vis);
                         }
-                        let label = self.nav.frame_label(index);
+                        // silx UrlList row delete -> sigUrlRemoved (lazy mode only).
+                        if lazy
+                            && ui
+                                .small_button("✕")
+                                .on_hover_text("Remove this source")
+                                .clicked()
+                        {
+                            to_remove = Some(index);
+                        }
+                        let label = self.row_label(index);
                         if ui.selectable_label(index == current, label).clicked() {
                             self.nav.set_current(index);
                         }
                     });
                 }
             });
+        if let Some(index) = to_remove {
+            self.remove_source(index);
+        }
     }
 
     /// Show only the navigation toolbar (first/prev slider next/last with a
@@ -1041,6 +1123,77 @@ mod tests {
         let n = nav(vec![frame("a")]);
         let f = n.current_frame().expect("displayable");
         assert_eq!(f.label.as_deref(), Some("a"));
+    }
+
+    // ── FrameNav::remove index adjustment (silx removeUrl) ───────────────────
+
+    #[test]
+    fn remove_before_current_shifts_index_down() {
+        let mut n = nav(vec![frame("a"), frame("b"), frame("c")]);
+        n.set_current(2); // showing "c".
+        n.dirty = false;
+        n.remove(0); // drop "a".
+        assert_eq!(n.len(), 2);
+        assert_eq!(n.current, 1); // still showing "c", now at index 1.
+        assert!(!n.dirty); // same content -> no rebuild.
+        assert_eq!(n.frame_label(1), "c");
+    }
+
+    #[test]
+    fn remove_current_points_at_next_then_clamps() {
+        let mut n = nav(vec![frame("a"), frame("b"), frame("c")]);
+        n.set_current(1); // showing "b".
+        n.dirty = false;
+        n.remove(1); // drop the current "b".
+        assert_eq!(n.current, 1); // now showing "c" (the next frame).
+        assert_eq!(n.frame_label(1), "c");
+        assert!(n.dirty); // content changed.
+        // Removing the (new) last while it is current clamps to the new last.
+        n.dirty = false;
+        n.remove(1); // drop "c" (current, last) -> current clamps to 0 ("a").
+        assert_eq!(n.current, 0);
+        assert_eq!(n.frame_label(0), "a");
+        assert!(n.dirty);
+    }
+
+    #[test]
+    fn remove_after_current_is_index_neutral() {
+        let mut n = nav(vec![frame("a"), frame("b"), frame("c")]);
+        n.set_current(0);
+        n.dirty = false;
+        n.remove(2); // drop "c", after current.
+        assert_eq!(n.current, 0);
+        assert!(!n.dirty);
+        assert_eq!(n.len(), 2);
+    }
+
+    #[test]
+    fn remove_last_remaining_resets() {
+        let mut n = nav(vec![frame("a")]);
+        n.remove(0);
+        assert!(n.is_empty());
+        assert_eq!(n.current, 0);
+    }
+
+    #[test]
+    fn remove_out_of_range_is_noop() {
+        let mut n = nav(vec![frame("a"), frame("b")]);
+        n.remove(9);
+        assert_eq!(n.len(), 2);
+    }
+
+    #[test]
+    fn schedule_remove_drops_the_slot() {
+        let mut s = LoadSchedule::default();
+        s.reset(3);
+        s.mark_loaded(0);
+        s.mark_failed(2);
+        s.remove(0); // drop slot 0; slots 1,2 shift down to 0,1.
+        assert_eq!(s.state.len(), 2);
+        assert!(s.needs_load(0)); // was slot 1 (NotRequested).
+        assert!(!s.needs_load(1)); // was slot 2 (Failed).
+        s.remove(9); // out of range: no-op.
+        assert_eq!(s.state.len(), 2);
     }
 
     // ── dirty flag transitions ──────────────────────────────────────────────
