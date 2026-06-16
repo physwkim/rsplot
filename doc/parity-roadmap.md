@@ -554,7 +554,7 @@ as-of-sweep reference.
 | ✅ Done | L | L | Fit background subtraction (const/linear/poly/strip/snip) | silx.math.fit.bgtheories.py + filters strip.c/snip1d.c | New `core::background`: `strip_background` (Jacobi peak-stripping, anchors + border-preserve, faithful to `strip.c`), `snip_background` (descending-window min clip, `snip1d.c`; silx applies no LLS), `polyfit`/`poly_eval` (numpy.polyfit/poly1d order via normal equations). `Background` enum {None, Constant=min(y), Linear, Strip{w,niter,factor}, Snip{w}, Polynomial{deg}} mirrors silx `bgtheories.THEORY` + defaults (StripWidth 2 / Iter 5000 / factor 1.0; SnipWidth 16; Linear/Poly fit on the strip background per `EstimatePolyOnStrip`). `compute`/`subtract` return the background curve / peak residual. 13 headless tests; wired into FitWidget via `fit_peak_with_background` + the background combo (row 251) |
 | ✅ Done | L | L | Fit parameter constraints (POSITIVE/FIXED/QUOTED/…) | fitmanager.py:421-430 + leastsq.py (CFREE..CIGNORED) | `core::fitting::leastsq_constrained` + `Constraint` enum {Free, Positive, Quoted{min,max}, Fixed, Factor{ref,factor}, Delta{ref,delta}, Sum{ref,sum}, Ignored} port silx's full constraint-code path: free-set classification with `derivfactor` (QUOTED `B·cos` Jacobian scaling), per-step CPOSITIVE `abs` / CQUOTED `A+B·sin(arcsin+Δ)` reparametrisation, `get_parameters` dependent-relation expansion (Factor/Delta/Sum/Ignored), `noigno` model-input reduction, and the silx two-pass covariance (FIXED/IGNORED → zero row/col + value² diagonal) + `get_sigma_parameters` uncertainties (new `LeastSqResult.uncertainties`). The shared `chisq_alpha_beta_constrained` is reused by the fit and covariance passes. Unconstrained `leastsq` left byte-identical (sibling, shares `invert_matrix`). FitWidget wiring landed via row 251 (`fit_peak_constrained` + the per-parameter constraint editor, FREE/POSITIVE/FIXED subset exposed). 9 headless tests (all-free≡unconstrained, Fixed hold + 100% uncertainty, Positive enforce/recover, Quoted clamp/recover, Factor/Delta/Sum ties, bad-spec rejects). One deliberate deviation: a single constraint-expanded base evaluation for the forward difference (silx uses raw `model(*parameters)`), equal for clean in-domain inputs |
 | ✅ Done | L | L | Fit multi-peak search | silx.math.fit.peaks (`seek`/`peak_search`) + fittheories `estimate_height_position_fwhm` + funs.c `sum_gauss` | Discovery primitive (`core::peaks`): `peak_search`/`peak_search_range` port silx C `seek` (2nd-derivative-of-Gaussian smoothing, significance state machine incl. doublet split; faithful incl. the init/loop gfactor off-by-one and the `data[0]=data[1]` quirk); `guess_fwhm` ports the strip-then-half-max width (floor 4). **Simultaneous fit now wired** (`core::fitting`): `multi_gaussian_model` ports `sum_gauss` (flat `(h,c,fwhm)` triples, no bg, `dhelp≤20` guard); `estimate_multi_gaussian` ports `estimate_height_position_fwhm` (peak_search seeds + `5·xspan/n` FWHM seed, ForcePeakPresence global-max fallback, a 4-iter preliminary constrained refine with centre quoted to ±½·search-fwhm width, then default-config final constraints height/FWHM Positive + centre Free); `fit_multi_gaussian` runs the full `leastsq_constrained` over all peaks at once. 12 headless tests (7 peaks + 5 multi-fit: model=Σ-singles, 2-peak/1-peak recovery, seed/constraint shape, empty/mismatch). FitWidget multi-peak UI is row 251 |
-| ✅ Done | L | L | Fit non-peak theories (step up/down, slit, arctan) | fittheories.py THEORY + funs.c (`sum_stepdown`/`sum_stepup`/`sum_slit`), functions.pyx `atan_stepup` | `core::fitting` gains `stepdown_model`/`stepup_model`/`slit_model`/`atan_stepup_model` (erfc/erf edges byte-faithful to `funs.c`; `erf` via Abramowitz-Stegun 7.1.26, ≤1.5e-7, exact at 0) + estimators `estimate_step{up,down}`/`estimate_slit`/`estimate_atan_stepup` (silx edge-kernel convolution; slit centre from half-max crossings on a `min(y)` baseline). `PeakModel::{StepDown,StepUp,Slit,AtanStepUp}` flow through `IterativeFit`; `FitModelChoice` gains 4 iterative choices. silx has no exp/poly *fit* theory (poly is a background — row 254). 12 headless tests; FitWidget UI GPU-unverified |
+| ✅ Done | L | L | Fit non-peak theories (step up/down, slit, arctan) | fittheories.py THEORY + funs.c (`sum_stepdown`/`sum_stepup`/`sum_slit`), functions.pyx `atan_stepup` | `core::fitting` gains `stepdown_model`/`stepup_model`/`slit_model`/`atan_stepup_model` (erfc/erf edges byte-faithful to `funs.c`; `erf` via Abramowitz-Stegun 7.1.26, ≤1.5e-7, exact at 0) + estimators `estimate_step{up,down}`/`estimate_slit`/`estimate_atan_stepup` (silx edge-kernel convolution; slit centre from half-max crossings on a `min(y)` baseline). `PeakModel::{StepDown,StepUp,Slit,AtanStepUp}` flow through `IterativeFit`; `FitModelChoice` gains 4 iterative choices. silx has no exp *fit* theory; the Degree 2–5 Polynomial *fit* theories (distinct from the polynomial *background* of row 254) are ported in commit a476018 — see the fit-theory-completion progress note below. 12 headless tests; FitWidget UI GPU-unverified |
 | ✅ Done | L | L | Standalone RadarView overview widget | tools/RadarView.py:139-300 | `RadarView` is a public, exported, standalone-usable widget (`RadarView::new`/`ui`, geometry unit-tested) AND embedded in `ImageView` with the full silx binding (data-extent + viewport sync, drag → `set_limits`). The prior "no standalone widget" note was backwards: the widget exists; what had been deferred (the live-plot binding) has since landed. Paint GPU-unverified |
 | ✅ Done | L | L | Print preview dialog | PrintPreviewToolButton.py | `PrintPreview` (`print_preview.rs`): a detachable page editor that places the plot snapshot on an A4 page, movable + corner-resizable (keep-aspect by default, silx `_GraphicsResizeRectItem`), with Clear All / Remove / Zoom± / per-item keep-aspect / Save Page. The snapshot is any RGBA8 image (e.g. `render_plot_rgba`, now public); "Save Page" composes the arranged page to a PNG (`compose_page`) — the no-dep substitute for silx's `QPrinter` (its print-to-file path). System-printer submission stays with `PrintDialog` (silx `PrintAction`, row 470). 12 tests (resize keep-ratio/free/clamp, default placement, composite + alpha, page-PNG IHDR, add/remove/clear, zoom bounds, headless render path). |
 | ✅ Done | L | L | ItemsSelectionDialog reuse | ItemsSelectionDialog.py; actions/fit.py:237-241 | Dialog gained the silx fit-tool capabilities it lacked: `set_available_kinds` (silx `setAvailableKinds`, offers only the requested kinds) + `SelectionMode::Single` (silx `setItemsSelectionMode(SingleSelection)`, ≤1 selected enforced by one owner). `examples/high_level_fit_widget.rs` now reuses it as a single-select curve+histogram picker that feeds `FitWidget::set_data` (silx `_initFit`→`_setFittedItem`). Capabilities/invariant unit-tested; example wiring GPU-unverified |
@@ -1317,6 +1317,51 @@ the interactive plot.
   passed / 0 failed, doctest ok (11 ignored), clippy `-D warnings` clean.
 - **Wave 13 complete**, `main` @ `7495590` (NOT pushed). Per-crate scope only (`-p siplot` == `--workspace`,
   sole member), so the pre-push full-workspace pass is satisfied by the per-crate run.
+
+### Post-release fit-theory completion (2026-06-16, after v0.3.0)
+
+A FitWidget audit found siplot exposed only **8 of silx's 19 `FitManager`
+theories** (`fittheories.py` `THEORY`) — a sub-feature gap inside the ✅ Fit
+rows, the same class of miss as the Heart glyph. Ported the missing 11 as new
+`PeakModel` + `FitModelChoice` variants (byte-faithful to `funs.c`; estimators
+seed parameters only, matching the existing single-`PeakModel` estimators —
+silx's multi-peak SameFwhm/constraint logic is not single-peak). **All 19 silx
+`FitManager` theories are now implemented:**
+
+- **`72de957`** — Area Lorentz (`sum_alorentz`), Split Gaussian
+  (`sum_splitgauss`), Split Lorentz (`sum_splitlorentz`).
+- **`9e90926`** — Area Pseudo-Voigt (`sum_apvoigt`), Split Pseudo-Voigt
+  (`sum_splitpvoigt`), Split Pseudo-Voigt 2 (`sum_splitpvoigt2`).
+- **`a476018`** — Degree 2–5 Polynomial (`fitfuns.poly`/`estimate_poly`), reusing
+  `core::background`'s numpy-convention `polyfit`/`poly_eval`; corrects the
+  row-557 note that wrongly said silx has no poly *fit* theory.
+- **`22ef3df`** — Hypermet (`sum_ahypermet`): the 19th theory. Gaussian +
+  short-tail + long-tail + step (`tail_flags = 15`, silx's default
+  `HypermetTails`), byte-faithful including the `fabs(slope) > 1e-11` tail guard.
+
+17 new headless tests (asymmetric/area recovery, split→symmetric collapse,
+area↔height identity, poly coefficient recovery, Hypermet tails-zero reduction
+to the area Gaussian + own-curve recovery + Initial-ratio seeds). Gate per
+commit `-p siplot`; `--workspace` clippy clean + `nextest` 1861/1861.
+
+**Hypermet design decision (the one open question, resolved in `22ef3df`).** A
+*faithful* Hypermet fit interacts with silx's default per-tail constraints:
+silx's `estimate_ahypermet` zeroes+`CFIXED`s a tail below its
+`MinGaussArea4{Short,Long}Tail`/`MinGaussHeight4StepTail` counts threshold and
+otherwise `CQUOTED`s the ratios to their `[Min, Max]` bounds (to "avoid zero
+derivatives", `fittheories.py:870`) — its tail activation is inseparable from
+that default constraint set. siplot's `PeakModel` estimate→fit path is
+unconstrained by default (the constraint machinery — `Constraint`,
+`fit_peak_constrained`, the per-parameter UI — is fully present but
+FitWidget-set, defaulting all-`Free`), an established project-wide invariant
+shared by all 18 other theories. Rather than bolt a one-off constraint-defaulting
+mechanism onto the pipeline for a single model (rejected by the
+senior-reviewer self-test as speculative for the other 18), Hypermet follows the
+same invariant: `estimate_ahypermet` seeds the five tail ratios to silx's
+`Initial*` values *unconditionally* (`0.05/0.70/0.05/20.0/0.002`), which is
+non-degenerate at the seed (every Jacobian column non-zero); applying
+`CFIXED`/`CQUOTED` through the constraint UI reproduces silx's exact tail
+handling. The unconditional-seed deviation is documented on the estimator.
 
 
 ## PlotWidget core, axes, frame, ticks  — 9✅ 0◐ 0☐
