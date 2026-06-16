@@ -1540,6 +1540,71 @@ pub fn atan_stepup_model(x: &[f64], params: &[f64]) -> Vec<f64> {
         .collect()
 }
 
+/// Evaluate a Hypermet peak (Gaussian + short tail + long tail + step) plus a
+/// flat background.
+///
+/// `params = [area, position, fwhm, st_area_r, st_slope_r, lt_area_r,
+/// lt_slope_r, step_height_r, background]`. Mirrors C `sum_ahypermet` with all
+/// four terms active (`tail_flags = 15`, silx's default `HypermetTails`). With
+/// `sigma = fwhm / (2*sqrt(2*LOG2))`, `height = area / (sigma*sqrt(2*pi))` and
+/// `sigma_sqrt2 = sigma*sqrt(2)`, each sample is the sum of:
+///
+/// - Gaussian: `height * exp(-0.5*((x-pos)/sigma)^2)`;
+/// - short tail (only when `|st_slope_r| > 1e-11`, the C `fabs(slope) > epsilon`
+///   guard that also avoids the `1/slope` division):
+///   `(area*c1/st_slope_r) * exp(0.5*(sigma/st_slope_r)^2 + (x-pos)/st_slope_r)`
+///   with `c1 = st_area_r * 0.5 * erfc((x-pos)/sigma_sqrt2 + 0.5*sigma_sqrt2/st_slope_r)`;
+/// - long tail: identical to the short tail with the `lt_*` ratios;
+/// - step: `step_height_r * height * 0.5 * erfc((x-pos)/sigma_sqrt2)`.
+///
+/// The trailing constant `background` is siplot's per-model baseline (silx keeps
+/// the baseline in a separate background theory). Returns a flat `background`
+/// line when `sigma == 0` (matching siplot's other edge models, which contribute
+/// nothing when their width collapses).
+pub fn hypermet_model(x: &[f64], params: &[f64]) -> Vec<f64> {
+    let area = params[0];
+    let position = params[1];
+    let fwhm = params[2];
+    let st_area_r = params[3];
+    let st_slope_r = params[4];
+    let lt_area_r = params[5];
+    let lt_slope_r = params[6];
+    let step_height_r = params[7];
+    let bg = params[8];
+
+    let sigma = fwhm / fwhm_to_sigma_factor();
+    if sigma == 0.0 {
+        return vec![bg; x.len()];
+    }
+    let sqrt2pi = (2.0 * std::f64::consts::PI).sqrt();
+    let height = area / (sigma * sqrt2pi);
+    let sigma_sqrt2 = sigma * std::f64::consts::SQRT_2;
+    const EPSILON: f64 = 1e-11;
+
+    x.iter()
+        .map(|&xi| {
+            let dx = xi - position;
+            let c2 = 0.5 * dx * dx / (sigma * sigma);
+            let mut y = bg + (-c2).exp() * height;
+            // Short-tail term.
+            if st_slope_r.abs() > EPSILON {
+                let c1 = st_area_r * 0.5 * erfc(dx / sigma_sqrt2 + 0.5 * sigma_sqrt2 / st_slope_r);
+                y += (area * c1 / st_slope_r)
+                    * (0.5 * (sigma / st_slope_r).powi(2) + dx / st_slope_r).exp();
+            }
+            // Long-tail term.
+            if lt_slope_r.abs() > EPSILON {
+                let c1 = lt_area_r * 0.5 * erfc(dx / sigma_sqrt2 + 0.5 * sigma_sqrt2 / lt_slope_r);
+                y += (area * c1 / lt_slope_r)
+                    * (0.5 * (sigma / lt_slope_r).powi(2) + dx / lt_slope_r).exp();
+            }
+            // Step term (`area / (sigma*sqrt2pi)` == `height`).
+            y += step_height_r * height * 0.5 * erfc(dx / sigma_sqrt2);
+            y
+        })
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // Initial-parameter estimators.
 //
@@ -1799,6 +1864,35 @@ pub fn estimate_slit(x: &[f64], y: &[f64]) -> Option<Vec<f64>> {
     Some(vec![height, position, fwhm, beamfwhm, bg])
 }
 
+/// Seed for [`hypermet_model`]: `[area, position, fwhm, st_area_r, st_slope_r,
+/// lt_area_r, lt_slope_r, step_height_r, background]`.
+///
+/// Area conversion mirrors silx `estimate_ahypermet`
+/// (`area = height * fwhm / (2*sqrt(2*ln2)) * sqrt(2*pi)`). The five tail ratios
+/// seed to silx's `Initial*Ratio` CONFIG defaults: `InitialShortTailAreaRatio
+/// = 0.05`, `InitialShortTailSlopeRatio = 0.70`, `InitialLongTailAreaRatio
+/// = 0.05`, `InitialLongTailSlopeRatio = 20.0`, `InitialStepTailHeightRatio
+/// = 0.002`.
+///
+/// # Deviation from silx
+///
+/// silx's `estimate_ahypermet` zeroes *and* `CFIXED`s a tail when the Gaussian
+/// area/height is below a counts threshold (`MinGaussArea4ShortTail = 50000`,
+/// `MinGaussArea4LongTail = 1000`, `MinGaussHeight4StepTail = 5000`) and
+/// otherwise `CQUOTED`s the ratios to their `[Min, Max]` CONFIG bounds — so its
+/// tail activation is inseparable from that default constraint set. Per
+/// siplot's project-wide fit invariant (estimators seed parameters only; the
+/// fit defaults to all-[`Constraint::Free`]; per-parameter constraints are
+/// applied through the `FitWidget`), the tails are instead seeded active and
+/// free so the unconstrained fit is non-degenerate at the seed. Apply
+/// `CFIXED`/`CQUOTED` through the constraint UI to reproduce silx's exact tail
+/// handling.
+pub fn estimate_ahypermet(x: &[f64], y: &[f64]) -> Option<Vec<f64>> {
+    let (h, c, f, bg) = estimate_height_position_fwhm(x, y)?;
+    let area = h * f / fwhm_to_sigma_factor() * (2.0 * std::f64::consts::PI).sqrt();
+    Some(vec![area, c, f, 0.05, 0.70, 0.05, 20.0, 0.002, bg])
+}
+
 // ---------------------------------------------------------------------------
 // Iterative fit models exposed through the FitFunction trait, and fit range.
 // ---------------------------------------------------------------------------
@@ -1835,6 +1929,9 @@ pub enum PeakModel {
     Slit,
     /// Arctan step up: `[height, position, width, bg]`.
     AtanStepUp,
+    /// Hypermet (Gaussian + short tail + long tail + step): `[area, position,
+    /// fwhm, st_area_r, st_slope_r, lt_area_r, lt_slope_r, step_height_r, bg]`.
+    Hypermet,
     /// Degree-2 polynomial: 3 coefficients highest-power-first (`a*x^2+b*x+c`).
     Polynomial2,
     /// Degree-3 polynomial: 4 coefficients highest-power-first.
@@ -1873,6 +1970,7 @@ impl PeakModel {
             PeakModel::StepUp => "Step Up",
             PeakModel::Slit => "Slit",
             PeakModel::AtanStepUp => "Arctan Step Up",
+            PeakModel::Hypermet => "Hypermet",
             PeakModel::Polynomial2 => "Degree 2 Polynomial",
             PeakModel::Polynomial3 => "Degree 3 Polynomial",
             PeakModel::Polynomial4 => "Degree 4 Polynomial",
@@ -1965,6 +2063,17 @@ impl PeakModel {
                 owned("Width"),
                 owned("Background"),
             ],
+            PeakModel::Hypermet => vec![
+                owned("Area"),
+                owned("Center"),
+                owned("FWHM"),
+                owned("ST Area Ratio"),
+                owned("ST Slope Ratio"),
+                owned("LT Area Ratio"),
+                owned("LT Slope Ratio"),
+                owned("Step Height Ratio"),
+                owned("Background"),
+            ],
             PeakModel::Polynomial2
             | PeakModel::Polynomial3
             | PeakModel::Polynomial4
@@ -1997,6 +2106,7 @@ impl PeakModel {
             PeakModel::StepUp => stepup_model(x, params),
             PeakModel::Slit => slit_model(x, params),
             PeakModel::AtanStepUp => atan_stepup_model(x, params),
+            PeakModel::Hypermet => hypermet_model(x, params),
             // silx `poly` theory: `numpy.poly1d(params)(x)`, coefficients
             // highest-power-first.
             PeakModel::Polynomial2
@@ -2023,6 +2133,7 @@ impl PeakModel {
             PeakModel::StepUp => estimate_stepup(x, y),
             PeakModel::Slit => estimate_slit(x, y),
             PeakModel::AtanStepUp => estimate_atan_stepup(x, y),
+            PeakModel::Hypermet => estimate_ahypermet(x, y),
             // silx `estimate_poly`: `numpy.polyfit(x, y, degree)`, coefficients
             // highest-power-first (exact least-squares; the LM then confirms it).
             PeakModel::Polynomial2
@@ -2868,6 +2979,77 @@ mod tests {
             PeakModel::Polynomial5.param_names(),
             ["a", "b", "c", "d", "e", "f"]
         );
+    }
+
+    #[test]
+    fn hypermet_model_reduces_to_area_gaussian_when_tails_zero() {
+        // All tail ratios zero ⇒ Hypermet collapses onto the area Gaussian + bg.
+        // The st/lt slope ratios are also zero, so the `|slope| > epsilon` guard
+        // skips the short/long-tail terms entirely (no 1/slope division).
+        let xs = linspace(0.0, 20.0, 201);
+        let h = hypermet_model(&xs, &[12.0, 10.0, 2.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.4]);
+        let g = gaussian_area_model(&xs, &[12.0, 10.0, 2.5, 0.4]);
+        for (a, b) in h.iter().zip(&g) {
+            assert!((a - b).abs() < 1e-12, "hypermet {a} vs area-gauss {b}");
+        }
+    }
+
+    #[test]
+    fn hypermet_tails_contribute_beyond_the_gaussian() {
+        // With the silx Initial tail ratios active, the curve must differ
+        // measurably from the tails-off (pure area-Gaussian) curve — proving the
+        // short/long-tail and step terms are wired in.
+        let xs = linspace(0.0, 20.0, 201);
+        let area = 12.0;
+        let tailed = hypermet_model(&xs, &[area, 10.0, 2.5, 0.05, 0.70, 0.05, 20.0, 0.002, 0.0]);
+        let plain = hypermet_model(&xs, &[area, 10.0, 2.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        let max_diff = tailed
+            .iter()
+            .zip(&plain)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0_f64, f64::max);
+        let peak = plain.iter().cloned().fold(0.0_f64, f64::max);
+        assert!(
+            max_diff > 0.01 * peak,
+            "tail contribution {max_diff} (peak {peak})"
+        );
+    }
+
+    #[test]
+    fn hypermet_model_recovers_own_curve() {
+        // Generate from the model with the silx Initial tail ratios + a known
+        // area/center/fwhm/bg, then fit via the estimator→LM path. Hypermet
+        // parameters are strongly correlated (a broad long tail is nearly
+        // collinear with the constant background), so the meaningful invariant is
+        // curve reproduction (reduced chi-square → 0) plus the well-determined
+        // centre, not individual parameter recovery.
+        let xs = linspace(0.0, 20.0, 401);
+        let truth = [12.0, 10.0, 2.5, 0.05, 0.70, 0.05, 20.0, 0.002, 0.3];
+        let ys = hypermet_model(&xs, &truth);
+        let fit = IterativeFit::new(PeakModel::Hypermet)
+            .fit_full(&xs, &ys)
+            .unwrap();
+        let p = &fit.fit.parameters;
+        assert!((p[1] - 10.0).abs() < 5e-2, "center {}", p[1]);
+        assert!(
+            fit.reduced_chisq().unwrap() < 1e-4,
+            "chisq {}",
+            fit.reduced_chisq().unwrap()
+        );
+    }
+
+    #[test]
+    fn estimate_ahypermet_seeds_silx_initial_tail_ratios() {
+        let xs = linspace(0.0, 20.0, 201);
+        let ys = hypermet_model(&xs, &[12.0, 10.0, 2.5, 0.05, 0.70, 0.05, 20.0, 0.002, 0.3]);
+        let seed = estimate_ahypermet(&xs, &ys).unwrap();
+        assert_eq!(seed.len(), 9, "9 seed params");
+        assert!((seed[1] - 10.0).abs() < 0.2, "center seed {}", seed[1]);
+        assert_eq!(seed[3], 0.05, "ST area ratio seed");
+        assert_eq!(seed[4], 0.70, "ST slope ratio seed");
+        assert_eq!(seed[5], 0.05, "LT area ratio seed");
+        assert_eq!(seed[6], 20.0, "LT slope ratio seed");
+        assert_eq!(seed[7], 0.002, "step height ratio seed");
     }
 
     #[test]

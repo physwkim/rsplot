@@ -284,6 +284,8 @@ pub enum FitModelChoice {
     IterativeSlit,
     /// Iterative arctan step up.
     IterativeAtanStepUp,
+    /// Iterative Hypermet (Gaussian + short tail + long tail + step).
+    IterativeHypermet,
     /// Degree-2 polynomial fit.
     IterativePolynomial2,
     /// Degree-3 polynomial fit.
@@ -299,7 +301,7 @@ pub enum FitModelChoice {
 
 impl FitModelChoice {
     /// All choices, in display order.
-    pub const ALL: [FitModelChoice; 21] = [
+    pub const ALL: [FitModelChoice; 22] = [
         FitModelChoice::Linear,
         FitModelChoice::GaussianEstimate,
         FitModelChoice::IterativeGaussian,
@@ -316,6 +318,7 @@ impl FitModelChoice {
         FitModelChoice::IterativeStepUp,
         FitModelChoice::IterativeSlit,
         FitModelChoice::IterativeAtanStepUp,
+        FitModelChoice::IterativeHypermet,
         FitModelChoice::IterativePolynomial2,
         FitModelChoice::IterativePolynomial3,
         FitModelChoice::IterativePolynomial4,
@@ -342,6 +345,7 @@ impl FitModelChoice {
             FitModelChoice::IterativeStepUp => "Step Up (Iterative)",
             FitModelChoice::IterativeSlit => "Slit (Iterative)",
             FitModelChoice::IterativeAtanStepUp => "Arctan Step Up (Iterative)",
+            FitModelChoice::IterativeHypermet => "Hypermet (Iterative)",
             FitModelChoice::IterativePolynomial2 => "Degree 2 Polynomial",
             FitModelChoice::IterativePolynomial3 => "Degree 3 Polynomial",
             FitModelChoice::IterativePolynomial4 => "Degree 4 Polynomial",
@@ -368,6 +372,7 @@ impl FitModelChoice {
             FitModelChoice::IterativeStepUp => Some(PeakModel::StepUp),
             FitModelChoice::IterativeSlit => Some(PeakModel::Slit),
             FitModelChoice::IterativeAtanStepUp => Some(PeakModel::AtanStepUp),
+            FitModelChoice::IterativeHypermet => Some(PeakModel::Hypermet),
             FitModelChoice::IterativePolynomial2 => Some(PeakModel::Polynomial2),
             FitModelChoice::IterativePolynomial3 => Some(PeakModel::Polynomial3),
             FitModelChoice::IterativePolynomial4 => Some(PeakModel::Polynomial4),
@@ -1091,6 +1096,10 @@ mod tests {
             Some(PeakModel::SplitPseudoVoigt2)
         );
         assert_eq!(
+            FitModelChoice::IterativeHypermet.peak_model(),
+            Some(PeakModel::Hypermet)
+        );
+        assert_eq!(
             FitModelChoice::IterativePolynomial2.peak_model(),
             Some(PeakModel::Polynomial2)
         );
@@ -1104,15 +1113,16 @@ mod tests {
 
     #[test]
     fn all_choices_listed_once_in_order() {
-        assert_eq!(FitModelChoice::ALL.len(), 21);
+        assert_eq!(FitModelChoice::ALL.len(), 22);
         assert_eq!(FitModelChoice::ALL[0], FitModelChoice::Linear);
         assert_eq!(FitModelChoice::ALL[8], FitModelChoice::IterativePseudoVoigt);
         assert_eq!(FitModelChoice::ALL[15], FitModelChoice::IterativeAtanStepUp);
+        assert_eq!(FitModelChoice::ALL[16], FitModelChoice::IterativeHypermet);
         assert_eq!(
-            FitModelChoice::ALL[16],
+            FitModelChoice::ALL[17],
             FitModelChoice::IterativePolynomial2
         );
-        assert_eq!(FitModelChoice::ALL[20], FitModelChoice::MultiGaussian);
+        assert_eq!(FitModelChoice::ALL[21], FitModelChoice::MultiGaussian);
         // Only the single-peak iterative choices map to one `PeakModel`; the
         // analytical (Linear / Gaussian-estimate) and composite (multi-peak)
         // choices have none.
