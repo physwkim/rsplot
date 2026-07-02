@@ -11,6 +11,40 @@ library), **sidm** (a PyDM-style EPICS display layer built on siplot), and
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-07-02
+
+Follow-up patch refining the 0.4.1 trackpad-momentum fix. `siplot` only; `sidm`
+and `adl2sidm` are re-released in lockstep (no functional change).
+
+### Added — `siplot`
+
+- **`Plot::scroll_zoom` flag (default `true`)** to disable wheel/trackpad zoom
+  per plot. When `false` the whole wheel handler is skipped — no scroll is read,
+  no momentum guard runs, no zoom happens — while box-drag zoom, the toolbar
+  Home/Zoom buttons, and the context menu are unaffected. A consumer that finds
+  wheel zoom troublesome can opt out with `plot.plot_mut().scroll_zoom = false`.
+
+### Fixed — `siplot`
+
+- **Wheel-zoom no longer stops working on plots that refit to data on every
+  update.** The 0.4.1 momentum guard was armed inside the low-level
+  `reset_zoom_to_data_range`, which the widget also funnels its
+  autoscale-refit-on-content-change through (`apply_auto_limits` →
+  `apply_limits_from_data_bounds`). A plot rebuilding its curves each update
+  re-armed the guard every frame, so the handler swallowed every scroll and
+  wheel-zoom stopped entirely (box-drag zoom and Zoom Back were unaffected). The
+  arm now lives on the user-facing reset verbs (`Plot::reset_zoom` arms after the
+  refit; `Plot::zoom_back` already armed its own) and the shared low-level path
+  no longer arms — so autoscale refits leave a later wheel-zoom alone, while the
+  context-menu Reset Zoom / Zoom Back over the data area still suppress momentum.
+- **Context-menu "Reset Zoom" refits to the live data range instead of restoring
+  a stale home snapshot.** For a long-lived plot whose content is rebuilt while
+  zoomed in, `home_limits` was re-captured as the *zoomed* view, so Reset Zoom
+  reverted to the zoom (a no-op) instead of showing the full data. It now calls
+  `Plot::reset_zoom` — refit the autoscale-on axes to live data, matching the
+  toolbar Home button and silx `resetZoom`. `home_limits` is still captured on
+  first show for external consumers; only this menu item stops reading it.
+
 ## [0.4.1] - 2026-07-02
 
 A single-fix patch release: the macOS trackpad-momentum reset bounce-back in
@@ -257,7 +291,8 @@ instead of Qt `.ui` XML.
 - siplot is now the root of a three-crate workspace; `sidm` reaches egui/wgpu
   through `siplot::egui` to keep a single egui/wgpu in the tree.
 
-[Unreleased]: https://github.com/physwkim/siplot/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/physwkim/siplot/compare/v0.4.2...HEAD
+[0.4.2]: https://github.com/physwkim/siplot/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/physwkim/siplot/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/physwkim/siplot/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/physwkim/siplot/compare/v0.2.0...v0.3.0
