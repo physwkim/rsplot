@@ -11,6 +11,12 @@ library), **sidm** (a PyDM-style EPICS display layer built on siplot), and
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-07-02
+
+A single-fix patch release: the macOS trackpad-momentum reset bounce-back in
+`siplot` (below). `sidm` and `adl2sidm` are re-released in lockstep (no
+functional change).
+
 ### Fixed — `siplot`
 
 - **Reset Zoom / Zoom Back no longer bounces back under macOS trackpad momentum.**
@@ -251,7 +257,8 @@ instead of Qt `.ui` XML.
 - siplot is now the root of a three-crate workspace; `sidm` reaches egui/wgpu
   through `siplot::egui` to keep a single egui/wgpu in the tree.
 
-[Unreleased]: https://github.com/physwkim/siplot/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/physwkim/siplot/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/physwkim/siplot/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/physwkim/siplot/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/physwkim/siplot/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/physwkim/siplot/compare/v0.1.0...v0.2.0
