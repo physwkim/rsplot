@@ -11,6 +11,22 @@ library), **sidm** (a PyDM-style EPICS display layer built on siplot), and
 
 ## [Unreleased]
 
+### Fixed — `siplot`
+
+- **Reset Zoom / Zoom Back no longer bounces back under macOS trackpad momentum.**
+  A view reset (right-click *Reset Zoom*, *Zoom Back*, or reset-to-data) restores
+  the view while the pointer sits over the data area, but a macOS trackpad /
+  Magic Mouse keeps sending *momentum* scroll for ~1 s after the gesture ends — so
+  `smooth_scroll_delta` stayed non-zero and the wheel-zoom handler re-zoomed the
+  just-restored view on the frames right after the menu closed. Box-zoom leaves no
+  residual scroll and so was unaffected, matching the reported asymmetry. A new
+  `Plot::reset_scroll_guard`, armed by every view-reset path (`Plot::zoom_back`,
+  `Plot::reset_zoom_to_data_range`, and the *Reset Zoom* context-menu item) and
+  consumed by the single wheel-zoom handler, swallows the decaying momentum until
+  the scroll settles back to zero, then disarms so a fresh gesture zooms normally.
+  Non-momentum wheel mice are unaffected: the scroll is already zero the frame
+  after a reset, so the guard disarms immediately.
+
 ## [0.4.0] - 2026-06-16
 
 Post-`0.3.0` deep-audit pass over the `silx.gui.plot` fit subsystem and marker

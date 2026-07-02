@@ -1040,7 +1040,16 @@ fn apply_interaction(
 
     // Zoom: wheel over the data area scales about the data point under the cursor.
     let scroll = ui.input(|i| i.smooth_scroll_delta.y);
-    if response.hovered()
+    if plot.reset_scroll_guard {
+        // A recent Reset Zoom / Zoom Back armed the settle guard: swallow the
+        // decaying pointer-scroll momentum instead of zooming, so it cannot undo
+        // the reset (macOS momentum keeps arriving for ~1 s while the pointer sits
+        // over the data area). Disarm once the scroll settles back to zero, so a
+        // fresh, intentional scroll zooms normally again.
+        if scroll == 0.0 {
+            plot.reset_scroll_guard = false;
+        }
+    } else if response.hovered()
         && scroll != 0.0
         && let Some(p) = response.hover_pos()
         && area.contains(p)
@@ -1391,6 +1400,7 @@ fn apply_interaction(
                 plot.limits = home;
             }
             plot.clear_limits_history();
+            plot.reset_scroll_guard = true;
             ui.close();
         }
         // Caller-supplied custom entries (silx `plotContextMenu.py` adding
@@ -1728,6 +1738,81 @@ mod tests {
             screen_rect: Some(Rect::from_min_size(Pos2::ZERO, screen)),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn wheel_zoom_suppressed_after_reset_until_scroll_settles() {
+        // Regression: a right-click "Reset Zoom" (or Zoom Back) restores the view
+        // while the pointer sits over the data area. On macOS the trackpad/Magic
+        // Mouse keeps sending momentum scroll for ~1 s after the gesture, which
+        // the wheel-zoom handler would otherwise apply, re-zooming the just-reset
+        // view. `reset_scroll_guard` swallows that decaying momentum until the
+        // scroll settles to zero, then a fresh gesture zooms normally again.
+        //
+        // Boundaries exercised: (armed, scroll != 0) -> no zoom; (armed, scroll
+        // == 0) -> disarm; (disarmed, scroll != 0) -> zoom.
+        let ctx = egui::Context::default();
+        let mut plot = Plot::new(0);
+        plot.limits = (0.0, 10.0, 0.0, 10.0);
+        let screen = egui::vec2(200.0, 200.0);
+
+        // Frame 0: discover the data area and park the pointer at its center so
+        // every later frame reports a hover there.
+        let (_r0, area) = run_frame(&ctx, &mut plot, screen_input(screen));
+        let c = area.center();
+        let mut warm = screen_input(screen);
+        warm.events.push(egui::Event::PointerMoved(c));
+        let _ = run_frame(&ctx, &mut plot, warm);
+
+        // A `Point`-unit wheel event with |delta| < 8 lands in `smooth_scroll_delta`
+        // that same frame (egui `WheelState::on_wheel_event`), so each such frame
+        // has a non-zero scroll — the momentum condition.
+        let wheel_at = |dy: f32| {
+            let mut f = screen_input(screen);
+            f.events.push(egui::Event::PointerMoved(c));
+            f.events.push(egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: egui::vec2(0.0, dy),
+                phase: egui::TouchPhase::Move,
+                modifiers: egui::Modifiers::default(),
+            });
+            f
+        };
+
+        // A view reset armed the guard while momentum is still in flight.
+        let restored = (0.0, 10.0, 0.0, 10.0);
+        plot.limits = restored;
+        plot.reset_scroll_guard = true;
+
+        // Momentum frame (scroll != 0): swallowed. View stays put; guard stays armed.
+        let _ = run_frame(&ctx, &mut plot, wheel_at(7.0));
+        assert_eq!(
+            plot.limits, restored,
+            "momentum must not re-zoom the reset view"
+        );
+        assert!(
+            plot.reset_scroll_guard,
+            "guard stays armed while scroll is non-zero"
+        );
+
+        // Settle frame (no wheel event -> scroll == 0): guard disarms, view unchanged.
+        let mut park = screen_input(screen);
+        park.events.push(egui::Event::PointerMoved(c));
+        let _ = run_frame(&ctx, &mut plot, park);
+        assert_eq!(plot.limits, restored, "settling does not change the view");
+        assert!(
+            !plot.reset_scroll_guard,
+            "guard disarms once the scroll settles to zero"
+        );
+
+        // Fresh, intentional gesture (scroll != 0, guard cleared): zooms normally.
+        // Same input as the swallowed momentum frame, proving the guard — not the
+        // input — was what suppressed the earlier zoom.
+        let _ = run_frame(&ctx, &mut plot, wheel_at(7.0));
+        assert_ne!(
+            plot.limits, restored,
+            "a fresh scroll after settling zooms again"
+        );
     }
 
     #[test]

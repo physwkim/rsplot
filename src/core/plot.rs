@@ -360,6 +360,14 @@ pub struct Plot {
     /// captures the first observed `limits` here so the home view survives
     /// pan/zoom (`doc/design.md` §8·§11.6). `None` until the first frame.
     pub home_limits: Option<(f64, f64, f64, f64)>,
+    /// Armed by a view reset (Reset Zoom / Zoom Back / reset-to-data) so residual
+    /// pointer-scroll *momentum* cannot immediately re-zoom and undo the reset.
+    /// The pointer sits over the data area during a right-click "Reset Zoom", and
+    /// macOS trackpad/Magic-Mouse momentum keeps `smooth_scroll_delta` non-zero
+    /// for ~1 s after the gesture — so without this the wheel-zoom handler re-zooms
+    /// on the frames right after the menu closes. Cleared once the scroll input
+    /// settles back to zero, so a fresh scroll gesture zooms normally again.
+    pub(crate) reset_scroll_guard: bool,
     /// X-axis scale (linear or log10) (`doc/design.md` §13 A3).
     pub x_scale: Scale,
     /// Y-axis scale (linear or log10).
@@ -566,6 +574,7 @@ impl Plot {
             reserve_x_label_gutter: false,
             reserve_y_label_gutter: false,
             home_limits: None,
+            reset_scroll_guard: false,
             x_scale: Scale::Linear,
             y_scale: Scale::Linear,
             x_inverted: false,
@@ -684,6 +693,7 @@ impl Plot {
         if let Some((limits, y2)) = self.limits_history.pop() {
             self.limits = limits;
             self.y2 = y2;
+            self.reset_scroll_guard = true;
             true
         } else {
             false
@@ -1074,6 +1084,7 @@ impl Plot {
 
         self.limits = (x_min, x_max, y_min, y_max);
         self.y2 = y2;
+        self.reset_scroll_guard = true;
     }
 
     /// Build the data↔screen transform for the given data-area rect, honoring
@@ -1332,6 +1343,40 @@ mod tests {
         plot.limits = (1.0, 2.0, 3.0, 4.0);
         assert!(!plot.zoom_back());
         assert_eq!(plot.limits, (1.0, 2.0, 3.0, 4.0));
+    }
+
+    #[test]
+    fn view_resets_arm_scroll_guard() {
+        // Invariant: every model-level view reset arms `reset_scroll_guard` so
+        // residual pointer-scroll momentum cannot immediately re-zoom the
+        // restored view. Boundaries: a fresh plot is unarmed; reset-to-data arms;
+        // a successful (history non-empty) zoom_back arms; an empty-history
+        // zoom_back restores nothing and so leaves the flag untouched.
+        let mut plot = Plot::new(0);
+        assert!(!plot.reset_scroll_guard, "fresh plot is unarmed");
+
+        plot.reset_zoom_to_data_range(DataRange {
+            x: Some((0.0, 1.0)),
+            y: Some((0.0, 1.0)),
+            y2: None,
+        });
+        assert!(plot.reset_scroll_guard, "reset-to-data arms the guard");
+
+        // A successful zoom_back re-arms after an explicit disarm.
+        plot.reset_scroll_guard = false;
+        plot.limits = (0.0, 1.0, 0.0, 1.0);
+        plot.push_limits();
+        plot.limits = (2.0, 3.0, 2.0, 3.0);
+        assert!(plot.zoom_back(), "restored a pushed view");
+        assert!(plot.reset_scroll_guard, "zoom_back arms the guard");
+
+        // Empty-history zoom_back restores nothing: it must not arm.
+        plot.reset_scroll_guard = false;
+        assert!(!plot.zoom_back(), "empty history restores nothing");
+        assert!(
+            !plot.reset_scroll_guard,
+            "a no-op zoom_back leaves the guard as-is"
+        );
     }
 
     #[test]
