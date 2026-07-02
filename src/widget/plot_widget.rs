@@ -1393,14 +1393,16 @@ fn apply_interaction(
             }
             ui.close();
         }
-        // Reset Zoom: restore the home view captured on first show and clear the
-        // limits history (the behavior the double-click reset used to provide).
+        // Reset Zoom: refit to the current data range (silx `resetZoom`), matching
+        // the toolbar Home button, then clear the limits history. `reset_zoom`
+        // refits the autoscale-on axes to the live data bounds and arms
+        // `reset_scroll_guard`. Restoring a `home_limits` snapshot instead would
+        // revert to whatever view was captured on the last first-show — which is
+        // the zoomed view when the plot was rebuilt while zoomed — so a refit is
+        // both silx-correct and free of that stale-home failure.
         if ui.button("Reset Zoom").clicked() {
-            if let Some(home) = plot.home_limits {
-                plot.limits = home;
-            }
+            plot.reset_zoom();
             plot.clear_limits_history();
-            plot.reset_scroll_guard = true;
             ui.close();
         }
         // Caller-supplied custom entries (silx `plotContextMenu.py` adding
