@@ -13606,6 +13606,25 @@ mod tests {
     }
 
     #[test]
+    fn widget_autoscale_refit_does_not_arm_scroll_guard() {
+        // Regression: the widget's autoscale-refit-on-content-change funnels
+        // through `reset_zoom_to_data_range` (via `apply_limits_from_data_bounds`)
+        // on every add/clear/remove. It must NOT arm `reset_scroll_guard`, or a
+        // plot that rebuilds its curves each update would swallow every subsequent
+        // wheel-zoom. Only the user-facing `reset_zoom`/`zoom_back` verbs — called
+        // by the context menu over the data area — arm the guard.
+        let mut plot = Plot::new(0);
+        plot.set_x_autoscale(true);
+        plot.set_y_autoscale(true);
+        assert!(!plot.reset_scroll_guard, "fresh plot is unarmed");
+        apply_widget_reset(&mut plot, data_bounds((10.0, 20.0), (-5.0, 5.0), None));
+        assert!(
+            !plot.reset_scroll_guard,
+            "autoscale refit on content change must not arm the wheel-zoom guard"
+        );
+    }
+
+    #[test]
     fn widget_reset_keeps_y_and_refits_x_when_only_x_autoscale_on() {
         // x_autoscale ON + y_autoscale OFF: X refit, current Y limits preserved.
         let mut plot = Plot::new(0);

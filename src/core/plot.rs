@@ -766,6 +766,15 @@ impl Plot {
     /// Equivalent to `reset_zoom_to_data_range(self.data_range())`.
     pub fn reset_zoom(&mut self) {
         self.reset_zoom_to_data_range(self.data_range());
+        // Arm the scroll-momentum guard here, at the user-facing reset verb —
+        // NOT inside `reset_zoom_to_data_range`. The widget funnels its
+        // autoscale-refit-on-content-change through that low-level fn on every
+        // add/clear/remove, so arming there made each rebuild swallow the next
+        // wheel-zoom (the guard stayed armed as long as content kept changing).
+        // The context menu's "Reset Zoom" / "Zoom Back" call these verbs over the
+        // data area (where trackpad momentum lands), so the guard is armed exactly
+        // at the momentum-vulnerable gestures and nowhere else.
+        self.reset_scroll_guard = true;
     }
 
     /// The per-side data margins applied around the data on reset-zoom (silx
@@ -1084,7 +1093,11 @@ impl Plot {
 
         self.limits = (x_min, x_max, y_min, y_max);
         self.y2 = y2;
-        self.reset_scroll_guard = true;
+        // NB: this low-level refit deliberately does NOT arm `reset_scroll_guard`.
+        // It is the shared path for the widget's autoscale-refit-on-content-change
+        // (every add/clear/remove), which is not a user gesture and must not
+        // suppress the next wheel-zoom. The user-facing `reset_zoom` verb arms the
+        // guard after calling this; `zoom_back` arms its own.
     }
 
     /// Build the data↔screen transform for the given data-area rect, honoring
@@ -1346,23 +1359,35 @@ mod tests {
     }
 
     #[test]
-    fn view_resets_arm_scroll_guard() {
-        // Invariant: every model-level view reset arms `reset_scroll_guard` so
-        // residual pointer-scroll momentum cannot immediately re-zoom the
-        // restored view. Boundaries: a fresh plot is unarmed; reset-to-data arms;
-        // a successful (history non-empty) zoom_back arms; an empty-history
-        // zoom_back restores nothing and so leaves the flag untouched.
+    fn user_reset_verbs_arm_scroll_guard_but_low_level_refit_does_not() {
+        // Invariant: the user-facing reset VERBS (`reset_zoom`, `zoom_back`) arm
+        // `reset_scroll_guard` so residual pointer-scroll momentum cannot
+        // immediately re-zoom the restored view. The low-level
+        // `reset_zoom_to_data_range` — which the widget's
+        // autoscale-refit-on-content-change funnels through on every add/clear —
+        // must NOT arm it, or every rebuilt curve would swallow the next
+        // wheel-zoom. Boundaries: fresh plot unarmed; low-level refit does not arm;
+        // reset_zoom arms; a successful (history non-empty) zoom_back arms; an
+        // empty-history zoom_back restores nothing and leaves the flag untouched.
         let mut plot = Plot::new(0);
         assert!(!plot.reset_scroll_guard, "fresh plot is unarmed");
 
+        // Low-level refit == the autoscale path: must leave the guard untouched.
         plot.reset_zoom_to_data_range(DataRange {
             x: Some((0.0, 1.0)),
             y: Some((0.0, 1.0)),
             y2: None,
         });
-        assert!(plot.reset_scroll_guard, "reset-to-data arms the guard");
+        assert!(
+            !plot.reset_scroll_guard,
+            "low-level reset-to-data (the autoscale refit path) must not arm the guard"
+        );
 
-        // A successful zoom_back re-arms after an explicit disarm.
+        // The user-facing reset_zoom verb arms it.
+        plot.reset_zoom();
+        assert!(plot.reset_scroll_guard, "reset_zoom arms the guard");
+
+        // A successful zoom_back arms after an explicit disarm.
         plot.reset_scroll_guard = false;
         plot.limits = (0.0, 1.0, 0.0, 1.0);
         plot.push_limits();
