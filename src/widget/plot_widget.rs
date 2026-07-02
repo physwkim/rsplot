@@ -1039,27 +1039,31 @@ fn apply_interaction(
     }
 
     // Zoom: wheel over the data area scales about the data point under the cursor.
-    let scroll = ui.input(|i| i.smooth_scroll_delta.y);
-    if plot.reset_scroll_guard {
-        // A recent Reset Zoom / Zoom Back armed the settle guard: swallow the
-        // decaying pointer-scroll momentum instead of zooming, so it cannot undo
-        // the reset (macOS momentum keeps arriving for ~1 s while the pointer sits
-        // over the data area). Disarm once the scroll settles back to zero, so a
-        // fresh, intentional scroll zooms normally again.
-        if scroll == 0.0 {
-            plot.reset_scroll_guard = false;
+    // Skipped in full when wheel zoom is disabled for this plot — no scroll read,
+    // no momentum guard, no zoom (box-drag / toolbar / context-menu zoom remain).
+    if plot.scroll_zoom {
+        let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+        if plot.reset_scroll_guard {
+            // A recent Reset Zoom / Zoom Back armed the settle guard: swallow the
+            // decaying pointer-scroll momentum instead of zooming, so it cannot undo
+            // the reset (macOS momentum keeps arriving for ~1 s while the pointer sits
+            // over the data area). Disarm once the scroll settles back to zero, so a
+            // fresh, intentional scroll zooms normally again.
+            if scroll == 0.0 {
+                plot.reset_scroll_guard = false;
+            }
+        } else if response.hovered()
+            && scroll != 0.0
+            && let Some(p) = response.hover_pos()
+            && area.contains(p)
+        {
+            let (cx, cy) = view.pixel_to_data(p);
+            let factor = interaction::wheel_zoom_factor(scroll);
+            // Push the pre-zoom view so zoom-back can step out of the wheel zoom.
+            plot.push_limits();
+            let next = interaction::zoom_about(base, factor, cx, cy, plot.x_scale, plot.y_scale);
+            commit(plot, next);
         }
-    } else if response.hovered()
-        && scroll != 0.0
-        && let Some(p) = response.hover_pos()
-        && area.contains(p)
-    {
-        let (cx, cy) = view.pixel_to_data(p);
-        let factor = interaction::wheel_zoom_factor(scroll);
-        // Push the pre-zoom view so zoom-back can step out of the wheel zoom.
-        plot.push_limits();
-        let next = interaction::zoom_about(base, factor, cx, cy, plot.x_scale, plot.y_scale);
-        commit(plot, next);
     }
 
     // Left-drag start: select/zoom modes prefer grabbing an ROI edge handle or
@@ -1814,6 +1818,59 @@ mod tests {
         assert_ne!(
             plot.limits, restored,
             "a fresh scroll after settling zooms again"
+        );
+    }
+
+    #[test]
+    fn scroll_zoom_disabled_ignores_the_wheel() {
+        // `scroll_zoom = false` skips the wheel handler entirely: a wheel event
+        // over the data area leaves the view untouched. The same event with the
+        // default `scroll_zoom = true` zooms, proving the flag — not the input —
+        // is what suppressed it.
+        let ctx = egui::Context::default();
+        let screen = egui::vec2(200.0, 200.0);
+        let start = (0.0, 10.0, 0.0, 10.0);
+
+        let wheel_frame = |ctx: &egui::Context, plot: &mut Plot, c: Pos2| {
+            let mut f = screen_input(screen);
+            f.events.push(egui::Event::PointerMoved(c));
+            f.events.push(egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: egui::vec2(0.0, 7.0),
+                phase: egui::TouchPhase::Move,
+                modifiers: egui::Modifiers::default(),
+            });
+            run_frame(ctx, plot, f)
+        };
+
+        // Disabled: the wheel does nothing.
+        let mut off = Plot::new(0);
+        off.limits = start;
+        off.scroll_zoom = false;
+        let (_r0, area) = run_frame(&ctx, &mut off, screen_input(screen));
+        let c = area.center();
+        // Warm-up frame parks the pointer so the next frame reports a hover there.
+        let mut warm = screen_input(screen);
+        warm.events.push(egui::Event::PointerMoved(c));
+        let _ = run_frame(&ctx, &mut off, warm);
+        let _ = wheel_frame(&ctx, &mut off, c);
+        assert_eq!(
+            off.limits, start,
+            "wheel must not zoom when scroll_zoom is disabled"
+        );
+
+        // Enabled (default): the identical wheel event zooms.
+        let mut on = Plot::new(0);
+        on.limits = start;
+        let (_r1, area) = run_frame(&ctx, &mut on, screen_input(screen));
+        let c = area.center();
+        let mut warm = screen_input(screen);
+        warm.events.push(egui::Event::PointerMoved(c));
+        let _ = run_frame(&ctx, &mut on, warm);
+        let _ = wheel_frame(&ctx, &mut on, c);
+        assert_ne!(
+            on.limits, start,
+            "wheel zooms normally when scroll_zoom is enabled"
         );
     }
 

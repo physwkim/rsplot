@@ -368,6 +368,11 @@ pub struct Plot {
     /// on the frames right after the menu closes. Cleared once the scroll input
     /// settles back to zero, so a fresh scroll gesture zooms normally again.
     pub(crate) reset_scroll_guard: bool,
+    /// Whether the mouse wheel / trackpad scroll zooms the view. `true` is the
+    /// default. Set `false` to disable wheel zoom entirely for this plot (box-drag
+    /// zoom, the toolbar Home/Zoom buttons, and the context menu still work); the
+    /// whole wheel handler — including the momentum settle guard — is then skipped.
+    pub scroll_zoom: bool,
     /// X-axis scale (linear or log10) (`doc/design.md` §13 A3).
     pub x_scale: Scale,
     /// Y-axis scale (linear or log10).
@@ -575,6 +580,7 @@ impl Plot {
             reserve_y_label_gutter: false,
             home_limits: None,
             reset_scroll_guard: false,
+            scroll_zoom: true,
             x_scale: Scale::Linear,
             y_scale: Scale::Linear,
             x_inverted: false,
