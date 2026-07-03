@@ -53,7 +53,7 @@ pub use crate::core::marker::{
     DEFAULT_MARKER_SIZE, Marker, MarkerConstraint, MarkerKind, TextAnchor, apply_constraint,
 };
 pub use crate::core::peaks::{
-    DEFAULT_PEAK_SENSITIVITY, Peak, guess_fwhm, peak_search, peak_search_range,
+    DEFAULT_PEAK_SENSITIVITY, Peak, guess_fwhm, padded_peak_search, peak_search, peak_search_range,
 };
 pub use crate::core::plot::{
     AxisConstraints, DataMargins, DataRange, DirtyState, ExtraAxis, GraphGrid, Plot, PlotId,

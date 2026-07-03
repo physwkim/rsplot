@@ -2315,9 +2315,12 @@ pub fn multi_gaussian_model(x: &[f64], params: &[f64]) -> Vec<f64> {
 /// Estimate initial parameters and fit constraints for a multi-peak Gaussian fit
 /// (silx `estimate_height_position_fwhm`, default config).
 ///
-/// Locates peaks with [`peak_search`](crate::core::peaks::peak_search)
-/// (`search_fwhm` floored at 3, `sensitivity` floored at 1; falls back to the
-/// global maximum when none are found, silx `ForcePeakPresence`). Seeds each
+/// Locates peaks with the edge-padded
+/// [`padded_peak_search`](crate::core::peaks::padded_peak_search) — the search
+/// silx's theory estimators use (`FitTheories.peak_search`,
+/// fittheories.py:280-313; `search_fwhm` floored at 3, `sensitivity` floored
+/// at 1; falls back to the global maximum when none are found, silx
+/// `ForcePeakPresence`). Seeds each
 /// peak as `(y[peak], x[peak], 5·|xspan|/n)`, refines the seeds with a quick
 /// 4-iteration constrained fit (height/FWHM positive, centre quoted to ±½ of the
 /// `search_fwhm`-sample x-width), and returns the refined seeds together with the
@@ -2339,7 +2342,7 @@ pub fn estimate_multi_gaussian(
     let search_fwhm = search_fwhm.max(3.0);
     let search_sens = sensitivity.max(1.0);
 
-    let found = crate::core::peaks::peak_search(y, search_fwhm, search_sens);
+    let found = crate::core::peaks::padded_peak_search(y, search_fwhm, search_sens);
     let peaks: Vec<usize> = if found.is_empty() {
         // silx ForcePeakPresence: use the (first) global maximum.
         let maxv = y.iter().copied().fold(f64::NEG_INFINITY, f64::max);
@@ -3781,6 +3784,34 @@ mod tests {
     fn estimate_multi_gaussian_rejects_empty_and_mismatch() {
         assert!(estimate_multi_gaussian(&[], &[], 5.0, 2.5).is_none());
         assert!(estimate_multi_gaussian(&[0.0, 1.0], &[1.0], 5.0, 2.5).is_none());
+    }
+
+    #[test]
+    fn estimate_multi_gaussian_seeds_an_edge_adjacent_peak() {
+        // The estimator searches with silx's edge-padded FitTheories
+        // peak_search (fittheories.py:280-313): a peak whose apex sits on the
+        // last sample is seeded alongside the interior peak (the raw unpadded
+        // search never sees it fall, so it seeded only 1 peak before).
+        let xs = grid(100);
+        let ys: Vec<f64> = xs
+            .iter()
+            .map(|&x| {
+                gaussian_model(&[x], &[100.0, 40.0, 8.0, 0.0])[0]
+                    + gaussian_model(&[x], &[80.0, 99.0, 8.0, 0.0])[0]
+            })
+            .collect();
+        let (seeds, _) = estimate_multi_gaussian(&xs, &ys, 8.0, DEFAULT_FIT_SENSITIVITY).unwrap();
+        assert_eq!(seeds.len(), 6, "both peaks seeded, got {seeds:?}");
+        // One refined centre near 40, one near the right edge.
+        let centers: Vec<f64> = seeds.chunks(3).map(|c| c[1]).collect();
+        assert!(
+            centers.iter().any(|&c| (c - 40.0).abs() < 2.0),
+            "{centers:?}"
+        );
+        assert!(
+            centers.iter().any(|&c| (c - 99.0).abs() < 2.0),
+            "{centers:?}"
+        );
     }
 
     #[test]

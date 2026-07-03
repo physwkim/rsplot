@@ -150,6 +150,46 @@ pub fn peak_search_range(
     peaks
 }
 
+/// Search for peaks after padding the array at both edges — the search the
+/// FitManager theory estimators use (silx `FitTheories.peak_search`,
+/// fittheories.py:280-313), as opposed to the raw [`peak_search`].
+///
+/// Pads `y` with `fwhm` copies of `y[0]` on the left and `fwhm` copies of
+/// `y[len - 1]` on the right (fittheories.py:293-297) so the C `seek` state
+/// machine has lead-in samples and edge-adjacent peaks are not missed, runs
+/// the search on the padded array when `len(ysearch) > 1.5 * fwhm`
+/// (fittheories.py:305), then re-maps each hit by `- fwhm` and keeps only
+/// in-range indices (fittheories.py:307-311). The pad count is `fwhm`
+/// truncated to an integer (silx's `FwhmPoints` config is an int).
+///
+/// silx multiplies the padded array by a scaling factor first; under the
+/// default config it is `1.0` (`AutoScaling = False`, `Yscaling = 1.0`,
+/// fittheories.py:111-112 — this module hard-codes the default config like
+/// the rest of the estimators), so no scaling is applied here.
+pub fn padded_peak_search(y: &[f64], fwhm: f64, sensitivity: f64) -> Vec<Peak> {
+    if y.is_empty() || fwhm < 0.0 {
+        return Vec::new();
+    }
+    let pad = fwhm as usize;
+    let mut ysearch = Vec::with_capacity(y.len() + 2 * pad);
+    ysearch.extend(std::iter::repeat_n(y[0], pad));
+    ysearch.extend_from_slice(y);
+    ysearch.extend(std::iter::repeat_n(y[y.len() - 1], pad));
+
+    if ysearch.len() as f64 > 1.5 * fwhm {
+        peak_search(&ysearch, fwhm, sensitivity)
+            .into_iter()
+            .filter_map(|p| {
+                // Re-map into the unpadded array; drop hits inside the pads.
+                let index = p.index.checked_sub(pad)?;
+                (index < y.len()).then_some(Peak { index, ..p })
+            })
+            .collect()
+    } else {
+        Vec::new()
+    }
+}
+
 /// Estimate the FWHM (in samples) of the largest peak (silx `guess_fwhm`).
 ///
 /// Removes a strip background, finds the global maximum of the residual, and
@@ -236,6 +276,39 @@ mod tests {
         let y = gauss(50.0, 8.0, 100.0, 100);
         let peaks = peak_search(&y, 8.0, DEFAULT_PEAK_SENSITIVITY);
         assert!(peaks.iter().all(|p| p.index < y.len()));
+    }
+
+    #[test]
+    fn padded_search_finds_a_right_edge_peak_the_raw_search_misses() {
+        // silx FitTheories.peak_search pads y with fwhm copies of y[0] /
+        // y[-1] per side (fittheories.py:293-297) so the seek state machine
+        // has lead-in/lead-out samples. A peak whose apex sits on the last
+        // sample never "falls" inside the raw array, so the raw search misses
+        // it; the padded search finds it at the true index.
+        let y = gauss(99.0, 8.0, 100.0, 100);
+        assert!(
+            peak_search(&y, 8.0, 2.5).is_empty(),
+            "raw search misses the right-edge apex"
+        );
+        let padded = padded_peak_search(&y, 8.0, 2.5);
+        assert_eq!(padded.len(), 1, "padded search finds it: {padded:?}");
+        assert_eq!(padded[0].index, 99);
+        assert!(padded[0].relevance > 0.0);
+    }
+
+    #[test]
+    fn padded_search_remaps_into_the_unpadded_array() {
+        // Indices are re-mapped by -fwhm and only in-range hits survive
+        // (fittheories.py:307-311): every index is valid for the raw array.
+        for c in [0.0, 4.0, 50.0, 95.0, 99.0] {
+            let y = gauss(c, 8.0, 100.0, 100);
+            for p in padded_peak_search(&y, 8.0, 2.5) {
+                assert!(p.index < y.len(), "c={c}: out-of-range {}", p.index);
+            }
+        }
+        // Degenerate inputs yield no peaks rather than panicking.
+        assert!(padded_peak_search(&[], 8.0, 2.5).is_empty());
+        assert!(padded_peak_search(&[1.0], 8.0, 2.5).is_empty());
     }
 
     #[test]
