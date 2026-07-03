@@ -2126,14 +2126,15 @@ fn retained_data_to_stats_input(
 /// over `pixels` (NaN-ignoring), for a raw-pixel autoscale (silx
 /// `ColormapDialog` Stddev3 / Percentile autoscale, ColormapDialog.py:450-480).
 ///
-/// The percentile pair comes from the base colormap's
-/// [`autoscale_percentiles`](Colormap::autoscale_percentiles) (silx
-/// `Colormap._percentiles`); [`AutoscaleMode::Stddev3`] ignores it. The LUT,
-/// normalization, gamma, and NaN color are preserved — only `vmin`/`vmax`
+/// The range comes from [`Colormap::autoscale_range`], i.e. it honors the base
+/// colormap's normalization and percentile pair (silx
+/// `Colormap._computeAutoscaleRange` dispatches per normalizer,
+/// colors.py:682-692; [`AutoscaleMode::Stddev3`] ignores the percentiles). The
+/// LUT, normalization, gamma, and NaN color are preserved — only `vmin`/`vmax`
 /// change. Split out so the autoscale computation is unit-testable without a GPU
 /// backend.
 fn autoscaled_colormap(base: &Colormap, mode: AutoscaleMode, pixels: &[f64]) -> Colormap {
-    let (vmin, vmax) = mode.range(pixels, base.autoscale_percentiles);
+    let (vmin, vmax) = base.autoscale_range(mode, pixels);
     let mut cm = base.clone();
     cm.vmin = vmin;
     cm.vmax = vmax;
@@ -15648,8 +15649,11 @@ mod tests {
         let base = Colormap::viridis(7.0, 9.0); // arbitrary prior limits
         let cm = autoscaled_colormap(&base, AutoscaleMode::Stddev3, &pixels);
         // Cross-check against the core primitive on the same data.
-        let (evmin, evmax) =
-            AutoscaleMode::Stddev3.range(&pixels, crate::core::colormap::DEFAULT_PERCENTILES);
+        let (evmin, evmax) = AutoscaleMode::Stddev3.range(
+            Normalization::Linear,
+            &pixels,
+            crate::core::colormap::DEFAULT_PERCENTILES,
+        );
         assert_eq!(cm.vmin, evmin);
         assert_eq!(cm.vmax, evmax);
         assert_eq!((cm.vmin, cm.vmax), (-1.0, 1.0));
@@ -15668,7 +15672,8 @@ mod tests {
         // numpy linear-interpolation percentile over the 10 finite values
         // [0..=9]: rank = p/100 * (n-1) = p/100 * 9. p=10 -> rank 0.9 -> 0.9;
         // p=90 -> rank 8.1 -> 8.1.
-        let (evmin, evmax) = AutoscaleMode::Percentile.range(&pixels, (10.0, 90.0));
+        let (evmin, evmax) =
+            AutoscaleMode::Percentile.range(Normalization::Linear, &pixels, (10.0, 90.0));
         assert_eq!(cm.vmin, evmin);
         assert_eq!(cm.vmax, evmax);
         assert!((cm.vmin - 0.9).abs() < 1e-12, "vmin {}", cm.vmin);

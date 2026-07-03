@@ -332,14 +332,16 @@ impl ColormapDialog {
     }
 
     /// The autoscale `(vmin, vmax)` this dialog applies over `pixels` for its
-    /// current mode and percentiles (silx `Colormap` autoscale via the
-    /// `ColormapDialog`-fed histogram). MinMax = finite min/max, Stddev3 =
-    /// mean ± 3·std clamped to the data range, Percentile = the dialog's
-    /// `(low, high)` percentiles. Split out so the mode/percentile selection is
-    /// testable without a GPU-backed [`Plot2D`]; [`Self::apply`] feeds it the
-    /// active image's raw pixels.
+    /// current mode, percentiles, and normalization (silx `Colormap` autoscale
+    /// via the `ColormapDialog`-fed histogram; the range dispatches per
+    /// normalizer — `_computeAutoscaleRange`, colors.py:682-692, so e.g. a log
+    /// dialog autoscales to `(min positive, max)`). Split out so the
+    /// mode/percentile/normalization selection is testable without a
+    /// GPU-backed [`Plot2D`]; [`Self::apply`] feeds it the active image's raw
+    /// pixels.
     pub(crate) fn autoscale_range(&self, pixels: &[f64]) -> (f64, f64) {
-        self.autoscale_mode.range(pixels, self.percentiles)
+        self.autoscale_mode
+            .range(self.normalization, pixels, self.percentiles)
     }
 
     /// Re-calculate and apply the colormap to the plot.
@@ -533,8 +535,11 @@ mod tests {
         // percentiles via the public AutoscaleMode::range consumer (the dialog
         // stores them; the range computation in 6B-2 reads them back).
         let (lo, hi) = dialog.percentiles;
-        let (rmin, rmax) = AutoscaleMode::Percentile
-            .range(&(0..=100).map(|i| i as f64).collect::<Vec<_>>(), (lo, hi));
+        let (rmin, rmax) = AutoscaleMode::Percentile.range(
+            Normalization::Linear,
+            &(0..=100).map(|i| i as f64).collect::<Vec<_>>(),
+            (lo, hi),
+        );
         // percentile 2.5 -> 2.5, 97.5 -> 97.5 over 0..=100 (numpy linear interp).
         assert!((rmin - 2.5).abs() < 1e-9, "rmin {rmin}");
         assert!((rmax - 97.5).abs() < 1e-9, "rmax {rmax}");
@@ -562,7 +567,10 @@ mod tests {
         dialog.autoscale_mode = AutoscaleMode::Percentile;
         dialog.percentiles = (10.0, 90.0);
         let pct = dialog.autoscale_range(&data);
-        assert_eq!(pct, AutoscaleMode::Percentile.range(&data, (10.0, 90.0)));
+        assert_eq!(
+            pct,
+            AutoscaleMode::Percentile.range(Normalization::Linear, &data, (10.0, 90.0))
+        );
         assert!(
             pct.0 > minmax.0 && pct.1 < minmax.1,
             "percentile {pct:?} must be tighter than minmax {minmax:?}"
@@ -572,8 +580,26 @@ mod tests {
         dialog.autoscale_mode = AutoscaleMode::Stddev3;
         assert_eq!(
             dialog.autoscale_range(&data),
-            AutoscaleMode::Stddev3.range(&data, dialog.percentiles)
+            AutoscaleMode::Stddev3.range(Normalization::Linear, &data, dialog.percentiles)
         );
+    }
+
+    #[test]
+    fn autoscale_range_honors_the_dialog_normalization() {
+        // R1-9: the dialog's autoscale is normalization-aware (silx
+        // _computeAutoscaleRange, colors.py:682-692). Counting data with
+        // zeros under a log dialog autoscales to (min positive, max), not to
+        // a vmin of 0 that collapses the log mapping.
+        let data = [0.0, 0.0, 0.5, 100.0];
+        let mut dialog = ColormapDialog::new();
+        dialog.autoscale = true;
+        dialog.autoscale_mode = AutoscaleMode::MinMax;
+
+        dialog.normalization = Normalization::Log;
+        assert_eq!(dialog.autoscale_range(&data), (0.5, 100.0));
+
+        dialog.normalization = Normalization::Linear;
+        assert_eq!(dialog.autoscale_range(&data), (0.0, 100.0));
     }
 
     // ── Histogram display (wave 6): data model ───────────────────────────────

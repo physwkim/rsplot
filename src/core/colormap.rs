@@ -82,6 +82,31 @@ impl Normalization {
             Normalization::Arcsinh => t.sinh(),
         }
     }
+
+    /// The autoscale fallback `(vmin, vmax)` when there is no usable data
+    /// (silx `_NormalizationMixIn.DEFAULT_RANGE`): `(1, 10)` for
+    /// [`Log`](Normalization::Log) (`LogarithmicNormalization.DEFAULT_RANGE`,
+    /// math/colormap.py:410), `(0, 1)` for every other normalization.
+    pub fn default_autoscale_range(self) -> (f64, f64) {
+        match self {
+            Normalization::Log => (1.0, 10.0),
+            _ => (0.0, 1.0),
+        }
+    }
+
+    /// Whether `v` is in this normalization's valid autoscale domain (silx
+    /// `_NormalizationMixIn.is_valid`): `v > 0` for
+    /// [`Log`](Normalization::Log) (math/colormap.py:417-419), `v >= 0` for
+    /// [`Sqrt`](Normalization::Sqrt) (math/colormap.py:434-436), everything
+    /// (including non-finite values — silx's base `is_valid` is all-`True`;
+    /// finiteness is filtered separately) otherwise.
+    pub fn is_valid_autoscale_value(self, v: f64) -> bool {
+        match self {
+            Normalization::Log => v > 0.0,
+            Normalization::Sqrt => v >= 0.0,
+            _ => true,
+        }
+    }
 }
 
 /// A named colormap in the built-in catalog. The perceptual maps are backed by
@@ -859,21 +884,30 @@ impl Colormap {
         let idx = (self.normalize(v) * 255.0).clamp(0.0, 255.0) as usize;
         self.lut[idx]
     }
+
+    /// The `(vmin, vmax)` autoscale range over `data` for `mode` under *this
+    /// colormap's* normalization and percentile pair — silx
+    /// `Colormap._computeAutoscaleRange` (colors.py:682-692), which dispatches
+    /// to the normalizer's `autoscale`. This is the single entry point every
+    /// raw-data autoscale should use; see [`AutoscaleMode::range`] for the
+    /// per-normalization semantics.
+    pub fn autoscale_range(&self, mode: AutoscaleMode, data: &[f64]) -> (f64, f64) {
+        mode.range(self.normalization, data, self.autoscale_percentiles)
+    }
 }
 
 /// silx's default `(low, high)` percentiles for [`AutoscaleMode::Percentile`]
 /// (`Colormap._DEFAULT_PERCENTILES`).
 pub const DEFAULT_PERCENTILES: (f64, f64) = (1.0, 99.0);
 
-/// silx's default `(vmin, vmax)` when autoscale has no finite data to work with
-/// (the linear-normalization `_NormalizationMixIn.DEFAULT_RANGE`).
-const DEFAULT_RANGE: (f64, f64) = (0.0, 1.0);
-
 /// How autoscale derives `(vmin, vmax)` from data (silx `Colormap.AUTOSCALE_MODES`).
 ///
-/// These mirror the *linear-normalization* autoscale of `silx.math.colormap`
-/// (`_LinearNormalizationMixIn`): the data range is used directly, not the
-/// normalized data.
+/// Autoscale is normalization-dependent (silx
+/// `Colormap._computeAutoscaleRange` dispatches to the *normalizer*'s
+/// `autoscale`, colors.py:682-692): [`AutoscaleMode::range`] therefore
+/// requires the [`Normalization`], making a normalization-blind autoscale
+/// unrepresentable. Use [`Colormap::autoscale_range`] to autoscale with a
+/// colormap's own normalization and percentiles.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum AutoscaleMode {
     /// Finite data min/max (silx `MINMAX`).
@@ -905,24 +939,59 @@ impl AutoscaleMode {
         }
     }
 
-    /// Compute the `(vmin, vmax)` autoscale range over `data` for this mode.
+    /// Compute the `(vmin, vmax)` autoscale range over `data` for this mode
+    /// under `normalization` — silx's normalizer `autoscale`
+    /// (`_NormalizationMixIn.autoscale`, math/colormap.py:238-297), reached
+    /// through `Colormap._computeAutoscaleRange` (colors.py:682-692). The
+    /// normalization is a required parameter because every part of the
+    /// computation depends on it:
     ///
-    /// `percentiles` is the `(low, high)` pair used by
-    /// [`Percentile`](Self::Percentile) (ignored by the other modes); pass
-    /// [`DEFAULT_PERCENTILES`] for silx's default. Non-finite samples are
-    /// dropped first. Mirrors `silx.math.colormap` linear-normalization
-    /// autoscale, including its fallbacks: empty / non-finite results collapse
-    /// to `DEFAULT_RANGE`, and an inverted range is clamped so `vmax >= vmin`.
-    pub fn range(self, data: &[f64], percentiles: (f64, f64)) -> (f64, f64) {
-        let finite: Vec<f64> = data.iter().copied().filter(|v| v.is_finite()).collect();
+    /// - **minmax**: valid-and-finite data min/max; under
+    ///   [`Normalization::Log`] it is `(min_positive, finite max)` instead
+    ///   (`LogarithmicNormalization.autoscale_minmax` →
+    ///   `_min_max(min_positive=True, finite=True)`, math/colormap.py:421-424,
+    ///   with **no** validity pre-filter — the max spans all finite values).
+    /// - **stddev3**: `mean ± 3·std` intersected with the minmax bounds
+    ///   (`vmin = max(dmin, stdmin)`, `vmax = min(dmax, stdmax)`, each falling
+    ///   back to the other side when one is absent, math/colormap.py:266-283).
+    ///   For [`Linear`](Normalization::Linear)/[`Gamma`](Normalization::Gamma)
+    ///   the mean/std run in *data* space (`_LinearNormalizationMixIn`,
+    ///   math/colormap.py:376-395); for log/sqrt/arcsinh they run in
+    ///   *normalized* space — `transform` → mean/std over the finite
+    ///   transformed values → `inverse_transform` back
+    ///   (`_NormalizationMixIn.autoscale_mean3std`, math/colormap.py:313-340).
+    /// - **percentile**: valid then finite filtering, then the `(low, high)`
+    ///   `nanpercentile` pair (math/colormap.py:355-370); `percentiles` is
+    ///   ignored by the other modes — pass [`DEFAULT_PERCENTILES`] for silx's
+    ///   default.
+    /// - **fallbacks**: empty data and `None`/non-finite bounds collapse
+    ///   per-side to [`Normalization::default_autoscale_range`] (`(1, 10)`
+    ///   under log), and an inverted range is clamped so `vmax >= vmin`
+    ///   (math/colormap.py:290-297).
+    ///
+    /// The standard deviation is the population (ddof = 0) std, matching
+    /// numpy `nanstd`.
+    pub fn range(
+        self,
+        normalization: Normalization,
+        data: &[f64],
+        percentiles: (f64, f64),
+    ) -> (f64, f64) {
+        let default_range = normalization.default_autoscale_range();
+        // silx autoscale head: no data at all -> DEFAULT_RANGE
+        // (math/colormap.py:251-253).
+        if data.is_empty() {
+            return default_range;
+        }
 
         let (raw_min, raw_max) = match self {
-            AutoscaleMode::MinMax => minmax(&finite),
+            AutoscaleMode::MinMax => autoscale_minmax(normalization, data),
             AutoscaleMode::Stddev3 => {
-                let (dmin, dmax) = minmax(&finite);
-                let (stdmin, stdmax) = mean3std(&finite);
+                let (dmin, dmax) = autoscale_minmax(normalization, data);
+                let (stdmin, stdmax) = autoscale_mean3std(normalization, data);
                 // silx: vmin = max(dmin, stdmin), vmax = min(dmax, stdmax),
-                // each falling back to the other when one side is absent.
+                // each falling back to the other when one side is absent
+                // (math/colormap.py:266-283).
                 let vmin = match (dmin, stdmin) {
                     (Some(d), Some(s)) => Some(d.max(s)),
                     (d, s) => d.or(s),
@@ -934,15 +1003,23 @@ impl AutoscaleMode {
                 (vmin, vmax)
             }
             AutoscaleMode::Percentile => {
-                let lo = nanpercentile(&finite, percentiles.0);
-                let hi = nanpercentile(&finite, percentiles.1);
+                // silx autoscale_percentiles: is_valid filter, then strip
+                // non-finite, then nanpercentile (math/colormap.py:355-370).
+                let valid: Vec<f64> = data
+                    .iter()
+                    .copied()
+                    .filter(|&v| v.is_finite() && normalization.is_valid_autoscale_value(v))
+                    .collect();
+                let lo = nanpercentile(&valid, percentiles.0);
+                let hi = nanpercentile(&valid, percentiles.1);
                 (lo, hi)
             }
         };
 
-        // silx fallback handling (_NormalizationMixIn.autoscale tail).
-        let vmin = raw_min.filter(|v| v.is_finite()).unwrap_or(DEFAULT_RANGE.0);
-        let mut vmax = raw_max.filter(|v| v.is_finite()).unwrap_or(DEFAULT_RANGE.1);
+        // silx fallback handling (_NormalizationMixIn.autoscale tail,
+        // math/colormap.py:290-297).
+        let vmin = raw_min.filter(|v| v.is_finite()).unwrap_or(default_range.0);
+        let mut vmax = raw_max.filter(|v| v.is_finite()).unwrap_or(default_range.1);
         if vmax < vmin {
             vmax = vmin;
         }
@@ -950,32 +1027,82 @@ impl AutoscaleMode {
     }
 }
 
-/// Finite min/max of `data`, or `(None, None)` when empty.
-fn minmax(data: &[f64]) -> (Option<f64>, Option<f64>) {
-    if data.is_empty() {
-        return (None, None);
+/// Normalization-aware autoscale min/max (silx `autoscale_minmax`), each side
+/// `None` when absent.
+///
+/// [`Normalization::Log`] uses silx's override (math/colormap.py:421-424):
+/// `_min_max(data, min_positive=True, finite=True)` → the smallest strictly
+/// positive finite value and the largest finite value, with **no** validity
+/// pre-filter (so the max spans all finite values, including non-positive
+/// ones). Every other normalization uses the base implementation
+/// (math/colormap.py:299-310): filter to valid (`is_valid`) finite values,
+/// then plain min/max.
+fn autoscale_minmax(normalization: Normalization, data: &[f64]) -> (Option<f64>, Option<f64>) {
+    if normalization == Normalization::Log {
+        let mut min_positive: Option<f64> = None;
+        let mut max: Option<f64> = None;
+        for &v in data {
+            if !v.is_finite() {
+                continue;
+            }
+            if v > 0.0 {
+                min_positive = Some(min_positive.map_or(v, |m| m.min(v)));
+            }
+            max = Some(max.map_or(v, |m| m.max(v)));
+        }
+        return (min_positive, max);
     }
-    let mut min = data[0];
-    let mut max = data[0];
-    for &v in &data[1..] {
-        min = min.min(v);
-        max = max.max(v);
+    let mut min: Option<f64> = None;
+    let mut max: Option<f64> = None;
+    for &v in data {
+        if !v.is_finite() || !normalization.is_valid_autoscale_value(v) {
+            continue;
+        }
+        min = Some(min.map_or(v, |m| m.min(v)));
+        max = Some(max.map_or(v, |m| m.max(v)));
     }
-    (Some(min), Some(max))
+    (min, max)
 }
 
-/// `(mean - 3·std, mean + 3·std)` of `data`, or `(None, None)` when empty.
-/// The standard deviation is the population (ddof = 0) std, matching numpy
-/// `nanstd` as used by silx's linear-normalization `autoscale_mean3std`.
-fn mean3std(data: &[f64]) -> (Option<f64>, Option<f64>) {
-    if data.is_empty() {
+/// Normalization-aware `mean ± 3·std` (silx `autoscale_mean3std`), or
+/// `(None, None)` when no finite sample survives.
+///
+/// [`Normalization::Linear`]/[`Normalization::Gamma`] compute in *data* space
+/// (`_LinearNormalizationMixIn.autoscale_mean3std`, math/colormap.py:376-395).
+/// Log/sqrt/arcsinh compute in *normalized* space: apply
+/// [`Normalization::transform`], drop non-finite results (silx replaces them
+/// with NaN before `nanmean`/`nanstd` — a non-positive value under log and a
+/// negative one under sqrt transform to NaN/-inf and are excluded), take
+/// `mean ± 3·std` there, and map back through
+/// [`Normalization::inverse_transform`] (`_NormalizationMixIn
+/// .autoscale_mean3std`, math/colormap.py:313-340). The std is the population
+/// (ddof = 0) std, matching numpy `nanstd`.
+fn autoscale_mean3std(normalization: Normalization, data: &[f64]) -> (Option<f64>, Option<f64>) {
+    let data_space = matches!(normalization, Normalization::Linear | Normalization::Gamma);
+    let samples: Vec<f64> = if data_space {
+        data.iter().copied().filter(|v| v.is_finite()).collect()
+    } else {
+        data.iter()
+            .map(|&v| normalization.transform(v))
+            .filter(|t| t.is_finite())
+            .collect()
+    };
+    if samples.is_empty() {
         return (None, None);
     }
-    let n = data.len() as f64;
-    let mean = data.iter().sum::<f64>() / n;
-    let variance = data.iter().map(|v| (v - mean) * (v - mean)).sum::<f64>() / n;
+    let n = samples.len() as f64;
+    let mean = samples.iter().sum::<f64>() / n;
+    let variance = samples.iter().map(|v| (v - mean) * (v - mean)).sum::<f64>() / n;
     let std = variance.sqrt();
-    (Some(mean - 3.0 * std), Some(mean + 3.0 * std))
+    let (lo, hi) = (mean - 3.0 * std, mean + 3.0 * std);
+    if data_space {
+        (Some(lo), Some(hi))
+    } else {
+        (
+            Some(normalization.inverse_transform(lo)),
+            Some(normalization.inverse_transform(hi)),
+        )
+    }
 }
 
 /// The `percentile`-th percentile of `data` (a value in `[0, 100]`), using
@@ -1472,7 +1599,7 @@ mod tests {
     fn autoscale_minmax_is_exact_finite_range() {
         let data = [3.0, -1.0, 5.0, 2.0];
         assert_eq!(
-            AutoscaleMode::MinMax.range(&data, DEFAULT_PERCENTILES),
+            AutoscaleMode::MinMax.range(Normalization::Linear, &data, DEFAULT_PERCENTILES),
             (-1.0, 5.0)
         );
     }
@@ -1482,7 +1609,8 @@ mod tests {
         // [0, 0, 0, 0, 10]: mean = 2, population std = 4, so mean±3·std =
         // [-10, 14]; clamped into the data range [0, 10] -> [0, 10].
         let data = [0.0, 0.0, 0.0, 0.0, 10.0];
-        let (vmin, vmax) = AutoscaleMode::Stddev3.range(&data, DEFAULT_PERCENTILES);
+        let (vmin, vmax) =
+            AutoscaleMode::Stddev3.range(Normalization::Linear, &data, DEFAULT_PERCENTILES);
         assert!((vmin - 0.0).abs() < 1e-9, "vmin {vmin}");
         assert!((vmax - 10.0).abs() < 1e-9, "vmax {vmax}");
 
@@ -1490,7 +1618,8 @@ mod tests {
         // [1, 2, 3, 4, 5] has mean 3, std sqrt(2); mean±3·std = 3 ± 3·sqrt(2)
         // = [-1.2426, 7.2426] -> clamped to data range [1, 5].
         let data2 = [1.0, 2.0, 3.0, 4.0, 5.0];
-        let (vmin2, vmax2) = AutoscaleMode::Stddev3.range(&data2, DEFAULT_PERCENTILES);
+        let (vmin2, vmax2) =
+            AutoscaleMode::Stddev3.range(Normalization::Linear, &data2, DEFAULT_PERCENTILES);
         assert!((vmin2 - 1.0).abs() < 1e-9, "vmin2 {vmin2}");
         assert!((vmax2 - 5.0).abs() < 1e-9, "vmax2 {vmax2}");
     }
@@ -1501,7 +1630,8 @@ mod tests {
         // rank(1%)  = 0.01 * 100 = 1.0  -> data[1]  = 1.0
         // rank(99%) = 0.99 * 100 = 99.0 -> data[99] = 99.0
         let data: Vec<f64> = (0..=100).map(|i| i as f64).collect();
-        let (vmin, vmax) = AutoscaleMode::Percentile.range(&data, DEFAULT_PERCENTILES);
+        let (vmin, vmax) =
+            AutoscaleMode::Percentile.range(Normalization::Linear, &data, DEFAULT_PERCENTILES);
         assert!((vmin - 1.0).abs() < 1e-9, "vmin {vmin}");
         assert!((vmax - 99.0).abs() < 1e-9, "vmax {vmax}");
     }
@@ -1519,20 +1649,162 @@ mod tests {
         // NaN/inf are stripped before computing the range.
         let data = [f64::NAN, 4.0, f64::INFINITY, 2.0];
         assert_eq!(
-            AutoscaleMode::MinMax.range(&data, DEFAULT_PERCENTILES),
+            AutoscaleMode::MinMax.range(Normalization::Linear, &data, DEFAULT_PERCENTILES),
             (2.0, 4.0)
         );
         // No finite samples -> silx DEFAULT_RANGE (0, 1).
         let empty: [f64; 0] = [];
         assert_eq!(
-            AutoscaleMode::MinMax.range(&empty, DEFAULT_PERCENTILES),
+            AutoscaleMode::MinMax.range(Normalization::Linear, &empty, DEFAULT_PERCENTILES),
             (0.0, 1.0)
         );
         let all_nan = [f64::NAN, f64::NAN];
         assert_eq!(
-            AutoscaleMode::Stddev3.range(&all_nan, DEFAULT_PERCENTILES),
+            AutoscaleMode::Stddev3.range(Normalization::Linear, &all_nan, DEFAULT_PERCENTILES),
             (0.0, 1.0)
         );
+    }
+
+    #[test]
+    fn log_autoscale_minmax_is_min_positive_to_finite_max() {
+        // silx LogarithmicNormalization.autoscale_minmax
+        // (math/colormap.py:421-424): (min_positive, finite max) — counting
+        // data with zeros/negatives must NOT collapse vmin to <= 0.
+        let data = [-5.0, 0.0, 0.1, 100.0, f64::NAN];
+        assert_eq!(
+            AutoscaleMode::MinMax.range(Normalization::Log, &data, DEFAULT_PERCENTILES),
+            (0.1, 100.0)
+        );
+        // The same data under Linear keeps the raw min.
+        assert_eq!(
+            AutoscaleMode::MinMax.range(Normalization::Linear, &data, DEFAULT_PERCENTILES),
+            (-5.0, 100.0)
+        );
+    }
+
+    #[test]
+    fn log_autoscaled_colormap_does_not_collapse_norm_bounds() {
+        // End to end through Colormap::autoscale_range (silx
+        // _computeAutoscaleRange, colors.py:682-692): a log colormap
+        // autoscaled over data containing zeros gets vmin = min positive, so
+        // norm_bounds() stays usable instead of the (0, 0) low-color collapse.
+        let mut cm = Colormap::viridis(0.0, 1.0);
+        cm.normalization = Normalization::Log;
+        let data = [0.0, 0.0, 0.5, 20.0];
+        let (vmin, vmax) = cm.autoscale_range(AutoscaleMode::MinMax, &data);
+        assert_eq!((vmin, vmax), (0.5, 20.0));
+        cm.vmin = vmin;
+        cm.vmax = vmax;
+        assert_ne!(cm.norm_bounds(), (0.0, 0.0), "log bounds must not collapse");
+    }
+
+    #[test]
+    fn log_autoscale_fallbacks_use_the_1_10_default_range() {
+        // Empty data -> the log DEFAULT_RANGE (1, 10)
+        // (LogarithmicNormalization.DEFAULT_RANGE, math/colormap.py:410).
+        let empty: [f64; 0] = [];
+        assert_eq!(
+            AutoscaleMode::MinMax.range(Normalization::Log, &empty, DEFAULT_PERCENTILES),
+            (1.0, 10.0)
+        );
+        let all_nan = [f64::NAN, f64::NAN];
+        assert_eq!(
+            AutoscaleMode::MinMax.range(Normalization::Log, &all_nan, DEFAULT_PERCENTILES),
+            (1.0, 10.0)
+        );
+        // No positive value: min_positive is None -> vmin falls back to 1;
+        // the finite max (-1) is below it, so vmax clamps to vmin
+        // (math/colormap.py:290-297).
+        let negative = [-5.0, -1.0];
+        assert_eq!(
+            AutoscaleMode::MinMax.range(Normalization::Log, &negative, DEFAULT_PERCENTILES),
+            (1.0, 1.0)
+        );
+    }
+
+    #[test]
+    fn log_percentile_filters_to_positive_values() {
+        // silx autoscale_percentiles applies is_valid (v > 0 for log) before
+        // the percentile (math/colormap.py:355-370): with (0, 100) the range
+        // spans only the positive values.
+        let data = [-100.0, 1.0, 2.0, 3.0, 4.0];
+        assert_eq!(
+            AutoscaleMode::Percentile.range(Normalization::Log, &data, (0.0, 100.0)),
+            (1.0, 4.0)
+        );
+        assert_eq!(
+            AutoscaleMode::Percentile.range(Normalization::Linear, &data, (0.0, 100.0)),
+            (-100.0, 4.0)
+        );
+    }
+
+    #[test]
+    fn log_stddev3_runs_in_normalized_space() {
+        // silx _NormalizationMixIn.autoscale_mean3std for non-linear
+        // normalizations (math/colormap.py:313-340): mean ± 3·std over
+        // log10(data) (non-finite transforms dropped), reverted through 10^x,
+        // then intersected with minmax. Twenty 1.0 samples and one 1e6:
+        // transformed = twenty 0.0 and one 6.0.
+        let mut data = vec![1.0; 20];
+        data.push(1e6);
+        let n = 21.0f64;
+        let mean = 6.0 / n;
+        let variance: f64 = (20.0 * mean * mean + (6.0 - mean) * (6.0 - mean)) / n;
+        let hi = 10f64.powf(mean + 3.0 * variance.sqrt()); // ~1.3e4 < dmax 1e6
+        let (vmin, vmax) =
+            AutoscaleMode::Stddev3.range(Normalization::Log, &data, DEFAULT_PERCENTILES);
+        // vmin: revert(mean - 3·std) ~ 2.8e-4 is below min_positive = 1, so
+        // the minmax intersection keeps 1 (vmin = max(dmin, stdmin)).
+        assert!((vmin - 1.0).abs() < 1e-12, "vmin {vmin}");
+        assert!((vmax - hi).abs() / hi < 1e-12, "vmax {vmax} != {hi}");
+        // Data-space stddev3 (the old behavior) is wildly different here:
+        // mean_d = 1e6/21 + 20/21, std_d from the same two-point split ->
+        // vmax = mean_d + 3·std_d ~ 6.9e5, ~50x the normalized-space bound.
+        let mean_d = (20.0 * 1.0 + 1e6) / n;
+        let var_d: f64 =
+            (20.0 * (1.0 - mean_d) * (1.0 - mean_d) + (1e6 - mean_d) * (1e6 - mean_d)) / n;
+        let hi_d = mean_d + 3.0 * var_d.sqrt();
+        let (_, linear_vmax) =
+            AutoscaleMode::Stddev3.range(Normalization::Linear, &data, DEFAULT_PERCENTILES);
+        assert!(
+            (linear_vmax - hi_d).abs() / hi_d < 1e-12,
+            "linear vmax {linear_vmax} != {hi_d}"
+        );
+        assert!(linear_vmax > 50.0 * hi, "spaces must differ materially");
+    }
+
+    #[test]
+    fn sqrt_autoscale_filters_negative_values() {
+        // silx SqrtNormalization.is_valid = v >= 0 (math/colormap.py:434-436):
+        // minmax and percentile exclude negatives; zero stays valid.
+        let data = [-4.0, 0.0, 1.0, 4.0];
+        assert_eq!(
+            AutoscaleMode::MinMax.range(Normalization::Sqrt, &data, DEFAULT_PERCENTILES),
+            (0.0, 4.0)
+        );
+        assert_eq!(
+            AutoscaleMode::Percentile.range(Normalization::Sqrt, &data, (0.0, 100.0)),
+            (0.0, 4.0)
+        );
+    }
+
+    #[test]
+    fn default_autoscale_range_and_validity_per_normalization() {
+        assert_eq!(Normalization::Log.default_autoscale_range(), (1.0, 10.0));
+        for norm in [
+            Normalization::Linear,
+            Normalization::Sqrt,
+            Normalization::Gamma,
+            Normalization::Arcsinh,
+        ] {
+            assert_eq!(norm.default_autoscale_range(), (0.0, 1.0), "{norm:?}");
+        }
+        assert!(!Normalization::Log.is_valid_autoscale_value(0.0));
+        assert!(Normalization::Log.is_valid_autoscale_value(0.5));
+        assert!(Normalization::Sqrt.is_valid_autoscale_value(0.0));
+        assert!(!Normalization::Sqrt.is_valid_autoscale_value(-0.5));
+        assert!(Normalization::Arcsinh.is_valid_autoscale_value(-0.5));
+        assert!(Normalization::Linear.is_valid_autoscale_value(-0.5));
     }
 
     #[test]

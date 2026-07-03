@@ -165,7 +165,7 @@ impl Scatter3D {
     /// With no data the range falls back to the autoscale default, matching
     /// [`AutoscaleMode::range`].
     pub fn autoscale_colormap(&mut self, mode: AutoscaleMode) -> (f64, f64) {
-        let (vmin, vmax) = mode.range(&self.values, self.colormap.autoscale_percentiles);
+        let (vmin, vmax) = self.colormap.autoscale_range(mode, &self.values);
         self.colormap.vmin = vmin;
         self.colormap.vmax = vmax;
         (vmin, vmax)
@@ -366,7 +366,7 @@ impl Scatter2D {
     /// Fit the colormap's value range to the current data with `mode`, returning
     /// the new `(vmin, vmax)` (as [`Scatter3D::autoscale_colormap`]).
     pub fn autoscale_colormap(&mut self, mode: AutoscaleMode) -> (f64, f64) {
-        let (vmin, vmax) = mode.range(&self.values, self.colormap.autoscale_percentiles);
+        let (vmin, vmax) = self.colormap.autoscale_range(mode, &self.values);
         self.colormap.vmin = vmin;
         self.colormap.vmax = vmax;
         (vmin, vmax)
@@ -898,7 +898,7 @@ impl ColormapMesh3D {
     /// Fit the colormap's value range to the current data with `mode`, returning
     /// the new `(vmin, vmax)` (as [`Scatter3D::autoscale_colormap`]).
     pub fn autoscale_colormap(&mut self, mode: AutoscaleMode) -> (f64, f64) {
-        let (vmin, vmax) = mode.range(&self.values, self.colormap.autoscale_percentiles);
+        let (vmin, vmax) = self.colormap.autoscale_range(mode, &self.values);
         self.colormap.vmin = vmin;
         self.colormap.vmax = vmax;
         (vmin, vmax)
@@ -1550,7 +1550,7 @@ impl ImageData3D {
     /// Fit the colormap's value range to the current data with `mode`, returning
     /// the new `(vmin, vmax)`.
     pub fn autoscale_colormap(&mut self, mode: AutoscaleMode) -> (f64, f64) {
-        let (vmin, vmax) = mode.range(&self.data, self.colormap.autoscale_percentiles);
+        let (vmin, vmax) = self.colormap.autoscale_range(mode, &self.data);
         self.colormap.vmin = vmin;
         self.colormap.vmax = vmax;
         (vmin, vmax)
@@ -1900,7 +1900,7 @@ impl HeightMapData {
 
     /// Fit the colormap's value range to the colormapped data with `mode`.
     pub fn autoscale_colormap(&mut self, mode: AutoscaleMode) -> (f64, f64) {
-        let (vmin, vmax) = mode.range(&self.values, self.colormap.autoscale_percentiles);
+        let (vmin, vmax) = self.colormap.autoscale_range(mode, &self.values);
         self.colormap.vmin = vmin;
         self.colormap.vmax = vmax;
         (vmin, vmax)
@@ -2635,7 +2635,7 @@ impl ScalarField3D {
             return (cm.vmin, cm.vmax);
         }
         let values: Vec<f64> = self.data.iter().map(|&v| v as f64).collect();
-        let (vmin, vmax) = mode.range(&values, self.cut_plane.colormap.autoscale_percentiles);
+        let (vmin, vmax) = self.cut_plane.colormap.autoscale_range(mode, &values);
         self.cut_plane.colormap.vmin = vmin;
         self.cut_plane.colormap.vmax = vmax;
         (vmin, vmax)
