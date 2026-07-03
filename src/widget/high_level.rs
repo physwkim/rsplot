@@ -28,7 +28,7 @@ use crate::core::shape::{Shape, ShapeKind};
 use crate::core::sift_align::{
     AffineTransformation, MatchedKeypoint, SiftAlignment, sift_auto_align,
 };
-use crate::core::transform::{AxisSide, Margins, Scale, YAxis};
+use crate::core::transform::{AxisSide, Margins, Scale, YAxis, clamp_axis_limits};
 use crate::core::triangles::Triangles;
 use crate::render::backend_wgpu::WgpuBackend;
 use crate::render::gpu_curve::CurveData;
@@ -1776,6 +1776,72 @@ fn raw_data_range_from_bounds(bounds: &DataBounds) -> DataRange {
         x: bounds.x.map(|b| (b.min, b.max)),
         y: bounds.y_left.map(|b| (b.min, b.max)),
         y2: bounds.y_right.map(|b| (b.min, b.max)),
+    }
+}
+
+/// Keep only the points a silx log-filtered curve keeps (`_logFilterData`,
+/// `items/curve.py`): a point survives when its coordinate is strictly
+/// positive on every log axis (and finite). Returns the `(min, max)` of the
+/// surviving points' X (`want_x`) or Y coordinates, `None` when no point
+/// survives.
+fn log_filtered_curve_range(
+    x: &[f64],
+    y: &[f64],
+    x_log: bool,
+    y_log: bool,
+    want_x: bool,
+) -> Option<(f64, f64)> {
+    let mut range: Option<(f64, f64)> = None;
+    for (&xv, &yv) in x.iter().zip(y) {
+        if (x_log && xv <= 0.0) || (y_log && yv <= 0.0) {
+            continue;
+        }
+        let v = if want_x { xv } else { yv };
+        if !v.is_finite() {
+            continue;
+        }
+        range = Some(match range {
+            None => (v, v),
+            Some((lo, hi)) => (lo.min(v), hi.max(v)),
+        });
+    }
+    range
+}
+
+/// One record's contribution to the data range under log axes, mirroring the
+/// range silx recomputes after a log toggle (`_internalSetScale` invalidates
+/// the data range; items re-derive bounds against the new scales): when no
+/// log axis reaches `<= 0` the raw bounds stand; otherwise a curve re-derives
+/// its range from the log-filtered points (`_logFilterData`) and any other
+/// item (image, unfilterable) drops out entirely, matching
+/// `ImageBase._getBounds` returning nothing under a log axis with a
+/// non-positive extent.
+///
+/// `want_x` selects the X range (any record contributes, like silx
+/// `ranges.x`); otherwise the LEFT-Y range is returned — right-bound records
+/// yield `None` there, since silx repairs the left axis from `ranges.y` only
+/// (`YAxis._getDataRange`, items/axis.py:517-519). The cross-axis filter
+/// still uses the record's own Y bounds, whichever axis it feeds.
+fn record_log_range(
+    record: &ItemRecord,
+    x_log: bool,
+    y_log: bool,
+    want_x: bool,
+) -> Option<(f64, f64)> {
+    let xb = record.bounds.x?;
+    let yb = record.bounds.y_left.or(record.bounds.y_right)?;
+    if (!x_log || xb.min > 0.0) && (!y_log || yb.min > 0.0) {
+        let b = if want_x { xb } else { record.bounds.y_left? };
+        return Some((b.min, b.max));
+    }
+    if !want_x && record.bounds.y_left.is_none() {
+        return None;
+    }
+    match &record.data {
+        Some(RetainedItemData::Curve { x, y }) => {
+            log_filtered_curve_range(x, y, x_log, y_log, want_x)
+        }
+        _ => None,
     }
 }
 
@@ -6227,9 +6293,42 @@ impl PlotWidget {
             .unwrap_or(false)
     }
 
-    /// Enable or disable a log10 X axis.  Limits must be strictly positive when on.
+    /// Enable or disable a log10 X axis.
+    ///
+    /// Switching to log with a current lower limit `<= 0` immediately refits
+    /// the axis to its strictly positive data range, mirroring silx
+    /// `XAxis._internalSetScale` (`items/axis.py:398-421`): the current upper
+    /// limit is kept when it already sits inside positive data
+    /// (`setLimits(dataRange[0], vmax)`), otherwise the full positive range
+    /// is adopted, and with no positive data the axis lands on `(1, 100)` —
+    /// instead of leaving a `Log10` axis with `min <= 0` to NaN the
+    /// transform.
     pub fn set_x_log(&mut self, on: bool) {
+        // silx Axis.setScale early-returns when unchanged (items/axis.py:225-229).
+        if self.is_x_logarithmic() == on {
+            return;
+        }
         self.backend.set_x_log(on);
+        if !on {
+            return;
+        }
+        let (vmin, vmax) = self.x_limits();
+        if vmin > 0.0 {
+            return;
+        }
+        let (lo, hi) = match self.positive_data_range(true) {
+            None => (1.0, 100.0),
+            Some((dmin, dmax)) => {
+                if vmax > 0.0 && dmin < vmax {
+                    (dmin, vmax)
+                } else {
+                    (dmin, dmax)
+                }
+            }
+        };
+        // silx writes via Axis.setLimits → _checkLimits (checkAxisLimits).
+        let (lo, hi) = clamp_axis_limits(lo, hi, true);
+        self.set_graph_x_limits(lo, hi);
     }
 
     /// Enable or disable a log10 X axis (alias for [`set_x_log`](Self::set_x_log)).
@@ -6247,9 +6346,40 @@ impl PlotWidget {
         self.is_x_logarithmic()
     }
 
-    /// Enable or disable a log10 Y axis.  Limits must be strictly positive when on.
+    /// Enable or disable a log10 Y axis.
+    ///
+    /// Switching to log with a current left lower limit `<= 0` immediately
+    /// refits the left axis to its strictly positive data range, mirroring
+    /// silx `YAxis._internalSetScale` (`items/axis.py:463-484`); see
+    /// [`set_x_log`](Self::set_x_log) for the exact rule. Like silx (where
+    /// the right axis shares the left scale but only the left limits are
+    /// repaired), the y2 range is left as-is.
     pub fn set_y_log(&mut self, on: bool) {
+        // silx Axis.setScale early-returns when unchanged (items/axis.py:225-229).
+        if self.is_y_logarithmic() == on {
+            return;
+        }
         self.backend.set_y_log(on);
+        if !on {
+            return;
+        }
+        let (_, _, vmin, vmax) = self.backend.plot().limits;
+        if vmin > 0.0 {
+            return;
+        }
+        let (lo, hi) = match self.positive_data_range(false) {
+            None => (1.0, 100.0),
+            Some((dmin, dmax)) => {
+                if vmax > 0.0 && dmin < vmax {
+                    (dmin, vmax)
+                } else {
+                    (dmin, dmax)
+                }
+            }
+        };
+        // silx writes via Axis.setLimits → _checkLimits (checkAxisLimits).
+        let (lo, hi) = clamp_axis_limits(lo, hi, true);
+        self.set_graph_y_limits(lo, hi, YAxis::Left);
     }
 
     /// Enable or disable a log10 Y axis (alias for [`set_y_log`](Self::set_y_log)).
@@ -6366,8 +6496,19 @@ impl PlotWidget {
     }
 
     /// Keep data square on screen by expanding the tighter axis' display range.
+    ///
+    /// Mirrors silx `setKeepDataAspectRatio` (`PlotWidget.py:2958-2969`):
+    /// no-op when the flag is unchanged, otherwise the view is immediately
+    /// refit to the full data via a forced reset zoom (silx
+    /// `_forceResetZoom`), ignoring the autoscale flags. silx's
+    /// `notify("setKeepDataAspectRatio")` event has no [`PlotEvent`]
+    /// counterpart; the refit's `LimitsChanged` is emitted.
     pub fn set_keep_data_aspect_ratio(&mut self, on: bool) {
+        if self.is_keep_data_aspect_ratio() == on {
+            return;
+        }
         self.backend.set_keep_data_aspect_ratio(on);
+        self.force_reset_zoom();
     }
 
     pub fn is_keep_data_aspect_ratio(&self) -> bool {
@@ -7503,6 +7644,42 @@ impl PlotWidget {
         if self.auto_reset_zoom && !self.data_bounds_empty() {
             self.apply_limits_from_data_bounds();
         }
+    }
+
+    /// The data range silx would report after a log toggle: the per-record
+    /// log-aware contributions ([`record_log_range`], using the CURRENT axis
+    /// scales) merged across items. `want_x` selects `ranges.x`; otherwise
+    /// the left-Y `ranges.y`. `None` when no item survives the log filter.
+    fn positive_data_range(&self, want_x: bool) -> Option<(f64, f64)> {
+        let x_log = self.backend.plot().x_scale == Scale::Log10;
+        let y_log = self.backend.plot().y_scale == Scale::Log10;
+        let mut merged: Option<(f64, f64)> = None;
+        for record in &self.item_records {
+            if let Some((lo, hi)) = record_log_range(record, x_log, y_log, want_x) {
+                merged = Some(match merged {
+                    None => (lo, hi),
+                    Some((mlo, mhi)) => (mlo.min(lo), mhi.max(hi)),
+                });
+            }
+        }
+        merged
+    }
+
+    /// Refit ALL axes to the accumulated data regardless of the autoscale
+    /// flags (silx `_forceResetZoom`, `PlotWidget.py:3308-3345`), with the
+    /// widget-side extra-axes refit and `LimitsChanged` bookkeeping shared
+    /// with [`Self::apply_limits_from_data_bounds`].
+    fn force_reset_zoom(&mut self) {
+        let extra = extra_data_ranges(&self.data_bounds);
+        if !extra.is_empty() {
+            self.backend.plot_mut().reset_extra_axes_to(&extra);
+        }
+        let range = raw_data_range_from_bounds(&self.data_bounds);
+        let before = self.limits_snapshot();
+        self.backend
+            .plot_mut()
+            .force_reset_zoom_to_data_range(range);
+        self.push_limits_changed_if(before);
     }
 
     /// Whether no axis has accumulated any data bounds.
@@ -13907,6 +14084,35 @@ mod tests {
     fn finite_bounds_ignores_non_finite_values() {
         let bounds = finite_bounds(&[f64::NAN, 2.0, -1.0, f64::INFINITY]).unwrap();
         assert_eq!((bounds.min, bounds.max), (-1.0, 2.0));
+    }
+
+    #[test]
+    fn log_filtered_curve_range_drops_nonpositive_on_log_axes() {
+        // silx _logFilterData: a point survives only with a strictly positive
+        // coordinate on every log axis.
+        let x = [-1.0, 2.0, 3.0, 4.0];
+        let y = [5.0, -1.0, 1.0, 2.0];
+        // X log only: the x=-1 point drops; the y values are unconstrained.
+        assert_eq!(
+            log_filtered_curve_range(&x, &y, true, false, true),
+            Some((2.0, 4.0))
+        );
+        // Y range under the same filter (points x>0): y in {-1, 1, 2}.
+        assert_eq!(
+            log_filtered_curve_range(&x, &y, true, false, false),
+            Some((-1.0, 2.0))
+        );
+        // Both log: only (3,1) and (4,2) survive — the X range shrinks
+        // because the y<=0 point is dropped too (cross-axis filter).
+        assert_eq!(
+            log_filtered_curve_range(&x, &y, true, true, true),
+            Some((3.0, 4.0))
+        );
+        // Nothing survives: all y <= 0 under y log.
+        assert_eq!(
+            log_filtered_curve_range(&[1.0, 2.0], &[-1.0, 0.0], false, true, false),
+            None
+        );
     }
 
     #[test]
