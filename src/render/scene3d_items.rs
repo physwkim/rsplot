@@ -1986,6 +1986,12 @@ pub struct CutPlane {
     interpolation: ImageInterpolation,
     resolution: usize,
     visible: bool,
+    /// Colour of the plane/box intersection contour (silx `PlaneInGroup` line
+    /// colour, `primitives.py:1008` — default white `(1., 1., 1., 1.)`).
+    stroke_color: Color32,
+    /// Whether the contour is drawn (silx `PlaneInGroup.strokeVisible`,
+    /// default `True`, `primitives.py:1010`).
+    stroke_visible: bool,
 }
 
 impl Default for CutPlane {
@@ -1996,7 +2002,8 @@ impl Default for CutPlane {
 
 impl CutPlane {
     /// A hidden cut plane with silx defaults: normal `(0, 1, 0)` through the
-    /// origin, the viridis colormap over `[0, 1]`, linear interpolation.
+    /// origin, the viridis colormap over `[0, 1]`, linear interpolation, and a
+    /// visible white contour stroke.
     pub fn new() -> Self {
         Self {
             plane: Plane::new(Vec3::new(0.0, 0.0, 0.0), Vec3::new(0.0, 1.0, 0.0)),
@@ -2004,6 +2011,8 @@ impl CutPlane {
             interpolation: ImageInterpolation::Linear,
             resolution: DEFAULT_CUT_PLANE_RESOLUTION,
             visible: false,
+            stroke_color: Color32::WHITE,
+            stroke_visible: true,
         }
     }
 
@@ -2077,6 +2086,31 @@ impl CutPlane {
     /// Show or hide the cut plane (silx `setVisible`).
     pub fn set_visible(&mut self, visible: bool) {
         self.visible = visible;
+    }
+
+    /// The colour of the plane's border stroke — the plane/box intersection
+    /// contour (silx `ScalarFieldView.getStrokeColor`,
+    /// `ScalarFieldView.py:555-557`).
+    pub fn stroke_color(&self) -> Color32 {
+        self.stroke_color
+    }
+
+    /// Set the colour of the plane's border stroke (silx
+    /// `ScalarFieldView.setStrokeColor`, `ScalarFieldView.py:559-570`).
+    pub fn set_stroke_color(&mut self, color: Color32) {
+        self.stroke_color = color;
+    }
+
+    /// Whether the border stroke is drawn (silx `PlaneInGroup.strokeVisible`,
+    /// `primitives.py:1047-1050`).
+    pub fn is_stroke_visible(&self) -> bool {
+        self.stroke_visible
+    }
+
+    /// Show or hide the border stroke (silx `PlaneInGroup.strokeVisible`
+    /// setter, `primitives.py:1052-1056`).
+    pub fn set_stroke_visible(&mut self, visible: bool) {
+        self.stroke_visible = visible;
     }
 }
 
@@ -2485,16 +2519,37 @@ impl ScalarField3D {
             }
         }
         // The cut plane (when visible): a colormapped slice of the volume.
-        if self.cut_plane.visible
-            && let Some(mesh) = build_cut_plane_mesh(
+        if self.cut_plane.visible {
+            if let Some(mesh) = build_cut_plane_mesh(
                 &self.data,
                 self.depth,
                 self.height,
                 self.width,
                 &self.cut_plane,
-            )
-        {
-            geometry.add_textured_mesh(mesh);
+            ) {
+                geometry.add_textured_mesh(mesh);
+            }
+            // Border stroke: the plane/box intersection contour as a closed
+            // line loop (silx PlaneInGroup.contourVertices,
+            // primitives.py:1082-1101 `boxPlaneIntersect` over the parent data
+            // bounds → `Lines(contourVertices, mode="loop")` :1126). The stroke
+            // is white by default, silx width 2.0 — drawn 1px here like the
+            // rest of the line chrome, the box wireframe included.
+            if self.cut_plane.stroke_visible
+                && let Some(bounds) = self.bounds()
+            {
+                let contour = box_plane_intersect(
+                    bounds,
+                    self.cut_plane.plane.normal(),
+                    self.cut_plane.plane.point(),
+                );
+                if contour.len() >= 3 {
+                    for (i, &a) in contour.iter().enumerate() {
+                        let b = contour[(i + 1) % contour.len()];
+                        geometry.add_line(a.to_array(), b.to_array(), self.cut_plane.stroke_color);
+                    }
+                }
+            }
         }
     }
 }
@@ -3736,6 +3791,79 @@ mod tests {
             g.textured_meshes.is_empty(),
             "plane misses the volume → no mesh"
         );
+        assert!(g.lines.is_empty(), "plane misses the volume → no stroke");
+    }
+
+    #[test]
+    fn visible_cut_plane_emits_white_contour_stroke() {
+        // silx PlaneInGroup: the visible plane draws its plane/box intersection
+        // as a closed white line loop (primitives.py:1082-1126).
+        let (data, d, h, w) = blob_field(); // 5×5×5
+        let mut sf = ScalarField3D::new().with_data(&data, d, h, w);
+        {
+            let cp = sf.cut_plane_mut();
+            cp.set_normal(Vec3::new(0.0, 0.0, 1.0));
+            cp.set_point(Vec3::new(2.5, 2.5, 2.5));
+            cp.set_visible(true);
+        }
+        assert!(sf.cut_plane().is_stroke_visible(), "stroke on by default");
+        assert_eq!(sf.cut_plane().stroke_color(), Color32::WHITE);
+
+        let mut g = Scene3dGeometry::new();
+        sf.append_to(&mut g);
+        // z=2.5 ∩ box = a square → 4 contour vertices → 4 loop segments.
+        assert_eq!(g.lines.len(), 8, "4 closed-loop segments, 2 verts each");
+        let white = egui::Rgba::from(Color32::WHITE).to_array();
+        for v in &g.lines {
+            assert_eq!(v.color, white, "stroke is white by default");
+            assert!((v.pos[2] - 2.5).abs() < 1e-4, "stroke lies on the plane");
+        }
+        // Closed loop: every endpoint appears exactly twice.
+        let mut counts: Vec<([i32; 3], usize)> = Vec::new();
+        for v in &g.lines {
+            let key = [0, 1, 2].map(|k| (v.pos[k] * 1024.0).round() as i32);
+            match counts.iter_mut().find(|(p, _)| *p == key) {
+                Some((_, n)) => *n += 1,
+                None => counts.push((key, 1)),
+            }
+        }
+        assert_eq!(counts.len(), 4, "four distinct corners");
+        assert!(
+            counts.iter().all(|&(_, n)| n == 2),
+            "each corner shared by two segments (closed loop): {counts:?}"
+        );
+    }
+
+    #[test]
+    fn cut_plane_stroke_color_and_visibility_api() {
+        let (data, d, h, w) = blob_field();
+        let mut sf = ScalarField3D::new().with_data(&data, d, h, w);
+        {
+            let cp = sf.cut_plane_mut();
+            cp.set_normal(Vec3::new(0.0, 0.0, 1.0));
+            cp.set_point(Vec3::new(2.5, 2.5, 2.5));
+            cp.set_visible(true);
+            cp.set_stroke_color(Color32::RED); // ScalarFieldView.setStrokeColor
+        }
+        let mut g = Scene3dGeometry::new();
+        sf.append_to(&mut g);
+        let red = egui::Rgba::from(Color32::RED).to_array();
+        assert!(!g.lines.is_empty());
+        assert!(g.lines.iter().all(|v| v.color == red));
+
+        // strokeVisible = False suppresses the contour but keeps the slice.
+        sf.cut_plane_mut().set_stroke_visible(false);
+        let mut g2 = Scene3dGeometry::new();
+        sf.append_to(&mut g2);
+        assert!(g2.lines.is_empty(), "stroke hidden → no loop");
+        assert_eq!(g2.textured_meshes.len(), 1, "slice still drawn");
+
+        // Hidden plane: neither slice nor stroke.
+        sf.cut_plane_mut().set_stroke_visible(true);
+        sf.cut_plane_mut().set_visible(false);
+        let mut g3 = Scene3dGeometry::new();
+        sf.append_to(&mut g3);
+        assert!(g3.lines.is_empty() && g3.textured_meshes.is_empty());
     }
 
     /// A 2×2×2 complex field with one distinctive sample (`3 + 4i`) so each
