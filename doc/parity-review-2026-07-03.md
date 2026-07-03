@@ -431,6 +431,768 @@ Reference: `adl2pydm/output_handler.py:650-660` — for `stacking="row"` (vertic
 
 Impact: multi-item vertical choice buttons render oversized, truncated captions where MEDM (and adl2pydm) shrink the font to the per-button row.
 
+### Round 2 (2026-07-04) — R2-1..R2-69
+
+Same 5-agent split, scopes rotated to surfaces R1 left uncovered
+(A: tools/widget layer, not gesture mechanics; B: items/colors/ticks/
+fit-engine internals, not estimation seeds). Agent-local numbers were
+renumbered to the contiguous R2-1..R2-69 (A: 1–26, B: 27–45, C: 46–52,
+D: 53–60, E: 61–69). Per-category "below-bar residuals"/"examined and
+excluded"/"verified clean" notes are retained inline — they are
+inventory for future rounds, not findings.
+
+### R2 Category A — plot tools & widget layer (vs silx tools/widgets/actions) [R2-1..R2-26]
+
+
+### R2-1: ImageStack renders every frame through a fixed `viridis(0.0, 1.0)` colormap — silx autoscales the plot-default gray per frame
+
+Severity: High
+
+Rust: `src/widget/image_stack.rs:521` — `colormap: Colormap::viridis(0.0, 1.0)` in `ImageStack::new`; `rebuild_image` (`:807-822`) passes `self.colormap.clone()` verbatim into `try_add_image`/`try_update_image`, and `set_colormap` (`:699`) only replaces the fixed map — no autoscale path exists.
+
+Reference: `silx/gui/plot/ImageStack.py:548-550` — `self._plot.addImage(self._urlData[url.path()], resetzoom=...)` with **no** colormap argument; `silx/gui/plot/PlotWidget.py:1465-1467` — a new image gets `setColormap(self.getDefaultColormap())` = gray with `vmin=None, vmax=None`, i.e. re-autoscaled to each frame's own data range.
+
+Impact: browsing any stack whose values are outside `[0, 1]` (counts, detector frames) shows a saturated single-color image out of the box; even after `set_colormap` the range stays frozen across frames while silx re-autoscales per frame. This is a residual site of the R1-16 family — its fix `1e8af27` changed only `high_level.rs:3477`. (A further out-of-category sibling exists at `high_level.rs:8577`, CompareImages.)
+
+### R2-2: Free-line profile samples half a pixel off (silx's `-0.5` corner→centre shift dropped at every caller), and the axis-aligned free-line snap branch is unported
+
+Severity: High
+
+Rust: `src/widget/profile_window.rs:87-88` — `Roi::Line { start, end } => line_profile_band(..., *start, *end, ...)` where `start`/`end` come straight from `transform.pixel_to_data` (`src/widget/high_level.rs:10793,10800-10805` ImageView drag; `:12886-12891` StackView 1D). `line_profile_band`'s own doc (`high_level.rs:1546-1548`) declares its inputs are *pixel-centre* coordinates and that "silx's `-0.5` plot-corner shift is *not* applied here" — but no caller applies it. Same family: nearest-neighbour `line_profile_values` callers round raw corner-convention coords.
+
+Reference: `silx/gui/plot/tools/profile/core.py:480-488` — `bilinear.profile_line((startPt[0] - 0.5, startPt[1] - 0.5), (endPt[0] - 0.5, endPt[1] - 0.5), roiWidth, method)`; and `core.py:413-448` — a free line whose endpoints share an integer row/column is snapped to `_alignedPartialProfile` (integer-rectangle `numpy.mean/sum`, out-of-image region **zero-padded**, `core.py:300-325`), never bilinear.
+
+Impact: every free-line profile bilinearly samples 0.5 px up/right of silx — a drag along a pixel-row centre yields a 50/50 blend of two rows where silx returns exactly that row. A horizontal/vertical drawn free line additionally returns cross-row interpolated values (NaN out of bounds) instead of silx's exact integer-row reduction (zeros out of bounds).
+
+### R2-3: H/V band profiles use plain mean/sum — silx uses `nanmean`/`nansum`, so masked (NaN) pixels poison the whole band
+
+Severity: Medium
+
+Rust: `src/widget/high_level.rs:1446-1459` — `aligned_profile_values` accumulates `(start..end).map(...).sum()` then divides by the full band size; no NaN filtering (the free-line `line_profile_band` *is* finite-filtered — internally inconsistent).
+
+Reference: `silx/gui/plot/tools/profile/core.py:241-247` — `_alignedFullProfile`: `fct = numpy.nanmean` (mean) / `numpy.nansum` (sum).
+
+Impact: siplot's mask pipeline stores masked pixels as `f32::NAN`, so an h/v profile with Width > 1 crossing a masked blob shows a NaN gap where silx shows the mean/sum of the remaining unmasked rows; one NaN pixel nukes the sample.
+
+### R2-4: Profile never recomputes outside an active drag — Width/Method edits and image-data changes are dead until the next drag
+
+Severity: Medium
+
+Rust: the only `update_profile` call sites are inside `response.dragged()` blocks (`src/widget/high_level.rs:10796-10808`; StackView via `show_profile` from its drag handler); `ImageView::set_image` never touches `profile_window`; no profile ROI is retained after `drag_stopped`. The comment at `src/widget/profile_window.rs:341-343` — "the host re-drives from the active ROI each frame" — is false.
+
+Reference: `silx/gui/plot/tools/profile/manager.py:936-944` — recompute on item DATA/MASK/POSITION/SCALE change; `silx/gui/plot/tools/profile/rois.py:238-257` — `setProfileMethod`/`setProfileLineWidth` call `invalidateProfile()` → immediate recompute; `:234-236` — recompute on ROI region edit.
+
+Impact: with the profile window open, changing the Width DragValue or Mean/Sum combo visibly does nothing, and replacing the image leaves a stale profile; silx updates instantly in all three cases. Structural cause: no profile ROI is retained, so no recompute trigger has anything to act on.
+
+### R2-5: StackView 2D stack profile hardcodes width = 1 / Mean and nearest-neighbour line sampling — the 1D mode of the same tool honors Width/Method
+
+Severity: Medium
+
+Rust: `src/widget/high_level.rs:12895-12903` — the `StackProfileDimension::TwoD` arm calls `stack_aligned_profile(..., 1, ..., ProfileMethod::Mean)` for H/V and `stack_line_profile` (`:12414-12428`, per-frame nearest-neighbour `line_profile_values`) for Line, ignoring the profile window's width/method.
+
+Reference: `silx/gui/plot/tools/profile/rois.py:1096-1104` — the image-stack profile ROIs pass `lineWidth=self.getProfileLineWidth(), method=method` into the same `core.createProfile` (h/v → nan-aware band, line → bilinear `profile_line`).
+
+Impact: switching the Profile3D toolbar to 2D silently reverts to a 1-px mean profile; the 2D line profile additionally uses nearest-neighbour instead of bilinear sampling. Roadmap row 553 records the extraction cores (which *do* take width/method) but not this hardcoded wiring.
+
+### R2-6: Profile window plots value-vs-distance; silx plots against the projected plot axis with computed title/labels
+
+Severity: Medium
+
+Rust: `src/widget/high_level.rs:1557` — `line_profile_band` returns `(distance_along_line, value)` pairs, plotted as-is; the scatter path plots `distance_value_curve` (`src/core/scatter_viz.rs:631-642`, whose doc claims it is "the form silx `ScatterProfileToolBar` shows"); `src/widget/profile_window.rs:196` — static title `"Profile"`, no axis labels.
+
+Reference: `silx/gui/plot/tools/profile/core.py:540-563` — aligned profiles use `arange(len)*scale + origin` in the profiled axis' data coords; diagonal lines use `numpy.linspace(x0, x1, len)` (X data coords) with `xLabel = "{xlabel}"`; `silx/gui/plot/tools/profile/rois.py:801-808` — scatter profiles pick `points[:, 0]` or `points[:, 1]` by dominant span; `rois.py:313-323` — window title = computed profile description + `"; width = %d"`, axes relabeled from the source plot.
+
+Impact: numerically different x values in the profile window — a (0,0)→(3,4) line reads 0..5 in siplot vs 0..3 in silx — and the window carries none of silx's self-describing title/labels. Distance is silx's convention only for `ProfileImageDirectedLineROI` (`rois.py:444-454`), which siplot does not port.
+
+### R2-7: Median filter compounds on repeated Apply — silx always refilters the retained original image
+
+Severity: Medium
+
+Rust: `src/widget/high_level.rs:7075-7106` — `apply_median_filter_kernel` reads the **current** retained pixels, filters, then `update_image_spec(handle, spec)`; `update_image_spec` (`:4446-4449`) calls `set_retained_data(handle, data)` with the *filtered* pixels, so the next Apply filters the already-filtered image.
+
+Reference: `silx/gui/plot/actions/medfilt.py:83-102` — `_updateActiveImage` captures `self._originalImage`; `_updateFilter` disconnects `sigActiveImageChanged`, filters `_originalImage`, `addImage(..., replace=True)`, reconnects — the disconnect exists precisely so the original survives every kernel change.
+
+Impact: Apply at width 3 then width 5 displays `medfilt5(medfilt3(orig))` in siplot vs `medfilt5(orig)` in silx — progressive, irreversible degradation during normal kernel exploration, unrecoverable without re-adding the image.
+
+### R2-8: FitAction plot flow unported — fit range not seeded from the visible X window, no "Fit <legend>" overlay curve on the source plot
+
+Severity: Medium
+
+Rust: `src/widget/fit_widget.rs:726-735` — the fit result is a curve named `"Fit"` on the FitWidget's own internal Plot1D; `src/widget/high_level.rs:5872-5884` — `set_fit_target` passes the full `(x, y)`; `fit_widget.rs:445,452-457` — range defaults to whole-curve and, when enabled, seeds from the *data extent*, never from the plot's current X limits.
+
+Reference: `silx/gui/plot/actions/fit.py:249` — `self._setXRange(*plot.getXAxis().getLimits())` (fit defaults to the visible zoom window); `:429-451` — `fit_legend = "Fit <%s>" % legend`, `x_fit` clipped to the range, `plot.addCurve(x_fit, y_fit, fit_legend, resetzoom=False, ...)` overlays the result on the **source** plot, hidden on `FitStarted`/`FitFailed`.
+
+Impact: fitting a zoomed-in peak fits the whole spectrum — numerically different parameters for the canonical silx workflow — and the fit overlay never appears next to the data. Roadmap rows 549/551/560 cover only the FitWidget dialog internals.
+
+### R2-9: PositionInfo snapping engage contract diverges — silx engages by item *pick* (filled-bar area / ±3 px polyline) with histogram priority-break and a DPR-scaled radius; siplot uses global-nearest apex within an unscaled 5 px
+
+Severity: Medium
+
+Rust: `src/widget/high_level.rs:7213-7233` — `snap_cursor` feeds histogram `(centers, counts)` apex vertices (plus curve/scatter points) to `snap_to_nearest(..., SNAP_THRESHOLD_DIST)` (raw constant 5, `src/widget/position_info.rs:200`), picking the globally nearest vertex across all items; no `pixels_per_point`/DPR factor anywhere on the path.
+
+Reference: `silx/gui/plot/tools/PositionInfo.py:229-237` — `sqDistInPixels = (SNAP_THRESHOLD_DIST * ratio) ** 2` with `ratio = devicePixelRatio()`, in Qt-logical space (`BackendOpenGL.dataToPixel` divides by DPR, BackendOpenGL.py:1617-1624); `:246-258` — a histogram is engaged via `item.pick(xPixel, yPixel)` — filled histograms area-pick anywhere between baseline and value (`items/histogram.py:283-291`), non-filled within ±3 px of the *step polyline* (`BackendOpenGL.py:1267`) — then snaps to bin centre/value and `break`s (unconditional priority over nearer curve points).
+
+Impact: hovering the middle of a tall filled bar snaps in silx, never in siplot; on a DPR-2 display (macOS default) silx's effective snap radius is 10 logical px vs siplot's 5 — snapping is twice as hard to trigger; and a picked histogram loses priority to any nearer curve vertex.
+
+### R2-10: Mask overlay color never adapts to the image colormap — `_setOverlayColorForImage`/`cursorColorForColormap` unported, overlay stays the constructor placeholder
+
+Severity: Medium
+
+Rust: `src/widget/mask_tools.rs:355-363` — `color: Color32::from_rgb(160, 160, 164)` ("silx `_defaultOverlayColor = rgba(\"gray\")`") is never updated on image sync; the built-in colormaps carry no cursor colors and `registered_colormap_cursor_color` has no widget caller.
+
+Reference: `silx/gui/plot/MaskToolsWidget.py:449-458` — on every image sync `_defaultOverlayColor = rgba(cursorColorForColormap(colormap["name"]))` for colormapped images, `rgba("black")` for RGBA images; `silx/math/colormap.py:54-67` — `"gray" → "#ff66ff"` (pink), magma/inferno/plasma → `#00ff00`, blue → `#ffff00`.
+
+Impact: silx's `rgba("gray")` is only a pre-first-image placeholder; siplot keeps it forever, so with the (now silx-default, R1-16) gray colormap the mask overlay is gray-on-gray and nearly invisible, and the per-colormap contrast rule plus the RGBA black fallback are absent.
+
+### R2-11: Stats mean/std/sum/COM filter NaN out; silx propagates NaN through them (only min/max are NaN-immune)
+
+Severity: Medium
+
+Rust: `src/core/stats.rs:22-23` — "Non-finite values (`NaN`, `±inf`) are filtered out before any aggregation, matching silx's reliance on finite data for min/max/com"; every `for_curve`/`for_scatter`/`for_image` accumulator skips non-finite values.
+
+Reference: `silx/gui/plot/stats/stats.py:343-346` — `values = numpy.ma.array(yData, mask=mask)` where the mask is only the onlimits/ROI clip (NaN stays unmasked); `:790-797` — `calculate` applies `numpy.mean`/`numpy.std` (`StatsWidget.py:1273-1274`) directly, so NaN propagates; only min/max go through NaN-ignoring `silx.math.combo.min_max`.
+
+Impact: an item with a single NaN sample shows `nan` for mean/std/COM (and sum) in silx's stats table but finite filtered values in siplot. The code comment claims a silx parity that holds only for min/max/coord-min/coord-max; roadmap row 1654 repeats the claim inside a Done row without framing it as a deviation.
+
+### R2-12: ScatterMask missing `updateEllipse`, `updateLine`, and the data-extent-scaled pencil — only disk and polygon exist
+
+Severity: Medium
+
+Rust: `src/widget/scatter_mask.rs` — zero hits for ellipse/line/pencil; the ScatterView mask panel wiring (`src/widget/high_level.rs:12081-12131`) exposes level/clear/invert/undo/redo/threshold/not-finite plus disk/rect/polygon only.
+
+Reference: `silx/gui/plot/ScatterMaskToolsWidget.py:150-168` — `updateEllipse` (`(px-ccol)²/rc² + (py-crow)²/rr² <= 1.0`, inclusive); `:170-194` — `updateLine` (rotated-rectangle polygon of width `width`); `:528-540` — `_getPencilWidth` scales the pencil width by `0.01 * self._data_extent` (pencil radius in data-extent units).
+
+Impact: scatter masking cannot reproduce silx's ellipse, line, or pencil selections at all. Roadmap frozen rows only ever claimed disk+polygon, but the section prose (`parity-roadmap.md:1537`) claims "the full drawing-tool set" for both mask widgets — the inventory contradicts itself, and the gap is unrecorded as a decision.
+
+### R2-13: Colorbar ticks outside `[vmin, vmax]` are clamped onto the bar ends — labels drawn at wrong value positions
+
+Severity: Medium
+
+Rust: `src/widget/colorbar.rs:260` — `paint_tick` places ticks via `self.colormap.normalize(v)`, and `Colormap::normalize` (`src/core/colormap.rs:866`) does `.clamp(0.0, 1.0)`; `paint_ticks_and_labels` applies no out-of-range filter.
+
+Reference: `silx/gui/plot/ColorBar.py:808-843` — `_getRelativePosition` returns `1.0 - (normVal - normMin)/(normMax - normMin)` **unclamped**; out-of-range ticks extrapolate past the bar and are clipped out of view by the widget viewport.
+
+Impact: nice-number layouts routinely emit `graphmin < vmin` (e.g. vmin = 0.13 → tick "0.0"), and the log path emits the decade below vmin plus sub-ticks over the enclosing decades; all of these land exactly on the bar edge labeled with a value that is not the edge value (a log bar with vmin = 3 shows "1" at 3's position while the end label says 3), with sub-tick lines piling on the edges. silx never draws a tick at a wrong position.
+
+### R2-14: ColormapDialog cannot autoscale one bound only — silx has per-bound "Auto scale" (`Colormap` supports `vmin=None` with fixed `vmax`)
+
+Severity: Medium
+
+Rust: `src/widget/colormap_dialog.rs:13,250-262` — a single `autoscale: bool` checkbox gates both bounds (auto → both DragValues replaced; off → both manual); siplot's `Colormap` carries plain `f64` bounds with no half-auto representation.
+
+Reference: `silx/gui/dialog/ColormapDialog.py:111-160` — `_BoundaryWidget` (one per bound) each with its own "Auto scale" toggle; `:1664-1668` — `self._minValue.setValue(vmin or dataRange[0], isAuto=vmin is None)` and same for max, mirroring `Colormap(vmin=None, vmax=...)`.
+
+Impact: the common silx workflow "pin vmax, let vmin track the data" (and its inverse) is unrepresentable in both the dialog and the colormap model.
+
+### R2-15: Arc polar start/end handle drag drops silx's ±180° angle-coherency rule — crossing the branch cut flips the arc to a near-full annulus
+
+Severity: Medium
+
+Rust: `src/core/roi.rs:750-751` — `RoiEdge::Vertex(2) => *start_angle = (dy - cy).atan2(dx - cx)` (raw atan2 in (−π, π]), same for the end handle.
+
+Reference: `silx/gui/plot/items/_arc_roi.py:139-146` (`withStartAngle`) and `:162-170` (`withEndAngle`) — "Never add more than 180 to maintain coherency": the delta from the *previous* angle is wrapped into ±π and accumulated, so angles are continuous across the branch cut.
+
+Impact: nudging a start handle from 3.2 rad flips the stored angle to ≈ −3.08, so `end − start` jumps by ~2π and the arc visually inverts (outline and `arc_contains` both use the raw sweep); silx never jumps more than 180° per drag. Adjacent (same handle family): storing only `(inner, outer)` loses silx's independent radius/weight when inner clamps to 0 (silx clamps only the *reported* value, `_arc_roi.py:856-865`), so a follow-up polar drag computes a different thickness.
+
+### R2-16: `XAxisScaleToolButton`/`YAxisScaleToolButton` (linear/log/**asinh**) unported — and no arcsinh *axis* scale exists at all
+
+Severity: Medium
+
+Rust: no counterpart anywhere; `rg asinh` over `src/` hits only colormap normalization; the axis scale enum is `Scale::{Linear, Log10}` only (`src/core/transform.rs:24-29`). Neither the roadmap nor the R1 doc mentions the scale tool buttons or an arcsinh axis scale.
+
+Reference: `silx/gui/plot/PlotToolButtons.py:227-380` — two tool-button classes offering linear/log/asinh axis scales (`"asinh"` state → `axis.setScale(...)`); backed by `silx/gui/plot/items/axis.py:48,68` — `AxisScaleType = Literal["linear","log","asinh"]`, `ARCSINH = "asinh"`.
+
+Impact: an entire axis-scale mode (and its two tool buttons) present in the current silx checkout has no port and no scope-decision record. Caveat, stated: this surface post-dates the frozen inventory (the roadmap's `PlotToolButtons.py` line citations correspond to an older checkout), so it may be new upstream surface — it still needs either a port or a recorded decision.
+
+### R2-17: `SyncAxes` synchronizes limits only — silx's default contract also synchronizes scale and direction
+
+Severity: Medium
+
+Rust: `src/widget/sync.rs:81-139` — `sync` propagates only `plot.limits` (X and/or Y); `x_scale`/`y_scale`/`x_inverted`/`y_inverted` (`src/core/plot.rs:375-381`) are never read or written, though the module doc (`sync.rs:9-11`) claims it "Mirrors silx `SyncAxes`".
+
+Reference: `silx/gui/plot/utils/axis.py:57-66` — `SyncAxes(..., syncLimits=True, syncScale=True, syncDirection=True)` ("By default everything is synchronized"); `:158-171` — `sigScaleChanged → __axisScaleChanged` and `sigInvertedChanged → __axisInvertedChanged` callbacks; `:238-241` — `synchronize()` pushes scale and inverted state too.
+
+Impact: in linked-plot layouts (the ported `syncaxis.py` example scenario), toggling log scale or axis inversion on one plot leaves the others unsynced — silx keeps them locked. The (non-default) syncCenter/syncZoom modes are also absent.
+
+### R2-18: Default grid is Major-on; silx plots start with no grid
+
+Severity: Low
+
+Rust: `src/core/plot.rs:605` — `grid: GraphGrid::Major` in `Plot::new` (and `#[default]` on `Major`); no construction site overrides it.
+
+Reference: `silx/gui/plot/PlotWidget.py:435` — `self._grid = None`; `GridAction` initializes unchecked from it.
+
+Impact: every siplot plot renders a major grid before any user action; silx renders none until toggled. Same shape as R1-16 (unrecorded default divergence) — needs either a fix or a roadmap decision entry.
+
+### R2-19: Ruler disarm destroys the measurement; silx hides it and reshows it on re-arm
+
+Severity: Low
+
+Rust: `src/widget/high_level.rs:7313-7315` — disarm does `self.remove_roi(index)`; the doc comment (`:7300-7302`) attributes this to "(silx deselect)".
+
+Reference: `silx/gui/plot/tools/RulerToolButton.py:118-122` — `_callback` starts with `self._lastRoiCreated.setVisible(self.isChecked())` — unchecking *hides* the ROI, re-checking reshows the previous measurement; removal happens only on `_disconnectPlot` (`:153-157`) or replacement by a new measurement.
+
+Impact: toggling the ruler off/on restores the last measurement in silx; in siplot it is permanently lost, and the code comment claims a silx behavior silx does not have.
+
+### R2-20: Pixel-histogram default bin count derived from finite-pixel count; silx uses total `array.size`
+
+Severity: Low
+
+Rust: `src/widget/actions/analysis.rs:279-280` — `guessed = sqrt(finite_count)`, `nbins = guessed.min(1024).max(2)`.
+
+Reference: `silx/gui/plot/actions/histogram.py:250` — `guessed_nbins = min(1024, int(numpy.sqrt(array.size)))` — total element count, NaN/inf included (only the *range* is finite-filtered).
+
+Impact: masked/NaN-bearing images get systematically fewer default bins than silx (50 % NaN → √2 fewer). The roadmap Wave-7C entry states the finite formula while labeling the port faithful — unnoticed drift, not a recorded deviation. (Adjacent unported bits, for the record: silx's integer-dtype `xmax−xmin` clamp is a documented N/A; the "Use weights" checkbox and the 2..9999 spin range are unported and unrecorded.)
+
+### R2-21: Curve CSV export hardcodes an `x,y` header and drops error columns — silx writes the real axis labels plus `*_errors` columns
+
+Severity: Low
+
+Rust: `src/widget/actions/io.rs:79-88` — `String::from("x,y\n")` then zips only `(x, y)`.
+
+Reference: `silx/gui/plot/actions/io.py:248-289` — `_getAxesLabels` (curve label falling back to plot axis label) + `_get1dData` appending `<label>_errors` / `_errors_below`/`_errors_above` columns; `silx/io/utils.py:279` — CSV header = `xlabel + "," + ",".join(ylabels)`.
+
+Impact: exported CSV loses the axis labels and any error-bar data. The reduced save surface (CSV-only) is a recorded decision; the header/error divergence *within* the ported CSV path is not.
+
+### R2-22: Mask pencil anchors cells with `floor()`; silx (and siplot's own rect converter) truncate with `int()`
+
+Severity: Low
+
+Rust: `src/widget/mask_tools.rs:826` — `paint_pencil_point(data_y.floor() as i64, data_x.floor() as i64, ...)`; the same file's `rect_params_to_cells` (`:1992-1999`) deliberately uses `as i64` truncation with a "silx int(), not floor" test note.
+
+Reference: `silx/gui/plot/MaskToolsWidget.py:858` — `col, row = int(col), int(row)` (truncation toward zero).
+
+Impact: differs for negative fractional coordinates — pencil strokes within one pixel outside the top/left image edge anchor at −1 instead of 0, so edge strokes mask fewer border pixels than silx. Also internally inconsistent with the port's own rectangle/polygon converter.
+
+### R2-23: ComplexImageView rebuilds a fresh autoscaled viridis per data/mode change — silx binds one persistent default-gray colormap shared across scalar modes, publicly settable per mode
+
+Severity: Low
+
+Rust: `src/widget/complex_image_view.rs:475-486` — `scalar_colormap`: `phase_colormap()` for Phase, else `Colormap::viridis(finite_range(scalar))` recomputed on every rebuild; no `set_colormap` surface exists.
+
+Reference: `silx/gui/plot/items/complex.py:125-143` — one `colormap = super().getColormap()` (ColormapMixIn default = gray, autoscale) is the **same object** for ABSOLUTE/REAL/IMAGINARY/SQUARE_AMPLITUDE; `:216-233` — public `setColormap(colormap, mode)` persists user edits across mode switches.
+
+Impact: default look diverges (R1-16 residual site), and a user cannot set or keep a colormap/range at all — every data or mode change silently re-autoscales.
+
+### R2-24: ColormapDialog editor numerics — gamma clamped to [0.1, 10] vs silx [0.01, 100]; sqrt-normalization histogram range not clipped to min-positive
+
+Severity: Low
+
+Rust: `src/widget/colormap_dialog.rs:223-227` — gamma `DragValue ... .range(0.1..=10.0)`; `:155-160` — only `Log` is special-cased for the auto-histogram range, so sqrt uses the full finite min/max.
+
+Reference: `silx/gui/dialog/ColormapDialog.py:947-948` — `_gammaSpinBox.setRange(0.01, 100.0)`; `:451-459` — `_computeNormalizedDataRange` returns `(min_positive, max)` for `SQRT` (as for LOG) when feeding the histogram.
+
+Impact: silx-legal gamma values outside [0.1, 10] are unreachable; with negative data under sqrt normalization the dialog's distribution display and extent differ from silx.
+
+### R2-25: `%.7g` stand-in picks fixed-vs-exponential from the pre-rounding exponent; C/Python `%g` decides after rounding
+
+Severity: Low
+
+Rust: `src/widget/stats_widget.rs:327-331` — `exp = value.abs().log10().floor()`; `if exp < -4 || exp >= digits` — computed on the raw value (used by `format_g7` → PositionInfo `format_value` and the stats table).
+
+Reference: `silx/gui/plot/tools/PositionInfo.py:315` — `"%.7g" % value`; C `%g` selects notation from the exponent *after* rounding to 7 significant digits.
+
+Impact: decade-boundary values format differently — `9999999.9` → siplot `10000000` vs silx `1e+07`; `9.9999999e-05` → siplot `1e-04` vs silx `0.0001`. Affects the PositionInfo readout and every `format_significant` consumer.
+
+### R2-26: `Roi::Line::contains` lacks silx's bounding-box gate — over-reports a strip up to 1 data-unit below/left of the segment
+
+Severity: Low
+
+Rust: `src/core/roi.rs:885` — `Roi::Line { .. } => segment_intersects_unit_square(*start, *end, pos)` with no pre-filter (the unit square is anchored at the query point's lower-left, so points just below/left of the segment still intersect).
+
+Reference: `silx/gui/plot/items/roi.py:314-332` — `LineROI.contains` first filters positions through `_BoundingBox.from_points(endpoints).contains(...)`, and only then runs `_intersects_unit_square`.
+
+Impact: per-pixel ROI masks (ROI stats over a Line ROI) include a one-unit-wide strip silx excludes; a Rust test bakes in the divergent `True`.
+
+#### Examined and excluded (with reasons)
+
+Ctrl re-evaluated mid-pencil-stroke (capture-once is recorded, roadmap rows 503/1556 — though note silx's *code* re-evaluates per event while its comment says otherwise); Cross/Directed-line profile toolbar arms (Cross display recorded as the row-552 deliverable; Directed-line is the one silx ROI that legitimately uses distance x-coords); `roi_io` dropping `interaction_mode` (internal round-trip loss — silx's ROI dict has no such field; worth a tech-debt note); CompareImages `viridis(0,1)` default at `high_level.rs:8577` (R1-16 sibling, outside category A — flagged for the consolidator); highlighted-ROI stroke `max(w,2)` vs absolute 2, arc/circle tessellation counts, exponent text `1.00e8` vs `1.00e+08`, normalization combo order (cosmetic); PositionInfo readout reset on cursor-leave (host-dependent immediate-mode idiom).
+
+#### Verification note
+
+Every finding independently re-verified at the cited lines on both trees; the roadmap and R1 doc were checked per finding for prior recording — none of the 26 is recorded.
+
+### R2 Category B — plot items, colors, core math (vs silx items/colors/math.fit/ticklayout/sift) [R2-27..R2-45]
+
+
+### R2-27: FitManager's fit path uses central differences (`left_derivative=True`); the Rust engine is forward-only
+
+Severity: Medium
+
+Rust: `src/core/fitting.rs:521-535` (unconstrained) and `:794-812` (constrained) — the Jacobian is always the forward difference `(f(p+δ) − f(p))/δ`; no central-difference mode exists in either engine or any caller.
+
+Reference: `silx/math/fit/fitmanager.py:888-898` — every FitWidget fit calls `leastsq(..., left_derivative=True)`; `silx/math/fit/leastsq.py:725-733` — that flag computes `(f(p+δ) − f(p−δ))/(2δ)`. Only the estimation micro-fit (fittheories.py:411-419) uses the forward default.
+
+Impact: the widget-path Jacobian is O(δ)-accurate where silx's is O(δ²) — different LM trajectory, iteration counts, and converged parameters at the tolerance margin for every FitWidget fit. (Roadmap row 555 records only the constraint-expanded *base evaluation* quirk, not the derivative mode.)
+
+### R2-28: LM iteration budget decrements per lambda attempt in silx, per accepted outer iteration in Rust
+
+Severity: Medium
+
+Rust: `src/core/fitting.rs:645` and `:1074` — `iiter -= 1` sits after the inner damping loop, so rejected-λ retries are free.
+
+Reference: `silx/math/fit/leastsq.py:470` — `iiter = iiter - 1` is inside `while flag == 0:` (verified indentation), so every rejected-λ retry consumes the `max_iter` budget.
+
+Impact: under λ rejections Rust runs strictly more outer iterations for the same `max_iter`. Sharpest in the 4-iteration estimation refine (fittheories.py:411-419 ↔ fitting.rs:2460-2471): silx's budget of 4 counts damping retries, Rust's counts 4 full accepted steps → different refined seeds → different final fits.
+
+### R2-29: Peak estimation ignores silx's default strip background (+ Savitzky-Golay pre-smooth); three sites assert a false "off by default"
+
+Severity: Medium
+
+Rust: `src/core/fitting.rs:2412` (`let height = y[pi];` raw), `:2392-2398` (ForcePeakPresence = argmax of raw `y`), `:2459-2471` (4-iter refine against raw `y`). The doc comment at `:2375`, `src/widget/fit_widget.rs:626-627`, and `doc/parity-roadmap.md` row 551 all claim "silx `StripBackgroundFlag` off by default" — factually wrong, so the recorded decision does not stand.
+
+Reference: `silx/math/fit/fittheories.py:142-143` — `DEFAULT_CONFIG` has `"StripBackgroundFlag": True, "SmoothingFlag": True`; `estimate_height_position_fwhm` computes `bg = self.strip_bg(y)` (`:332`), seeds heights `y[peak] − bg[peak]` (`:374/:378`), picks the forced peak from `y − bg` (`:361-364`), and refines against `yw = y − bg` (`:386-387`). `strip_bg` = `strip(savitsky_golay(y, 5), w=2, n=5000, factor=1.0)` (`:236-251`).
+
+Impact: on any data with a baseline, silx seeds baseline-corrected heights and refines against the stripped signal; siplot seeds inflated heights and refines against raw data — different LM starting point for Multi-Gaussian, and a different ForcePeakPresence pick on tilted baselines. Blocking sub-gap: `savitsky_golay`/`smooth1d` (filters.pyx + smoothnd.c) have no Rust counterpart anywhere in `src/`.
+
+### R2-30: `erfc = 1 − erf` collapses to exactly 0 for arguments ≳ 5.9 — hypermet tail terms zeroed where silx keeps relative precision
+
+Severity: Medium
+
+Rust: `src/core/fitting.rs:1446-1467` — `erf` is A&S 7.1.26 (absolute error ≤ 1.5e-7) and `erfc(x) = 1.0 - erf(x)`; consumed by the hypermet st/lt/step terms at `:1603/:1609/:1614` and the step/slit models at `:1488/:1506/:1530`.
+
+Reference: `silx/math/fit/functions/src/funs.c:46-49` — `#define erfc myerfc` is `_WIN32`-only; on every other platform `sum_ahypermet` (`:1172/:1183/:1193`) calls libm `erfc` with full relative accuracy down to ~1e-300 (and even Windows' `myerfc`, funs.c:76-90, is the relative-accurate NR rational form).
+
+Impact: hypermet tails are `erfc(w)·exp(z)` with `w = dx/(σ√2) + σ√2/(2·slope)` — the product depends on erfc's *relative* accuracy at large `w`. Measured: +0.67% error at w=5, −100% (exact 0) at w ≥ ~5.9; a short-tail term at σ=5, slope=0.7, dx=+5 reads 24.06 vs silx 20.92 (+15%), and for `σ/slope ≳ 8.5` (reachable under silx's own default bounds, `MinShortTailSlopeRatio=0.5`) the whole tail evaluates to 0 with a zero LM gradient, stalling the tail parameters. Step/slit models see only ≤1.5e-7 absolute — the code comment's "far below fit noise" is false specifically for hypermet.
+
+### R2-31: `get_sigma_parameters` drops the CFACTOR multiplier
+
+Severity: Medium
+
+Rust: `src/core/fitting.rs:334-341` — `Factor { reference, .. } | Delta {..} | Sum {..} => sigma_par[i] = sigma_par[reference]` — all three collapsed to an unscaled copy.
+
+Reference: `silx/math/fit/leastsq.py:875-876` — `CFACTOR: sigma_par[i] = constraints[i][2] * sigma_par[ref]`; only CDELTA/CSUM copy unscaled (`:877-880`).
+
+Impact: the reported uncertainty of any FACTOR-tied parameter is wrong by the factor — coincidentally exact for factor-1.0 ties, wrong for any user-entered factor via the widget's FACTOR editor.
+
+### R2-32: FitWidget error column shows unconstrained `std_errors()` instead of silx's constraint-propagated `uncertainties`
+
+Severity: Medium
+
+Rust: `src/widget/fit_widget.rs:950-951` — `self.iterative_result.as_ref().map(|ir| ir.std_errors())` (sqrt of covariance diagonal).
+
+Reference: `silx/math/fit/fitmanager.py:904-909` — `sigmas = infodict["uncertainties"]` → `_get_sigma_parameters` over `cov0` (leastsq.py:517-523): QUOTED gets `|B·cos(p)|·σ`, FIXED shows the parameter value, FACTOR/DELTA/SUM are tied.
+
+Impact: identical on the all-Free path, divergent for every constrained fit — including the default Multi-Gaussian, whose Positive constraints route through `leastsq_constrained`. The silx-faithful value already exists as `LeastSqResult.uncertainties` (fitting.rs:1117-1118); the widget reads the other field.
+
+### R2-33: Non-finite samples abort the widget fit; silx filters them and fits the rest
+
+Severity: Medium
+
+Rust: `src/widget/fit_widget.rs:575-595` — `ranged_data` filters by x-range only; `leastsq`/`leastsq_constrained` then hard-error on any non-finite sample (`fitting.rs:463-464`, `:897-898`) and the widget renders no fit.
+
+Reference: `silx/math/fit/fitmanager.py:884-885` — `runfit` fits `ydata[self._finite_mask]`/`xdata[self._finite_mask]` (mask built at `:803-808`); estimation filters the same way (`:434-436`).
+
+Impact: a curve containing a single NaN (routine in beamline data) fits normally in silx and silently produces no fit in siplot.
+
+### R2-34: Curve data range excludes error bars
+
+Severity: Medium
+
+Rust: `src/widget/high_level.rs:1923-1929` — `curve_spec_bounds` uses `finite_bounds(spec.x)`/`finite_bounds(spec.y)` only; `x_error`/`y_error` never reach the bounds.
+
+Reference: `silx/gui/plot/items/core.py:1661-1694` — `Curve._getBounds` → `__minMaxDataWithError` (`:1632`, applied at `:1685-1686`): bounds are `min(data − err)` / `max(data + err)`.
+
+Impact: reset-zoom/autoscale clips error-bar whiskers extending past the data extremes; silx fits them in the view.
+
+### R2-35: SIFT match-ratio gate 0.8 (L2) vs silx 0.73² = 0.5329 (L1); the in-code "equivalent" claim is false
+
+Severity: Medium
+
+Rust: `src/core/sift_align.rs:30-33` — `MATCH_RATIO_THRESHOLD: f32 = 0.8` with the comment "silx `MatchPlan` applies an equivalent nearest-neighbour ratio gate"; `lowe-sift` gates the L2 ratio at that value.
+
+Reference: `silx/opencl/sift/param.py:78` — `MatchRatio=0.73`; `match.py:199/:329` pass/apply `MatchRatio²` (0.5329) as the threshold on **L1** distances (kernel doc `matching_cpu.cl:113`: "0.73*0.73 for L1 distance").
+
+Impact: siplot accepts substantially looser matches than silx, so the pair set feeding the affine fit differs and noisy images register differently. Roadmap rows 324/460/1630 record "Lowe ratio 0.8" descriptively without acknowledging silx's 0.73 — not a recorded divergence decision.
+
+### R2-36: SIFT alignment's `< 18` matches shift-only fallback missing — affine fitted from as few as 3 pairs
+
+Severity: Medium
+
+Rust: `src/core/sift_align.rs:227-229` — `if raw.len() < 3 { return None; }`, else always least-squares-fits the full 6-parameter affine.
+
+Reference: `silx/opencl/sift/alignment.py:309-320` — `if (len_match < 3 * 6) or shift_only:` → identity matrix + `offset = (median(dy), median(dx))`; the affine fit runs only with ≥ 18 matches ("3 points per DOF").
+
+Impact: for 3–17 matches silx returns a robust median translation; siplot fits an affine to a handful of noisy pairs and can output scale/rotation silx would never produce on the auto-align path.
+
+### R2-37: TimeSeries bracket ticks drawn outside the axis range — silx culls them
+
+Severity: Medium
+
+Rust: `src/widget/chrome.rs:397-408` — the TimeSeries arm returns `calc_ticks_tz` output unfiltered (the port deliberately brackets via `include_first_beyond`, dtime_ticks.rs:566-584); the grid/tick/label loops (`chrome.rs:566-573`, `:584-597`) iterate all ticks with no `min ≤ v ≤ max` filter on an unclipped painter. The numeric path filters inside `nice_ticks` (`:320`), so only TimeSeries leaks.
+
+Reference: `silx/gui/plot/backends/glutils/GLPlotFrame.py:460-462` — `visibleDatetimes = tuple(dt for dt in tickDateTimes if dtMin <= dt <= dtMax)`; labels (and the µs zero-strip) are computed over the visible set only; the mpl backend culls via the axes viewport.
+
+Impact: on a time axis, one tick + label per end renders in the gutters beyond the plot frame, and with grid on, grid lines are painted outside the frame; the µs zero-strip is also computed over the out-of-range labels.
+
+### R2-38: Linear nice-number tick layout diverges from silx (`/(nTicks)` vs `/(max_ticks−1)`, `<` vs `<=` thresholds, fixed 8/6 vs pixel-adaptive density)
+
+Severity: Medium
+
+Rust: `src/widget/chrome.rs:306-325` — `step = nice_num(range / (max_ticks - 1), true)` with round thresholds `frac < 1.5 / < 3.0 / < 7.0` (`:284-291`), deployed with fixed defaults 8 (X) / 6 (Y) (`:540/:547`).
+
+Reference: `silx/gui/plot/_utils/ticklayout.py:126-127` — `spacing = niceNumGeneric(vrange / nTicks, isRound=True)` (divisor `nTicks`); `niceNumGeneric` uses `frac <= roundFrac` (`:105`, defaults `(1.5, 3.0, 7.0, 10.0)`); the deployed nticks is pixel-adaptive `max(2, round(1.3·dpr/dpi · nbPixels))` (`GLPlotFrame.py:414-425`, `ticklayout.py:180-189`).
+
+Impact: different tick sets for identical views (e.g. [0,100]: silx nticks=5 → step 20; siplot X → `nice_num(100/7)` → 10); exact-boundary fracs (1.5/3/7) flip to the coarser step; density does not adapt to plot size. Roadmap row 1369 records "nice-number tick layout" as plain done, no deviation noted.
+
+### R2-39: Log axis never coarsens decade ticks (`niceNumbersForLog10` unported in chrome) and returns no ticks for `min ≤ 0`
+
+Severity: Medium
+
+Rust: `src/widget/chrome.rs:335-343` — `log_decade_ticks` emits every decade in `ceil(log10 min)..floor(log10 max)` and returns empty when `min ≤ 0`; sub-ticks are always drawn (`:453-472`).
+
+Reference: `silx/gui/plot/_utils/ticklayout.py:205-218` — for ranges > nTicks(5) decades, `spacing = floor(rangelog/5)` with bounds re-anchored to spacing multiples; `GLPlotFrame.py:371-375` clamps `dataMin ≤ 0` to 1.0 and still draws; sub-ticks are gated on `step == 1` (`:398`). (The colorbar port at colorbar.rs:567-587 implements this correctly — chrome does not.)
+
+Impact: a 1e0..1e12 axis shows 13 labeled ticks vs silx's ~6 (61 overlapping labels for 1e-30..1e30, with sub-ticks on top); a log axis over non-positive limits renders tickless where silx recovers. Log labels also read "100"/"1e9" instead of silx's `"1e%+03d"` → "1e+02"/"1e+09" (`GLPlotFrame.py:395` vs `chrome.rs:347-353`).
+
+### R2-40: ±inf maps to `nan_color`; both silx pipelines clip infinities into the LUT ends
+
+Severity: Medium
+
+Rust: `src/render/shaders/image.wgsl` fs_main — `finite = (v >= -3.4028235e38) && (v <= 3.4028235e38); if (!finite) { return nan_color; }` (the comment claims this mirrors silx); `src/core/colormap.rs:880-886` — `color_at` returns `nan_color` for every non-finite value, feeding all CPU-colored items (`src/render/scene3d_items.rs:239/475/937/1623/2447/...`).
+
+Reference: `silx/gui/plot/backends/glutils/GLPlotImage.py:202-206` — `nancolor` only when `isnan(raw_data)`; ±inf pass through the normalization clamp → +inf hits the top LUT color, −inf the bottom. Same in the CPU path: `silx/math/_colormap.pyx:362-376` — only `isnan(value)` gets `nan_color`; `value <= normalized_vmin → lut[0]`, `>= normalized_vmax → lut[last]` (+inf survives `apply_double` as +inf, `:228-229`).
+
+Impact: saturated/overflow pixels (`+inf`, routine in detector float data) render transparent white (default `nan_color`) instead of the top colormap color, on the 2D image shader and every CPU-colormapped item.
+
+### R2-41: Explicit vmin/vmax invalid under the normalization is not repaired — silx falls back to per-side autoscale, siplot collapses the render
+
+Severity: Medium
+
+Rust: `src/widget/colormap_dialog.rs:348-378` — with autoscale off, `apply` passes `self.vmin`/`self.vmax` straight into `build_colormap`; nothing checks the explicit range against the normalization domain. `Colormap::norm_bounds` (`src/core/colormap.rs:844-852`) then sees `log10(vmin ≤ 0)` non-finite and returns `(0, 0)`, mapping the whole image to the low color.
+
+Reference: `silx/gui/colors.py:711-724` — `getColormapRange` treats an explicit bound failing `normalizer.is_valid` (e.g. `vmin ≤ 0` under log) as `None` and recomputes that side from data (`:726-750`, with `vmax2 = max(fmax, vmin2)` ordering repair). The GL backend therefore always receives a strictly positive log range (`GLPlotImage.py:363`).
+
+Impact: switching the dialog to Log with an explicit `Min: 0` (the default lower bound for counting data), or constructing `Colormap::new(name, 0.0, max).with_normalization(Log)`, renders the entire image as the single low LUT color; silx recovers to `(min_positive, vmax)`. Distinct from R1-9, which fixed only the autoscale computation.
+
+### R2-42: LUT lookup quantization — GPU samples the LUT with linear filtering (silx: GL_NEAREST) and the CPU bins by ×255 (silx: ×256)
+
+Severity: Low
+
+Rust: `src/render/gpu_image.rs:544-547` — the LUT sampler is `FilterMode::Linear` (min and mag) and `image.wgsl` uses `textureSample(lut_tex, lut_samp, vec2(value, 0.5))`, so displayed colors are interpolated *between* LUT entries; `src/core/colormap.rs:884` (and `src/widget/high_level.rs:9477/:13880/:15120`) — CPU index is `trunc(ratio·255)`.
+
+Reference: `GLPlotImage.py:338-347` — the cmap texture is `minFilter=GL_NEAREST, magFilter=GL_NEAREST`, i.e. texel `trunc(value·256)` clamped; `silx/math/_colormap.pyx:345-376` — CPU `lut_index = int((value − vmin')·(nb_colors/range))` with overflow clamp, the same 256-binning.
+
+Impact: siplot displays colors not present in the 256-entry table (registered discrete LUTs become gradients) and the first/last half-texels differ; on the CPU path roughly half of all values land one LUT entry away from silx's (e.g. ratio 0.5 → index 127 vs 128).
+
+### R2-43: Snip background snips the full array; silx's default anchor split leaves the last two samples raw
+
+Severity: Low
+
+Rust: `src/core/background.rs:78-95` — `snip_background` runs over the whole array (modifies `1..=n−2`), used by `Background::Snip` (`:234`).
+
+Reference: `silx/math/fit/bgtheories.py:229-243` — with default `AnchorsFlag=False`, `anchors_indices = [0, len−1]`, so `background[0:n−1] = snip1d(y[0:n−1], w)` and `background[n−1:] = snip1d(y[n−1:], w)` (identity); the C `snip1d` on the n−1 sub-array leaves its own last element raw too, so silx keeps **both** `n−2` and `n−1` at raw values and the difference propagates ~`2·width` samples (default SnipWidth 16 → last ~32 samples) through the descending-p passes.
+
+Impact: the Snip background curve diverges from silx over the right-edge region; a peak abutting the right edge is absorbed into the background by silx but stripped by siplot.
+
+### R2-44: Negative error values are not clipped to 0 before drawing
+
+Severity: Low
+
+Rust: `src/render/gpu_curve.rs:906-937` — `build_errorbar_segments` uses raw `(lo, hi)` from `ErrorBars::bounds`; no negative-clip exists.
+
+Reference: `silx/gui/plot/items/core.py:1586-1611` — `_filterData` runs `_filterNegativeValues` on both error arrays unconditionally (`numpy.clip(data, 0, None)`), linear and log alike.
+
+Impact: a negative error entry draws an inverted whisker instead of a suppressed one.
+
+### R2-45: Histogram step outline is 2N+2 points (two hard-coded y=0 end anchors); silx builds exactly 2N and leaves closure to the fill baseline
+
+Severity: Low
+
+Rust: `src/widget/high_level.rs:1161-1173` — `histogram_step_values` pushes `(edges[0], 0.0)` first and `(edges[N], 0.0)` last around the 2N stair points.
+
+Reference: `silx/gui/plot/items/histogram.py:88-105` — `_getHistogramCurve` is exactly 2N stair points; closure to the baseline is the backend fill's job (`baseline` param, `:194`).
+
+Impact: the drawn outline includes two vertical end segments silx never strokes (visible with fill off), and the anchors are pinned to 0 regardless of baseline — coincident today only because `add_histogram_with_align` (`:4247`) hard-codes `Baseline::Scalar(0.0)`; any non-zero baseline desynchronizes outline and fill.
+
+#### Additional minor residuals (below bar, verified — consolidator's discretion)
+
+- equal-bounds QUOTED rejects the whole fit vs silx holding the parameter (`fitting.rs:910-914` ↔ `leastsq.py:673-693`)
+- `seek` on regions of ≤ 6 samples returns nothing vs C continuing with `sqrt(data)` significance (`peaks.rs:80-82` ↔ `peaks.c:106-116`, unreachable via the deployed padded path)
+- µs tick zero-strip keeps the full label where silx's slice yields empty labels — silx-side bug needing a bug-for-bug decision record (`dtime_ticks.rs:770-784` ↔ `dtime_ticklayout.py:303`)
+- linear tick labels cap at 6 decimals with no mpl-style offset text (`chrome.rs:328-331`)
+- colorbar scientific threshold 8 chars vs 35 px and `1e3` vs `1e+03` exponent text (`colorbar.rs:502-517/:432/:638` ↔ `ColorBar.py:888-896/:436/:448`)
+- Python banker's rounding vs Rust half-away in tick-count derivation (`colorbar.rs:411-413`, `dtime_ticks.rs:633`)
+- linear minor ticks are a siplot extension (silx GL draws none)
+- REGULAR_GRID 1-row/col scatter collapses the axis scale to 0 (`high_level.rs:11065-11074` ↔ `scatter.py:450-453`)
+- binned-statistic drops NaN-valued points instead of NaN-poisoning the bin (`scatter_viz.rs:1155-1158` ↔ `scatter.py:501-513`)
+- histogram log-axis bounds cross-filter (`high_level.rs:1876-1882` ↔ `histogram.py:209-243`)
+- zero-width model-parameter guards documented in fitting.rs docs vs C NaN/abort
+- `decimate.rs:10-11` misattributes its algorithm to silx (silx has no decimation feature)
+
+#### Verified clean (agent's sweep)
+
+LM core (flambda 0.001/×10/÷10/cap 1000, deltachi/epsfcn stops, derivative step, weights, damping, all seven constraint transforms incl. `_get_sigma_parameters` QUOTED strict-bounds quirk, two-pass covariance); all 19 theory models + estimator seed conversions (modulo findings above); sum_gauss..sum_ahypermet formulas; strip.c/snip1d.c cores; peaks.c seek state machine + guess_fwhm + padded_peak_search; bgtheories config defaults; dtime tick tables/formats/DST (modulo R2-37); colorbar tick machinery incl. never-draw-graphmax quirk; colormap LUT contents (gray/temperature/jet/hsv), mask-overlay LUT, autoscale (R1-9 fix verified), dialog histogram binning; scatter grid-detection/quadrilateral/binned math; complex modes incl. `_complex2rgbalog`; histogram edges/revert/pick; median filter default mode; bilinear profile sampling; SIFT pipeline structure and affine decomposition.
+
+### R2 Category C — plot3d scene graph, items, camera (vs silx.gui.plot3d) [R2-46..R2-52]
+
+
+### R2-46: Every colormapped 3D item defaults to a fixed viridis [0, 1] range — silx defaults to gray with autoscale that tracks the data
+
+Severity: Medium
+
+Rust: `src/render/scene3d_items.rs:113, 314, 831, 1503, 1838, 2227` — `Scatter3D`, `Scatter2D`, `ColormapMesh3D`, `ImageData3D`, `HeightMapData`, and `CutPlane` all construct `Colormap::new(ColormapName::Viridis, 0.0, 1.0)` (each doc-commented "silx defaults"). `Colormap` carries plain `vmin`/`vmax` f64s — there is no autoscale state — and the only range-follows-data paths are the manual one-shot `autoscale_colormap()` / `autoscale_cut_plane_colormap()` (`scene3d_items.rs:167-172, 2632-2641`), which nothing calls on `set_data`.
+
+Reference: `silx/gui/plot/items/core.py:608-609` — every plot3d `ColormapMixIn` item defaults to `Colormap()` = name `gray` (`silx/_config.py:58`), linear, `vmin=vmax=None` (autoscale); `silx/gui/plot3d/items/mixins.py:128-137` — `_syncSceneColormap` pushes `colormap.getColormapRange(self)` whenever data or colormap changes. `ScalarFieldView.py:358-360` — cut-plane colormap `Colormap(name="gray", ..., vmin=None, vmax=None)`; `ScalarFieldView.py:403-405` — `_sfViewDataChanged` re-autoscales on every data change.
+
+Impact: any colormapped 3D item shown with default settings and data outside [0, 1] renders saturated flat color (e.g. a volume in [100, 4000]: the visible cut plane is one solid top-LUT color until the user presses Autoscale; silx shows the full gradient immediately and keeps tracking data updates). The LUT-name half (viridis vs gray) is the exact R1-16 defect at six 3D sites the R1-16 fix (2D `default_colormap` only) did not sweep. The roadmap's recorded "CPU `color_at` at build time" simplification covers the mapping *mechanism*, not the default name/range or the autoscale-follows-data contract; the structural gap is that autoscale is unrepresentable in the 3D colormap binding.
+
+### R2-47: Line, triangle, and mesh pipelines are opaque — silx renders the whole viewport with GL_BLEND, so iso-surface/mesh alpha is dropped (and the iso depth-sort is dead code)
+
+Severity: Medium
+
+Rust: `src/render/gpu_scene3d.rs:791-793` — shared line/triangle pipeline `targets: &[Some(target_format.into())]` "blend: None … → opaque write"; `:929-930` — mesh pipeline (iso-surfaces, `Mesh3D`, `ColormapMesh3D`) likewise "Opaque (blend None)". Only points, image quads, and textured meshes blend (`:867, :999`). Meanwhile `ScalarField3D::append_raw` sorts iso-surfaces by decreasing level (`src/render/scene3d_items.rs:2752-2758`) — an order that only matters under alpha blending — and the widget's tick lines are emitted at 60% alpha (`src/widget/scene_widget.rs:360-365`) into the opaque line pipeline.
+
+Reference: `silx/gui/plot3d/scene/viewport.py:356-357` — `Viewport.render` enables `GL_BLEND` with `glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)` for **all** scene content; `silx/gui/plot3d/items/volume.py:659-663` — `_updateIsosurfaces` sorts by `-level` so nested translucent surfaces composite inner-first; `:319-329`/`:728-739` — `Isosurface.setColor` RGBA and `ComplexIsosurface._updateColor` drives `mesh.alpha`; `silx/gui/plot3d/scene/axes.py:114` — tick lines use `color[3] * 0.6`.
+
+Impact: a semi-transparent iso-surface renders fully opaque in siplot — the outer shell hides everything inside — where silx composites; `Mesh3D`/`ColormapMesh3D` vertex alpha is ignored; LabelledAxes tick dashes render at full strength instead of 60%. The Rust code carries both silx-side conventions (the `-level` sort, the 0.6 alpha) whose visible effect the pipelines then discard — internal evidence the blending contract was intended but not wired.
+
+### R2-48: 3D wheel zoom applies silx's fixed 0.2 step once per *frame* of smoothed scroll, not once per wheel *event*
+
+Severity: Medium
+
+Rust: `src/widget/scene_widget.rs:487-494` — `let scroll = ui.input(|i| i.smooth_scroll_delta.y); if scroll != 0.0 … self.camera.zoom_at(ndc, ndc_z, scroll > 0.0)`; `src/core/scene3d/camera.rs:484-486` — every `zoom_at` call moves the camera by the fixed `step = ±0.2` of the distance to the anchor, ignoring delta magnitude.
+
+Reference: `silx/gui/plot3d/Plot3DWidget.py:407-416` — one Qt `wheelEvent` dispatches one `handleEvent("wheel", …)`; `silx/gui/plot3d/scene/interaction.py:340-341` — `_zoomToPosition` applies `step = 0.2 * (1 if angle < 0 else -1)` exactly once per event, magnitude-independent.
+
+Impact: egui's sum-conserving smoothing spreads one discrete notch over N frames, each frame firing a full 0.2 step — one notch multiplies camera-to-anchor distance by 0.8^N (≈0.26 at N=6) instead of 0.8; a macOS trackpad flick with momentum collapses the view onto the anchor in a single gesture. Zoom rate is frame-rate- and platform-dependent. Same per-frame-vs-per-notch family as R1-8 (2D), but the 3D fix needs a per-event (accumulate-and-quantize or raw-event) trigger since silx's 3D step is fixed-per-event, not per-angle.
+
+### R2-49: `ComplexField3D` per-child complex modes missing — no own-mode cut plane, no colormapped `ComplexIsosurface`
+
+Severity: Medium
+
+Rust: `src/render/scene3d_items.rs:2877-2884, 3041-3051` — `ComplexField3D` stores a single `mode: ComplexMode` and projects **one** real field into the inner `ScalarField3D`; the cut plane and every iso-surface can only display that projection, and `Isosurface` (`:2104-2109`) has only a solid `Color32` — no colormapped-surface variant. Module doc (`:2869-2875`) and roadmap P2.3b record only the two amplitude-phase *hue composites* as unported.
+
+Reference: `silx/gui/plot3d/items/volume.py:690-699` — `ComplexCutPlane` is itself a `ComplexMixIn`: `_syncDataWithParent` fetches `parent.getData(mode=self.getComplexMode())`, so the slice can show e.g. PHASE while iso-surfaces sit on ABSOLUTE; `:741-756, 776-801` — `ComplexIsosurface` with mode ≠ NONE extracts the surface from the parent's mode but colours it by *another* mode's values (`interp3d` → `primitives.ColormapMesh3D` with `mesh.alpha = color[3]`) — "iso-surface of amplitude coloured by phase".
+
+Impact: two whole silx display branches of the complex flagship cannot be expressed. Neither is in the roadmap's recorded scope decisions (which cover only the hue composites), so the gap is silent; `ColormapMesh3D` and the trilinear sampler already exist in the port — missing composition, not missing infrastructure.
+
+### R2-50: Gesture depth anchors cannot see the cut plane — `SceneWidget::pick` skips the textured-mesh channel, so orbit/pan/zoom over the flagship's slice anchor at the far plane
+
+Severity: Low
+
+Rust: `src/render/gpu_scene3d.rs:397-400` — `pick_triangles()` documents "Image quads and textured meshes (the cut plane) are excluded"; `SceneWidget::pick` (`src/widget/scene_widget.rs:549-647`) covers triangles, meshes, points, line anchors, and image layers, but never `textured_meshes`. Orbit pivot (`:445-449`), pan plane (`:464-471`), wheel anchor (`:487-493`) all fall back to scene centre / NDC z = 1 on a miss; `ScalarFieldView::show` (`src/widget/scalar_field_view.rs:285-287`) delegates straight to `SceneWidget::show`, never consulting `ScalarField3D::pick_cut_plane` for gestures (only `ScalarFieldView::pick` does, `:256-281`).
+
+Reference: `silx/gui/plot3d/scene/interaction.py:153-156, 228-229, 331` — all three gesture anchors read `viewport._pickNdcZGL(x, y)`, the depth *buffer* under the cursor (`viewport.py:536-…`), which contains every rendered fragment — the cut plane included.
+
+Impact: in the `ScalarFieldView` default interactive state (cut plane visible, no/hidden iso-surfaces under cursor), silx pans 1:1 with the slice pixel grabbed and zooms keeping the slice point invariant; siplot anchors at the far plane — pan translates far too fast and wheel zoom drifts. Distinct from cleared R1-17 (anchor wiring) — this is the pick traversal's negative space, same shape as cleared R1-22 (which added image and LINES channels but not textured meshes).
+
+### R2-51: `CutPlane` has no `displayValuesBelowMin` — values ≤ colormap min cannot be discarded
+
+Severity: Low
+
+Rust: `src/render/scene3d_items.rs:2200-2212` — `CutPlane` carries `plane / colormap / interpolation / resolution / visible / stroke_*` only; the slice raster (`build_cut_plane_mesh`, `:2439-2447`) always maps every sample through `color_at`, which clamps below-min values to the low LUT colour. No API in the 3D surface toggles below-min transparency.
+
+Reference: `silx/gui/plot3d/items/volume.py:134-150` — `CutPlane.get/setDisplayValuesBelowMin` (same API on `ScalarFieldView.py:618-634`, the SFViewParamTree "Values<min" row); `silx/gui/plot3d/scene/function.py:498, 462-466, 516-520` — default `True`, and when `False` the colormap GLSL substitutes `if (value == 0.) { discard; }`, punching below-min texels out of the slice.
+
+Impact: default rendering matches, but silx's thresholded-mask mode (hide everything at/below vmin) has no siplot counterpart, and the parameter row it backs cannot be ported. API/param-semantics gap, unrecorded in the roadmap.
+
+### R2-52: Default viewpoint is the "Side" three-quarter face — silx's initial camera is the front view
+
+Severity: Low
+
+Rust: `src/widget/scene_widget.rs:114-117` — `SceneWidget::new` runs `camera.extrinsic.reset(CameraFace::Side)` before framing, comment "Default to the silx 'side' three-quarter view".
+
+Reference: `silx/gui/plot3d/scene/viewport.py:221-223` — viewport camera created at `position=(0, 0, 12)` with `CameraExtrinsic` default `direction=(0, 0, -1)` (`camera.py:50`), i.e. the **front** face; only startup adjustment is `centerScene()` on first render (`Plot3DWidget.py:377-379`); `resetCamera` does not touch direction/up (`camera.py:283-291`). `'side'` exists only as the `resetZoom`/viewpoint-action parameter (`Plot3DWidget.py:342-349`).
+
+Impact: a fresh `SceneWidget`/`ScalarFieldView` opens on the (-1,-1,-1) diagonal where silx opens face-on down -Z; the code comment's "as silx" attribution is wrong (same mis-attribution class as cleared R1-24, which covered colour constants only). Needs either a revert to Front or a recorded deliberate-deviation entry.
+
+#### Verified clean (agent's sweep, no finding)
+
+camera fit math (`resetCamera` sin/min-fov/depth-extent, orthographic branch, `adjustCameraDepthExtent` 0.95/1.05/zextent-1000) vs camera.py:283-324/viewport.py:385-410; OrbitDrag/PanDrag vs arcball CameraSelectRotate.drag/CameraSelectPan (interaction.py:149-261) incl. π/minsize angle + y-inversion; iso auto-level re-resolve on data change; set_level clears auto; decreasing-level ordering; (min, min_positive, max) finite range; scatter defaults (symbol 'o', size 6.0); NaN → transparent-white; image interpolation default nearest; SFV centerScene-once, setScale/setTranslation re-centering, shininess 32. Not reported because recorded: hue-composite complex modes, ClipPlane, _model/ParamTreeView, Spheres, per-fragment 3D-texture slice, height-map resample quirk, cut-plane 1px stroke, snapshot-less labels.
+
+### R2 Category D — sidm widgets & engine (vs PyDM) [R2-53..R2-60]
+
+
+### R2-53: SidmSpinbox writes on every step/drag tick; PyDM sends only on Enter (writeOnPress is opt-in and defaults off)
+
+Severity: Medium
+
+Rust: `sidm/src/widgets/spinbox.rs:105-118` — `ui.add(drag).changed()` → `changed.then(|| self.set_value(value))`: every `DragValue` mutation (each arrow step, every frame of a drag) issues a channel `put`.
+
+Reference: `~/codes/pydm/pydm/widgets/spinbox.py:31,55-66,90-91` — `_write_on_press = False` by default; `stepBy` calls `send_value()` **only** `if self._write_on_press`; the value is otherwise sent solely from `keyPressEvent` on `Qt.Key_Return`/`Qt.Key_Enter`.
+
+Impact: stepping a sidm spinbox from 0 to 10 emits ten (or more, when dragged) puts to the control PV where PyDM emits exactly one on Enter — intermediate setpoints are written to hardware that PyDM never sends, and there is no way to get PyDM's compose-then-commit behaviour.
+
+### R2-54: SidmSpinbox default step is `10^-precision`; PyDM's default single step is 1 (`step_exponent = 0`)
+
+Severity: Low
+
+Rust: `sidm/src/widgets/spinbox.rs:97` — `let step = self.step.unwrap_or_else(|| 10f64.powi(-decimals));` (module doc `spinbox.rs:7-8` presents this as the port of `step_exponent`).
+
+Reference: `~/codes/pydm/pydm/widgets/spinbox.py:35,122-127` — `self.step_exponent = 0` at init and `update_step_size` sets `setSingleStep(10**self.step_exponent)` = 1.0, independent of precision; the exponent changes only via Ctrl+Left/Right (`:84-88`, floored at `-self.decimals()`).
+
+Impact: a stock spinbox on a PREC=3 PV steps by 0.001 in sidm vs 1.0 in PyDM — arrow/drag interactions produce different write payloads; PyDM's Ctrl+arrow exponent adjustment and the "Step: 1E{n}" suffix/tooltip (`spinbox.py:143-148`) have no counterpart.
+
+### R2-55: Alarm-border default inverted for PushButton/Spinbox/Slider — PyDM ships these three with `alarmSensitiveBorder = False` (and the slider with `alarmSensitiveContent = True`)
+
+Severity: Medium
+
+Rust: `sidm/src/widgets/base.rs:323-331` — `ChannelBase::new` applies `BorderMode::default()` = `Alarm` and `alarm_sensitive_content: false` uniformly; `push_button.rs:86`, `spinbox.rs:38`, `slider.rs:44` all take these defaults unchanged (only `with_border_mode` builders exist; no widget-specific default override).
+
+Reference: `~/codes/pydm/pydm/widgets/pushbutton.py:74` and `~/codes/pydm/pydm/widgets/spinbox.py:29` — `self._alarm_sensitive_border = False`; `~/codes/pydm/pydm/widgets/slider.py:264-265` — `alarmSensitiveContent = True`, `alarmSensitiveBorder = False`. (Frame and Drawing also default border-off, which sidm did port — `frame.rs`/`drawing.rs` per roadmap T1/T4 — so the rule exists but was not applied to these three.)
+
+Impact: on any MINOR/MAJOR/INVALID alarm, sidm draws a 2 px severity ring around every push button, spinbox and slider that PyDM leaves unstyled; conversely PyDM's slider recolours its value label by severity while sidm's slider has no severity-coloured content at all.
+
+### R2-56: Fortran reading order reshapes to the wrong geometry — PyDM makes `width` the first (row) axis, sidm keeps `width` columns and transposes with the wrong stride
+
+Severity: Medium
+
+Rust: `sidm/src/widgets/image_view.rs:63-72` — Fortran branch produces a `height × width` image (same dims as C-like) with `p[r*width + c] = data[c*height + r]`, `height = len/width`.
+
+Reference: `~/codes/pydm/pydm/widgets/image.py:106-109` — `Clike: img.reshape((-1, width), order="C")`; `Fortranlike: img.reshape((width, -1), order="F")`, i.e. a **`width`-row × `(len/width)`-column** image with `M[i][j] = data[j*width + i]`, displayed row-major (`image.py:210` `axisOrder="row-major"`).
+
+Impact: for any non-square image the two disagree in both shape and pixel mapping — e.g. `len=6, width=3`: PyDM Fortran renders 3 rows × 2 cols `[[d0,d3],[d1,d4],[d2,d5]]`, sidm renders 2 rows × 3 cols `[[d0,d2,d4],[d1,d3,d5]]` (the sidm unit test `reshape_fortran_transposes_into_row_major`, `image_view.rs:300-308`, locks in the divergent mapping). Only square images coincide. A PyDM camera screen using Fortranlike shows a different picture in sidm.
+
+### R2-57: SidmImageView defaults diverge — reading order defaults CLike (PyDM: Fortranlike) and colormap defaults Viridis (PyDM: Inferno)
+
+Severity: Low
+
+Rust: `sidm/src/widgets/image_view.rs:26-28` — `#[default] CLike` (justified in the doc comment as "the EPICS areaDetector default", which is not the PyDM contract); `:148` — `colormap: ColormapName::Viridis`.
+
+Reference: `~/codes/pydm/pydm/widgets/image.py:196` — `self._reading_order = ReadingOrder.Fortranlike` is the constructor default; `:185` — `self._colormap = PyDMColorMap.Inferno`.
+
+Impact: an image widget instantiated with defaults renders with a different orientation family (C vs Fortran interpretation of the same flat array — compounding R2-56) and a different palette than the same PyDM widget. Neither default flip is recorded in `doc/pydm-parity-roadmap.md` P4 or the module docs as a deviation (same class as the R1-16 gray-vs-viridis finding).
+
+### R2-58: Scatter and event plots default to the 18000-sample time-plot buffer; PyDM's default for both is 1200
+
+Severity: Low
+
+Rust: `sidm/src/widgets/scatter_plot.rs:164` and `sidm/src/widgets/event_plot.rs:104` — both use `ring_buffer::DEFAULT_BUFFER_SIZE` (= 18000, `sidm/src/widgets/ring_buffer.rs:20`, which is `timeplot.py`'s constant).
+
+Reference: `~/codes/pydm/pydm/widgets/scatterplot.py:12` — `DEFAULT_BUFFER_SIZE = 1200`; `~/codes/pydm/pydm/widgets/eventplot.py:11` — `DEFAULT_BUFFER_SIZE = 1200`.
+
+Impact: a default sidm scatter/event curve retains 15× more points than PyDM before dropping the oldest — after the 1200th sample the two widgets show different data windows (PyDM starts rolling; sidm keeps accumulating to 18000), and memory/draw cost per curve differs accordingly.
+
+### R2-59: `calc://` plain dialect cannot evaluate PyDM's expression vocabulary — bare `math` names, `np`, `epics_string`, `epics_unsigned` all fail and the failure is silent
+
+Severity: Medium
+
+Rust: `sidm/src/data_plugins/calc_plugin.rs:341-357` — the default (non-medm) dialect feeds the expression to evalexpr, whose math builtins are namespaced (`math::sin`, no bare `sin`, no `pi`, no numpy, no EPICS helpers); `eval_with_context(expr, &ctx).ok()?` maps every parse/eval error to `None` = "publish nothing", with no log.
+
+Reference: `~/codes/pydm/pydm/data_plugins/calc_plugin.py:51-53` — `eval_env = {"math": math, "np": np, "numpy": np, "epics_string": epics_string, "epics_unsigned": epics_unsigned}` plus **all** of `math.__dict__` injected bare (`sin`, `cos`, `pi`, `e`, `floor`, …); `:174-179` — `eval(self._expression, env)`, and errors are at least logged via `logger.exception`.
+
+Impact: any PyDM-grammar calc address — `calc://x?expr=sin(A)*2`, `expr=A*pi`, `expr=epics_unsigned(A)`, `expr=epics_string(A)` — evaluates in PyDM but publishes no value ever in sidm: the channel sits connected-but-valueless (the same silent-dead-channel class as R1-25/29) and, unlike the medm dialect's fail-visible warn (`calc_plugin.rs:321-331`), nothing is reported. char-waveform (`Bytes`) children additionally have no binding in the plain dialect (`pv_to_evalexpr` covers scalars only), where PyDM hands the ndarray to `epics_string`.
+
+### R2-60: SidmLineEdit enum-substitutes its display text; PyDMLineEdit shows (and round-trips) the numeric value
+
+Severity: Low
+
+Rust: `sidm/src/widgets/line_edit.rs:116-118` — `current_text` delegates to `format_value`, whose Default path substitutes the enum label for integer-like values (`display_format.rs:117-120`), so a line edit on an mbbo/bo shows `"On"`.
+
+Reference: `~/codes/pydm/pydm/widgets/line_edit.py:294-311` — `set_display` runs only `parse_value_for_display` (Default returns the value unchanged) then `format_string.format(new_value)` for int/float; unlike `label.py:137-141`, there is **no** `enum_strings` branch, so an enum channel's int index displays as `"1"` (precision-formatted), and `send_value` (`line_edit.py:126`) parses the field back with `int(...)`.
+
+Impact: for the same enum PV the two toolkits show different field text (label vs index); sidm's display/parse pair is self-consistent (labels accepted on write, `line_edit.rs:268-278`) but a PyDM operator procedure phrased in terms of the numeric field content and any pixel-level screen comparison diverge. Undocumented as a deviation in roadmap W3.
+
+#### Sub-bar observations (consolidator's discretion)
+
+(a) `SidmEnumComboBox` lacks PyDM's `_has_enums` enable gate and "Enums not available." tooltip (`enum_combo_box.py:128-151` vs `enum_combo_box.rs:92` — the sidm combo is clickable-but-empty before enum strings arrive)
+(b) PyDM's push-button release write reuses the `relative` addition (`pushbutton.py:525-530` via `__execute_send`), while sidm's release is always absolute (`push_button.rs:136-139` — deviation noted in the code comment only)
+(c) `PYDM_DEFAULT_PROTOCOL` is an env var in PyDM (`config.py:6-9`) but only a programmatic setter in sidm (`engine.rs:156`)
+(d) PyDM's line-edit right-click unit-conversion menu (`line_edit.py:191-242`, `utilities.find_unit_options`) has no sidm counterpart
+(e) `str(ndarray)` in a label is space-separated in PyDM (`label.py:150`) vs comma-separated in `display_format.rs:225-235`
+
+#### Verified clean (agent's sweep, no finding)
+
+alarm palette hexes + dashed-disconnected border; display_format.rs numeric/hex/binary/exponential/enum formats (incl. floor-toward-−∞ and Python exponent shape); macro substitution/macParseDefns port; byte-indicator defaults (1 bit / vertical / squares / colors); checkbox >0 / write 1-0; timeplot buffer 18000 + OnValueChange default + 1000 ms fixed-rate default; scale-indicator defaults (10 divisions / pointer / value label); line-edit parse paths (radix, strtobool, unit strip, array round-trip); disconnected-label = channel address; remove_protocol middle-click copy.
+
+### R2 Category E — adl2sidm parse/codegen (vs adl2pydm + MEDM C) [R2-61..R2-69]
+
+
+### R2-61: Absent `vis` in a dynamic attribute is treated as "if not zero" — MEDM's default is V_STATIC and MEDM never writes the default
+
+Severity: High
+
+Rust: `adl2sidm/src/codegen.rs:387` — `let vis = da.get("vis").map(String::as_str).unwrap_or("if not zero");` inside `visibility_gate_address` (`:385-414`); only a literal `vis="static"` returns `None`, so any `"dynamic attribute"` block that carries a channel but no `vis` key gets a `calc://…expr=A#0` gate, and the gate condition (`:365-367`) hides the widget when the channel reads 0.0 — and also while it is disconnected.
+
+C reference: `medm/medmCommon.c:805` — `dynamicAttributeInit` sets `dynAttr->vis = V_STATIC`; `medm/medmCommon.c:1518` — `writeDlDynamicAttribute` writes `vis` **only** `if(dynAttr->vis != V_STATIC)`, so every stock MEDM file with a static-visibility dynamic attribute omits the key; `medm/utils.c:4472-4473` — `calcVisibility` `case V_STATIC: return True` (always drawn). (adl2pydm has the same bug: `output_handler.py:83` `vis = attr.get("vis", "if not zero")` — MEDM C is the contract.)
+
+Impact: the extremely common alarm-coloured shape/text pattern — `"dynamic attribute" { clr="alarm" chan="$(P)$(M).SEVR" }`, no `vis` — converts to a widget that MEDM always shows (recoloured by severity) but sidm **hides whenever the channel value is 0** (NO_ALARM severity ⇒ invisible) and while disconnected. Same wrong gating for `clr="discrete"`+chan and chan-only blocks. This re-opens the R1-33/34 visibility family from the *defaults* side: the expression engine is now right, but the rule is fabricated where MEDM has none.
+
+### R2-62: Strip chart time span — `milli-second` units unscaled (1000× too long), and the omitted-default `period` falls to sidm's 5 s instead of MEDM's 60 s
+
+Severity: Medium
+
+Rust: `adl2sidm/src/codegen.rs:1618-1626` — `strip_chart_span` scales `period` by `Some("minute") => 60.0, Some("hour") => 3600.0, _ => 1.0` and returns `None` when `period` is absent (no `.with_time_span`, so the sidm default applies: `sidm/src/widgets/time_plot.rs:60` `DEFAULT_TIME_SPAN: f64 = 5.0`). The legacy `delay` key is never read (no hit in `codegen.rs`).
+
+C reference: `medm/medmStripChart.c:2105-2108` — parse accepts `"milli second"`/`"milli-second"` → MILLISECONDS; `:586-588` — `timeInterval = period * 0.001 / dataWidth` (milliseconds ×0.001); `"hour"` is not a MEDM unit (units are milli-second/second/minute). `:39-40` — `SC_DEFAULT_PERIOD 60.0`, `SC_DEFAULT_UNITS SECONDS`; `:2211` — `writeDlStripChart` omits `period` when it equals 60.0, so a stock strip chart carries no `period` key. `:2091, 2172-2199` — pre-2.2 files carry `delay`, converted via `linear_scale`. (adl2pydm passes `period` raw as `updateInterval`, `output_handler.py:1065-1068` — also unscaled; MEDM C is the contract.)
+
+Impact: a `period=500, units="milli-second"` chart (0.5 s window in MEDM) converts to a 500 s window; a default-configured MEDM strip chart (no `period` key — the common case) converts to a 5-second window instead of MEDM's 60 seconds; legacy `delay`-format charts silently lose their span too.
+
+### R2-63: Pre-2.2 top-level `basic attribute`/`dynamic attribute` inheritance and the old nested `attr{}` form are dropped — legacy static graphics lose colour, fill, width, and visibility rules silently
+
+Severity: Medium
+
+Rust: `adl2sidm/src/adl_parser.rs:562-568` — `parse()` keeps only top-level blocks whose symbol is in `ADL_WIDGET_SYMBOLS` (`:108-133`), so a top-level `"basic attribute"`/`"dynamic attribute"` block (the old-format carrier) is discarded without a warning; additionally `parse_widget`'s attribute lifting (`:317-329`) reads assignments at nesting level 0 only (`locate_assignments`, `:197-215`), so the old nested `"basic attribute" { attr { clr=… } }` / `dynamic attribute { attr { mod {…} param {…} } }` shape yields an empty attribute map even where the block is widget-nested.
+
+C reference: `medm/display.c:487` — for `versionNumber < 20200` the parser initialises rolling attributes; `:536-546` — top-level `"basic attribute"` (and the misspelled `<<basic atribute>>`) / `"dynamic attribute"` tokens are parsed via `parseOldBasicAttribute`/`parseOldDynamicAttribute` into rolling state; `:515-529` — each subsequent Rectangle/Oval/Arc/Text/Polyline/Polygon **inherits** the last-seen attributes (dynAttr consumed once, basic attr persists). Old write shape: `medm/medmCommon.c:630` and `:1536` (nested `attr {`). adl2pydm drops these blocks the same way; MEDM C is the contract.
+
+Impact: every pre-MEDM-2.2 `.adl` converts with all static graphics in default black-solid (colour/fill/line-width lost) and all old-format visibility/alarm-colour rules gone — silently, no converter warning. Same interop-contract family R1-35 opened (`rdbk`/`ctrl` were fixed; the attribute half of the old format was not).
+
+### R2-64: Related display `visual` never read — "invisible" hotspots render as opaque buttons, row/column-of-buttons render as a menu; entry `policy` misread as `mode`
+
+Severity: Medium
+
+Rust: `adl2sidm/src/codegen.rs:2076-2157` — `emit_related_display` chooses plain-button (1 entry) vs `menu_button` (N entries) purely from entry count; no code reads the `visual` key (zero hits in `codegen.rs`), and `style_prelude` (`:2149-2153`) paints the widget's `bclr` as a filled rect over the full geometry. `:2265` — `related_display_entries` reads `spec.get("mode")` for the replace flag.
+
+C reference: `medm/medmRelatedDisplay.c:728-739` — parse of `visual` ("a row of buttons"/"a column of buttons"/"invisible", `displayList.h:451-453`); `:819-821` — written whenever ≠ RD_MENU, so the key is present in exactly the files that need it; `:562-593` — `RD_HIDDEN_BTN` creates **no widget**, drawing only a sparse 4×4 stipple over the underlying graphic (click handled directly); `:461-556` — ROW/COL create N side-by-side buttons. Entry key: `:666-671` parses `policy` ("replace display"), `:778-780` writes `policy=` — there is no `mode` key in the file format. (adl2pydm reads `visual=="invisible"` — `output_handler.py:268-283`, `:410-417` — and `policy` — `:1025`.)
+
+Impact: screens that overlay invisible related displays on graphics (a standard MEDM hotspot idiom) convert to opaque, bclr-filled buttons that cover the graphic; row/column button groups collapse into a single menu button. The `policy` misread means `replace` is never detected, so the replace-mode deviation warning (`codegen.rs:2195-2199`) can never fire.
+
+### R2-65: Text-update/text-entry `format` types beyond `string` silently dropped — `exponential` and `hexadecimal` have exact sidm surfaces
+
+Severity: Medium
+
+Rust: `adl2sidm/src/codegen.rs:2561-2568` — `string_format_builder` maps only `format="string"` (or a `$`-suffixed PV) to `DisplayFormat::String`; every other MEDM format (`exponential`, `engr. notation`, `compact`, `truncated`, `hexadecimal`, `octal`, `sexagesimal*`) falls through to `None` with **no warning**, leaving sidm's fixed-point default. Call sites `:499` (text update), `:526` (text entry).
+
+C reference: `medm/medmTextUpdate.c:300-345` — the runtime format switch renders `EXPONENTIAL` via `cvtDoubleToExpString`, `HEXADECIMAL`/`OCTAL` in that radix, `COMPACT`, `TRUNCATED`, three `SEXAGESIMAL` modes (format strings at `displayList.h:409-418`); parse at `medmTextUpdate.c:567`, `medmTextEntry.c:773`. adl2pydm maps only `string` too (`output_handler.py:1211-1227`). sidm already ships the missing targets: `sidm/src/widgets/display_format.rs:33-46` has `Exponential` and `Hex`, and both `SidmLabel::with_format` (`label.rs:68`) and `SidmLineEdit::with_format` (`line_edit.rs:68`) accept them.
+
+Impact: a `format="hexadecimal"` status word renders as decimal, `format="exponential"` renders fixed-point — numerically misleading displays — even though the two most common non-default formats need only a two-line mapping; the remaining formats at minimum need the converter warning every other unsupported feature gets.
+
+### R2-66: `limits` block source/default resolution misread — `precDefault` applied without its `precSrc` gate, absent `hoprDefault` read as 0.0 instead of MEDM's 1.0, and a single-sided `*Src="default"` overrides both ends
+
+Severity: Medium
+
+Rust: `adl2sidm/src/codegen.rs:2550-2553` — `precision_default_builder` emits `.with_precision(precDefault)` whenever the key parses, never checking `precSrc` (call sites `:498`, `:525`, `:748`, `:906`). `:2704-2721` — `user_defined_limits` triggers when **either** `loprSrc` or `hoprSrc` is `"default"` and then emits `.with_limits(loprDefault.unwrap_or(0.0), hoprDefault.unwrap_or(0.0))` — both ends forced, missing `hoprDefault` read as 0.0.
+
+C reference: `medm/medmCommon.c:665-666` — `writeDlLimits` writes `precDefault` whenever it differs from `PREC_DEFAULT` (0) **even when `precSrc` stays channel** (`precSrc` itself written only when `== PV_LIMITS_DEFAULT`, `:663`); `medm/medmTextUpdate.c:495-497` — at runtime `prec` comes from the channel's precision unless `precSrc == PV_LIMITS_DEFAULT`. `medm/medmWidget.h:55-57` — `LOPR_DEFAULT 0.0`, **`HOPR_DEFAULT 1.0`**, `PREC_DEFAULT 0`; `medmCommon.c:660-661` omits `hoprDefault` when it equals 1.0, so `limits { hoprSrc="default" }` alone means HOPR = 1.0, and each of lopr/hopr/prec resolves per its own source. (adl2pydm shares the 0.0-default and both-ends bugs, `output_handler.py:1349-1365`, and skips precision per its TODO at `:1345-1348`.)
+
+Impact: a `.adl` carrying a leftover `precDefault=3` with channel-sourced precision converts pinned to 3 decimals where MEDM tracks the PV's PREC; `limits { hoprSrc="default" }` converts to `with_limits(0.0, 0.0)` — a degenerate scale/slider range where MEDM shows 0.0..1.0; a widget that defaults only HOPR loses its channel-driven LOPR.
+
+### R2-67: `clrmod="alarm"` silently ignored on every controller — MEDM alarm-colours text entry, message button, menu, choice button, valuator, and wheel switch
+
+Severity: Medium
+
+Rust: `adl2sidm/src/codegen.rs` — `alarm_content_builder` (`:2582-2588`) is applied only to text update (`:500`), byte (`:836`), and scale indicators (`:879`); the controller emitters — text entry `:520-546`, message button `:550-583`, menu `:586-607`, choice button `:612-665`, valuator `:671-721`, wheel switch `:725-770` — never read `clrmod` and emit **no warning** when it is `"alarm"`. (Root cause partly cross-crate: sidm exposes `with_alarm_sensitive_content` only on `SidmByteIndicator`/`SidmDrawing`/`SidmLabel`/`SidmScaleIndicator`.)
+
+C reference: MEDM colours the control's foreground by severity under `clrmod=ALARM` at runtime: `medm/medmTextEntry.c:418-424` (`XmNforeground = alarmColor(pr->severity)`), `medmMessageButton.c:348`, `medmMenu.c:540`, `medmChoiceButtons.c:375`, `medmValuator.c:892-895`, `medmWheelSwitch.c:390`. (adl2pydm drops controller clrmod too.)
+
+Impact: operator screens that rely on a text entry / menu / message button turning red on MAJOR alarm lose that indication entirely on conversion, with no converter warning — asymmetric with the monitor widgets, where the same MEDM key is faithfully wired (R1-33-family fix). Closing fully needs the sidm builder on the controller widgets; at minimum the silent drop should warn.
+
+### R2-68: Cartesian plot runtime surface silently dropped — `trigger`, `erase`, `eraseMode`, `countPvName`, `style`, `erase_oldest`
+
+Severity: Low
+
+Rust: `adl2sidm/src/codegen.rs:1425-1535` — `emit_cartesian_plot` reads only `count` (numeric, scatter-buffer only), the traces, plotcom, and x/y1/y2 axis blocks; none of the six keys above is read anywhere in `codegen.rs`, and no warning is emitted for any of them (a non-numeric `count` — the PV-name form — also silently disappears through `parse::<usize>().ok()`).
+
+C reference: `medm/medmCartesianPlot.c:3043-3068` — parse of `trigger` (plot updates only when the trigger PV posts), `erase` + `eraseMode` (`if not zero`/`if zero`), and `countPvName` (`count` may name a PV, `:2957-2963` stores it as a string); `:2964-2994` — `style` (`point plot`/`line plot`/`step`/`fill under`) and `erase_oldest` (`plot last n pts` circular vs `plot n pts & stop`); `:439-466` — erase/trigger wired as live records at execute time. (adl2pydm's `write_block_cartesian_plot`, `output_handler.py:687-775`, ignores all six as well.)
+
+Impact: a triggered cartesian plot converts to one that redraws on every waveform update; erase-PV screens lose their clear function; `style="point plot"` renders as connected lines; a PV-driven count degrades to the default buffer — all without any converter warning, unlike every other unsupported-feature path in the emitter.
+
+### R2-69: Wheel-switch `format` only parsed in adl2pydm's `w.d` form — MEDM's documented printf form (`"% 6.2f"`) falls back to channel precision
+
+Severity: Low
+
+Rust: `adl2sidm/src/codegen.rs:2762-2767` — `wheel_decimals` handles `"integer"` and `w.d` (`fmt.split_once('.')?.1.parse::<i32>()`); for a printf-style value the fraction part is `"2f"`, the parse fails, and the emitter warns "precision left to channel" (`:740-747`).
+
+C reference: `medm/medmWheelSwitch.c:664-667` — the token is stored raw and handed to the Xc widget as `XmNformat`; `medm/xc/WheelSwitch.c:44` — `DEFAULT_FORMAT "% 6.2f"` (the documented printf shape), `:1348-1355` — the widget parses the format by locating `%` and the trailing `f`, so `"% 6.2f"` means exactly 2 decimals regardless of PREC. (adl2pydm makes the same `w.d` assumption, `output_handler.py:1178-1197`.)
+
+Impact: any wheel switch whose `.adl` carries the real MEDM printf format displays with the channel's PREC instead of the format's decimals whenever the two differ (warned, not silent — but the decimals are recoverable by stripping the `%`-prefix/`f`-suffix before the `w.d` split).
+
+#### Verification notes
+
+Choice-button `stacking` row/column orientation checked against `medmChoiceButtons.c:131-140` (XmVERTICAL for ROW) and matches; `"row column"` grid stacking degrades to a warned vertical stack (warned, not silent — not reported). Valuator `dPrecision`→display-precision is a recorded roadmap decision, skipped. No source files modified.
+
 ## Cleared During Review
 
 Fix round 2026-07-03/04 (one commit per finding; branch merged fast-forward
@@ -689,3 +1451,80 @@ into main):
     contract): R1-28, R1-35, R1-36, R1-37, R1-38.
   - Unimplemented surface (scope decisions to record or close): R1-18,
     R1-19, R1-20, R1-32, R1-5 (partially).
+
+- 2026-07-04: **round 2 opened**; same 5 read-only agents, scopes
+  rotated to surfaces R1 left uncovered (A: silx tools/widget layer,
+  B: items/colors/ticks/fit-engine internals, C: plot3d round 2,
+  D: sidm widget/display semantics vs PyDM, E: adl2sidm remaining
+  widget/attribute surface vs MEDM C).
+- 2026-07-04: round 2 consolidated — **69 findings** (High 3,
+  Medium 44, Low 22), renumbered R2-1..R2-69 (A: 1–26, B: 27–45,
+  C: 46–52, D: 53–60, E: 61–69). Baseline: post-R1-fix-round HEAD
+  `4ba56d2`.
+
+  Thematic clusters:
+  - **The R1-16 fix never swept its family:** R2-1 (ImageStack
+    `viridis(0,1)`), R2-23 (ComplexImageView), R2-46 (six 3D item
+    sites), plus the CompareImages sibling at `high_level.rs:8577`
+    flagged by agent A. The R1-16 fix changed one construction site;
+    the `Colormap::viridis(0.0, 1.0)`-at-construction anchor was never
+    `rg`-swept. Textbook violation of the fixes-from-reported-defects
+    rule — the fix round must start with that sweep.
+  - **Autoscale is unrepresentable in the `Colormap` model:** R2-1,
+    R2-14, R2-23, R2-46 share one structural cause — `Colormap`
+    carries plain `f64` vmin/vmax where silx's contract is
+    `None`-means-autoscale per bound. Every consumer therefore invents
+    a frozen range. Structural fix: optional bounds resolved against
+    item data at apply time; the four symptoms then close together.
+  - **Defaults are the R2 negative space.** Beyond the colormap
+    family: R2-18 (grid Major-on vs silx none), R2-52 (Side vs front
+    viewpoint), R2-55 (alarm-border on PushButton/Spinbox/Slider where
+    PyDM ships border-off), R2-57 (CLike/Viridis vs PyDM
+    Fortranlike/Inferno), R2-58 (scatter/event buffer 18000 vs 1200),
+    R2-62/R2-66 (MEDM write-omitted defaults: period 60 s, HOPR 1.0).
+    R1 audited behaviours; R2 shows constructor defaults and
+    absent-key defaults were the unaudited half.
+  - **MEDM write-omits-defaults, parser treats absent as absent:**
+    R2-61 (missing `vis` fabricated as "if not zero" where MEDM's
+    default is V_STATIC — hides alarm-coloured widgets at value 0),
+    R2-62, R2-66 — the same class R1-38 opened (`sbit=15` omitted).
+  - **adl2sidm silent drops bypass its own warn convention:** R2-63
+    (old-format attribute inheritance), R2-64 (`visual`/`policy`),
+    R2-65 (format types with existing sidm surfaces), R2-67
+    (controller `clrmod=alarm`), R2-68 (cartesian runtime keys) — the
+    emitter warns on other unsupported paths but not these.
+  - **Fit stack: mode/config parity, not formula parity:** R2-27..33 —
+    R1 verified the formulas; what diverges is which mode the deployed
+    FitManager path actually runs (central differences, per-λ budget,
+    strip-background default TRUE with three sites asserting the
+    opposite, erfc relative precision, CFACTOR sigma, constrained
+    uncertainties, NaN filtering).
+  - **Profile subsystem retains no ROI:** R2-2..R2-6 — width/method
+    edits and data changes have no recompute trigger to act on
+    (structural), plus the −0.5 corner→centre convention dropped at
+    every caller and nan-policy drift.
+  - **Recurrences of closed R1 families in new sites:** R2-48 (3D
+    wheel per-frame vs per-event — R1-8 family), R2-59 (calc:// plain
+    dialect silent-dead-channel — R1-25/29 family), R2-56 (a unit
+    test locking in the divergent behaviour — the R1 test-skepticism
+    class).
+
+  Classification (per port-translation-lessons):
+  - Reference-independent defects (real regardless of upstream):
+    R2-4 (dead profile controls), R2-7 (median filter compounds),
+    R2-13 (colorbar ticks at wrong positions), R2-30 (erfc collapse →
+    zero-gradient stall), R2-41 (log Min:0 render collapse), R2-47
+    (translucent surfaces hide interior data), R2-53 (per-tick puts
+    to hardware), R2-56 (Fortran reshape wrong geometry, locked by a
+    unit test), R2-59 (silent dead calc channels), R2-61 (widgets
+    wrongly hidden at value 0).
+  - Reference-faithful gaps: R2-2, R2-3, R2-5, R2-6, R2-8..R2-11,
+    R2-15, R2-19..R2-22, R2-24..R2-29, R2-31..R2-40, R2-42..R2-46,
+    R2-48, R2-50, R2-52, R2-54, R2-55, R2-57, R2-58, R2-60.
+  - Interop-contract gaps (.adl file format is the contract):
+    R2-62..R2-69 (and R2-61 doubles here).
+  - Unimplemented surface (port or record a scope decision): R2-12
+    (scatter-mask ellipse/line/pencil), R2-14 (per-bound autoscale),
+    R2-16 (asinh axis scale + tool buttons), R2-17 (SyncAxes
+    scale/direction), R2-49 (complex per-child modes), R2-51
+    (displayValuesBelowMin).
