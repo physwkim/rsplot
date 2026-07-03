@@ -468,6 +468,34 @@ into main):
   notch (Line×40pt, sum-conserving smoothing) = exactly ×1.1, N notches
   = 1.1^N; trackpad stays continuous at the same rate.
 
+**Category C batch (`fix/plot3d`, cherry-picked onto main at `1119c54`):**
+
+- R1-24 — `9b7ce07` silx default style constants (grey-51 background,
+  white box/text) + foreground/text colour APIs.
+- R1-17 — `8c9ec16` orbit pivots on the picked point, pan plane at the
+  picked NDC depth, wheel zoom anchored at the cursor pick.
+- R1-23 — `553ed28` viewport linear fog + shininess-gated specular
+  (ScalarFieldView shininess=32); `paint_scene3d_with`/`snapshot_scene3d_with`.
+- R1-21 — `3c0bbb5` cut plane's box-intersection contour stroke + colour/
+  visibility API. *Residual:* 1 px stroke vs silx width 2.0 (line
+  pipeline has no wide-line support).
+- R1-22 — `94cd71f` Scatter2D LINES data-point picking (5 px threshold)
+  + image-quad pixel picking (row/col payload).
+- R1-18 — `fbfe4e2` `Item3DTransform` stack (translate · rotate-about-
+  centre · matrix · scale, silx items/core.py:288-485) baked at append;
+  inverse-transpose normals; transformed bounds/pick; SFV set_scale/
+  set_translation. *Residual:* rotated image layers convert to textured
+  quads and lose row/col picking.
+- R1-19 — `0f099b1` LabelledAxes chrome: ticklayout port (verified
+  against executable silx), dashed tick lines, egui-overlay axis/tick
+  labels, `set_axes_labels`. *Residuals:* labels absent from
+  `snapshot()` (overlay text); CPU world-space dashes vs silx screen-px
+  fragment dashes; `%g` stand-in decimal-only at extreme magnitudes.
+- R1-20 — `1119c54` overview orientation indicator: companion scene
+  (half-transparent disc + RGB axes ×2.5), camera slaved at
+  −12·direction, second viewport+scissor pass top-right 100×100 px, on
+  by default, `set_orientation_indicator_visible`.
+
 **Category D batch (`fix/sidm`, merged at `e4ed898`):**
 
 - R1-25 — `e19bf21` pva Connected publishes `write_access = true`
