@@ -168,6 +168,48 @@ fn switching_dimension_closes_the_inactive_window() {
     assert!(!app.borrow().stack_profile_window().is_open());
 }
 
+/// R2-5: the 2D stacked profile honors the shared line width / reduction method
+/// (silx Profile3DToolBar's single setting), instead of the old hardcoded
+/// width-1 Mean. The width/method live on the 1D profile window.
+#[test]
+fn two_d_profile_honors_the_shared_width_and_method() {
+    let (app, _harness) = harness();
+    app.borrow_mut().set_profile_mode(ProfileMode::Horizontal);
+    app.borrow_mut()
+        .set_profile_dimension(StackProfileDimension::TwoD);
+    app.borrow_mut().profile_window_mut().set_line_width(3);
+    app.borrow_mut()
+        .profile_window_mut()
+        .set_method(ProfileMethod::Sum);
+
+    // Drive a horizontal 2D profile at row 1 (end.y = 1.5 -> floor 1).
+    assert!(app.borrow_mut().show_profile((0.5, 1.5), (3.5, 1.5)));
+
+    // Expected: a width-3 Sum extraction (the shared setting), not width-1 Mean.
+    let expected = app
+        .borrow()
+        .stack_aligned_profile(1.0, 3, true, ProfileMethod::Sum)
+        .expect("horizontal stack profile");
+    let width1_mean = app
+        .borrow()
+        .stack_aligned_profile(1.0, 1, true, ProfileMethod::Mean)
+        .expect("horizontal stack profile");
+
+    let view = app.borrow();
+    let got = view
+        .stack_profile_window()
+        .profile()
+        .expect("2D window has a profile after show_profile");
+    assert_eq!(
+        *got, expected,
+        "2D profile must use the shared width/method"
+    );
+    assert_ne!(
+        *got, width1_mean,
+        "2D profile must not be the old hardcoded width-1 Mean"
+    );
+}
+
 #[test]
 fn show_profile_returns_true_for_a_line_over_the_volume() {
     let (app, _harness) = harness();

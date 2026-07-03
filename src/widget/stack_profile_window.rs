@@ -30,6 +30,10 @@ pub struct StackProfileWindow {
     /// `(profile_len, frame_count)` of the currently-uploaded image, so a
     /// dimension change re-fits the view (silx re-creates the profile image).
     last_dims: Option<(usize, usize)>,
+    /// The last [`StackProfile`] uploaded (the values shown), retained for
+    /// introspection/tests — lets a caller confirm the extracted profile
+    /// (e.g. that the 2D profile honored the shared width/method).
+    last_profile: Option<StackProfile>,
     window_id: egui::Id,
     open: bool,
     /// Initial outer size of the profile viewport, in points (matches
@@ -58,6 +62,7 @@ impl StackProfileWindow {
             plot,
             image_handle: None,
             last_dims: None,
+            last_profile: None,
             window_id: egui::Id::new(plot_id).with("stack_profile_window"),
             open: false,
             size: egui::vec2(420.0, 320.0),
@@ -93,6 +98,7 @@ impl StackProfileWindow {
         if profile.frame_count == 0 || profile.profile_len == 0 {
             return;
         }
+        self.last_profile = Some(profile.clone());
         // The image pipeline takes f32 scalars; the stacked profile is f64.
         let data: Vec<f32> = profile.values.iter().map(|&v| v as f32).collect();
         let spec = ImageSpec::scalar(
@@ -122,6 +128,14 @@ impl StackProfileWindow {
     /// pick data in tests).
     pub fn plot_mut(&mut self) -> &mut Plot2D {
         &mut self.plot
+    }
+
+    /// The last [`StackProfile`] uploaded via [`set_profile`](Self::set_profile),
+    /// or `None` before the first (or after only empty) profiles. Lets a caller
+    /// confirm the extracted values (e.g. that the 2D stacked profile honored the
+    /// shared line width / reduction method).
+    pub fn profile(&self) -> Option<&StackProfile> {
+        self.last_profile.as_ref()
     }
 
     /// Show the stacked profile in its own native OS window (a separate egui

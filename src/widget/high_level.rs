@@ -12439,18 +12439,23 @@ pub fn stack_aligned_profile(
 }
 
 /// Stack a line-segment profile over every frame (silx
-/// `ProfileImageStackLineROI`), using [`line_profile_values`] per frame.
+/// `ProfileImageStackLineROI`), using the bilinear band [`line_profile_band`]
+/// per frame so the line width and reduction method are honored — silx's
+/// image-stack line ROI runs the same `bilinear.profile_line(..., roiWidth,
+/// method)` as the 1D line profile (`tools/profile/rois.py:1096-1104`).
 pub fn stack_line_profile(
     data: &[f32],
     shape: [usize; 3],
     perspective: StackPerspective,
     start: (f64, f64),
     end: (f64, f64),
+    line_width: u32,
+    method: ProfileMethod,
 ) -> Option<StackProfile> {
     stack_profile_with(data, shape, perspective, |w, h, pixels| {
-        // line_profile_values returns (arc positions, sampled values); stack the
-        // sampled values.
-        line_profile_values(w, h, pixels, start, end)
+        // line_profile_band returns (arc positions, band-reduced values); stack
+        // the reduced values.
+        line_profile_band(w, h, pixels, start, end, line_width, method)
             .ok()
             .map(|(_positions, values)| values)
     })
@@ -12827,9 +12832,23 @@ impl StackView {
     /// dimension and stack them (silx `Profile3DToolBar`'s
     /// `ProfileImageStackLineROI`). Requires a loaded volume; returns `None` in
     /// flat-frames mode.
-    pub fn stack_line_profile(&self, start: (f64, f64), end: (f64, f64)) -> Option<StackProfile> {
+    pub fn stack_line_profile(
+        &self,
+        start: (f64, f64),
+        end: (f64, f64),
+        line_width: u32,
+        method: ProfileMethod,
+    ) -> Option<StackProfile> {
         let (data, shape) = self.volume.as_ref()?;
-        stack_line_profile(data, *shape, self.perspective, start, end)
+        stack_line_profile(
+            data,
+            *shape,
+            self.perspective,
+            start,
+            end,
+            line_width,
+            method,
+        )
     }
 
     /// The armed profile-ROI tool of the Profile3D toolbar (silx
@@ -12922,13 +12941,19 @@ impl StackView {
                 true
             }
             StackProfileDimension::TwoD => {
+                // Honor the shared line width / reduction method (silx's
+                // Profile3DToolBar uses one setting for the 1D and 2D profiles);
+                // they live on the 1D profile window. Previously hardcoded to
+                // 1 / Mean, so 2D silently ignored the user's Width/Method.
+                let line_width = self.profile_window.line_width();
+                let method = self.profile_window.method();
                 let profile = match self.profile_mode {
-                    ProfileMode::Line => self.stack_line_profile(start, end),
+                    ProfileMode::Line => self.stack_line_profile(start, end, line_width, method),
                     ProfileMode::Horizontal => {
-                        self.stack_aligned_profile(end.1.floor(), 1, true, ProfileMethod::Mean)
+                        self.stack_aligned_profile(end.1.floor(), line_width, true, method)
                     }
                     ProfileMode::Vertical => {
-                        self.stack_aligned_profile(end.0.floor(), 1, false, ProfileMethod::Mean)
+                        self.stack_aligned_profile(end.0.floor(), line_width, false, method)
                     }
                     ProfileMode::Rectangle | ProfileMode::None => None,
                 };
@@ -13394,6 +13419,8 @@ mod tests {
             StackPerspective::Axis0,
             (0.0, 0.0),
             (3.0, 0.0),
+            1,
+            ProfileMethod::Mean,
         )
         .unwrap();
         assert_eq!(sp.frame_count, 2);
@@ -13403,6 +13430,39 @@ mod tests {
         let (frame0, frame1) = sp.values.split_at(sp.profile_len);
         assert!(frame0.iter().all(|&v| v < 100.0), "frame0 {frame0:?}");
         assert!(frame1.iter().all(|&v| v >= 100.0), "frame1 {frame1:?}");
+    }
+
+    #[test]
+    fn stack_line_profile_honors_width_and_method() {
+        // R2-5: the stacked line profile is a bilinear band that honors width +
+        // method (silx runs the same profile_line as the 1D line). A width-2 Sum
+        // over a segment differs from the width-1 Mean the arm used to hardcode.
+        let (data, shape) = sample_volume();
+        let w1 = stack_line_profile(
+            &data,
+            shape,
+            StackPerspective::Axis0,
+            (0.5, 1.0),
+            (3.5, 1.0),
+            1,
+            ProfileMethod::Mean,
+        )
+        .unwrap();
+        let w2 = stack_line_profile(
+            &data,
+            shape,
+            StackPerspective::Axis0,
+            (0.5, 1.0),
+            (3.5, 1.0),
+            2,
+            ProfileMethod::Sum,
+        )
+        .unwrap();
+        assert_eq!(w1.frame_count, w2.frame_count);
+        assert_ne!(
+            w1.values, w2.values,
+            "width/method must change the stacked line profile"
+        );
     }
 
     #[test]
