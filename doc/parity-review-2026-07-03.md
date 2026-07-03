@@ -433,7 +433,38 @@ Impact: multi-item vertical choice buttons render oversized, truncated captions 
 
 ## Cleared During Review
 
-(none yet — fix phase not started)
+Fix round 2026-07-03/04 (one commit per finding; branch merged fast-forward
+into main):
+
+**Category D batch (`fix/sidm`, merged at `e4ed898`):**
+
+- R1-25 — `e19bf21` pva Connected publishes `write_access = true`
+  (p4p parity: protocol carries no access-rights signal).
+- R1-26 — `acea1d7` value mask now pyepics' exact
+  `DBE_VALUE|DBE_ALARM|DBE_PROPERTY` (DBE_LOG dropped, pyepics parity) plus
+  a DBE_PROPERTY-only subscription that refetches CTRL metadata
+  (`update_ctrl_vars` parity; epics-ca-rs monitor snapshots are TIME-class).
+- R1-27 — `c6d3d03` CA wire strings decode latin-1 at all four sites
+  (units / string values / string arrays / enum labels); pva stays UTF-8.
+- R1-28 — `3454028` pva monitor name = netloc only, `/path` drilled as
+  subfield keys; RPC form implemented (NTURI, typed args, `pydm_pollrate`).
+  *Residual:* pva subfield **writes** dropped with warning (part of the
+  recorded NTTable value-model deferral).
+- R1-29 — `cdb8d3d` `PvField::Union` unwraps the selected variant and
+  recurses; NTNDArray ubyte lands as `Bytes`. *Residual:* compressed-codec
+  arrays (blosc/lz4/bslz4/jpeg) skip the value with a one-time warning —
+  decompression needs new deps.
+- R1-30 — `985220a` ca+pva puts gate on published write access; CA seeds
+  rights from `ChannelInfo` on every connect; `SIDM_READ_ONLY` env
+  (PYDM_READ_ONLY parity) read at plugin construction. *Residual:* the
+  revoked-rights path has unit-level coverage only (in-process CaServer
+  always grants write).
+- R1-31 — `ff8fcb8` value events only on actual value change: CA compares
+  against `last_value` (cleared on disconnect), pva gates on the monitor's
+  changed-field marks; first update always emits.
+- R1-32 — `e4ed898` loc:// `type=array`, `unit`/`upper_limit`/
+  `lower_limit`/`enum_string` extras, float auto-precision (digit count
+  capped 8) on init and every float put.
 
 ## Review Log
 
