@@ -15,7 +15,7 @@
 use egui_wgpu::RenderState;
 
 use crate::core::backend::{ImageSpec, ItemHandle};
-use crate::core::colormap::{Colormap, ColormapName};
+use crate::core::colormap::{AutoscaleMode, Colormap, ColormapName};
 use crate::core::plot::PlotId;
 use crate::widget::high_level::{Plot2D, PlotDataError};
 use crate::widget::plot_widget::PlotResponse;
@@ -189,30 +189,6 @@ fn data_max_amplitude(data: &[(f32, f32)]) -> f32 {
         .fold(0.0_f32, f32::max)
 }
 
-/// Compute the `[min, max]` of `values` over finite entries, returning
-/// `(0.0, 1.0)` when there is no finite value (degenerate range fallback that
-/// the colormap maps to its low color).
-fn finite_range(values: &[f32]) -> (f64, f64) {
-    let mut min = f64::INFINITY;
-    let mut max = f64::NEG_INFINITY;
-    for &v in values {
-        if v.is_finite() {
-            let v = v as f64;
-            if v < min {
-                min = v;
-            }
-            if v > max {
-                max = v;
-            }
-        }
-    }
-    if min.is_finite() && max.is_finite() && max > min {
-        (min, max)
-    } else {
-        (0.0, 1.0)
-    }
-}
-
 /// Render a horizontal toolbar of selectable mode buttons (one per
 /// [`ComplexMode`] in silx menu order) and return the mode the user picked this
 /// frame, or `None` if no button was clicked.
@@ -252,6 +228,14 @@ pub struct ComplexImageView {
     height: u32,
     data: Vec<(f32, f32)>,
     mode: ComplexMode,
+    /// The base colormap shared by every non-phase scalar mode (ABSOLUTE /
+    /// REAL / IMAGINARY / SQUARE_AMPLITUDE), matching silx's single
+    /// `ColormapMixIn` colormap object reused across those modes. Its
+    /// name/normalization/gamma persist across mode and data changes; the value
+    /// range is re-derived from each scalar image (silx's `vmin`/`vmax = None`
+    /// autoscale). [`ComplexMode::Phase`] ignores this and uses the fixed hsv
+    /// phase colormap.
+    colormap: Colormap,
     /// Displayed max amplitude for [`ComplexMode::Log10AmplitudePhase`] (silx
     /// `smax`): `None` autoscales to the data max.
     max_amplitude: Option<f32>,
@@ -274,6 +258,9 @@ impl ComplexImageView {
             height: 0,
             data: Vec::new(),
             mode: ComplexMode::Absolute,
+            // silx's scalar-mode default colormap is the plot default (gray),
+            // autoscaled per image; the stored range is a placeholder.
+            colormap: Colormap::new(ColormapName::Gray, 0.0, 1.0),
             // silx default amplitude range: autoscale max, 2 log10 decades.
             max_amplitude: None,
             delta: DEFAULT_AMPLITUDE_DELTA,
@@ -473,16 +460,34 @@ impl ComplexImageView {
     }
 
     /// The colormap for a scalar mode: the fixed `hsv` phase colormap for
-    /// [`ComplexMode::Phase`], or an autoscaled viridis for every other scalar
-    /// mode (silx: phase uses the fixed `[-pi, pi]` hsv colormap, the rest use
-    /// the autoscaling default colormap).
+    /// [`ComplexMode::Phase`], or the persistent base colormap ([`Self::colormap`],
+    /// gray by default) autoscaled to this image for every other scalar mode
+    /// (silx: phase uses the fixed `[-pi, pi]` hsv colormap, the rest share one
+    /// autoscaling `ColormapMixIn` colormap object).
     fn scalar_colormap(&self, scalar: &[f32]) -> Colormap {
         if self.mode == ComplexMode::Phase {
             phase_colormap()
         } else {
-            let (vmin, vmax) = finite_range(scalar);
-            Colormap::viridis(vmin, vmax)
+            let data: Vec<f64> = scalar.iter().map(|&v| v as f64).collect();
+            self.colormap.autoscaled(AutoscaleMode::MinMax, &data)
         }
+    }
+
+    /// The base colormap shared by the non-phase scalar modes (silx
+    /// `getColormap`).
+    pub fn colormap(&self) -> &Colormap {
+        &self.colormap
+    }
+
+    /// Set the base colormap for the non-phase scalar modes (silx
+    /// `setColormap`). Only the name / normalization / gamma / NaN color are
+    /// honored — the value range is re-derived from each scalar image (silx's
+    /// `vmin`/`vmax = None` autoscale), and the setting persists across mode
+    /// switches. [`ComplexMode::Phase`] is unaffected (it uses the fixed hsv
+    /// phase colormap).
+    pub fn set_colormap(&mut self, colormap: Colormap) {
+        self.colormap = colormap;
+        self.dirty = true;
     }
 
     /// Upload or replace the scalar image, preserving the zoom on update.
@@ -808,19 +813,6 @@ mod tests {
         let cm = phase_colormap();
         assert_eq!(cm.vmin, -std::f64::consts::PI);
         assert_eq!(cm.vmax, std::f64::consts::PI);
-    }
-
-    // ── finite_range boundaries ─────────────────────────────────────────────
-
-    #[test]
-    fn finite_range_ignores_non_finite_and_falls_back() {
-        assert_eq!(finite_range(&[1.0, 5.0, 3.0]), (1.0, 5.0));
-        // All-equal -> degenerate -> fallback (0, 1).
-        assert_eq!(finite_range(&[2.0, 2.0]), (0.0, 1.0));
-        // NaN/inf are skipped; remaining single finite value is degenerate.
-        assert_eq!(finite_range(&[f32::NAN, f32::INFINITY, 4.0]), (0.0, 1.0));
-        // No finite values -> fallback.
-        assert_eq!(finite_range(&[f32::NAN]), (0.0, 1.0));
     }
 
     #[test]

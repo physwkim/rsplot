@@ -894,6 +894,25 @@ impl Colormap {
     pub fn autoscale_range(&self, mode: AutoscaleMode, data: &[f64]) -> (f64, f64) {
         mode.range(self.normalization, data, self.autoscale_percentiles)
     }
+
+    /// Clone `self` with its value range replaced by the [`AutoscaleMode`] range
+    /// over `data` (via [`Self::autoscale_range`], so the range honors this
+    /// colormap's normalization and percentile pair). The LUT, normalization,
+    /// gamma, NaN color, and percentiles are preserved — only `vmin`/`vmax`
+    /// change.
+    ///
+    /// This is the shared primitive for silx's "colormap with `vmin`/`vmax =
+    /// None`, autoscaled to the item's own data" contract (`ColormapMixIn`
+    /// items, `ImageStack`, `ImageComplexData`, the 3D colormapped items): a
+    /// base colormap carries the name/normalization, the item re-derives the
+    /// range from its data on each update.
+    pub fn autoscaled(&self, mode: AutoscaleMode, data: &[f64]) -> Colormap {
+        let (vmin, vmax) = self.autoscale_range(mode, data);
+        let mut cm = self.clone();
+        cm.vmin = vmin;
+        cm.vmax = vmax;
+        cm
+    }
 }
 
 /// silx's default `(low, high)` percentiles for [`AutoscaleMode::Percentile`]
@@ -1822,6 +1841,30 @@ mod tests {
         assert_eq!(cmap.color_at(f64::NAN), [1, 2, 3, 4]);
         assert_eq!(cmap.color_at(f64::INFINITY), [1, 2, 3, 4]);
         assert_eq!(cmap.color_at(f64::NEG_INFINITY), [1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn autoscaled_replaces_range_and_preserves_lut() {
+        // `autoscaled` re-derives vmin/vmax from data (minmax here) while
+        // keeping the LUT, normalization, gamma, and nan color — the shared
+        // primitive for silx's autoscale-to-item-data contract.
+        let base = Colormap::new(ColormapName::Gray, 0.0, 1.0).with_nan_color([9, 8, 7, 6]);
+        let cm = base.autoscaled(AutoscaleMode::MinMax, &[10.0, 20.0, 30.0]);
+        assert_eq!((cm.vmin, cm.vmax), (10.0, 30.0));
+        assert_eq!(cm.lut, base.lut);
+        assert_eq!(cm.nan_color, [9, 8, 7, 6]);
+        assert_eq!(cm.normalization, base.normalization);
+    }
+
+    #[test]
+    fn autoscaled_honors_normalization_for_the_range() {
+        // Under log normalization, minmax autoscale uses the smallest strictly
+        // positive value as vmin (silx LogarithmicNormalization.autoscale),
+        // proving the range derivation is normalization-aware, not plain
+        // min/max.
+        let base = Colormap::viridis(1.0, 10.0).with_normalization(Normalization::Log);
+        let cm = base.autoscaled(AutoscaleMode::MinMax, &[-5.0, 0.0, 2.0, 100.0]);
+        assert_eq!((cm.vmin, cm.vmax), (2.0, 100.0));
     }
 
     // --- Custom LUT registration -----------------------------------------
