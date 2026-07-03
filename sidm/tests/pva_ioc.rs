@@ -86,6 +86,15 @@ fn pva_roundtrip_monitor_and_put() {
         "channel never connected to the in-process pva server"
     );
 
+    // Connect must also publish write access: p4p gives no access-rights
+    // signal, so PyDM defaults it to True on connect
+    // (p4p_plugin_component.py:233-237). The widget enable gate reads
+    // exactly this state — without it every writable widget stays disabled.
+    assert!(
+        wait_for(|| ch.read(|s| s.write_access), Duration::from_secs(5)),
+        "write_access never became true after pva connect"
+    );
+
     // The initial monitor update delivers the seeded value.
     assert!(
         wait_for(

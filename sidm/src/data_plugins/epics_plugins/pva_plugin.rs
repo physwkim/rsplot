@@ -157,7 +157,17 @@ async fn run_channel(
                 mask_disconnected: false,
             };
             let callback = move |ev: MonitorEvent| match ev {
-                MonitorEvent::Connected { .. } => writer.update(|s| s.connected = true),
+                MonitorEvent::Connected { .. } => writer.update(|s| {
+                    s.connected = true;
+                    // pvAccess exposes no access-rights signal, so PyDM
+                    // defaults write access to True on connect ("no way to
+                    // get the actual write access value from p4p, so
+                    // defaulting to True", p4p_plugin_component.py:233-237).
+                    // Without this every writable widget stays permanently
+                    // disabled over pva:// (base.rs gates enabled on
+                    // state.write_access, which defaults to false).
+                    s.write_access = true;
+                }),
                 MonitorEvent::Data { value, .. } => {
                     if let Some(c) = enum_choices_of(&value) {
                         *choices.lock().expect("pva choices cache poisoned") = Some(c);
