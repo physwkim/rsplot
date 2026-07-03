@@ -3566,7 +3566,16 @@ impl PlotWidget {
     }
 
     /// Set the primary pointer interaction mode used by [`Self::show`].
+    ///
+    /// Entering Zoom mode clears the limits history, mirroring silx:
+    /// `_setInteractiveMode` re-instantiates the zoom handler on every
+    /// switch, and `Zoom.__init__` runs `getLimitsHistory().clear()`
+    /// (`PlotInteraction.py:365-370`) — so Zoom Back only steps through the
+    /// current zoom session, never a stale one.
     pub fn set_interaction_mode(&mut self, mode: PlotInteractionMode) {
+        if mode == PlotInteractionMode::Zoom {
+            self.backend.plot_mut().clear_limits_history();
+        }
         self.interaction_mode = mode;
     }
 

@@ -1070,8 +1070,10 @@ fn apply_interaction(
                 // `pixelToData(cx, cy, axis="right")`, `_utils/panzoom.py:158-166`).
                 let cy2 = plot.transform_y2(area).map(|t| t.pixel_to_data(p).1);
                 let factor = interaction::wheel_zoom_factor(scroll);
-                // Push the pre-zoom view so zoom-back can step out of the wheel zoom.
-                plot.push_limits();
+                // No history push here: silx pushes only from `Zoom._zoom`
+                // (the box-zoom commit, PlotInteraction.py:475-478), never
+                // from the wheel path — a per-frame push would turn one
+                // smooth-scroll flick into dozens of Zoom Back steps.
                 let (next, next_y2) = interaction::zoom_view_about(
                     (base, plot.y2),
                     factor,
@@ -1432,15 +1434,18 @@ fn apply_interaction(
             ui.close();
         }
         // Reset Zoom: refit to the current data range (silx `resetZoom`), matching
-        // the toolbar Home button, then clear the limits history. `reset_zoom`
-        // refits the autoscale-on axes to the live data bounds and arms
-        // `reset_scroll_guard`. Restoring a first-show snapshot instead would
-        // revert to whatever view was captured on the last first-show — which is
-        // the zoomed view when the plot was rebuilt while zoomed — so a refit is
-        // both silx-correct and free of that stale-home failure.
+        // the toolbar Home button. `reset_zoom` refits the autoscale-on axes to
+        // the live data bounds and arms `reset_scroll_guard`. The limits history
+        // is deliberately NOT cleared: silx `ResetZoomAction` only calls
+        // `resetZoom()` (actions/control.py), so Zoom Back can still step
+        // through the session after a reset. (The history clears on entering
+        // Zoom mode instead, silx `Zoom.__init__`.) Restoring a first-show
+        // snapshot instead of refitting would revert to whatever view was
+        // captured on the last first-show — which is the zoomed view when the
+        // plot was rebuilt while zoomed — so a refit is both silx-correct and
+        // free of that stale-home failure.
         if ui.button("Reset Zoom").clicked() {
             plot.reset_zoom();
-            plot.clear_limits_history();
             ui.close();
         }
         // Caller-supplied custom entries (silx `plotContextMenu.py` adding
@@ -1978,6 +1983,20 @@ mod tests {
             modifiers: egui::Modifiers::default(),
         });
         let _ = run_frame(ctx, plot, f);
+    }
+
+    #[test]
+    fn wheel_zoom_does_not_push_limits_history() {
+        // silx pushes to the limits history only from `Zoom._zoom` (the
+        // box-zoom commit, PlotInteraction.py:475-478) — never from the wheel
+        // path, where a per-frame push would turn one smooth-scroll flick
+        // into dozens of Zoom Back steps.
+        let ctx = egui::Context::default();
+        let mut plot = Plot::new(0);
+        plot.limits = (0.0, 10.0, 0.0, 10.0);
+        drive_wheel_at_centre(&ctx, &mut plot, 7.0);
+        assert_ne!(plot.limits, (0.0, 10.0, 0.0, 10.0), "the wheel zoomed");
+        assert_eq!(plot.limits_history_len(), 0, "but pushed no history");
     }
 
     #[test]
