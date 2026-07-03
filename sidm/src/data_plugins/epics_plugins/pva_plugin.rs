@@ -55,6 +55,11 @@ pub struct PvaPlugin {
     /// `None` for the default plugin (environment-configured search); tests
     /// point this at a loopback `PvaServer`.
     server: Option<SocketAddr>,
+    /// Global read-only mode (`SIDM_READ_ONLY`, read once at construction) —
+    /// PyDM's `pydm --read-only` / `data_plugins.is_read_only()`. p4p's
+    /// `put_value` warns and drops every write in read-only mode
+    /// (p4p_plugin_component.py:409-411).
+    read_only: bool,
 }
 
 impl PvaPlugin {
@@ -65,6 +70,7 @@ impl PvaPlugin {
         Self {
             client: Arc::new(OnceCell::new()),
             server: None,
+            read_only: crate::data_plugins::env_read_only(),
         }
     }
 
@@ -75,6 +81,7 @@ impl PvaPlugin {
         Self {
             client: Arc::new(OnceCell::new()),
             server: Some(server),
+            read_only: crate::data_plugins::env_read_only(),
         }
     }
 }
@@ -101,7 +108,10 @@ impl DataPlugin for PvaPlugin {
         let pv = address.full_address();
         let client = self.client.clone();
         let server = self.server;
-        runtime.spawn(run_channel(client, server, pv, writer, writes, cancel));
+        let read_only = self.read_only;
+        runtime.spawn(run_channel(
+            client, server, pv, writer, writes, cancel, read_only,
+        ));
         Ok(())
     }
 }
@@ -114,6 +124,7 @@ async fn run_channel(
     writer: StateWriter,
     mut writes: mpsc::UnboundedReceiver<PvValue>,
     cancel: CancellationToken,
+    read_only: bool,
 ) {
     // One PVA client per engine, created on first use.
     let client = match client_cell
@@ -213,6 +224,23 @@ async fn run_channel(
 
             maybe = writes.recv() => match maybe {
                 Some(value) => {
+                    // p4p's put_value warns and drops every write in global
+                    // read-only mode (p4p_plugin_component.py:409-411).
+                    if read_only {
+                        log::warn!(
+                            "pva://{pv}: read-only mode is enabled (SIDM_READ_ONLY), \
+                             could not write value: {value:?}"
+                        );
+                        continue;
+                    }
+                    // Gate on the published write access — false until the
+                    // monitor connects (it becomes true on Connected, since
+                    // pvAccess exposes no access-rights signal); p4p's
+                    // pre-connect put would just fail inside context.put.
+                    if !writer.read(|s| s.write_access) {
+                        log::warn!("pva://{pv}: dropping put {value:?}: no write access");
+                        continue;
+                    }
                     // Decide the PUT shape against the cached choices, then drop
                     // the lock before the await. No local echo — the value only
                     // changes when the server confirms via the monitor. Failed

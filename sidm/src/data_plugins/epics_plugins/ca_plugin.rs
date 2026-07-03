@@ -60,6 +60,12 @@ pub struct CaPlugin {
     /// `EPICS_CA_ADDR_LIST` (the programmatic equivalent of that variable).
     /// Empty for the default plugin; tests point this at a loopback IOC.
     addresses: Vec<SocketAddr>,
+    /// Global read-only mode (`SIDM_READ_ONLY`, read once at construction) —
+    /// PyDM's `pydm --read-only` / `data_plugins.is_read_only()`. Forces the
+    /// published `write_access` to false (`send_access_state`,
+    /// pyepics_plugin_component.py:179-185), which both disables writable
+    /// widgets and gates every put.
+    read_only: bool,
 }
 
 impl CaPlugin {
@@ -79,6 +85,7 @@ impl CaPlugin {
         Self {
             client: Arc::new(OnceCell::new()),
             addresses,
+            read_only: crate::data_plugins::env_read_only(),
         }
     }
 }
@@ -105,7 +112,10 @@ impl DataPlugin for CaPlugin {
         let pv = address.full_address();
         let client = self.client.clone();
         let addresses = self.addresses.clone();
-        runtime.spawn(run_channel(client, addresses, pv, writer, writes, cancel));
+        let read_only = self.read_only;
+        runtime.spawn(run_channel(
+            client, addresses, pv, writer, writes, cancel, read_only,
+        ));
         Ok(())
     }
 }
@@ -118,6 +128,7 @@ async fn run_channel(
     writer: StateWriter,
     mut writes: mpsc::UnboundedReceiver<PvValue>,
     cancel: CancellationToken,
+    read_only: bool,
 ) {
     // One CA client per engine, created on first use.
     let client = match client_cell
@@ -201,7 +212,7 @@ async fn run_channel(
                 initial_done = true;
                 if res.is_ok() && !connected_now {
                     connected_now = true;
-                    on_connect(&ch, &writer, &mut enum_cache, &mut native_type, &mut last_value)
+                    on_connect(&ch, &writer, &mut enum_cache, &mut native_type, &mut last_value, read_only)
                         .await;
                 }
             }
@@ -210,7 +221,7 @@ async fn run_channel(
                 Ok(ConnectionEvent::Connected) => {
                     if !connected_now {
                         connected_now = true;
-                        on_connect(&ch, &writer, &mut enum_cache, &mut native_type, &mut last_value)
+                        on_connect(&ch, &writer, &mut enum_cache, &mut native_type, &mut last_value, read_only)
                             .await;
                     }
                 }
@@ -224,12 +235,16 @@ async fn run_channel(
                     writer.update(|s| s.connected = false);
                 }
                 Ok(ConnectionEvent::AccessRightsChanged { write, .. }) => {
-                    writer.update(move |s| s.write_access = write);
+                    // Global read-only mode forces the published access to
+                    // false regardless of the CA right — PyDM's
+                    // send_access_state emits False and returns when
+                    // is_read_only() (pyepics_plugin_component.py:179-185).
+                    writer.update(move |s| s.write_access = write && !read_only);
                 }
                 Ok(ConnectionEvent::NativeTypeChanged { .. }) => {
                     // Record type changed under us — refetch metadata (units,
                     // enum strings, limits) against the new native type.
-                    on_connect(&ch, &writer, &mut enum_cache, &mut native_type, &mut last_value)
+                    on_connect(&ch, &writer, &mut enum_cache, &mut native_type, &mut last_value, read_only)
                         .await;
                 }
                 Err(broadcast::error::RecvError::Lagged(_)) => {}
@@ -291,6 +306,14 @@ async fn run_channel(
                     // never reached the wire.
                     if !connected_now {
                         log::warn!("ca://{pv}: unable to put {value:?}: channel disconnected");
+                    } else if !writer.read(|s| s.write_access) {
+                        // PyDM's put_value drops the write when is_read_only()
+                        // or the channel lacks write access
+                        // (pyepics_plugin_component.py:205-213). Read-only
+                        // mode is already folded into the published
+                        // write_access, so this one gate covers both; pyepics
+                        // drops silently, we log at debug for diagnosability.
+                        log::debug!("ca://{pv}: dropping put {value:?}: no write access");
                     } else {
                         match pv_to_epics(&value, native_type, enum_cache.as_deref()) {
                             Some(ev) => {
@@ -319,9 +342,19 @@ async fn on_connect(
     enum_cache: &mut Option<Arc<[String]>>,
     native_type: &mut Option<DbFieldType>,
     last_value: &mut Option<PvValue>,
+    read_only: bool,
 ) {
     // The native type is known once connected; cache it for the write path.
     *native_type = ch.native_field_type().ok();
+    // Seed access rights at connect time — pyepics re-reads them on every
+    // connection (reload_access_state, pyepics_plugin_component.py:187-190,
+    // called from send_connection_state :197-198) — so a CA_PROTO_ACCESS_RIGHTS
+    // broadcast that raced our event subscription is never missed. Read-only
+    // mode forces the published access to false (send_access_state :179-185).
+    if let Ok(info) = ch.info().await {
+        let write = info.access_rights.write && !read_only;
+        writer.update(move |s| s.write_access = write);
+    }
     match ch.get_with_metadata(DbrClass::Ctrl).await {
         Ok(snap) => {
             let strings: Option<Arc<[String]>> = snap

@@ -415,6 +415,18 @@ impl StateWriter {
             self.shared.publish_value(value);
         }
     }
+
+    /// Read the current published state — the same snapshot the GUI-side
+    /// [`Channel::read`] sees.
+    ///
+    /// Lets the connection task gate decisions on what it has *published*
+    /// rather than on a shadow copy: the write path checks
+    /// `state.write_access` here before a put (PyDM's
+    /// `if self.pv.write_access:` gate, `pyepics_plugin_component.py:209`),
+    /// so "widget shown enabled" and "put allowed" can never diverge.
+    pub fn read<R>(&self, f: impl FnOnce(&ChannelState) -> R) -> R {
+        f(&self.shared.state.read().expect("channel state poisoned"))
+    }
 }
 
 /// One per-PV connection: owns the shared state, the GUI→engine write queue,
