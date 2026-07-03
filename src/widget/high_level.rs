@@ -10116,6 +10116,10 @@ impl ImageView {
 
         self.upload_image();
         self.rebuild_histograms();
+        // If a profile is open, re-derive it from the new image (silx recompute
+        // on item DATA change). No-op when no profile ROI has been drawn.
+        self.profile_window
+            .refresh_image(self.width, self.height, &self.pixels);
         Ok(())
     }
 
@@ -13168,6 +13172,11 @@ impl StackView {
             } else {
                 self.image_handle = Some(self.inner.add_image_spec(spec));
             }
+            // If a current-frame (2D) profile is open, re-derive it from the new
+            // frame (silx recompute on frame/POSITION change). No-op when no
+            // profile ROI has been drawn.
+            self.profile_window
+                .refresh_image(self.width, self.height, frame);
             self.dirty = false;
         }
         let response = self.inner.show(ui);

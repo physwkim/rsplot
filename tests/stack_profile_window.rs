@@ -13,7 +13,8 @@ use std::rc::Rc;
 use egui_kittest::Harness;
 use egui_kittest::wgpu::{WgpuTestRenderer, create_render_state, default_wgpu_setup};
 use siplot::egui;
-use siplot::{Colormap, ProfileMethod, ProfileMode, StackProfileDimension, StackView, YAxis};
+use siplot::egui::Color32;
+use siplot::{Colormap, ProfileMethod, ProfileMode, Roi, StackProfileDimension, StackView, YAxis};
 
 /// A `[2, 3, 4]` volume (2 frames, each 3 rows × 4 cols under the default
 /// `Axis0` perspective) whose element `(i, j, k)` encodes its indices as
@@ -180,6 +181,96 @@ fn show_profile_returns_true_for_a_line_over_the_volume() {
         "a line profile over a loaded volume must produce a 2D stacked profile"
     );
     assert!(app.borrow().stack_profile_window().is_open());
+}
+
+/// R2-4: a line-width or method edit recomputes the profile from the retained
+/// source, without needing a fresh drag. Uses `profile_window_mut()` directly
+/// (no transform needed) over a 3×3 ramp `value = row*10 + col`.
+#[test]
+fn width_and_method_edits_recompute_from_the_retained_source() {
+    let (app, _harness) = harness();
+    let ramp: Vec<f32> = (0..3)
+        .flat_map(|r| (0..3).map(move |c| (r * 10 + c) as f32))
+        .collect();
+
+    let mut view = app.borrow_mut();
+    let pw = view.profile_window_mut();
+    pw.update_profile(3, 3, &ramp, &Roi::HRange { y: (1.0, 1.0) });
+    // width 1, Mean -> just row 1.
+    assert_eq!(pw.active_profile_values(), vec![vec![10.0, 11.0, 12.0]]);
+
+    // Method edit alone: width-1 Sum == width-1 Mean (single row), but the
+    // recompute path must run without error and keep the row-1 values.
+    pw.set_method(ProfileMethod::Sum);
+    assert_eq!(pw.active_profile_values(), vec![vec![10.0, 11.0, 12.0]]);
+
+    // Width edit: a width-3 Sum band over rows 0,1,2 -> per-col sum 30 + 3c.
+    // This differs from the width-1 result only because set_line_width
+    // recomputed from the retained source (the R2-4 bug: it did nothing).
+    pw.set_line_width(3);
+    assert_eq!(pw.active_profile_values(), vec![vec![30.0, 33.0, 36.0]]);
+}
+
+/// R2-4: scrubbing to another frame re-derives the current-frame (1D) profile
+/// through `refresh_image` in the dirty-upload path — the profile tracks the
+/// image data, not just the last drag.
+#[test]
+fn scrubbing_frames_recomputes_the_current_frame_profile() {
+    let (app, mut harness) = harness();
+    // 1D dimension is the default; a horizontal drag opens the current-frame
+    // profile window.
+    app.borrow_mut().set_profile_mode(ProfileMode::Horizontal);
+    let p0 = app
+        .borrow()
+        .data_to_pixel(0.5, 1.0, YAxis::Left)
+        .expect("transform cached");
+    let p1 = app
+        .borrow()
+        .data_to_pixel(3.5, 1.0, YAxis::Left)
+        .expect("transform cached");
+    drag(&mut harness, p0, p1);
+    assert!(app.borrow().profile_window().is_open());
+
+    let before = app.borrow().profile_window().active_profile_values();
+    assert!(!before.is_empty(), "a drag must retain an image-ROI source");
+
+    // Scrub to frame 1 and let show() run the dirty upload → refresh_image.
+    app.borrow_mut().set_frame(1);
+    harness.step();
+    let after = app.borrow().profile_window().active_profile_values();
+
+    // Frame index only adds 100 per element (value = 100*i + 10*row + col), so
+    // the same row/width/method over frame 1 is exactly `before + 100`.
+    let expected: Vec<Vec<f64>> = before
+        .iter()
+        .map(|c| c.iter().map(|v| v + 100.0).collect())
+        .collect();
+    assert_eq!(after, expected, "frame change must recompute the profile");
+    assert_ne!(after, before);
+}
+
+/// R2-4 hygiene: a precomputed-curve profile clears the retained image-ROI
+/// source, so a later width edit does not re-derive the stale image profile.
+#[test]
+fn precomputed_curve_clears_the_retained_source() {
+    let (app, _harness) = harness();
+    let ramp: Vec<f32> = (0..3)
+        .flat_map(|r| (0..3).map(move |c| (r * 10 + c) as f32))
+        .collect();
+
+    let mut view = app.borrow_mut();
+    let pw = view.profile_window_mut();
+    pw.update_profile(3, 3, &ramp, &Roi::HRange { y: (1.0, 1.0) });
+    assert!(!pw.active_profile_values().is_empty());
+
+    pw.set_profile_curve("scatter", Color32::RED, vec![0.0, 1.0], vec![5.0, 6.0]);
+    assert!(
+        pw.active_profile_values().is_empty(),
+        "a precomputed curve must clear the image-ROI source"
+    );
+    // A later width edit must not resurrect the old image profile.
+    pw.set_line_width(3);
+    assert!(pw.active_profile_values().is_empty());
 }
 
 #[test]

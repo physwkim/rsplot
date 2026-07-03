@@ -161,9 +161,27 @@ fn profiles_for_roi(
     }
 }
 
+/// The image + ROI the current profile was extracted from, retained so the
+/// profile recomputes when the line width, reduction method, or image data
+/// change — not only during a fresh drag. Mirrors silx `ProfileManager`, which
+/// recomputes on item DATA/POSITION change and on `setProfileMethod`/
+/// `setProfileLineWidth` (`manager.py:936-944`, `rois.py:238-257`). `None` until
+/// the first image-ROI [`ProfileWindow::update_profile`]; cleared by the
+/// precomputed-curve path so a later width/method edit never re-derives a stale
+/// image ROI over a scatter/stack profile.
+struct ProfileSource {
+    width: u32,
+    height: u32,
+    data: Vec<f32>,
+    roi: Roi,
+}
+
 /// A window widget to display the 1D profile of an image based on an ROI.
 pub struct ProfileWindow {
     plot: Plot1D,
+    /// The retained image + ROI the profile was last extracted from (see
+    /// [`ProfileSource`]); drives width/method/data-change recompute.
+    source: Option<ProfileSource>,
     /// Handles of the live profile curves. One for a line/range/rect ROI; two
     /// for a cross ROI (the horizontal and vertical sub-profiles). Rebuilt when
     /// the curve count changes between updates (silx `ProfileImageCrossROI`).
@@ -197,6 +215,7 @@ impl ProfileWindow {
 
         Self {
             plot,
+            source: None,
             curve_handles: Vec::new(),
             window_id: egui::Id::new(plot_id).with("profile_window"),
             open: false,
@@ -213,9 +232,13 @@ impl ProfileWindow {
         self.line_width
     }
 
-    /// Set the profile band width in pixels (clamped to at least 1).
+    /// Set the profile band width in pixels (clamped to at least 1) and
+    /// recompute the profile from the retained source (silx
+    /// `setProfileLineWidth` -> `invalidateProfile`). A no-op recompute when no
+    /// image-ROI source is retained.
     pub fn set_line_width(&mut self, width: u32) {
         self.line_width = width.max(1);
+        self.recompute();
     }
 
     /// The current band reduction method (silx `ProfileOptionToolButton`).
@@ -223,9 +246,35 @@ impl ProfileWindow {
         self.method
     }
 
-    /// Set the band reduction method (mean vs sum).
+    /// Set the band reduction method (mean vs sum) and recompute the profile
+    /// from the retained source (silx `setProfileMethod` -> `invalidateProfile`).
+    /// A no-op recompute when no image-ROI source is retained.
     pub fn set_method(&mut self, method: ProfileMethod) {
         self.method = method;
+        self.recompute();
+    }
+
+    /// The profile curve `y`-values the retained image-ROI source currently
+    /// produces at the active line width and method — one entry per curve
+    /// ([`Roi::Cross`] yields two). Empty when no image-ROI source is retained
+    /// (before the first drag, or after a precomputed-curve profile). Lets a
+    /// caller/test confirm that a width/method/data change flows into the
+    /// profile without a fresh drag (the R2-4 recompute contract).
+    pub fn active_profile_values(&self) -> Vec<Vec<f64>> {
+        match &self.source {
+            Some(src) => profiles_for_roi(
+                src.width,
+                src.height,
+                &src.data,
+                &src.roi,
+                self.line_width,
+                self.method,
+            )
+            .into_iter()
+            .map(|c| c.y)
+            .collect(),
+            None => Vec::new(),
+        }
     }
 
     /// Is the window currently open?
@@ -244,9 +293,52 @@ impl ProfileWindow {
     }
 
     /// Re-calculate and update the profile curve based on the given ROI, using
-    /// the current line width and reduction method.
+    /// the current line width and reduction method. Retains `(data, roi)` as the
+    /// active [`ProfileSource`] so subsequent width/method edits and
+    /// [`refresh_image`](Self::refresh_image) calls recompute from it.
     pub fn update_profile(&mut self, width: u32, height: u32, data: &[f32], roi: &Roi) {
-        let curves = profiles_for_roi(width, height, data, roi, self.line_width, self.method);
+        self.source = Some(ProfileSource {
+            width,
+            height,
+            data: data.to_vec(),
+            roi: roi.clone(),
+        });
+        self.recompute();
+    }
+
+    /// Replace the retained image data (keeping the active ROI) and recompute —
+    /// the host calls this when its image changes while a profile is open (silx
+    /// recompute on item DATA change, `manager.py:936-944`). A no-op when no
+    /// profile ROI has been drawn yet, so hosts may call it unconditionally on
+    /// every image update.
+    pub fn refresh_image(&mut self, width: u32, height: u32, data: &[f32]) {
+        let Some(src) = self.source.as_mut() else {
+            return;
+        };
+        src.width = width;
+        src.height = height;
+        src.data = data.to_vec();
+        self.recompute();
+    }
+
+    /// Re-extract the profile curve(s) from the retained [`ProfileSource`] with
+    /// the current line width and method, and push them to the plot. The single
+    /// recompute path for the image-ROI profile: shared by
+    /// [`update_profile`](Self::update_profile),
+    /// [`refresh_image`](Self::refresh_image), and the in-window width/method
+    /// edits. No-op when no source is retained.
+    fn recompute(&mut self) {
+        let curves = match &self.source {
+            Some(src) => profiles_for_roi(
+                src.width,
+                src.height,
+                &src.data,
+                &src.roi,
+                self.line_width,
+                self.method,
+            ),
+            None => return,
+        };
         self.set_curves(curves);
     }
 
@@ -266,6 +358,10 @@ impl ProfileWindow {
         if x.is_empty() {
             return;
         }
+        // This profile is sampled upstream, not from a retained image + ROI, so
+        // drop any retained source: a later width/method edit must not re-derive
+        // a stale image profile over this precomputed curve.
+        self.source = None;
         self.set_curves(vec![ProfileCurve { label, color, x, y }]);
     }
 
@@ -339,8 +435,10 @@ impl ProfileWindow {
         let mut live_pos = None;
         ctx.show_viewport_immediate(viewport_id, builder, |ui, _class| {
             // Line-width + method controls (silx ProfileToolButton / method
-            // option). Edits take effect on the next `update_profile`, which the
-            // host re-drives from the active ROI each frame.
+            // option). Each edit routes through `set_line_width`/`set_method`,
+            // which recompute the profile immediately from the retained source
+            // (silx `setProfileLineWidth`/`setProfileMethod` ->
+            // `invalidateProfile`), so it no longer waits for the next drag.
             ui.horizontal(|ui| {
                 ui.label("Width:");
                 let mut width = self.line_width;
@@ -357,15 +455,19 @@ impl ProfileWindow {
                 }
                 ui.separator();
                 ui.label("Method:");
+                let mut method = self.method;
                 egui::ComboBox::from_id_salt("profile_method")
-                    .selected_text(match self.method {
+                    .selected_text(match method {
                         ProfileMethod::Mean => "Mean",
                         ProfileMethod::Sum => "Sum",
                     })
                     .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut self.method, ProfileMethod::Mean, "Mean");
-                        ui.selectable_value(&mut self.method, ProfileMethod::Sum, "Sum");
+                        ui.selectable_value(&mut method, ProfileMethod::Mean, "Mean");
+                        ui.selectable_value(&mut method, ProfileMethod::Sum, "Sum");
                     });
+                if method != self.method {
+                    self.set_method(method);
+                }
             });
             ui.separator();
             self.plot.show(ui);
