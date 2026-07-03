@@ -34,7 +34,11 @@ pub struct OrbitDrag {
 }
 
 impl OrbitDrag {
-    /// Begin an orbit at window pixel `origin`, rotating around `center`.
+    /// Begin an orbit at window pixel `origin`, rotating around `center`. With
+    /// silx's `orbitAroundCenter=False` (the mode `Plot3DWidget` uses,
+    /// `Plot3DWidget.py:189-205`) the caller passes the **picked object point**
+    /// under the press as `center`, falling back to the scene bounds centre on a
+    /// miss (`interaction.py:150-161` `CameraSelectRotate.beginDrag`).
     pub fn begin(camera: &Camera, origin: (f32, f32), center: Vec3) -> Self {
         OrbitDrag {
             origin,
@@ -79,9 +83,11 @@ impl OrbitDrag {
 }
 
 /// Camera panning. Port of `CameraSelectPan`: a drag translates the camera so
-/// the scene point on a fixed depth plane stays under the cursor. silx picks the
-/// plane from the GPU depth at the cursor; with no picking yet, the widget uses
-/// the scene-centre depth, so the centre plane tracks the cursor 1:1.
+/// the scene point on a fixed depth plane stays under the cursor. silx reads the
+/// plane depth from the depth buffer under the press (`interaction.py:226-235`
+/// `_pickNdcZGL(x, y)`); the widget supplies the same datum from the CPU pick
+/// ([`crate::SceneWidget::pick`]'s `ndc_depth`), falling back to the far plane
+/// (`z = 1`, what an empty depth buffer reads) on a miss.
 #[derive(Clone, Copy, Debug)]
 pub struct PanDrag {
     /// Last cursor position as NDC `(x, y, z)`; `z` is the fixed pan-plane depth.
@@ -89,12 +95,14 @@ pub struct PanDrag {
 }
 
 impl PanDrag {
-    /// Begin a pan at window pixel `win`, with the pan plane at `center`'s depth.
-    pub fn begin(camera: &Camera, win: (f32, f32), size: (f32, f32), center: Vec3) -> Self {
-        let plane_z = camera.matrix().transform_point(center, true).z;
+    /// Begin a pan at window pixel `win`, with the pan plane at NDC depth
+    /// `plane_ndc_z` — the picked depth under the press (silx
+    /// `CameraSelectPan.beginDrag`: `ndcZ = _pickNdcZGL(x, y)`), or `1.0` (the
+    /// far plane) when nothing was hit.
+    pub fn begin(win: (f32, f32), size: (f32, f32), plane_ndc_z: f32) -> Self {
         let (nx, ny) = window_to_ndc(win, size);
         PanDrag {
-            last: Vec3::new(nx, ny, plane_z),
+            last: Vec3::new(nx, ny, plane_ndc_z),
         }
     }
 
@@ -187,10 +195,9 @@ mod tests {
     fn pan_keeps_grabbed_point_under_the_cursor() {
         let mut camera = test_camera();
         let size = (300.0, 300.0);
-        let center = Vec3::ZERO;
 
-        // Pan plane depth = centre's NDC z.
-        let plane_z = camera.matrix().transform_point(center, true).z;
+        // Pan plane depth = the scene centre's NDC z (a centre-depth anchor).
+        let plane_z = camera.matrix().transform_point(Vec3::ZERO, true).z;
         let a = (120.0, 160.0);
         let b = (180.0, 130.0);
         let (nax, nay) = window_to_ndc(a, size);
@@ -200,12 +207,73 @@ mod tests {
         let inv0 = camera.matrix().inverse().expect("invertible");
         let p_a = inv0.transform_point(Vec3::new(nax, nay, plane_z), true);
 
-        let mut pan = PanDrag::begin(&camera, a, size, center);
+        let mut pan = PanDrag::begin(a, size, plane_z);
         pan.update(&mut camera, b, size);
 
         // After the pan, P_A must project to cursor B (defining pan property).
         let projected = camera.matrix().transform_point(p_a, true);
         approx(projected.x, nbx, 1e-3);
         approx(projected.y, nby, 1e-3);
+    }
+
+    #[test]
+    fn pan_anchored_at_picked_depth_tracks_the_picked_point() {
+        // The pan plane sits at the *picked* geometry depth (silx
+        // interaction.py:226-235), not the scene-centre depth: a point well off
+        // the centre plane must track the cursor 1:1.
+        let mut camera = test_camera();
+        let size = (300.0, 300.0);
+
+        // Picked object point off the centre plane (z = 2 is 3 units from the
+        // camera at (0,0,5); the centre plane is 5 units away).
+        let picked = Vec3::new(0.4, -0.3, 2.0);
+        let picked_ndc = camera.matrix().transform_point(picked, true);
+
+        // Grab exactly where the picked point projects, drag to B.
+        let a_ndc = (picked_ndc.x, picked_ndc.y);
+        let a_win = (
+            (a_ndc.0 + 1.0) * 0.5 * size.0,
+            (1.0 - a_ndc.1) * 0.5 * size.1,
+        );
+        let b_win = (a_win.0 + 60.0, a_win.1 - 45.0);
+        let (nbx, nby) = window_to_ndc(b_win, size);
+
+        let mut pan = PanDrag::begin(a_win, size, picked_ndc.z);
+        pan.update(&mut camera, b_win, size);
+
+        // The picked point itself must land under cursor B.
+        let projected = camera.matrix().transform_point(picked, true);
+        approx(projected.x, nbx, 1e-3);
+        approx(projected.y, nby, 1e-3);
+    }
+
+    #[test]
+    fn orbit_pivots_on_the_picked_point() {
+        // With a picked anchor (silx orbitAroundCenter=False,
+        // interaction.py:150-161), the orbit preserves the camera's distance to
+        // the *picked* point and keeps looking at it — not at the scene centre.
+        let mut camera = test_camera();
+        let size = (300.0, 300.0);
+        let pivot = Vec3::new(1.0, 0.5, 1.0); // off-centre picked object point
+        let start_radius = (camera.extrinsic.position() - pivot).length();
+
+        let drag = OrbitDrag::begin(&camera, (150.0, 150.0), pivot);
+        drag.update(&mut camera, (210.0, 170.0), size);
+
+        let pos = camera.extrinsic.position();
+        // Radius to the picked pivot is preserved (the defining orbit property).
+        approx((pos - pivot).length(), start_radius, 1e-3);
+        // The rotation happened (the camera moved).
+        assert!(
+            (pos - Vec3::new(0.0, 0.0, 5.0)).length() > 0.1,
+            "orbit should move the camera: {pos:?}"
+        );
+        // The distance to the *scene centre* is NOT preserved in general — the
+        // pivot is what anchors the motion.
+        let centre_radius = pos.length();
+        assert!(
+            (centre_radius - 5.0).abs() > 1e-3,
+            "off-centre pivot must not orbit the origin (radius stayed {centre_radius})"
+        );
     }
 }

@@ -781,6 +781,37 @@ mod tests {
     }
 
     #[test]
+    fn zoom_at_picked_depth_keeps_the_picked_pixel_invariant() {
+        // silx CameraWheel mode "position" (interaction.py:329-341): zooming
+        // with the cursor over a picked point moves the camera along the line
+        // to that point, so its projection — the pixel under the mouse — stays
+        // put. Anchor at the *picked* NDC depth, not the centre-plane depth.
+        let mut cam = perspective_test_camera();
+        let picked = Vec3::new(0.6, -0.4, 1.0); // off-centre, off the centre plane
+        let ndc0 = cam.matrix().transform_point(picked, true);
+
+        cam.zoom_at((ndc0.x, ndc0.y), ndc0.z, true);
+        let ndc1 = cam.matrix().transform_point(picked, true);
+        approx(ndc1.x, ndc0.x);
+        approx(ndc1.y, ndc0.y);
+        // And the camera actually moved closer to the picked point.
+        assert!(
+            (cam.extrinsic.position() - picked).length()
+                < (Vec3::new(0.0, 0.0, 5.0) - picked).length(),
+            "zoom in must approach the picked point"
+        );
+
+        cam.zoom_at(
+            (ndc1.x, ndc1.y),
+            cam.matrix().transform_point(picked, true).z,
+            false,
+        );
+        let ndc2 = cam.matrix().transform_point(picked, true);
+        approx(ndc2.x, ndc0.x);
+        approx(ndc2.y, ndc0.y);
+    }
+
+    #[test]
     fn adjust_depth_extent_brackets_the_bounds() {
         let mut cam = perspective_test_camera();
         let bounds = (Vec3::new(-1.0, -1.0, -1.0), Vec3::new(1.0, 1.0, 1.0));

@@ -6,8 +6,12 @@
 //! [`crate::core::scene3d::interaction`]) and registers the wgpu paint callback
 //! ([`paint_scene3d`]) that renders the scene offscreen and blits it in.
 //!
-//! Port of silx `Plot3DWidget` + `SceneWidget`'s default `RotateCameraControl`:
-//! left-drag orbits around the scene centre, right-drag pans, the wheel zooms.
+//! Port of silx `Plot3DWidget` + `SceneWidget`'s default `RotateCameraControl`
+//! (`orbitAroundCenter=False`, wheel mode `"position"`): left-drag orbits around
+//! the picked point under the press (scene centre on a miss), right-drag pans on
+//! the picked depth plane, and the wheel zooms keeping the picked pixel
+//! invariant — each gesture anchors on [`SceneWidget::pick`], the CPU stand-in
+//! for silx's depth-buffer read.
 //! The scene chrome (bounding box + RGB axes) is generated from the bounds via
 //! [`Scene3dGeometry::add_bounding_box_with_axes`]; data-item geometry set with
 //! [`SceneWidget::set_geometry`] is merged in beneath the chrome (every channel,
@@ -236,11 +240,17 @@ impl SceneWidget {
         // press origin keeps that threshold travel from being silently dropped.
         let press_origin = ui.ctx().input(|i| i.pointer.press_origin());
 
-        // Orbit — left drag.
+        // Orbit — left drag. Pivot on the picked object point under the press
+        // (silx CameraSelectRotate.beginDrag with orbitAroundCenter=False,
+        // interaction.py:150-161), falling back to the scene centre on a miss.
         if response.drag_started_by(PointerButton::Primary)
             && let Some(p) = press_origin
         {
-            self.orbit = Some(OrbitDrag::begin(&self.camera, to_local(p), center));
+            let win = to_local(p);
+            let pivot = self
+                .pick(window_to_ndc(win, size_px))
+                .map_or(center, |hit| hit.position);
+            self.orbit = Some(OrbitDrag::begin(&self.camera, win, pivot));
         }
         if response.dragged_by(PointerButton::Primary)
             && let (Some(orbit), Some(p)) = (self.orbit, response.interact_pointer_pos())
@@ -251,11 +261,18 @@ impl SceneWidget {
             self.orbit = None;
         }
 
-        // Pan — right drag.
+        // Pan — right drag. The pan plane sits at the picked depth under the
+        // press (silx CameraSelectPan.beginDrag: `ndcZ = _pickNdcZGL(x, y)`,
+        // interaction.py:226-235); a miss reads the cleared depth buffer, i.e.
+        // the far plane (NDC z = 1).
         if response.drag_started_by(PointerButton::Secondary)
             && let Some(p) = press_origin
         {
-            self.pan = Some(PanDrag::begin(&self.camera, to_local(p), size_px, center));
+            let win = to_local(p);
+            let plane_z = self
+                .pick(window_to_ndc(win, size_px))
+                .map_or(1.0, |hit| hit.ndc_depth);
+            self.pan = Some(PanDrag::begin(win, size_px, plane_z));
         }
         if response.dragged_by(PointerButton::Secondary)
             && let (Some(mut pan), Some(p)) = (self.pan, response.interact_pointer_pos())
@@ -267,14 +284,17 @@ impl SceneWidget {
             self.pan = None;
         }
 
-        // Zoom — wheel while hovering.
+        // Zoom — wheel while hovering. Un-project the cursor at its own picked
+        // depth so the pixel under the mouse stays invariant (silx CameraWheel
+        // mode "position", interaction.py:329-341); a miss anchors at the far
+        // plane, as silx's depth-buffer read does.
         let scroll = ui.input(|i| i.smooth_scroll_delta.y);
         if scroll != 0.0
             && let Some(p) = response.hover_pos()
         {
-            let (nx, ny) = window_to_ndc(to_local(p), size_px);
-            let ndc_z = self.camera.matrix().transform_point(center, true).z;
-            self.camera.zoom_at((nx, ny), ndc_z, scroll > 0.0);
+            let ndc = window_to_ndc(to_local(p), size_px);
+            let ndc_z = self.pick(ndc).map_or(1.0, |hit| hit.ndc_depth);
+            self.camera.zoom_at(ndc, ndc_z, scroll > 0.0);
         }
 
         // Keep the scene within the depth frustum after any interaction.
