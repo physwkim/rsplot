@@ -1634,6 +1634,149 @@ pub fn line_profile_band(
     Ok((x_vals, y_vals))
 }
 
+/// Port of silx `_alignedPartialProfile` (tools/profile/core.py:290-327): the
+/// integer-rectangle reduction used when a free line is axis-aligned. With
+/// `axis == 0` the band integrates over rows (one profile value per column);
+/// with `axis == 1` it integrates over columns (one value per row). `row_range`
+/// and `col_range` are half-open integer pixel-index ranges. The region outside
+/// the image is **zero-padded** (silx allocates a zeros array of the full
+/// `profileLength` and drops the in-bounds slice in at `offset`), and the
+/// reduction is plain mean/sum — silx uses `numpy.mean`/`numpy.sum` here, *not*
+/// the nan-aware reduction of the full aligned profile.
+fn aligned_partial_profile(
+    width: usize,
+    height: usize,
+    data: &[f32],
+    row_range: (i64, i64),
+    col_range: (i64, i64),
+    axis: u8,
+    method: ProfileMethod,
+) -> Vec<f64> {
+    // The range aligned with the profile direction (silx `profileRange`).
+    let profile_range = if axis == 0 { col_range } else { row_range };
+    let profile_length = (profile_range.1 - profile_range.0).unsigned_abs() as usize;
+    if profile_length == 0 {
+        return Vec::new();
+    }
+
+    // Intersect the ROI rectangle with the image (silx min(max(0, .), dim)).
+    let row_start = row_range.0.clamp(0, height as i64) as usize;
+    let row_end = row_range.1.clamp(0, height as i64) as usize;
+    let col_start = col_range.0.clamp(0, width as i64) as usize;
+    let col_end = col_range.1.clamp(0, width as i64) as usize;
+
+    let mut profile = vec![0.0f64; profile_length];
+    // offset = -min(0, profileRange[0]) places the in-bounds slice into the
+    // zero-padded full profile (silx `profile[:, offset:offset+n] = imgProfile`).
+    let offset = (-profile_range.0.min(0)) as usize;
+
+    if axis == 0 {
+        // Integrate over rows -> one value per column in [col_start, col_end).
+        let band = row_end.saturating_sub(row_start);
+        if band > 0 {
+            for (k, col) in (col_start..col_end).enumerate() {
+                let sum: f64 = (row_start..row_end)
+                    .map(|row| data[row * width + col] as f64)
+                    .sum();
+                let v = match method {
+                    ProfileMethod::Mean => sum / band as f64,
+                    ProfileMethod::Sum => sum,
+                };
+                if let Some(slot) = profile.get_mut(offset + k) {
+                    *slot = v;
+                }
+            }
+        }
+    } else {
+        // Integrate over columns -> one value per row in [row_start, row_end).
+        let band = col_end.saturating_sub(col_start);
+        if band > 0 {
+            for (k, row) in (row_start..row_end).enumerate() {
+                let sum: f64 = (col_start..col_end)
+                    .map(|col| data[row * width + col] as f64)
+                    .sum();
+                let v = match method {
+                    ProfileMethod::Mean => sum / band as f64,
+                    ProfileMethod::Sum => sum,
+                };
+                if let Some(slot) = profile.get_mut(offset + k) {
+                    *slot = v;
+                }
+            }
+        }
+    }
+    profile
+}
+
+/// Extract a free-line image profile, porting silx `createProfile`'s free-line
+/// branch (tools/profile/core.py:406-450). `start`/`end` are `(column, row)`
+/// pixel-data coordinates (the drag endpoints). When the endpoints share an
+/// integer row or column the line is treated as axis-aligned and reduced as an
+/// integer rectangle ([`aligned_partial_profile`], zero-padded out of image,
+/// plain mean/sum); otherwise it is a bilinear band ([`line_profile_band`])
+/// sampled with silx's `-0.5` plot-corner shift applied to both endpoints.
+/// Returns `(position, value)` pairs; the position axis is the profile-step
+/// index (the exact plot-axis coordinates/labels are a separate concern).
+pub fn free_line_profile(
+    width: u32,
+    height: u32,
+    data: &[f32],
+    start: (f64, f64),
+    end: (f64, f64),
+    linewidth: u32,
+    method: ProfileMethod,
+) -> Result<(Vec<f64>, Vec<f64>), PlotDataError> {
+    validate_image_len(width, height, data.len())?;
+    let (sc, sr) = start;
+    let (ec, er) = end;
+    let roi_width = linewidth.max(1) as f64;
+
+    // silx aligned test on the *untruncated* endpoints:
+    // int(startRow) == int(endRow) or int(startCol) == int(endCol).
+    let aligned =
+        (sr.trunc() as i64) == (er.trunc() as i64) || (sc.trunc() as i64) == (ec.trunc() as i64);
+    if !aligned {
+        // General case: bilinear band with silx's -0.5 corner shift on both ends.
+        return line_profile_band(
+            width,
+            height,
+            data,
+            (sc - 0.5, sr - 0.5),
+            (ec - 0.5, er - 0.5),
+            linewidth,
+            method,
+        );
+    }
+
+    // Truncate to integer pixel indices and order start <= end per component.
+    let mut s = (sr.trunc() as i64, sc.trunc() as i64); // (row, col)
+    let mut e = (er.trunc() as i64, ec.trunc() as i64);
+    if s.0 > e.0 || s.1 > e.1 {
+        std::mem::swap(&mut s, &mut e);
+    }
+    let (w, h) = (width as usize, height as usize);
+    let profile = if s.0 == e.0 {
+        // Row aligned: the band spans `roi_width` rows around the shared row and
+        // the profile runs along the columns.
+        let row_range = (
+            (s.0 as f64 + 0.5 - 0.5 * roi_width).trunc() as i64,
+            (s.0 as f64 + 0.5 + 0.5 * roi_width).trunc() as i64,
+        );
+        let col_range = (s.1, e.1 + 1);
+        aligned_partial_profile(w, h, data, row_range, col_range, 0, method)
+    } else {
+        // Column aligned.
+        let row_range = (s.0, e.0 + 1);
+        let col_range = (
+            (s.1 as f64 + 0.5 - 0.5 * roi_width).trunc() as i64,
+            (s.1 as f64 + 0.5 + 0.5 * roi_width).trunc() as i64,
+        );
+        aligned_partial_profile(w, h, data, row_range, col_range, 1, method)
+    };
+    let x = (0..profile.len()).map(|i| i as f64).collect();
+    Ok((x, profile))
+}
+
 /// Extract a 1D profile within a rectangle by reducing along an axis.
 ///
 /// `rect` is (x_min, x_max, y_min, y_max) in (column, row) coordinates.
@@ -12439,10 +12582,10 @@ pub fn stack_aligned_profile(
 }
 
 /// Stack a line-segment profile over every frame (silx
-/// `ProfileImageStackLineROI`), using the bilinear band [`line_profile_band`]
-/// per frame so the line width and reduction method are honored — silx's
-/// image-stack line ROI runs the same `bilinear.profile_line(..., roiWidth,
-/// method)` as the 1D line profile (`tools/profile/rois.py:1096-1104`).
+/// `ProfileImageStackLineROI`), running the full free-line
+/// [`free_line_profile`] per frame so the line width / reduction method are
+/// honored and axis-aligned lines use silx's integer-rectangle path — the same
+/// `core.createProfile` the 1D line profile uses (`tools/profile/rois.py:1096-1104`).
 pub fn stack_line_profile(
     data: &[f32],
     shape: [usize; 3],
@@ -12453,9 +12596,10 @@ pub fn stack_line_profile(
     method: ProfileMethod,
 ) -> Option<StackProfile> {
     stack_profile_with(data, shape, perspective, |w, h, pixels| {
-        // line_profile_band returns (arc positions, band-reduced values); stack
-        // the reduced values.
-        line_profile_band(w, h, pixels, start, end, line_width, method)
+        // free_line_profile returns (positions, band-reduced values); stack the
+        // reduced values (silx's image-stack line ROI runs the same free-line
+        // createProfile per frame: aligned-integer or bilinear-with-shift).
+        free_line_profile(w, h, pixels, start, end, line_width, method)
             .ok()
             .map(|(_positions, values)| values)
     })
@@ -14740,6 +14884,72 @@ mod tests {
                 actual: 3,
             }
         );
+    }
+
+    #[test]
+    fn free_line_profile_general_case_applies_the_minus_half_shift() {
+        // R2-2: a non-axis-aligned free line samples with silx's -0.5 corner
+        // shift, so free_line_profile == line_profile_band with both endpoints
+        // shifted by -0.5. 3x3 gradient value = row*3 + col.
+        let data = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
+        // (col, row) endpoints. int(col): int(0.7)=0 != int(2.4)=2; int(row):
+        // int(1.2)=1 != int(2.3)=2 -> general (bilinear) case. Both endpoints
+        // stay in bounds after the -0.5 shift, so no sample is NaN.
+        let start = (0.7, 1.2);
+        let end = (2.4, 2.3);
+        let free = free_line_profile(3, 3, &data, start, end, 1, ProfileMethod::Mean).unwrap();
+        let shifted = line_profile_band(
+            3,
+            3,
+            &data,
+            (start.0 - 0.5, start.1 - 0.5),
+            (end.0 - 0.5, end.1 - 0.5),
+            1,
+            ProfileMethod::Mean,
+        )
+        .unwrap();
+        assert_eq!(free, shifted);
+        // And it must differ from the un-shifted band (the old, 0.5px-off path).
+        let unshifted = line_profile_band(3, 3, &data, start, end, 1, ProfileMethod::Mean).unwrap();
+        assert_ne!(free.1, unshifted.1);
+    }
+
+    #[test]
+    fn free_line_profile_row_aligned_uses_integer_rectangle() {
+        // R2-2: endpoints sharing an integer row snap to the aligned integer
+        // rectangle (no bilinear, no -0.5). 3x3 ramp value = row*10 + col.
+        let data = [0.0, 1.0, 2.0, 10.0, 11.0, 12.0, 20.0, 21.0, 22.0];
+        // Row 1 from col 0 to col 2, width 1 Mean -> exactly row 1.
+        let (x, y) =
+            free_line_profile(3, 3, &data, (0.0, 1.0), (2.0, 1.0), 1, ProfileMethod::Mean).unwrap();
+        assert_eq!(x, vec![0.0, 1.0, 2.0]);
+        assert_eq!(y, vec![10.0, 11.0, 12.0]);
+        // Width 3 Sum -> per-column sum over all three rows: 30 + 3c.
+        let (_, ys) =
+            free_line_profile(3, 3, &data, (0.0, 1.0), (2.0, 1.0), 3, ProfileMethod::Sum).unwrap();
+        assert_eq!(ys, vec![30.0, 33.0, 36.0]);
+    }
+
+    #[test]
+    fn free_line_profile_column_aligned_uses_integer_rectangle() {
+        // Endpoints sharing an integer column reduce along the column.
+        // 3x3 ramp value = row*10 + col; column 1 down all rows.
+        let data = [0.0, 1.0, 2.0, 10.0, 11.0, 12.0, 20.0, 21.0, 22.0];
+        let (x, y) =
+            free_line_profile(3, 3, &data, (1.0, 0.0), (1.0, 2.0), 1, ProfileMethod::Mean).unwrap();
+        assert_eq!(x, vec![0.0, 1.0, 2.0]);
+        assert_eq!(y, vec![1.0, 11.0, 21.0]);
+    }
+
+    #[test]
+    fn free_line_profile_aligned_zero_pads_out_of_image() {
+        // A row-aligned line extending past the right edge zero-pads the
+        // out-of-image positions (silx _alignedPartialProfile builds a zeros
+        // array). 3x3 ramp; row 1, cols 0..4 -> [10,11,12,0,0].
+        let data = [0.0, 1.0, 2.0, 10.0, 11.0, 12.0, 20.0, 21.0, 22.0];
+        let (_, y) =
+            free_line_profile(3, 3, &data, (0.0, 1.0), (4.0, 1.0), 1, ProfileMethod::Mean).unwrap();
+        assert_eq!(y, vec![10.0, 11.0, 12.0, 0.0, 0.0]);
     }
 
     #[test]

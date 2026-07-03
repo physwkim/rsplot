@@ -456,6 +456,23 @@ Impact: browsing any stack whose values are outside `[0, 1]` (counts, detector f
 
 ### R2-2: Free-line profile samples half a pixel off (silx's `-0.5` corner→centre shift dropped at every caller), and the axis-aligned free-line snap branch is unported
 
+**FIXED (Round 2 profile-subsystem cluster):** ported silx `createProfile`'s
+free-line dispatch as `free_line_profile` (`high_level.rs`): the aligned-endpoints
+check (`int(startRow)==int(endRow) || int(startCol)==int(endCol)`) routes to a new
+`aligned_partial_profile` (integer-rectangle plain mean/sum, out-of-image
+**zero-padded**, a faithful port of silx `_alignedPartialProfile`); the general
+case calls `line_profile_band` with silx's `-0.5` corner shift applied to both
+endpoints. `line_profile_band` stays the pixel-centre primitive. Both Line-ROI
+callers now route through it: `profiles_for_roi` Line arm (`profile_window.rs`) —
+which backs the ImageView profile window and the StackView 1D line — and the free
+`stack_line_profile` (StackView 2D line, per frame). Tests:
+`free_line_profile_general_case_applies_the_minus_half_shift`,
+`free_line_profile_row_aligned_uses_integer_rectangle`,
+`free_line_profile_column_aligned_uses_integer_rectangle`,
+`free_line_profile_aligned_zero_pads_out_of_image`. Residual: nearest-neighbour
+`line_profile_values` callers still round raw corner-convention coords (R2-6 x-axis
+concern, distinct); the profile-window plot-axis labels/coords are R2-6.
+
 Severity: High
 
 Rust: `src/widget/profile_window.rs:87-88` — `Roi::Line { start, end } => line_profile_band(..., *start, *end, ...)` where `start`/`end` come straight from `transform.pixel_to_data` (`src/widget/high_level.rs:10793,10800-10805` ImageView drag; `:12886-12891` StackView 1D). `line_profile_band`'s own doc (`high_level.rs:1546-1548`) declares its inputs are *pixel-centre* coordinates and that "silx's `-0.5` plot-corner shift is *not* applied here" — but no caller applies it. Same family: nearest-neighbour `line_profile_values` callers round raw corner-convention coords.

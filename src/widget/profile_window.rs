@@ -6,7 +6,7 @@ use crate::core::plot::PlotId;
 use crate::core::roi::Roi;
 use crate::render::gpu_curve::CurveData;
 use crate::widget::high_level::{
-    Plot1D, ProfileMethod, aligned_profile_values, line_profile_band, rect_profile_values,
+    Plot1D, ProfileMethod, aligned_profile_values, free_line_profile, rect_profile_values,
 };
 
 /// A single named profile curve extracted from a profile ROI: a legend label, a
@@ -85,7 +85,7 @@ fn profiles_for_roi(
 ) -> Vec<ProfileCurve> {
     match roi {
         Roi::Line { start, end } => {
-            line_profile_band(width, height, data, *start, *end, line_width, method)
+            free_line_profile(width, height, data, *start, *end, line_width, method)
                 .ok()
                 .map(|(x, y)| ProfileCurve {
                     label: "profile",
