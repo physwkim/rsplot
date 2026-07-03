@@ -620,15 +620,35 @@ fn emit_choice_button(b: &mut Builder, widget: &MedmWidget, options: &Options, z
         .get("stacking")
         .map(String::as_str)
         .unwrap_or("row");
-    match stacking {
+    let vertical = match stacking {
         // `row` -> Vertical, which is `SidmEnumButton`'s default, so no builder.
-        "row" => {}
-        "column" => builders.push(".with_orientation(Orientation::Horizontal)".to_string()),
-        other => b.warnings.push(format!(
-            "line {}: choice button stacking {other:?} unsupported, using 'row'",
-            widget.line
-        )),
-    }
+        "row" => true,
+        "column" => {
+            builders.push(".with_orientation(Orientation::Horizontal)".to_string());
+            false
+        }
+        other => {
+            b.warnings.push(format!(
+                "line {}: choice button stacking {other:?} unsupported, using 'row'",
+                widget.line
+            ));
+            true
+        }
+    };
+    // Font: a `row` (vertical) stack shares the widget height among its
+    // buttons, so the font must fit ONE button, not the whole geometry — MEDM
+    // sizes each toggle at height/numberOfButtons and picks the font for that
+    // cell (medmChoiceButtons.c:131-136). The enum strings are unknown at
+    // convert time, so the item count is estimated from the geometry exactly
+    // as adl2pydm does: est = max(2, round(h/20)), font from h/est
+    // (output_handler.py:650-660). A `column` stack keeps the full height.
+    let font_px = if vertical {
+        let h = f64::from(geom.height);
+        let est_items = (h / 20.0).round().max(2.0);
+        font_px_from_fractional_height(h / est_items)
+    } else {
+        font_px_from_height(geom.height)
+    };
     push_channel_widget(
         b,
         z,
@@ -639,7 +659,7 @@ fn emit_choice_button(b: &mut Builder, widget: &MedmWidget, options: &Options, z
             connect_desc: &format!("adl2sidm: connect {addr} (choice button)"),
             builders: &builders,
             colors: WidgetColors::from_widget(widget),
-            font_px: Some(font_px_from_height(geom.height)),
+            font_px: Some(font_px),
         },
     );
 }
@@ -2318,7 +2338,13 @@ impl WidgetColors {
 /// size (in egui points, which track the glyph pixel height) for a text-bearing
 /// widget of the given `height`.
 fn font_px_from_height(height: i32) -> f32 {
-    (f64::from(height) * 0.6).round().clamp(6.0, 20.0) as f32
+    font_px_from_fractional_height(f64::from(height))
+}
+
+/// [`font_px_from_height`] over a fractional height — a per-button share of a
+/// stacked widget's geometry (adl2pydm `write_font_size(height_override=…)`).
+fn font_px_from_fractional_height(height: f64) -> f32 {
+    (height * 0.6).round().clamp(6.0, 20.0) as f32
 }
 
 /// The scoped style-override lines applying a MEDM-derived font size and static
@@ -5002,6 +5028,56 @@ byte {
         assert!(
             g.source
                 .contains(".with_orientation(Orientation::Horizontal)")
+        );
+    }
+
+    #[test]
+    fn row_choice_button_sizes_its_font_per_button() {
+        // R1-40: a row (vertical) stack shares the height among its buttons —
+        // MEDM sizes each toggle at height/numberOfButtons
+        // (medmChoiceButtons.c:131-136). A 4-item-shaped 80 px widget:
+        // est = max(2, round(80/20)) = 4 -> per-button 20 px -> font 12, where
+        // the whole-geometry rule gave clamp(48) = 20 (adl2pydm
+        // output_handler.py:650-660).
+        let adl = r#"
+"color map" {
+	colors {
+		ffffff,
+	}
+}
+"choice button" {
+	object {
+		x=0
+		y=0
+		width=80
+		height=80
+	}
+	control {
+		chan="ROWCB"
+	}
+	stacking="row"
+}
+"#;
+        let g = generate(&parse(adl), &Options::default());
+        // (Responsive output scales the size by `sy`, so match the prefix.)
+        assert!(
+            g.source.contains("egui::FontId::proportional(12.0"),
+            "row choice-button font must fit one button (12.0):\n{}",
+            g.source
+        );
+        assert!(
+            !g.source.contains("proportional(20.0"),
+            "whole-geometry font must not survive on a row stack:\n{}",
+            g.source
+        );
+        // The CONTROLS column stack keeps the full-height rule: its choice
+        // button is the only 40 px-tall widget there, so the sole
+        // clamp(round(24)) = 20 font in that screen is its.
+        let g = controls();
+        assert!(
+            g.source.contains("proportional(20.0"),
+            "column choice-button keeps the whole-height font:\n{}",
+            g.source
         );
     }
 
