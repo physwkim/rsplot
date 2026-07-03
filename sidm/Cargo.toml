@@ -31,8 +31,13 @@ ca = ["dep:epics-ca-rs", "dep:epics-base-rs"]
 pva = ["dep:epics-pva-rs"]
 # Derived-channel backend (`calc://`). Pulls evalexpr (a pure-Rust expression
 # evaluator) to compute one channel from an expression over other channels'
-# scalar values, porting PyDM's calc plugin. No network dependency.
-calc = ["dep:evalexpr"]
+# scalar values, porting PyDM's calc plugin. Also pulls epics-base-rs for the
+# MEDM CALC dialect (`?dialect=medm`): its libCom calc engine implements the
+# same grammar as MEDM's medmCalc.c (double-typed `=`/`#`, `**`, ternary,
+# ABS..NOT functions, PI/D2R/R2D, A-L operands in both cases), so a converted
+# MEDM visibility rule evaluates with MEDM semantics whenever `calc://` exists
+# at all — no build where the address parses but the dialect is missing.
+calc = ["dep:evalexpr", "dep:epics-base-rs"]
 
 [dependencies]
 # `version` (alongside `path`) is required so `cargo publish` records a
