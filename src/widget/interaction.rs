@@ -313,11 +313,28 @@ pub fn constrain_zoom_axes(
     (x0, x1, y0, y1)
 }
 
-/// Convert an egui wheel delta (`smooth_scroll_delta.y`, pixels) to a zoom
+/// One discrete wheel notch's worth of `smooth_scroll_delta.y`, in egui
+/// points: egui 0.34 maps a `MouseWheelUnit::Line` event of ±1.0 through
+/// `InputOptions::line_scroll_speed` (native default 40.0 points; the web
+/// backend uses a smaller per-event value but fires proportionally more
+/// events), and its scroll smoothing dribbles the delta out sum-conservingly
+/// over a few frames — so one notch totals exactly 40.0 points regardless of
+/// how many frames it spans (`egui/src/input_state/wheel_state.rs`).
+const WHEEL_NOTCH_POINTS: f64 = 40.0;
+
+/// Convert an egui wheel delta (`smooth_scroll_delta.y`, points) to a zoom
 /// factor for [`zoom_about`]. Scrolling up (`> 0`) zooms in (`factor < 1`).
+///
+/// Calibrated to silx `_onWheel` (`PlotInteraction.py:1912-1913`), where one
+/// wheel step is exactly ×1.1: the exponent is `ln(1.1) / 40.0` per point, so
+/// a full notch (40.0 points, [`WHEEL_NOTCH_POINTS`]) gives a span factor of
+/// exactly `1/1.1` and N notches compose to `1.1^N` — the exponential form
+/// keeps the calibration exact even when egui's smoothing splits a notch
+/// across frames, and lets smooth trackpad deltas zoom continuously at the
+/// same per-distance rate (a deliberate egui-ism; silx quantizes to whole
+/// steps).
 pub fn wheel_zoom_factor(scroll_y: f32) -> f64 {
-    // Exponential so repeated notches compose multiplicatively and symmetrically.
-    (-(scroll_y as f64) * 0.0015).exp()
+    (-(scroll_y as f64) * (1.1f64.ln() / WHEEL_NOTCH_POINTS)).exp()
 }
 
 /// Whether `limits` are non-degenerate (both spans strictly positive). The
@@ -2224,6 +2241,33 @@ mod tests {
         assert!(wheel_zoom_factor(100.0) < 1.0);
         assert!(wheel_zoom_factor(-100.0) > 1.0);
         assert!((wheel_zoom_factor(0.0) - 1.0).abs() <= 1e-12);
+    }
+
+    #[test]
+    fn wheel_factor_one_notch_is_exactly_1_1() {
+        // silx `_onWheel`: one wheel step is exactly x1.1
+        // (PlotInteraction.py:1912-1913). One egui notch = 40.0 points of
+        // smooth_scroll_delta (Line 1.0 x line_scroll_speed native default).
+        let notch = 40.0_f32;
+        // Scroll up one notch: span factor 1/1.1 (a x1.1 zoom-in).
+        assert!((wheel_zoom_factor(notch) - 1.0 / 1.1).abs() <= 1e-12);
+        // Scroll down one notch: span factor 1.1 (a x1.1 zoom-out).
+        assert!((wheel_zoom_factor(-notch) - 1.1).abs() <= 1e-12);
+        // N notches compose to 1.1^N.
+        assert!((wheel_zoom_factor(-3.0 * notch) - 1.1f64.powi(3)).abs() <= 1e-9);
+    }
+
+    #[test]
+    fn wheel_factor_split_deltas_compose_to_one_notch() {
+        // egui's scroll smoothing splits a notch's 40.0 points across frames
+        // sum-conservingly; the exponential factor must compose to exactly
+        // one silx step regardless of the split.
+        let parts = [13.0_f32, 9.5, 11.5, 6.0]; // sums to 40.0
+        let composed: f64 = parts.iter().map(|&p| wheel_zoom_factor(p)).product();
+        assert!(
+            (composed - 1.0 / 1.1).abs() <= 1e-12,
+            "composed {composed} != 1/1.1"
+        );
     }
 
     #[test]
