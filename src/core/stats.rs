@@ -5,7 +5,8 @@
 //!
 //! - `min`, `max`, `delta` (`max - min`) — silx `StatMin` / `StatMax` /
 //!   `StatDelta` (stats.py:783-813)
-//! - `mean`, `sum` (integral) — silx `("mean", numpy.mean)` / sum aggregation
+//! - `mean`, `sum` (integral), `std` — silx `("mean", numpy.mean)` /
+//!   `("std", numpy.std)` (StatsWidget.py:1266-1276) / sum aggregation
 //! - center of mass `COM = sum(pos * val) / sum(val)` — silx `StatCOM`
 //!   (stats.py:881-910)
 //! - coordinates of the first min / max via `argmin` / `argmax` mapped back
@@ -65,6 +66,9 @@ pub struct Stats {
     pub delta: Option<f64>,
     /// Arithmetic mean of finite values (silx `("mean", numpy.mean)`).
     pub mean: Option<f64>,
+    /// Population standard deviation (ddof = 0) of finite values — silx
+    /// `("std", numpy.std)` in `DEFAULT_STATS` (StatsWidget.py:1266-1276).
+    pub std: Option<f64>,
     /// Sum / integral of finite values.
     pub sum: Option<f64>,
     /// Center of mass (silx `StatCOM`, stats.py:881). For a curve this is a
@@ -273,6 +277,10 @@ impl Stats {
 struct Accumulator {
     finite_count: usize,
     sum: f64,
+    // Welford running mean / squared-deviation sum for the population std
+    // (numpy.std, ddof = 0 — silx `("std", numpy.std)`).
+    welford_mean: f64,
+    welford_m2: f64,
     // COM numerators: sum(val * pos).
     com_x_num: f64,
     com_y_num: f64,
@@ -287,6 +295,10 @@ impl Accumulator {
     fn push(&mut self, value: f64, x: f64, y: f64) {
         self.finite_count += 1;
         self.sum += value;
+        // Welford update: numerically stable running mean + M2.
+        let delta = value - self.welford_mean;
+        self.welford_mean += delta / self.finite_count as f64;
+        self.welford_m2 += delta * (value - self.welford_mean);
         self.com_x_num += value * x;
         if y.is_finite() {
             self.com_y_num += value * y;
@@ -342,6 +354,9 @@ impl Accumulator {
             max: Some(self.max),
             delta: Some(self.max - self.min),
             mean: Some(mean),
+            // Population std (ddof = 0), matching numpy.std as used by silx
+            // `DEFAULT_STATS` (StatsWidget.py:1275).
+            std: Some((self.welford_m2 / self.finite_count as f64).sqrt()),
             sum: Some(self.sum),
             com,
             coord_min: coord(self.min_pos),
@@ -373,10 +388,35 @@ mod tests {
         assert_eq!(s.max, None);
         assert_eq!(s.delta, None);
         assert_eq!(s.mean, None);
+        assert_eq!(s.std, None);
         assert_eq!(s.sum, None);
         assert_eq!(s.com, ComCoord::NONE);
         assert_eq!(s.coord_min, ComCoord::NONE);
         assert_eq!(s.coord_max, ComCoord::NONE);
+    }
+
+    #[test]
+    fn curve_std_is_population_std() {
+        // numpy.std (ddof = 0) of [2, 4, 4, 4, 5, 5, 7, 9] is exactly 2
+        // (mean 5, squared deviations sum 32, 32 / 8 = 4, sqrt = 2).
+        let ys = [2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0];
+        let xs: Vec<f64> = (0..ys.len()).map(|i| i as f64).collect();
+        let s = Stats::for_curve(&xs, &ys, StatScope::All);
+        approx(s.std.unwrap(), 2.0);
+    }
+
+    #[test]
+    fn curve_std_single_point_is_zero() {
+        let s = Stats::for_curve(&[1.0], &[5.0], StatScope::All);
+        approx(s.std.unwrap(), 0.0);
+    }
+
+    #[test]
+    fn image_std_is_population_std() {
+        // [1, 2, 3, 4]: mean 2.5, variance (2.25+0.25+0.25+2.25)/4 = 1.25.
+        let data = [1.0, 2.0, 3.0, 4.0];
+        let s = Stats::for_image(&data, 2, 2, (0.0, 0.0), (1.0, 1.0), StatScope::All);
+        approx(s.std.unwrap(), 1.25f64.sqrt());
     }
 
     #[test]

@@ -1,9 +1,11 @@
 //! Statistics table widget ported from silx `gui/plot/StatsWidget.py`.
 //!
 //! [`StatsWidget`] renders one row per tracked item and one column per
-//! statistic (min / coords min / max / coords max / COM / mean / sum /
-//! delta), mirroring silx `DEFAULT_STATS` (StatsWidget.py:1266-1276) extended
-//! with the sum/delta aggregates exposed by [`crate::core::stats::Stats`].
+//! statistic (min / coords min / max / coords max / COM / mean / std),
+//! mirroring silx `DEFAULT_STATS` (StatsWidget.py:1266-1276) exactly. The
+//! sum/delta aggregates of [`crate::core::stats::Stats`] stay available on the
+//! computed [`Stats`] rows but are not default table columns (silx's default
+//! table has none).
 //!
 //! It carries an auto/manual update toggle (silx `setUpdateMode`,
 //! StatsWidget.py:1258-1263) and a "use visible data range" toggle (silx
@@ -223,21 +225,21 @@ impl StatsWidget {
     }
 }
 
-/// Column headers, matching silx `DEFAULT_STATS` order
-/// (StatsWidget.py:1266-1276) plus the sum/delta aggregates.
-const STAT_COLUMNS: [&str; 8] = [
+/// Column headers, matching silx `DEFAULT_STATS` order exactly
+/// (StatsWidget.py:1266-1276): min, coords min, max, coords max, COM, mean,
+/// std.
+const STAT_COLUMNS: [&str; 7] = [
     "min",
     "coords min",
     "max",
     "coords max",
     "COM",
     "mean",
-    "sum",
-    "delta",
+    "std",
 ];
 
 /// Format one table row's cells in [`STAT_COLUMNS`] order.
-fn row_cells(stats: &Stats) -> [String; 8] {
+fn row_cells(stats: &Stats) -> [String; 7] {
     [
         format_stat(stats.min),
         format_coord(stats.coord_min),
@@ -245,8 +247,7 @@ fn row_cells(stats: &Stats) -> [String; 8] {
         format_coord(stats.coord_max),
         format_coord(stats.com),
         format_stat(stats.mean),
-        format_stat(stats.sum),
-        format_stat(stats.delta),
+        format_stat(stats.std),
     ]
 }
 
@@ -425,6 +426,37 @@ mod tests {
     #[test]
     fn format_coord_none_is_dashes() {
         assert_eq!(format_coord(ComCoord::NONE), "--");
+    }
+
+    #[test]
+    fn stat_columns_match_silx_default_stats_exactly() {
+        // silx DEFAULT_STATS (StatsWidget.py:1266-1276): StatMin, StatCoordMin,
+        // StatMax, StatCoordMax, StatCOM, ("mean", numpy.mean),
+        // ("std", numpy.std) — no sum, no delta.
+        assert_eq!(
+            STAT_COLUMNS,
+            [
+                "min",
+                "coords min",
+                "max",
+                "coords max",
+                "COM",
+                "mean",
+                "std"
+            ]
+        );
+    }
+
+    #[test]
+    fn row_cells_render_std_column() {
+        // numpy.std of [2, 4, 4, 4, 5, 5, 7, 9] is exactly 2 (population std).
+        let ys = [2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0];
+        let xs: Vec<f64> = (0..ys.len()).map(|i| i as f64).collect();
+        let stats = Stats::for_curve(&xs, &ys, StatScope::All);
+        let cells = row_cells(&stats);
+        assert_eq!(cells.len(), STAT_COLUMNS.len());
+        // "std" is the last DEFAULT_STATS column; default "{0:.3f}" format.
+        assert_eq!(cells[6], "2.000");
     }
 
     #[test]
