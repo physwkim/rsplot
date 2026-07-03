@@ -95,6 +95,57 @@ fn reconnecting_after_drop_makes_a_fresh_connection() {
 }
 
 #[test]
+fn local_float_write_rederives_precision() {
+    // PyDM re-derives a float variable's precision from the written value
+    // when no explicit precision is configured (local_plugin.py:377-388).
+    let engine = Engine::new();
+    let ch = engine.connect("loc://prec?type=float&init=1.5").unwrap();
+    assert!(wait_for(|| ch.is_connected(), Duration::from_secs(1)));
+    assert_eq!(ch.read(|s| s.precision), Some(1));
+
+    ch.put(PvValue::Float(2.125));
+    assert!(
+        wait_for(
+            || ch.read(|s| s.precision) == Some(3),
+            Duration::from_secs(1)
+        ),
+        "precision should follow the written value (got {:?})",
+        ch.read(|s| s.precision)
+    );
+
+    // With an explicit precision the derived one must not override it.
+    let fixed = engine
+        .connect("loc://prec2?type=float&init=1.5&precision=5")
+        .unwrap();
+    assert!(wait_for(|| fixed.is_connected(), Duration::from_secs(1)));
+    fixed.put(PvValue::Float(2.125));
+    assert!(
+        wait_for(
+            || matches!(fixed.read(|s| s.value.clone()), Some(PvValue::Float(v)) if v == 2.125),
+            Duration::from_secs(1)
+        ),
+        "write should land"
+    );
+    assert_eq!(fixed.read(|s| s.precision), Some(5));
+}
+
+#[test]
+fn local_array_type_serves_a_waveform() {
+    // loc://name?type=array&init=[..] (PyDM local_plugin.py:32, :321-323).
+    let engine = Engine::new();
+    let ch = engine
+        .connect("loc://wave?type=array&init=[1.5, 2.5, 3.5]")
+        .unwrap();
+    assert!(wait_for(|| ch.is_connected(), Duration::from_secs(1)));
+    assert_eq!(
+        ch.read(|s| s.value.clone()),
+        Some(PvValue::FloatArray(std::sync::Arc::from(
+            [1.5, 2.5, 3.5].as_slice()
+        )))
+    );
+}
+
+#[test]
 fn unknown_protocol_errors() {
     let engine = Engine::new();
     assert!(engine.connect("zz://nope").is_err());

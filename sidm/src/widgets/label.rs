@@ -275,9 +275,12 @@ mod tests {
             "loc label channel never connected"
         );
         writer.put(PvValue::Float(7.0));
+        // "7.0", not "7": a loc:// float without an explicit precision
+        // derives it from the written value — precision_for_value(7.0) = 1
+        // (PyDM local_plugin.py:377-388).
         assert!(
             wait_for(
-                || label.display_text(&label.channel().state()) == "7",
+                || label.display_text(&label.channel().state()) == "7.0",
                 Duration::from_secs(2)
             ),
             "label did not observe the written value (got {:?})",
