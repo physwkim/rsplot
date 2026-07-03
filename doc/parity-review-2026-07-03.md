@@ -436,6 +436,38 @@ Impact: multi-item vertical choice buttons render oversized, truncated captions 
 Fix round 2026-07-03/04 (one commit per finding; branch merged fast-forward
 into main):
 
+**Category A batch (`fix/interaction`, cherry-picked onto main at
+`fe4ec3f`):**
+
+- R1-1 — `134d1a5` pan and wheel zoom move y2 with the gesture; single
+  owner `commit(plot, next, next_y2)` writes limits AND y2 for the
+  pan/wheel/box/arrow paths.
+- R1-2 — `40097d1` wheel gated on zoom-enabled axes / keep-aspect
+  override / all-disabled no-op (`_onWheel`); box zoom skips the
+  disabled-axes substitution under keep-aspect (`_getAxesExtent`).
+- R1-3 — `bdb33f6` silx `checkAxisLimits` is the one repair owner
+  (degenerate ±10% expansion, ±1e37 clamp) for BOTH reset verbs; the
+  divergent `as_non_degenerate` padding and the dead write-only
+  `home_limits` removed. Includes silx's "Nothing to autoscale"
+  all-axes-pinned early return.
+- R1-4 — `ff4c403` log toggles snap to the positive data range at toggle
+  time (`_internalSetScale` + `_logFilterData`-style filtering);
+  keep-aspect toggle change-gates and forces a reset zoom. *Residual:*
+  no `PlotEvent` counterpart for silx's scale/aspect notify (no event
+  pattern to attach to; `LimitsChanged` fires from the refits).
+- R1-5 — `567a90d` `_forceResetZoom` cross-axis defaults: no-data axis →
+  (1,100), left adopts yright when left has no data, y2 adopts left;
+  y2-only and itemless plots now refit.
+- R1-6 — `b06efc4` box zoom rejected below silx's SURFACE_THRESHOLD
+  (pixel area |dx|·|dy| ≥ 5) — no limits write, no history push.
+- R1-7 — `8966b21` zoom-mode entry clears limits history; context-menu
+  Reset Zoom no longer clears; per-frame wheel pushes removed (pan and
+  box-zoom pushes kept per the recorded roadmap decision — roadmap rows
+  updated).
+- R1-8 — `fe4ec3f` wheel factor exp(ln(1.1)/40·px): one egui discrete
+  notch (Line×40pt, sum-conserving smoothing) = exactly ×1.1, N notches
+  = 1.1^N; trackpad stays continuous at the same rate.
+
 **Category D batch (`fix/sidm`, merged at `e4ed898`):**
 
 - R1-25 — `e19bf21` pva Connected publishes `write_access = true`
