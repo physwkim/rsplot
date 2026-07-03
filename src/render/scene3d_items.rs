@@ -460,6 +460,12 @@ impl Scatter2D {
                         self.color_rgba(b),
                     );
                 }
+                // silx picks LINES mode at the data points (5 px square), not
+                // along the segments (items/scatter.py:509-511 → _pickPoints
+                // threshold=5.0); anchor every data point for the pick path.
+                for i in 0..self.len() {
+                    geometry.add_line_pick_anchor(self.position(i));
+                }
             }
             Scatter2DVisualization::Solid => {
                 let tri = delaunay(&self.x, &self.y);

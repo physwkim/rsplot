@@ -330,6 +330,11 @@ pub struct Scene3dGeometry {
     /// Textured arbitrary-triangle meshes (one texture each), drawn in the same
     /// alpha-blended textured pass as the image quads. Used by the cut plane.
     pub(crate) textured_meshes: Vec<Scene3dTexturedMesh>,
+    /// Pick-only data-point anchors: positions that are hit-testable but draw
+    /// nothing. Emitted by `Scatter2D` in LINES mode, where silx picks at the
+    /// data points (5 px square) rather than along the segments
+    /// (`items/scatter.py:509-511` → `_pickPoints(..., threshold=5.0)`).
+    pub(crate) line_pick_anchors: Vec<[f32; 3]>,
 }
 
 impl Scene3dGeometry {
@@ -338,7 +343,7 @@ impl Scene3dGeometry {
         Self::default()
     }
 
-    /// True when there is nothing to draw.
+    /// True when there is nothing to draw or pick.
     pub fn is_empty(&self) -> bool {
         self.lines.is_empty()
             && self.triangles.is_empty()
@@ -346,6 +351,7 @@ impl Scene3dGeometry {
             && self.meshes.is_empty()
             && self.images.is_empty()
             && self.textured_meshes.is_empty()
+            && self.line_pick_anchors.is_empty()
     }
 
     /// Drop all geometry, keeping allocated capacity for reuse.
@@ -356,6 +362,7 @@ impl Scene3dGeometry {
         self.meshes.clear();
         self.images.clear();
         self.textured_meshes.clear();
+        self.line_pick_anchors.clear();
     }
 
     /// Append a textured image layer (see [`Scene3dImageLayer`]).
@@ -380,6 +387,8 @@ impl Scene3dGeometry {
         self.images.extend_from_slice(&other.images);
         self.textured_meshes
             .extend_from_slice(&other.textured_meshes);
+        self.line_pick_anchors
+            .extend_from_slice(&other.line_pick_anchors);
     }
 
     /// World-space triangles for CPU picking, as `[v0, v1, v2]` triples: the
@@ -414,6 +423,19 @@ impl Scene3dGeometry {
             .iter()
             .map(|p| Vec3::from_array(p.pos))
             .collect()
+    }
+
+    /// Append a pick-only anchor at `pos`: hit-testable by
+    /// [`crate::SceneWidget::pick`] (silx `_pickPoints`, 5 px square) but never
+    /// drawn. Used by `Scatter2D` LINES mode, which silx picks at its data
+    /// points, not along the segments (`items/scatter.py:509-511`).
+    pub fn add_line_pick_anchor(&mut self, pos: [f32; 3]) {
+        self.line_pick_anchors.push(pos);
+    }
+
+    /// World-space pick-only anchors (see [`Self::add_line_pick_anchor`]).
+    pub fn line_pick_anchors(&self) -> &[[f32; 3]] {
+        &self.line_pick_anchors
     }
 
     /// Append a line segment `a→b` in one solid [`Color32`].
@@ -2053,6 +2075,7 @@ mod tests {
             uvs: vec![[0.0; 2], [1.0, 0.0], [1.0; 2]],
             interpolation: ImageInterpolation::Nearest,
         });
+        src.add_line_pick_anchor([0.5; 3]); // 1 pick-only anchor
 
         let mut dst = Scene3dGeometry::new();
         assert!(dst.is_empty());
@@ -2065,11 +2088,13 @@ mod tests {
         assert_eq!(dst.meshes.len(), 3);
         assert_eq!(dst.images.len(), 1);
         assert_eq!(dst.textured_meshes.len(), 1);
+        assert_eq!(dst.line_pick_anchors.len(), 1);
 
         // A second extend appends (does not replace).
         dst.extend_from(&src);
         assert_eq!(dst.lines.len(), 4);
         assert_eq!(dst.textured_meshes.len(), 2);
+        assert_eq!(dst.line_pick_anchors.len(), 2);
     }
 
     #[test]

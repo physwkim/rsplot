@@ -24,6 +24,7 @@ use crate::core::scene3d::camera::{Camera, CameraDirection, CameraFace};
 use crate::core::scene3d::interaction::{OrbitDrag, PanDrag, window_to_ndc};
 use crate::core::scene3d::mat4::Vec3;
 use crate::core::scene3d::pick::{picking_segment, segment_triangles_intersection};
+use crate::core::scene3d::plane::segment_plane_intersect;
 use crate::render::gpu_scene3d::{
     Scene3dFog, Scene3dGeometry, Scene3dId, Scene3dShading, install_scene3d, paint_scene3d_with,
     set_scene3d, snapshot_scene3d_with,
@@ -388,15 +389,17 @@ impl SceneWidget {
     /// data surfaces and scatter points, or `None` if the ray misses everything
     /// or the camera is singular.
     ///
-    /// Port of silx `SceneWidget.pickItems` reduced to the data the
-    /// [`ScalarFieldView`](crate::ScalarFieldView) flagship draws: it builds the
-    /// picking segment ([`picking_segment`]) and intersects it with the data
-    /// triangles ([`segment_triangles_intersection`] over
-    /// `Scene3dGeometry::pick_triangles` — flat fills, lit meshes, iso-surfaces);
-    /// scatter points are hit-tested by projecting each to NDC and keeping those
-    /// within [`PICK_POINT_TOLERANCE_PX`] of the click. The bounding-box / axes
-    /// chrome is excluded (it is not part of the data content), matching silx
-    /// picking scene items rather than the frame.
+    /// Port of silx `SceneWidget.pickItems`: it builds the picking segment
+    /// ([`picking_segment`]) and intersects it with the data triangles
+    /// ([`segment_triangles_intersection`] over
+    /// `Scene3dGeometry::pick_triangles` — flat fills, lit meshes,
+    /// iso-surfaces); scatter points are hit-tested by projecting each to NDC
+    /// and keeping those within [`PICK_POINT_TOLERANCE_PX`] of the click;
+    /// Scatter2D-LINES data points via the [`PICK_LINE_TOLERANCE_PX`] square
+    /// test (silx `_pickPoints`); image quads by plane intersection with a
+    /// pixel row/column payload (silx `_Image._pickFull`). The bounding-box /
+    /// axes chrome is excluded (it is not part of the data content), matching
+    /// silx picking scene items rather than the frame.
     ///
     /// Uses the camera's current viewport size, so call after [`SceneWidget::show`]
     /// has run this frame (it syncs the camera aspect to the rendered rect).
@@ -443,6 +446,60 @@ impl SceneWidget {
             }
         }
 
+        // Pick-only anchors (Scatter2D LINES mode): silx `_pickPoints` with a
+        // 5 px threshold (items/scatter.py:424-434, called with threshold=5.0
+        // from :511) — a per-axis square test `|Δndc| < threshold/viewport`
+        // plus the segment depth range `z ∈ [-1, 1]`, nearest by depth.
+        let square_ndc_x = PICK_LINE_TOLERANCE_PX / vw.max(1.0);
+        let square_ndc_y = PICK_LINE_TOLERANCE_PX / vh.max(1.0);
+        for (index, &pos) in self.content.line_pick_anchors().iter().enumerate() {
+            let world = Vec3::new(pos[0], pos[1], pos[2]);
+            let p = mvp.transform_point(world, true);
+            if !(-1.0..=1.0).contains(&p.z) {
+                continue;
+            }
+            if (p.x - ndc.0).abs() < square_ndc_x && (p.y - ndc.1).abs() < square_ndc_y {
+                consider(ScenePick {
+                    position: world,
+                    ndc_depth: p.z,
+                    kind: ScenePickKind::LinePoint { index },
+                });
+            }
+        }
+
+        // Image quads: silx `_Image._pickFull` (items/image.py:55-84) —
+        // intersect the picking segment with the image plane; exactly one
+        // crossing (a coplanar segment picks nothing), reject in front of the
+        // origin edge, then floor to the pixel row/column and bounds-check.
+        // The layer is axis-aligned in its z = origin.z plane, pixel (col,row)
+        // spanning origin + (col..col+1, row..row+1)·scale.
+        for (image, layer) in self.content.images.iter().enumerate() {
+            let hits = segment_plane_intersect(
+                segment.0,
+                segment.1,
+                Vec3::new(0.0, 0.0, 1.0),
+                Vec3::new(0.0, 0.0, layer.origin[2]),
+            );
+            let [hit] = hits.as_slice() else {
+                continue; // no crossing, or segment coplanar with the image
+            };
+            // World → image-frame (column, row) continuous coordinates.
+            let col_f = (hit.x - layer.origin[0]) / layer.scale[0];
+            let row_f = (hit.y - layer.origin[1]) / layer.scale[1];
+            if col_f < 0.0 || row_f < 0.0 {
+                continue; // outside image (silx rejects negatives)
+            }
+            let (col, row) = (col_f as usize, row_f as usize);
+            if row >= layer.height as usize || col >= layer.width as usize {
+                continue; // outside image
+            }
+            consider(ScenePick {
+                position: *hit,
+                ndc_depth: mvp.transform_point(*hit, true).z,
+                kind: ScenePickKind::Image { image, row, col },
+            });
+        }
+
         best
     }
 }
@@ -453,6 +510,12 @@ impl SceneWidget {
 /// per-point marker size is not threaded into the pick path).
 pub const PICK_POINT_TOLERANCE_PX: f32 = 7.0;
 
+/// Pixel threshold of the pick-anchor square test — silx picks `Scatter2D`
+/// LINES mode at its data points with `threshold=5.0`
+/// (`items/scatter.py:511`), tested as `|Δndc| < threshold/viewport` per axis
+/// (`items/scatter.py:424-428`).
+pub const PICK_LINE_TOLERANCE_PX: f32 = 5.0;
+
 /// What [`SceneWidget::pick`] hit.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ScenePickKind {
@@ -460,6 +523,18 @@ pub enum ScenePickKind {
     Surface,
     /// A scatter point, with its index in the points channel.
     Point { index: usize },
+    /// A pick-only data-point anchor (Scatter2D LINES mode — silx picks the
+    /// data points, not the segments; `items/scatter.py:509-511`), with its
+    /// index in the anchors channel.
+    LinePoint { index: usize },
+    /// An image-quad pixel (silx `_Image._pickFull`, `items/image.py:55-84`),
+    /// with the layer's index in the images channel and the picked pixel's
+    /// row/column in the image data.
+    Image {
+        image: usize,
+        row: usize,
+        col: usize,
+    },
 }
 
 /// The nearest scene hit from [`SceneWidget::pick`].

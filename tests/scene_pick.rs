@@ -7,7 +7,10 @@
 
 use egui_kittest::wgpu::{create_render_state, default_wgpu_setup};
 use siplot::egui::Color32;
-use siplot::{CameraFace, PointMarker, Scene3dGeometry, ScenePickKind, SceneWidget};
+use siplot::{
+    CameraFace, ImageInterpolation, PointMarker, Scatter2D, Scatter2DVisualization,
+    Scene3dGeometry, Scene3dImageLayer, ScenePickKind, SceneWidget, Vec3,
+};
 
 /// Frame a unit-box scene from the Front viewpoint, with the camera sized
 /// square so the centre-screen ray is unambiguous. `pick` reads the widget's own
@@ -113,4 +116,82 @@ fn pick_prefers_the_nearer_surface() {
         "nearer plane (z=0.8) should win, got z = {}",
         pick.position.z
     );
+}
+
+/// The NDC (x, y) where `world` projects with the widget's current camera —
+/// used to aim a pick exactly at a known data point.
+fn ndc_of(w: &SceneWidget, world: Vec3) -> (f32, f32) {
+    let p = w.camera().matrix().transform_point(world, true);
+    (p.x, p.y)
+}
+
+#[test]
+fn pick_scatter2d_lines_mode_hits_data_points_not_segments() {
+    // silx picks LINES mode at the data points with a 5 px square threshold
+    // (items/scatter.py:509-511), never along the segments.
+    let scatter = Scatter2D::new()
+        .with_data(&[0.25, 0.75, 0.5], &[0.25, 0.25, 0.75], &[0.0, 1.0, 2.0])
+        .with_visualization(Scatter2DVisualization::Lines);
+    let mut geo = Scene3dGeometry::new();
+    scatter.append_to(&mut geo);
+    assert_eq!(
+        geo.line_pick_anchors().len(),
+        3,
+        "one anchor per data point"
+    );
+    let w = front_view_widget(25, geo);
+
+    // Aim exactly at data point 1 → LinePoint with that index.
+    let target = Vec3::new(0.75, 0.25, 0.0);
+    let pick = w.pick(ndc_of(&w, target)).expect("hits the data point");
+    assert_eq!(pick.kind, ScenePickKind::LinePoint { index: 1 });
+    assert!((pick.position.x - 0.75).abs() < 1e-6);
+    assert!((pick.position.y - 0.25).abs() < 1e-6);
+
+    // Aim at the midpoint of the edge between points 0 and 1: on the drawn
+    // segment but ~50 px from either endpoint at this zoom → no pick.
+    let mid = Vec3::new(0.5, 0.25, 0.0);
+    assert!(
+        w.pick(ndc_of(&w, mid)).is_none(),
+        "silx picks the points, not the line segments"
+    );
+}
+
+#[test]
+fn pick_image_quad_returns_row_and_column() {
+    // A 3×2-pixel image layer at origin (0,0,0.5), 0.25 world units per pixel
+    // → spans (0..0.75, 0..0.5) in the z = 0.5 plane.
+    let mut geo = Scene3dGeometry::new();
+    geo.add_image_layer(Scene3dImageLayer {
+        pixels: vec![255; 3 * 2 * 4],
+        width: 3,
+        height: 2,
+        origin: [0.0, 0.0, 0.5],
+        scale: [0.25, 0.25],
+        interpolation: ImageInterpolation::Nearest,
+    });
+    let w = front_view_widget(26, geo);
+
+    // Aim inside pixel (row 1, col 2): world (0.6, 0.3) → col 0.6/0.25 = 2.4,
+    // row 0.3/0.25 = 1.2 (silx _pickFull floors to ints, image.py:72-77).
+    let target = Vec3::new(0.6, 0.3, 0.5);
+    let pick = w.pick(ndc_of(&w, target)).expect("ray crosses the image");
+    assert_eq!(
+        pick.kind,
+        ScenePickKind::Image {
+            image: 0,
+            row: 1,
+            col: 2
+        }
+    );
+    // The hit position is the world-space plane intersection.
+    assert!((pick.position.x - 0.6).abs() < 1e-3);
+    assert!((pick.position.y - 0.3).abs() < 1e-3);
+    assert!((pick.position.z - 0.5).abs() < 1e-3);
+
+    // Just past the last column (x = 0.9 → col 3.6 ≥ width 3): outside image
+    // (silx rejects row/column past the data shape, image.py:78-84).
+    assert!(w.pick(ndc_of(&w, Vec3::new(0.9, 0.3, 0.5))).is_none());
+    // Behind the origin corner (negative image coordinates): rejected too.
+    assert!(w.pick(ndc_of(&w, Vec3::new(-0.2, 0.3, 0.5))).is_none());
 }
