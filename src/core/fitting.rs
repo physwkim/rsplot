@@ -1883,15 +1883,20 @@ pub fn estimate_atan_stepup(x: &[f64], y: &[f64]) -> Option<Vec<f64>> {
 /// sharpness, then take the slit centre/width from the half-maximum crossings
 /// of the background-subtracted data. silx subtracts a *strip* background; that
 /// filter is a separate theory (not yet ported), so the baseline here is
-/// `min(y)` — the same simplification the peak estimators use. `beamfwhm` is
-/// seeded as the average of the up/down edge FWHMs (silx's docstring intent;
-/// its code has an index typo that reads the down-step centre instead), then
-/// clamped to silx's `[range*3/n, edge_distance/10]` bounds.
+/// `min(y)` — the same simplification the peak estimators use.
+///
+/// `beamfwhm` seeds as silx's exact expression `0.5 * (largestup[2] +
+/// largestdown[1])` (fittheories.py:1076) — the up-step **FWHM** averaged
+/// with the down-step **centre position**. silx's docstring says "average of
+/// FWHM for up- and down-step" (fittheories.py:1065), but the code indexes
+/// the down-step centre; the quirk is reproduced deliberately for parity.
+/// It is then clamped in silx's order: `min` against `edge_distance / 10`,
+/// then `max` against `range * 3 / len(x)` (fittheories.py:1077-1078).
 pub fn estimate_slit(x: &[f64], y: &[f64]) -> Option<Vec<f64>> {
     let up = estimate_stepup(x, y)?; // [h, center_up, fwhm_up, bg]
     let down = estimate_stepdown(x, y)?; // [h, center_down, fwhm_down, bg]
     let (center_up, fwhm_up) = (up[1], up[2]);
-    let (center_down, fwhm_down) = (down[1], down[2]);
+    let center_down = down[1];
     let edge_distance = (center_down - center_up).abs();
 
     let bg = y.iter().copied().fold(f64::INFINITY, f64::min);
@@ -1905,8 +1910,10 @@ pub fn estimate_slit(x: &[f64], y: &[f64]) -> Option<Vec<f64>> {
     let position = (x[first] + x[last]) / 2.0;
     let fwhm = x[last] - x[first];
 
-    // Beam sharpness: average of the edge FWHMs, clamped to silx's bounds.
-    let mut beamfwhm = 0.5 * (fwhm_up + fwhm_down);
+    // Beam sharpness: silx's exact `0.5 * (largestup[2] + largestdown[1])` —
+    // the up FWHM averaged with the down CENTRE (fittheories.py:1076, index
+    // quirk reproduced), then clamped in silx's order (:1077-1078).
+    let mut beamfwhm = 0.5 * (fwhm_up + center_down);
     beamfwhm = beamfwhm.min(edge_distance / 10.0);
     let xmin = x.iter().copied().fold(f64::INFINITY, f64::min);
     let xmax = x.iter().copied().fold(f64::NEG_INFINITY, f64::max);
@@ -4029,7 +4036,32 @@ mod tests {
         let s = estimate_slit(&xs, &ys).unwrap();
         assert_eq!(s.len(), 5);
         assert!((s[1] - 50.0).abs() < 2.0, "position seed {}", s[1]);
-        assert!(s[3] > 0.0, "beamfwhm seed must be positive: {}", s[3]);
+        // On a positive x domain the raw beamfwhm (>= 0.5 * centre_down) always
+        // exceeds edge_distance / 10, so the min clamp binds: 20 / 10 = 2
+        // (silx fittheories.py:1077).
+        assert!((s[3] - 2.0).abs() < 1e-9, "beamfwhm seed {}", s[3]);
+    }
+
+    #[test]
+    fn estimate_slit_beamfwhm_reproduces_the_silx_index_quirk() {
+        // silx seeds beamfwhm = 0.5 * (largestup[2] + largestdown[1]) — the up
+        // FWHM averaged with the down-step CENTRE, not the down FWHM
+        // (fittheories.py:1076; the docstring at :1065 says "average of FWHM"
+        // but the code indexes the centre). On a negative x domain the down
+        // centre is negative, the raw value goes negative, the min clamp keeps
+        // it, and the max clamp floors it at range * 3 / len(x)
+        // (fittheories.py:1077-1078) — whereas averaging the two FWHMs (both
+        // positive, ~22 here) would clamp at edge_distance / 10 = 2 instead.
+        let xs = linspace(-100.0, 0.0, 201);
+        let ys = slit_model(&xs, &[10.0, -50.0, 20.0, 3.0, 2.0]);
+        let s = estimate_slit(&xs, &ys).unwrap();
+        let floor = 100.0 * 3.0 / 201.0;
+        assert!(
+            (s[3] - floor).abs() < 1e-9,
+            "beamfwhm {} must sit on the range*3/n floor {}",
+            s[3],
+            floor
+        );
     }
 
     #[test]
