@@ -212,11 +212,13 @@ impl ChannelState {
 /// that read it once per GUI frame coalesce every update that arrived since the
 /// previous frame into one (acceptable for a label, lossy for a strip chart).
 /// A `ValueEvent` is the event-driven complement: the engine emits exactly one
-/// per value arrival (an EPICS `camonitor` callback), so a consumer that drains
-/// the [`ValueSubscription`] queue sees *every* value — at its own arrival
-/// time — even when many land between two frames. This mirrors PyDM, whose
-/// `receiveNewValue` slot fires (and appends to the plot buffer) once per
-/// monitor callback, independent of repaint.
+/// per value arrival (an EPICS monitor callback that actually changed the
+/// value), so a consumer that drains the [`ValueSubscription`] queue sees
+/// *every* value — at its own arrival time — even when many land between two
+/// frames. This mirrors PyDM, whose `receiveNewValue` slot fires (and appends
+/// to the plot buffer) once per *emitted* value, independent of repaint — and
+/// the plugins emit only on an actual value change
+/// (`pyepics_plugin_component.py:102`, `p4p_plugin_component.py:241-242`).
 #[derive(Clone, Debug)]
 pub struct ValueEvent {
     /// The value carried by this update.
@@ -390,9 +392,17 @@ impl StateWriter {
     /// reach the snapshot without also reaching the event stream. Call it at
     /// every value-arrival site (the monitor callback, the connect-time initial
     /// value); connection/metadata-only changes use [`update`](Self::update) so
-    /// they do not emit a spurious sample. The published value is whatever `f`
-    /// leaves in `state.value`, so a repeated value still emits an event (a
-    /// strip chart must show the time progression even when the value repeats).
+    /// they do not emit a spurious sample.
+    ///
+    /// `post_value` itself emits one event per call, unconditionally — the
+    /// *caller* decides what counts as a value arrival. The PV backends gate
+    /// on an actual value change before calling it, matching PyDM, which
+    /// dedups before `receiveNewValue` ever fires: pyepics emits only when
+    /// `not np.array_equal(value, self._value)`
+    /// (`pyepics_plugin_component.py:102`) and p4p only when `"value"` is in
+    /// the monitor's `changedSet()` (`p4p_plugin_component.py:241-242`). So
+    /// an alarm-only or metadata-only update refreshes the snapshot via
+    /// [`update`](Self::update) and appends no sample.
     pub fn post_value(&self, f: impl FnOnce(&mut ChannelState)) {
         let value = {
             let mut state = self.shared.state.write().expect("channel state poisoned");
@@ -659,7 +669,10 @@ mod tests {
             });
         }
         assert_eq!(drain_values(&sub), vec![1.0, 2.0, 3.0]);
-        // A repeated value still emits an event (strip-chart time progression).
+        // post_value itself never dedups — a repeated value still emits an
+        // event. Change-gating is the CALLER's job: the PV backends compare
+        // against the previous value (PyDM parity) and route unchanged
+        // updates through `update` instead.
         writer.post_value(|s| s.value = Some(PvValue::Float(3.0)));
         assert_eq!(drain_values(&sub), vec![3.0]);
         // Drain leaves the queue empty.

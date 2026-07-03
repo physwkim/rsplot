@@ -177,6 +177,13 @@ fn ca_property_event_refreshes_metadata_live() {
         "initial value never arrived"
     );
 
+    // Subscribe to value events AFTER the initial value: a metadata-only
+    // property change must not append a strip-chart sample. PyDM gates every
+    // value emit on an actual value change (np.array_equal,
+    // pyepics_plugin_component.py:102); the property path re-emits metadata
+    // only.
+    let values = ch.subscribe_values(16);
+
     // Change the PV's display metadata at runtime and post DBE_PROPERTY —
     // the server-side equivalent of `caput PV.EGU` / `PV.PREC`. PyDM's
     // pyepics monitor (DBE_VALUE|DBE_ALARM|DBE_PROPERTY) picks this up live
@@ -200,5 +207,16 @@ fn ca_property_event_refreshes_metadata_live() {
         "metadata never refreshed after DBE_PROPERTY (units={:?}, precision={:?})",
         ch.read(|s| s.units.clone()),
         ch.read(|s| s.precision)
+    );
+
+    // The property event's snapshot carried the SAME value (1.5), so no
+    // value event may have been emitted for it (R1-31: alarm/property
+    // callbacks with an unchanged value are severity/metadata refreshes,
+    // not samples).
+    let mut sampled = Vec::new();
+    values.drain(|ev| sampled.push(ev.value));
+    assert!(
+        sampled.is_empty(),
+        "metadata-only DBE_PROPERTY emitted value events: {sampled:?}"
     );
 }

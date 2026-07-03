@@ -168,14 +168,25 @@ async fn run_channel(
                     // state.write_access, which defaults to false).
                     s.write_access = true;
                 }),
-                MonitorEvent::Data { value, .. } => {
+                MonitorEvent::Data { value, marked, .. } => {
                     if let Some(c) = enum_choices_of(&value) {
                         *choices.lock().expect("pva choices cache poisoned") = Some(c);
                     }
-                    // A pvAccess monitor value: post it so value-event
-                    // subscribers (strip charts) get every update, not just the
-                    // latest snapshot per frame.
-                    writer.post_value(move |s| apply_ntscalar(s, &value));
+                    // PyDM emits a value only when "value" is in the
+                    // monitor's changedSet (p4p_plugin_component.py:241-242,
+                    // matching leaves named `value` or `value.*`); a
+                    // metadata-only update (alarm / display / timeStamp)
+                    // refreshes the state but appends no strip-chart sample.
+                    // `marked` is `None` on the first update of a connect
+                    // cycle (a complete snapshot with no prior to delta
+                    // against) — always a value event, like PyDM's first
+                    // callback after `clear_cache`.
+                    let value_changed = value_marked(marked.as_ref());
+                    if value_changed {
+                        writer.post_value(move |s| apply_ntscalar(s, &value));
+                    } else {
+                        writer.update(move |s| apply_ntscalar(s, &value));
+                    }
                 }
                 MonitorEvent::Disconnected | MonitorEvent::Finished => {
                     // Keep the stale value (PyDM behaviour); only `connected`
@@ -236,6 +247,15 @@ async fn run_channel(
 // ---------------------------------------------------------------------------
 // Pure read path: NT structure → ChannelState.
 // ---------------------------------------------------------------------------
+
+/// Whether a monitor update's changed-leaf marks include the value field —
+/// PyDM's `changed_value == "value" or changed_value.split(".")[0] == "value"`
+/// over `changedSet()` (p4p_plugin_component.py:241-242). `None` (the first
+/// update of a connect cycle, a full snapshot) counts as changed: PyDM's
+/// first callback after `clear_cache` always emits.
+fn value_marked(marked: Option<&std::collections::HashSet<String>>) -> bool {
+    marked.is_none_or(|m| m.iter().any(|p| p == "value" || p.starts_with("value.")))
+}
 
 /// Apply a full NT structure (`NTScalar`/`NTEnum`) to the channel state.
 ///
@@ -605,6 +625,31 @@ mod tests {
         value.set("choices", PvField::ScalarArray(arr));
         root.set("value", PvField::Structure(value));
         PvField::Structure(root)
+    }
+
+    #[test]
+    fn value_marked_matches_pydm_changedset_semantics() {
+        use std::collections::HashSet;
+        let set =
+            |paths: &[&str]| -> HashSet<String> { paths.iter().map(|p| (*p).to_owned()).collect() };
+        // First update of a connect cycle: full snapshot, always a value.
+        assert!(value_marked(None));
+        // Scalar value leaf / NTEnum sub-leaf both count.
+        assert!(value_marked(Some(&set(&["value"]))));
+        assert!(value_marked(Some(&set(&[
+            "value.index",
+            "timeStamp.userTag"
+        ]))));
+        // Metadata-only updates do not.
+        assert!(!value_marked(Some(&set(&[
+            "alarm.severity",
+            "timeStamp.secondsPastEpoch"
+        ]))));
+        assert!(!value_marked(Some(&set(&["display.units"]))));
+        // A field merely *named like* value must not match (PyDM splits on
+        // '.', so "valueAlarm.lowAlarmLimit" is not a value change).
+        assert!(!value_marked(Some(&set(&["valueAlarm.lowAlarmLimit"]))));
+        assert!(!value_marked(Some(&set(&[]))));
     }
 
     #[test]

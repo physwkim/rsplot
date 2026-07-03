@@ -174,6 +174,15 @@ async fn run_channel(
     // first metadata fetch; a write before then is coerced by value shape.
     let mut native_type: Option<DbFieldType> = None;
     let mut connected_now = false;
+    // Last decoded value, PyDM's `self._value`: a monitor snapshot posts a
+    // VALUE event only when the decoded value differs from this
+    // (`if value is not None and not np.array_equal(value, self._value)`,
+    // pyepics_plugin_component.py:102). Alarm-only (DBE_ALARM) and property
+    // snapshots refresh severity/timestamp without emitting a sample.
+    // Cleared on disconnect so the first value after a reconnect always
+    // emits (PyDM clears the cache in `send_connection_state`,
+    // pyepics_plugin_component.py:192-199).
+    let mut last_value: Option<PvValue> = None;
 
     // Deterministic first-connect trigger. `connection_events` is a broadcast
     // subscribed just above, so a `Connected` posted before that subscribe
@@ -192,7 +201,8 @@ async fn run_channel(
                 initial_done = true;
                 if res.is_ok() && !connected_now {
                     connected_now = true;
-                    on_connect(&ch, &writer, &mut enum_cache, &mut native_type).await;
+                    on_connect(&ch, &writer, &mut enum_cache, &mut native_type, &mut last_value)
+                        .await;
                 }
             }
 
@@ -200,11 +210,15 @@ async fn run_channel(
                 Ok(ConnectionEvent::Connected) => {
                     if !connected_now {
                         connected_now = true;
-                        on_connect(&ch, &writer, &mut enum_cache, &mut native_type).await;
+                        on_connect(&ch, &writer, &mut enum_cache, &mut native_type, &mut last_value)
+                            .await;
                     }
                 }
                 Ok(ConnectionEvent::Disconnected | ConnectionEvent::Unresponsive) => {
                     connected_now = false;
+                    // Forget the value cache so the first value after a
+                    // reconnect always emits (PyDM clear_cache parity).
+                    last_value = None;
                     // Keep the stale value (PyDM behaviour); only `connected`
                     // flips, which drives Disconnected styling.
                     writer.update(|s| s.connected = false);
@@ -215,7 +229,8 @@ async fn run_channel(
                 Ok(ConnectionEvent::NativeTypeChanged { .. }) => {
                     // Record type changed under us — refetch metadata (units,
                     // enum strings, limits) against the new native type.
-                    on_connect(&ch, &writer, &mut enum_cache, &mut native_type).await;
+                    on_connect(&ch, &writer, &mut enum_cache, &mut native_type, &mut last_value)
+                        .await;
                 }
                 Err(broadcast::error::RecvError::Lagged(_)) => {}
                 Err(broadcast::error::RecvError::Closed) => break,
@@ -224,11 +239,22 @@ async fn run_channel(
             snap = monitor.recv() => match snap {
                 Some(Ok(snap)) => {
                     connected_now = true;
-                    let strings = enum_cache.clone();
-                    // A monitor value arrival: post_value also fans it out to
-                    // value-event subscribers (strip charts), so every monitor
-                    // callback becomes one sample even between GUI frames.
-                    writer.post_value(move |s| apply_value(s, &snap, strings.as_deref()));
+                    let value = epics_to_pv(&snap.value, enum_cache.as_deref());
+                    if last_value.as_ref() != Some(&value) {
+                        // A NEW value: post it so value-event subscribers
+                        // (strip charts) get one sample per actual change —
+                        // PyDM gates every new_value emit on
+                        // `not np.array_equal(value, self._value)`
+                        // (pyepics_plugin_component.py:102).
+                        last_value = Some(value.clone());
+                        writer.post_value(move |s| apply_value(s, &snap, value));
+                    } else {
+                        // Same value (an alarm-only DBE_ALARM callback or a
+                        // property snapshot): refresh severity/timestamp in
+                        // the state without emitting a sample, like PyDM's
+                        // severity-only signal path.
+                        writer.update(move |s| apply_alarm(s, &snap));
+                    }
                 }
                 Some(Err(_)) => {}  // transient monitor error; keep the connection
                 None => break,      // subscription ended (channel shutdown)
@@ -292,6 +318,7 @@ async fn on_connect(
     writer: &StateWriter,
     enum_cache: &mut Option<Arc<[String]>>,
     native_type: &mut Option<DbFieldType>,
+    last_value: &mut Option<PvValue>,
 ) {
     // The native type is known once connected; cache it for the write path.
     *native_type = ch.native_field_type().ok();
@@ -305,8 +332,12 @@ async fn on_connect(
             *enum_cache = strings.clone();
             // The connect-time snapshot carries the initial value, so post it as
             // a value event (not a bare snapshot update) — the first strip-chart
-            // sample.
-            writer.post_value(move |s| apply_metadata(s, &snap, strings));
+            // sample. Always a value event: PyDM clears its value cache on
+            // (re)connect, so the first callback after connect emits
+            // unconditionally (pyepics_plugin_component.py:192-199 → :102).
+            let value = epics_to_pv(&snap.value, strings.as_deref());
+            *last_value = Some(value.clone());
+            writer.post_value(move |s| apply_metadata(s, &snap, value, strings));
         }
         Err(_) => {
             // Connected, but the metadata read failed; reflect the connection so
@@ -343,14 +374,18 @@ async fn on_property_change(
 }
 
 /// Apply a `DBR_CTRL_*` snapshot: value + alarm + timestamp + units / precision
-/// / limits / enum strings. `enum_strings` is moved into the state and reused to
-/// resolve the value's enum label.
-fn apply_metadata(s: &mut ChannelState, snap: &Snapshot, enum_strings: Option<Arc<[String]>>) {
-    s.connected = true;
-    s.value = Some(epics_to_pv(&snap.value, enum_strings.as_deref()));
-    s.severity = AlarmSeverity::from_epics(snap.alarm.severity);
-    s.timestamp = Some(snap.timestamp.into());
+/// / limits / enum strings. `value` is the already-decoded snapshot value (the
+/// caller also records it as the dedup cache); `enum_strings` is moved into the
+/// state.
+fn apply_metadata(
+    s: &mut ChannelState,
+    snap: &Snapshot,
+    value: PvValue,
+    enum_strings: Option<Arc<[String]>>,
+) {
+    s.value = Some(value);
     s.enum_strings = enum_strings;
+    apply_alarm(s, snap);
     apply_display_control(s, snap);
 }
 
@@ -385,11 +420,21 @@ fn apply_display_control(s: &mut ChannelState, snap: &Snapshot) {
     }
 }
 
-/// Apply a monitor snapshot: value + alarm + timestamp only (metadata is
-/// connect-time and is not re-published on every monitor event).
-fn apply_value(s: &mut ChannelState, snap: &Snapshot, enum_strings: Option<&[String]>) {
+/// Apply a monitor snapshot that carries a NEW value: value + alarm +
+/// timestamp (metadata is fetched on connect and on `DBE_PROPERTY`, not
+/// re-published on every monitor event). `value` is decoded by the caller,
+/// which also uses it for the changed-value gate.
+fn apply_value(s: &mut ChannelState, snap: &Snapshot, value: PvValue) {
+    s.value = Some(value);
+    apply_alarm(s, snap);
+}
+
+/// Apply a monitor snapshot whose value is unchanged: connected + alarm +
+/// timestamp only. The PyDM counterpart of an alarm-only callback, which
+/// re-emits severity but no value (`send_new_value` gates the value emit on
+/// `np.array_equal`, pyepics_plugin_component.py:99-102).
+fn apply_alarm(s: &mut ChannelState, snap: &Snapshot) {
     s.connected = true;
-    s.value = Some(epics_to_pv(&snap.value, enum_strings));
     s.severity = AlarmSeverity::from_epics(snap.alarm.severity);
     s.timestamp = Some(snap.timestamp.into());
 }
@@ -692,7 +737,8 @@ mod tests {
         });
 
         let mut state = ChannelState::default();
-        apply_metadata(&mut state, &snap, None);
+        let value = epics_to_pv(&snap.value, None);
+        apply_metadata(&mut state, &snap, value, None);
 
         assert!(state.connected);
         assert_eq!(state.value, Some(PvValue::Float(2.5)));
@@ -716,7 +762,8 @@ mod tests {
         let strings: Option<Arc<[String]>> =
             snap.enums.as_ref().map(|e| latin1_strings(&e.strings));
         let mut state = ChannelState::default();
-        apply_metadata(&mut state, &snap, strings);
+        let value = epics_to_pv(&snap.value, strings.as_deref());
+        apply_metadata(&mut state, &snap, value, strings);
 
         assert_eq!(
             state.value,
@@ -775,7 +822,8 @@ mod tests {
             ..Default::default()
         });
         let mut state = ChannelState::default();
-        apply_metadata(&mut state, &snap, None);
+        let value = epics_to_pv(&snap.value, None);
+        apply_metadata(&mut state, &snap, value, None);
         assert_eq!(state.units.as_deref(), Some("µm"));
 
         // String scalar values decode latin-1 too (0xC5 = "Å").
@@ -797,7 +845,8 @@ mod tests {
             ..Default::default()
         };
         let snap = Snapshot::new(EpicsValue::Double(4.0), 0, 2, ts());
-        apply_value(&mut state, &snap, None);
+        let value = epics_to_pv(&snap.value, None);
+        apply_value(&mut state, &snap, value);
 
         assert!(state.connected);
         assert_eq!(state.value, Some(PvValue::Float(4.0)));
