@@ -30,22 +30,41 @@
 //! `value.index` with the resolved index — a string label is matched against
 //! the cached choices first, then taken as a numeric index. There is no local
 //! echo: the value only changes when the server confirms through the monitor.
+//!
+//! **Address grammar** (PyDM's, `pydm/data_plugins/plugin.py:261-280` +
+//! `p4p_plugin_component.py:58-78`):
+//!
+//! - `pva://NAME` — monitor the channel `NAME`.
+//! - `pva://NAME/sub/field` — monitor `NAME` (the netloc only); the `/path`
+//!   is a subfield selector drilled into each delivered value (an NTTable
+//!   column, a nested struct member, an array element by integer index).
+//! - `pva://fn?arg=..&pydm_pollrate=N` (or any address ending in `&`) — an
+//!   RPC channel: no monitor; the function is called with an NTURI request
+//!   every `N` seconds (once, with a 5 s timeout, when no pollrate is given)
+//!   and the result's `value` is published. RPC channels drop writes.
 
 use std::borrow::Cow;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use epics_pva_rs::client_native::PvaClient;
 use epics_pva_rs::client_native::ops_v2::{MonitorEvent, MonitorEventMask};
+use epics_pva_rs::nt::NTURI;
 use epics_pva_rs::pvdata::TypedScalarArray;
 use epics_pva_rs::{PvField, PvaError, ScalarValue};
 use tokio::sync::{OnceCell, mpsc};
 use tokio_util::sync::CancellationToken;
 
+use crate::address::PvAddress;
 use crate::channel::{AlarmSeverity, ChannelState, PvValue, StateWriter};
 use crate::data_plugins::{ConnectionCtx, DataPlugin};
 use crate::engine::EngineError;
+
+/// PyDM's single-shot RPC timeout (seconds) — used as both the call timeout
+/// and the effective poll period when no `pydm_pollrate` is given
+/// (`DEFAULT_RPC_TIMEOUT = 5.0`, p4p_plugin_component.py:22, applied :96-98).
+const DEFAULT_RPC_TIMEOUT: f64 = 5.0;
 
 /// The `pva://` data plugin. Holds the lazily-initialized, engine-shared
 /// [`PvaClient`] (PyDM's process-wide p4p context).
@@ -105,14 +124,51 @@ impl DataPlugin for PvaPlugin {
             runtime,
             address,
         } = ctx;
-        let pv = address.full_address();
         let client = self.client.clone();
         let server = self.server;
-        let read_only = self.read_only;
-        runtime.spawn(run_channel(
-            client, server, pv, writer, writes, cancel, read_only,
-        ));
+        // RPC form first, like p4p's __init__ (is_rpc_address on the full
+        // user-entered channel, p4p_plugin_component.py:69-72; no monitor is
+        // created for it, :77-78).
+        if is_rpc_address(address.raw()) {
+            let rpc = parse_rpc_channel(&address);
+            runtime.spawn(run_rpc(client, server, rpc, writer, writes, cancel));
+            return Ok(());
+        }
+        let cfg = ChannelCfg {
+            // The monitor name is the NETLOC only (plugin.py:262-266, passed
+            // as the address at :291 and used for the monitor at
+            // p4p_plugin_component.py:78) …
+            pv: address.netloc().to_owned(),
+            // … while the /path is a subfield selector, split on '/'
+            // (get_subfield, plugin.py:269-280).
+            subfield: subfield_keys(&address),
+            read_only: self.read_only,
+        };
+        runtime.spawn(run_channel(client, server, cfg, writer, writes, cancel));
         Ok(())
+    }
+}
+
+/// Parsed non-RPC channel address: the monitor name plus the subfield keys.
+struct ChannelCfg {
+    /// The channel to monitor — the address netloc.
+    pv: String,
+    /// Subfield keys drilled into each delivered value (`Arc` so the monitor
+    /// callback can hold its own handle). Empty for a plain `pva://NAME`.
+    subfield: Arc<[String]>,
+    /// Global read-only mode (see [`PvaPlugin::read_only`]).
+    read_only: bool,
+}
+
+/// The `/path` component as subfield keys — PyDM's `get_subfield`
+/// (plugin.py:269-280): an empty path selects nothing; otherwise the leading
+/// `/` is stripped and the rest split on `/`.
+fn subfield_keys(address: &PvAddress) -> Arc<[String]> {
+    let path = address.path();
+    if path.is_empty() {
+        Arc::from([])
+    } else {
+        path[1..].split('/').map(String::from).collect()
     }
 }
 
@@ -120,12 +176,16 @@ impl DataPlugin for PvaPlugin {
 async fn run_channel(
     client_cell: Arc<OnceCell<Arc<PvaClient>>>,
     server: Option<SocketAddr>,
-    pv: String,
+    cfg: ChannelCfg,
     writer: StateWriter,
     mut writes: mpsc::UnboundedReceiver<PvValue>,
     cancel: CancellationToken,
-    read_only: bool,
 ) {
+    let ChannelCfg {
+        pv,
+        subfield,
+        read_only,
+    } = cfg;
     // One PVA client per engine, created on first use.
     let client = match client_cell
         .get_or_try_init(|| async {
@@ -159,6 +219,7 @@ async fn run_channel(
         let choices = choices.clone();
         let client = client.clone();
         let pv = pv.clone();
+        let subfield = subfield.clone();
         async move {
             // pvxs defaults mask `Connected`; we want it (to un-gate the widget
             // before the first value) and `Disconnected`/`Finished` (to flip
@@ -193,10 +254,11 @@ async fn run_channel(
                     // against) — always a value event, like PyDM's first
                     // callback after `clear_cache`.
                     let value_changed = value_marked(marked.as_ref());
+                    let sf = subfield.clone();
                     if value_changed {
-                        writer.post_value(move |s| apply_ntscalar(s, &value));
+                        writer.post_value(move |s| apply_ntscalar(s, &value, &sf));
                     } else {
-                        writer.update(move |s| apply_ntscalar(s, &value));
+                        writer.update(move |s| apply_ntscalar(s, &value, &sf));
                     }
                 }
                 MonitorEvent::Disconnected | MonitorEvent::Finished => {
@@ -241,6 +303,19 @@ async fn run_channel(
                         log::warn!("pva://{pv}: dropping put {value:?}: no write access");
                         continue;
                     }
+                    // Subfield writes need the whole-structure rewrite PyDM
+                    // does for NTTable (set_value_by_keys + full-table put,
+                    // p4p_plugin_component.py:379-408) — that write model is
+                    // part of the recorded NTTable deferral (sidm's value
+                    // model is flat by design), so drop with a warning.
+                    if !subfield.is_empty() {
+                        log::warn!(
+                            "pva://{pv}: subfield writes are not supported, \
+                             dropping put {value:?} to /{}",
+                            subfield.join("/")
+                        );
+                        continue;
+                    }
                     // Decide the PUT shape against the cached choices, then drop
                     // the lock before the await. No local echo — the value only
                     // changes when the server confirms via the monitor. Failed
@@ -273,6 +348,221 @@ async fn run_channel(
 }
 
 // ---------------------------------------------------------------------------
+// RPC channels (`pva://fn?arg=..&pydm_pollrate=N`).
+// ---------------------------------------------------------------------------
+
+/// A parsed RPC address: function name, typed args, poll rate.
+struct RpcChannel {
+    /// The RPC channel (function) name — the address netloc.
+    function: String,
+    /// `(name, value)` request args with types inferred per
+    /// `get_arg_datatype` (p4p_plugin_component.py:129-144).
+    args: Vec<(String, ScalarValue)>,
+    /// Seconds between calls; `0` means a single shot
+    /// (poll_rpc_channel, p4p_plugin_component.py:94-98).
+    poll_rate: f64,
+}
+
+/// PyDM's RPC-address test (p4p_plugin_component.py:200-209): the raw
+/// user-entered channel is an RPC iff it ends with `&` or with
+/// `&pydm_pollrate=<number>` (regex `(&|\&pydm_pollrate=\d+(\.\d+)?)$`).
+fn is_rpc_address(raw: &str) -> bool {
+    if raw.ends_with('&') {
+        return true;
+    }
+    match raw.rfind("&pydm_pollrate=") {
+        Some(idx) => is_pollrate_number(&raw[idx + "&pydm_pollrate=".len()..]),
+        None => false,
+    }
+}
+
+/// `\d+(\.\d+)?` — the number grammar in PyDM's RPC-address regex.
+fn is_pollrate_number(s: &str) -> bool {
+    let mut parts = s.splitn(2, '.');
+    let int = parts.next().unwrap_or("");
+    if int.is_empty() || !int.bytes().all(|b| b.is_ascii_digit()) {
+        return false;
+    }
+    match parts.next() {
+        None => true,
+        Some(frac) => !frac.is_empty() && frac.bytes().all(|b| b.is_ascii_digit()),
+    }
+}
+
+/// Parse an RPC address — PyDM's `parse_rpc_channel`
+/// (p4p_plugin_component.py:164-198). Handles the three shapes:
+/// `pva://fn?a=1&b=2&pydm_pollrate=10` (query form), `pva://fn&` (no args,
+/// no pollrate; the trailing `&` lands in the netloc, :173-174), and
+/// `pva://fn&pydm_pollrate=5` (no `?`, so the pollrate lands in the netloc,
+/// :176-184). An unparseable pollrate becomes 0 (single shot) where PyDM's
+/// `float(...)` would raise and kill the connection.
+fn parse_rpc_channel(address: &PvAddress) -> RpcChannel {
+    let mut function = address.netloc().to_owned();
+    if function.ends_with('&') {
+        function.pop();
+    }
+    let mut poll_rate = 0.0f64;
+    let mut args: Vec<(String, ScalarValue)> = Vec::new();
+    if let Some(idx) = function.find("&pydm_pollrate=") {
+        poll_rate = function[idx + "&pydm_pollrate=".len()..]
+            .parse()
+            .unwrap_or(0.0);
+        function.truncate(function.find('&').unwrap_or(function.len()));
+    } else {
+        for (k, v) in address.query_params() {
+            // parse_qs drops blank values by default (keep_blank_values
+            // False), so `a=` contributes nothing.
+            if v.is_empty() {
+                continue;
+            }
+            if k == "pydm_pollrate" {
+                poll_rate = v.parse().unwrap_or(0.0);
+            } else {
+                args.push((k, rpc_arg_scalar(&v)));
+            }
+        }
+    }
+    RpcChannel {
+        function,
+        args,
+        poll_rate,
+    }
+}
+
+/// Infer an RPC arg's wire type from its string form — PyDM's
+/// `get_arg_datatype` (p4p_plugin_component.py:129-144): int parse → `'i'`
+/// (int32), float parse → `'f'` (float32), else string. (PyDM's bool branch
+/// is dead code — `"true".lower() == "True"` never holds — so booleans fall
+/// through to string there too.)
+fn rpc_arg_scalar(v: &str) -> ScalarValue {
+    if let Ok(i) = v.parse::<i32>() {
+        return ScalarValue::Int(i);
+    }
+    if let Ok(f) = v.parse::<f32>() {
+        return ScalarValue::Float(f);
+    }
+    ScalarValue::String(v.into())
+}
+
+/// Service one RPC channel: call the function every `poll_rate` seconds and
+/// publish the result's `value` — PyDM's `poll_rpc_channel`
+/// (p4p_plugin_component.py:91-127). With no pollrate the call happens once
+/// (with the 5 s default timeout) and the task then just services
+/// cancellation. Writes are dropped (p4p's `put_value` returns for RPC
+/// channels, :413-414).
+async fn run_rpc(
+    client_cell: Arc<OnceCell<Arc<PvaClient>>>,
+    server: Option<SocketAddr>,
+    rpc: RpcChannel,
+    writer: StateWriter,
+    mut writes: mpsc::UnboundedReceiver<PvValue>,
+    cancel: CancellationToken,
+) {
+    // One PVA client per engine, created on first use (same cell as the
+    // monitor channels).
+    let client = match client_cell
+        .get_or_try_init(|| async {
+            let client = match server {
+                Some(addr) => PvaClient::builder().server_addr(addr).build(),
+                None => PvaClient::new()?,
+            };
+            Ok::<_, PvaError>(Arc::new(client))
+        })
+        .await
+    {
+        Ok(c) => c.clone(),
+        Err(_) => {
+            writer.update(|s| s.connected = false);
+            return;
+        }
+    };
+
+    // Pollrate 0 = a single request with the default timeout
+    // (p4p_plugin_component.py:94-98).
+    let single_shot = rpc.poll_rate == 0.0;
+    let poll_rate = if single_shot {
+        DEFAULT_RPC_TIMEOUT
+    } else {
+        rpc.poll_rate
+    };
+    let period = Duration::from_secs_f64(poll_rate);
+    // The NTURI request is invariant across polls; build it once
+    // (create_request, p4p_plugin_component.py:146-162).
+    let (desc, value) = NTURI::request("pva", &rpc.function, &rpc.args);
+    let fn_name = rpc.function;
+
+    loop {
+        let started = Instant::now();
+        // PyDM bounds each call by the poll rate (`timeout=self._rpc_poll_rate`,
+        // p4p_plugin_component.py:105-107).
+        let result = tokio::select! {
+            _ = cancel.cancelled() => return,
+            r = tokio::time::timeout(period, client.pvrpc(&fn_name, &desc, &value)) => r,
+        };
+        match result {
+            Ok(Ok((_, response))) => {
+                // Result → connected + emit; only int/float/bool/str results
+                // are emitted (emit_for_type, p4p_plugin_component.py:80-89,
+                // called at :112-114). A result without a scalar `value`
+                // still marks the channel connected (PyDM would crash on
+                // `result.value` there; we stay connected without a sample).
+                match field(&response, "value").and_then(value_to_pv) {
+                    Some(
+                        v @ (PvValue::Int(_)
+                        | PvValue::Float(_)
+                        | PvValue::Bool(_)
+                        | PvValue::Str(_)),
+                    ) => writer.post_value(move |s| {
+                        s.connected = true;
+                        s.value = Some(v);
+                    }),
+                    _ => writer.update(|s| s.connected = true),
+                }
+            }
+            // Call error or timeout: the RPC channel reads as disconnected
+            // (p4p_plugin_component.py:108-116).
+            _ => writer.update(|s| s.connected = false),
+        }
+
+        if single_shot {
+            break;
+        }
+        // Wait out the remainder of the poll period (p4p_plugin_component.py:
+        // 121-127 — wall clock here, where PyDM's time.process_time() barely
+        // advances during the blocking call and effectively sleeps the full
+        // period *after* the call). Writes arriving meanwhile are drained and
+        // dropped (p4p's put_value returns for RPC channels, :413-414).
+        let wait = period.saturating_sub(started.elapsed());
+        let deadline = tokio::time::Instant::now() + wait;
+        loop {
+            tokio::select! {
+                _ = cancel.cancelled() => return,
+                _ = tokio::time::sleep_until(deadline) => break,
+                maybe = writes.recv() => match maybe {
+                    Some(v) => {
+                        log::debug!("pva://{fn_name}: RPC channels drop writes ({v:?})");
+                    }
+                    None => return,  // all Channels dropped
+                },
+            }
+        }
+    }
+
+    // Single shot done: keep draining (and dropping) writes until the last
+    // Channel goes away. p4p's put_value silently returns for RPC channels
+    // (p4p_plugin_component.py:413-414).
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => break,
+            maybe = writes.recv() => match maybe {
+                Some(v) => log::debug!("pva://{fn_name}: RPC channels drop writes ({v:?})"),
+                None => break,
+            },
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Pure read path: NT structure → ChannelState.
 // ---------------------------------------------------------------------------
 
@@ -291,10 +581,31 @@ fn value_marked(marked: Option<&std::collections::HashSet<String>>) -> bool {
 /// safe to call per event: it sets `connected`, the value, alarm severity,
 /// timestamp, and any present display/control/valueAlarm metadata. Metadata
 /// fields absent from the structure are left untouched.
-fn apply_ntscalar(s: &mut ChannelState, root: &PvField) {
+///
+/// `subfield` (from a `pva://NAME/sub/field` address) is drilled into the
+/// delivered `value` before conversion — PyDM's `nttable_data_location` walk
+/// over the emitted value (p4p_plugin_component.py:262-284). When a key does
+/// not resolve the value is left untouched (PyDM logs the same condition as
+/// an exception and emits nothing).
+fn apply_ntscalar(s: &mut ChannelState, root: &PvField, subfield: &[String]) {
     s.connected = true;
-    if let Some(value) = field(root, "value").and_then(value_to_pv) {
+    let extracted = field(root, "value").and_then(|v| {
+        if subfield.is_empty() {
+            return value_to_pv(v);
+        }
+        let mut cur = drill(v, &subfield[0])?;
+        for key in &subfield[1..] {
+            cur = drill(&cur, key)?;
+        }
+        value_to_pv(&cur)
+    });
+    if let Some(value) = extracted {
         s.value = Some(value);
+    } else if !subfield.is_empty() {
+        log::debug!(
+            "pva subfield /{} did not resolve to a value",
+            subfield.join("/")
+        );
     }
     if let Some(sev) = scalar_field(root, "alarm.severity").and_then(scalar_i64) {
         // `from_epics` maps 0/1/2 and clamps everything else to INVALID; clamp
@@ -346,6 +657,44 @@ fn field<'a>(root: &'a PvField, path: &str) -> Option<&'a PvField> {
         cur = s.get_field(seg)?;
     }
     Some(cur)
+}
+
+/// One step of the subfield walk (p4p_plugin_component.py:262-284): a string
+/// key selects a structure member (an NTTable column, a nested struct field);
+/// failing that, a key that parses as an integer indexes into an array.
+/// Returns an owned piece — array handles are `Arc`-backed, so the clones are
+/// cheap.
+fn drill(f: &PvField, key: &str) -> Option<PvField> {
+    if let PvField::Structure(s) = f
+        && let Some(sub) = s.get_field(key)
+    {
+        return Some(sub.clone());
+    }
+    let idx: usize = key.parse().ok()?;
+    match f {
+        PvField::ScalarArray(a) => a.get(idx).cloned().map(PvField::Scalar),
+        PvField::ScalarArrayTyped(t) => typed_array_element(t, idx).map(PvField::Scalar),
+        PvField::StructureArray(a) => a.get(idx)?.clone().map(PvField::Structure),
+        _ => None,
+    }
+}
+
+/// One element of a typed scalar array as an owned [`ScalarValue`].
+fn typed_array_element(t: &TypedScalarArray, i: usize) -> Option<ScalarValue> {
+    Some(match t {
+        TypedScalarArray::Boolean(a) => ScalarValue::Boolean(*a.get(i)?),
+        TypedScalarArray::Byte(a) => ScalarValue::Byte(*a.get(i)?),
+        TypedScalarArray::UByte(a) => ScalarValue::UByte(*a.get(i)?),
+        TypedScalarArray::Short(a) => ScalarValue::Short(*a.get(i)?),
+        TypedScalarArray::UShort(a) => ScalarValue::UShort(*a.get(i)?),
+        TypedScalarArray::Int(a) => ScalarValue::Int(*a.get(i)?),
+        TypedScalarArray::UInt(a) => ScalarValue::UInt(*a.get(i)?),
+        TypedScalarArray::Long(a) => ScalarValue::Long(*a.get(i)?),
+        TypedScalarArray::ULong(a) => ScalarValue::ULong(*a.get(i)?),
+        TypedScalarArray::Float(a) => ScalarValue::Float(*a.get(i)?),
+        TypedScalarArray::Double(a) => ScalarValue::Double(*a.get(i)?),
+        TypedScalarArray::String(a) => ScalarValue::String(a.get(i)?.clone()),
+    })
 }
 
 /// Borrow a dotted path's leaf as a scalar value.
@@ -689,7 +1038,7 @@ mod tests {
             250,
         );
         let mut s = ChannelState::default();
-        apply_ntscalar(&mut s, &root);
+        apply_ntscalar(&mut s, &root, &[]);
 
         assert!(s.connected);
         assert_eq!(s.value, Some(PvValue::Float(2.5)));
@@ -706,6 +1055,7 @@ mod tests {
         apply_ntscalar(
             &mut s,
             &ntscalar(PvField::Scalar(ScalarValue::Long(7)), 0, 1, 0),
+            &[],
         );
         assert_eq!(s.value, Some(PvValue::Int(7)));
 
@@ -713,6 +1063,7 @@ mod tests {
         apply_ntscalar(
             &mut s,
             &ntscalar(PvField::Scalar(ScalarValue::String("hi".into())), 0, 1, 0),
+            &[],
         );
         assert_eq!(s.value, Some(PvValue::Str(Arc::from("hi"))));
 
@@ -720,6 +1071,7 @@ mod tests {
         apply_ntscalar(
             &mut s,
             &ntscalar(PvField::Scalar(ScalarValue::Boolean(true)), 0, 1, 0),
+            &[],
         );
         assert_eq!(s.value, Some(PvValue::Bool(true)));
     }
@@ -728,7 +1080,7 @@ mod tests {
     fn unset_timestamp_is_none() {
         let root = ntscalar(PvField::Scalar(ScalarValue::Double(1.0)), 0, 0, 0);
         let mut s = ChannelState::default();
-        apply_ntscalar(&mut s, &root);
+        apply_ntscalar(&mut s, &root, &[]);
         assert_eq!(s.timestamp, None);
     }
 
@@ -736,7 +1088,7 @@ mod tests {
     fn out_of_range_severity_clamps_to_invalid() {
         let root = ntscalar(PvField::Scalar(ScalarValue::Double(1.0)), 9, 1, 0);
         let mut s = ChannelState::default();
-        apply_ntscalar(&mut s, &root);
+        apply_ntscalar(&mut s, &root, &[]);
         assert_eq!(s.severity, AlarmSeverity::Invalid);
     }
 
@@ -749,7 +1101,7 @@ mod tests {
             0,
         );
         let mut s = ChannelState::default();
-        apply_ntscalar(&mut s, &root);
+        apply_ntscalar(&mut s, &root, &[]);
         assert_eq!(
             s.value,
             Some(PvValue::FloatArray(Arc::from([1.0, 2.0, 3.0].as_slice())))
@@ -762,7 +1114,7 @@ mod tests {
             0,
         );
         let mut s = ChannelState::default();
-        apply_ntscalar(&mut s, &root);
+        apply_ntscalar(&mut s, &root, &[]);
         assert_eq!(
             s.value,
             Some(PvValue::IntArray(Arc::from([3_i64, 4].as_slice())))
@@ -776,7 +1128,7 @@ mod tests {
             0,
         );
         let mut s = ChannelState::default();
-        apply_ntscalar(&mut s, &root);
+        apply_ntscalar(&mut s, &root, &[]);
         assert_eq!(
             s.value,
             Some(PvValue::Bytes(Arc::from([104_u8, 105, 0].as_slice())))
@@ -792,7 +1144,7 @@ mod tests {
             0,
         );
         let mut s = ChannelState::default();
-        apply_ntscalar(&mut s, &root);
+        apply_ntscalar(&mut s, &root, &[]);
         assert_eq!(
             s.value,
             Some(PvValue::FloatArray(Arc::from([1.5, 2.5].as_slice())))
@@ -803,7 +1155,7 @@ mod tests {
     fn ntenum_value_resolves_index_label_and_caches_choices() {
         let root = ntenum(1, &["Off", "On"]);
         let mut s = ChannelState::default();
-        apply_ntscalar(&mut s, &root);
+        apply_ntscalar(&mut s, &root, &[]);
 
         assert_eq!(
             s.value,
@@ -824,7 +1176,7 @@ mod tests {
     fn ntenum_index_out_of_range_has_no_label() {
         let root = ntenum(5, &["Off", "On"]);
         let mut s = ChannelState::default();
-        apply_ntscalar(&mut s, &root);
+        apply_ntscalar(&mut s, &root, &[]);
         assert_eq!(
             s.value,
             Some(PvValue::Enum {
@@ -869,7 +1221,7 @@ mod tests {
         let root = PvField::Structure(root_s);
 
         let mut s = ChannelState::default();
-        apply_ntscalar(&mut s, &root);
+        apply_ntscalar(&mut s, &root, &[]);
 
         assert_eq!(s.units.as_deref(), Some("mm"));
         assert_eq!(s.precision, Some(3));
@@ -949,5 +1301,111 @@ mod tests {
             pv_to_pva_put(&PvValue::Str(Arc::from("Bogus")), Some(&choices)),
             None
         );
+    }
+
+    #[test]
+    fn rpc_address_detection_matches_pydm_regex() {
+        // PyDM's `(&|\&pydm_pollrate=\d+(\.\d+)?)$` (p4p :200-209).
+        assert!(is_rpc_address(
+            "pva://pv:call:add?lhs=4&rhs=7&pydm_pollrate=10"
+        ));
+        assert!(is_rpc_address("pva://pv:call:add&"));
+        assert!(is_rpc_address("pva://fn?a=1&"));
+        assert!(is_rpc_address("pva://fn&pydm_pollrate=5.5"));
+        // The number grammar is \d+(\.\d+)? — a bare trailing dot or a
+        // non-number does not match.
+        assert!(!is_rpc_address("pva://fn&pydm_pollrate=5."));
+        assert!(!is_rpc_address("pva://fn&pydm_pollrate=abc"));
+        // Plain monitors, with or without subfield/query, are not RPC.
+        assert!(!is_rpc_address("pva://NAME"));
+        assert!(!is_rpc_address("pva://NAME/sub/field"));
+        assert!(!is_rpc_address("pva://fn?a=1"));
+    }
+
+    #[test]
+    fn rpc_channel_parsing_matches_pydm() {
+        // Query form (the p4p docstring example, :59-65).
+        let rpc = parse_rpc_channel(&PvAddress::parse(
+            "pva://pv:call:add?lhs=4&rhs=7&pydm_pollrate=10",
+        ));
+        assert_eq!(rpc.function, "pv:call:add");
+        assert_eq!(
+            rpc.args,
+            vec![
+                ("lhs".to_owned(), ScalarValue::Int(4)),
+                ("rhs".to_owned(), ScalarValue::Int(7)),
+            ]
+        );
+        assert_eq!(rpc.poll_rate, 10.0);
+
+        // Bare single-shot form: trailing '&' stripped from the netloc
+        // (p4p :173-174), no args, pollrate 0.
+        let rpc = parse_rpc_channel(&PvAddress::parse("pva://fn&"));
+        assert_eq!(rpc.function, "fn");
+        assert!(rpc.args.is_empty());
+        assert_eq!(rpc.poll_rate, 0.0);
+
+        // No-'?' pollrate form: both land in the netloc (p4p :176-184).
+        let rpc = parse_rpc_channel(&PvAddress::parse("pva://fn&pydm_pollrate=5"));
+        assert_eq!(rpc.function, "fn");
+        assert!(rpc.args.is_empty());
+        assert_eq!(rpc.poll_rate, 5.0);
+
+        // Arg typing (get_arg_datatype :129-144): int → int32,
+        // float → float32, everything else (including "True" — PyDM's bool
+        // branch is dead code) → string. Blank values are dropped like
+        // parse_qs does.
+        let rpc = parse_rpc_channel(&PvAddress::parse("pva://fn?x=4.5&s=hello&flag=True&a=&"));
+        assert_eq!(rpc.function, "fn");
+        assert_eq!(
+            rpc.args,
+            vec![
+                ("x".to_owned(), ScalarValue::Float(4.5)),
+                ("s".to_owned(), ScalarValue::String("hello".into())),
+                ("flag".to_owned(), ScalarValue::String("True".into())),
+            ]
+        );
+        assert_eq!(rpc.poll_rate, 0.0);
+    }
+
+    #[test]
+    fn subfield_keys_come_from_the_path() {
+        // get_subfield (plugin.py:269-280): path split on '/'.
+        assert_eq!(
+            subfield_keys(&PvAddress::parse("pva://TBL/col/1")).as_ref(),
+            ["col".to_owned(), "1".to_owned()]
+        );
+        assert!(subfield_keys(&PvAddress::parse("pva://NAME")).is_empty());
+    }
+
+    #[test]
+    fn subfield_drills_into_structure_and_array() {
+        // An NTTable-shaped value: a structure of column arrays.
+        let mut table = PvStructure::new("");
+        table.set(
+            "col",
+            PvField::ScalarArrayTyped(TypedScalarArray::Double(Arc::from([1.5, 2.5].as_slice()))),
+        );
+        let mut root = PvStructure::new("epics:nt/NTTable:1.0");
+        root.set("value", PvField::Structure(table));
+        let root = PvField::Structure(root);
+
+        // Column key selects the array (p4p :262-284 string-key branch).
+        let mut s = ChannelState::default();
+        apply_ntscalar(&mut s, &root, &["col".to_owned()]);
+        assert_eq!(
+            s.value,
+            Some(PvValue::FloatArray(Arc::from([1.5, 2.5].as_slice())))
+        );
+
+        // Column + integer row index selects one element (int-key branch).
+        let mut s = ChannelState::default();
+        apply_ntscalar(&mut s, &root, &["col".to_owned(), "1".to_owned()]);
+        assert_eq!(s.value, Some(PvValue::Float(2.5)));
+
+        // An unresolvable key leaves the value untouched.
+        let mut s = ChannelState::default();
+        apply_ntscalar(&mut s, &root, &["nope".to_owned()]);
+        assert_eq!(s.value, None);
     }
 }

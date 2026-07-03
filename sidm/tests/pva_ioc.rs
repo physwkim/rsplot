@@ -12,10 +12,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use epics_pva_rs::FieldDesc;
-use epics_pva_rs::nt::{NTEnum, NTScalar};
+use epics_pva_rs::nt::{NTEnum, NTScalar, NTTable};
 use epics_pva_rs::pvdata::ScalarType;
 use epics_pva_rs::server_native::{PvaServer, SharedPV, SharedSource};
-use epics_pva_rs::{PvField, ScalarValue};
+use epics_pva_rs::{PvField, PvStructure, ScalarValue};
 use sidm::{Engine, PvValue, PvaPlugin};
 
 /// Poll `cond` until it holds or `timeout` elapses; returns the final result.
@@ -162,5 +162,114 @@ fn pva_enum_put_via_label_resolves_index() {
         ),
         "did not observe enum index 1 / label On after writing the label (got {:?})",
         ch.read(|s| s.value.clone())
+    );
+}
+
+#[test]
+fn pva_subfield_path_selects_into_the_structure() {
+    // An NTTable with one double column `x` = [1.5, 2.5, 3.5]. A PyDM-style
+    // address `pva://NAME/x/2` must monitor NAME (netloc only,
+    // plugin.py:262-266) and drill the /path keys into the delivered value
+    // (get_subfield + the p4p walk, plugin.py:269-280 /
+    // p4p_plugin_component.py:262-284).
+    let (engine, _server, _server_rt) = pva_engine(|source| {
+        let table = NTTable::new().add_column(ScalarType::Double, "x", None);
+        let desc = table.build();
+        let mut init = table.create();
+        let mut cols = PvStructure::new("");
+        cols.set(
+            "x",
+            PvField::ScalarArray(vec![
+                ScalarValue::Double(1.5),
+                ScalarValue::Double(2.5),
+                ScalarValue::Double(3.5),
+            ]),
+        );
+        if let PvField::Structure(s) = &mut init {
+            s.set("value", PvField::Structure(cols));
+        }
+        add_pv(source, "sidm:test:pva:tbl", desc, init);
+    });
+
+    // Column + row index → one element.
+    let elem = engine
+        .connect("pva://sidm:test:pva:tbl/x/2")
+        .expect("connect subfield element channel");
+    assert!(
+        wait_for(
+            || matches!(elem.read(|s| s.value.clone()), Some(PvValue::Float(v)) if (v - 3.5).abs() < 1e-9),
+            Duration::from_secs(5)
+        ),
+        "did not observe table element x[2] = 3.5 (got {:?})",
+        elem.read(|s| s.value.clone())
+    );
+
+    // Column alone → the whole waveform.
+    let col = engine
+        .connect("pva://sidm:test:pva:tbl/x")
+        .expect("connect subfield column channel");
+    assert!(
+        wait_for(
+            || matches!(
+                col.read(|s| s.value.clone()),
+                Some(PvValue::FloatArray(a)) if a.as_ref() == [1.5, 2.5, 3.5]
+            ),
+            Duration::from_secs(5)
+        ),
+        "did not observe column x = [1.5, 2.5, 3.5] (got {:?})",
+        col.read(|s| s.value.clone())
+    );
+}
+
+#[test]
+fn pva_rpc_address_calls_the_function_and_publishes_the_result() {
+    // PyDM RPC form (p4p_plugin_component.py:58-78): the trailing '&' marks
+    // the address as RPC; the args become a typed NTURI request; with no
+    // pydm_pollrate the call happens once. The server sums query.lhs +
+    // query.rhs and the result's `value` must land in the channel state.
+    let (engine, _server, _server_rt) = pva_engine(|source| {
+        let desc = NTScalar::new(ScalarType::Int).build();
+        let init = NTScalar::new(ScalarType::Int).create();
+        let pv = SharedPV::build_mailbox();
+        pv.open(desc, init).expect("open rpc pv");
+        pv.on_rpc(|_pv, _desc, value| {
+            let arg = |name: &str| -> i32 {
+                let PvField::Structure(root) = &value else {
+                    return 0;
+                };
+                let Some(PvField::Structure(q)) = root.get_field("query") else {
+                    return 0;
+                };
+                match q.get_field(name) {
+                    Some(PvField::Scalar(ScalarValue::Int(v))) => *v,
+                    _ => 0,
+                }
+            };
+            let sum = arg("lhs") + arg("rhs");
+            let rdesc = NTScalar::new(ScalarType::Int).build();
+            let mut rval = NTScalar::new(ScalarType::Int).create();
+            if let PvField::Structure(s) = &mut rval {
+                s.set("value", PvField::Scalar(ScalarValue::Int(sum)));
+            }
+            Ok((rdesc, rval))
+        });
+        source.add("sidm:test:pva:sum", pv);
+    });
+
+    let ch = engine
+        .connect("pva://sidm:test:pva:sum?lhs=4&rhs=7&")
+        .expect("connect rpc channel");
+
+    assert!(
+        wait_for(
+            || matches!(ch.read(|s| s.value.clone()), Some(PvValue::Int(11))),
+            Duration::from_secs(10)
+        ),
+        "did not observe the RPC result 4 + 7 = 11 (got {:?})",
+        ch.read(|s| s.value.clone())
+    );
+    assert!(
+        ch.is_connected(),
+        "RPC result must mark the channel connected"
     );
 }
