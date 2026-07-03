@@ -260,7 +260,7 @@ async fn on_connect(
                 .enums
                 .as_ref()
                 .filter(|e| !e.strings.is_empty())
-                .map(|e| lossy_strings(&e.strings));
+                .map(|e| latin1_strings(&e.strings));
             *enum_cache = strings.clone();
             // The connect-time snapshot carries the initial value, so post it as
             // a value event (not a bare snapshot update) — the first strip-chart
@@ -285,7 +285,7 @@ fn apply_metadata(s: &mut ChannelState, snap: &Snapshot, enum_strings: Option<Ar
     s.timestamp = Some(snap.timestamp.into());
     s.enum_strings = enum_strings;
     if let Some(d) = &snap.display {
-        s.units = (!d.units.is_empty()).then(|| Arc::from(d.units.as_str_lossy()));
+        s.units = (!d.units.is_empty()).then(|| Arc::from(latin1_str(&d.units)));
         s.precision = Some(i32::from(d.precision));
         s.display_limits = Some((d.lower_disp_limit, d.upper_disp_limit));
         s.warn_limits = Some((d.lower_warning_limit, d.upper_warning_limit));
@@ -309,7 +309,7 @@ fn apply_value(s: &mut ChannelState, snap: &Snapshot, enum_strings: Option<&[Str
 /// `enum_strings` when available.
 fn epics_to_pv(value: &EpicsValue, enum_strings: Option<&[String]>) -> PvValue {
     match value {
-        EpicsValue::String(v) => PvValue::Str(Arc::from(v.as_str_lossy())),
+        EpicsValue::String(v) => PvValue::Str(Arc::from(latin1_str(v))),
         EpicsValue::Short(v) => PvValue::Int(i64::from(*v)),
         EpicsValue::Float(v) => PvValue::Float(f64::from(*v)),
         EpicsValue::Enum(i) => PvValue::Enum {
@@ -358,17 +358,25 @@ fn epics_to_pv(value: &EpicsValue, enum_strings: Option<&[String]>) -> PvValue {
         EpicsValue::ULongArray(a) => {
             PvValue::IntArray(a.iter().map(|x| i64::from(*x)).collect::<Vec<_>>().into())
         }
-        EpicsValue::StringArray(a) => PvValue::StrArray(lossy_strings(a)),
+        EpicsValue::StringArray(a) => PvValue::StrArray(latin1_strings(a)),
     }
 }
 
-/// Render wire strings ([`PvString`]: raw, not-guaranteed-UTF-8 bytes) into
-/// sidm's `Arc<[String]>` display text; non-UTF-8 bytes become U+FFFD.
-fn lossy_strings(strings: &[PvString]) -> Arc<[String]> {
-    strings
-        .iter()
-        .map(|s| s.as_str_lossy().into_owned())
-        .collect()
+/// Decode one CA wire string ([`PvString`]: raw, not-guaranteed-UTF-8 bytes)
+/// as latin-1: every raw byte maps 1:1 to the same U+00XX codepoint, so no
+/// byte is ever destroyed. PyDM decodes every CA string this way — it sets
+/// pyepics' `utils3.EPICS_STR_ENCODING = "latin-1"`
+/// (`pyepics_plugin_component.py:14-19`) — so IOC strings written as latin-1
+/// (`µm` 0xB5, `Å` 0xC5, `°C` 0xB0) render as the intended glyphs instead of
+/// the U+FFFD a UTF-8-lossy decode would produce.
+fn latin1_str(s: &PvString) -> String {
+    s.as_bytes().iter().map(|&b| b as char).collect()
+}
+
+/// Render CA wire strings into sidm's `Arc<[String]>` display text via the
+/// latin-1 decode of [`latin1_str`] (enum labels, string arrays).
+fn latin1_strings(strings: &[PvString]) -> Arc<[String]> {
+    strings.iter().map(latin1_str).collect()
 }
 
 /// Resolve an enum index to its label string, if `enum_strings` covers it.
@@ -616,7 +624,8 @@ mod tests {
             strings: vec!["OFF".into(), "ON".into()],
         });
 
-        let strings: Option<Arc<[String]>> = snap.enums.as_ref().map(|e| lossy_strings(&e.strings));
+        let strings: Option<Arc<[String]>> =
+            snap.enums.as_ref().map(|e| latin1_strings(&e.strings));
         let mut state = ChannelState::default();
         apply_metadata(&mut state, &snap, strings);
 
@@ -628,6 +637,31 @@ mod tests {
             })
         );
         assert_eq!(state.enum_strings.as_deref().map(|s| s.len()), Some(2));
+    }
+
+    #[test]
+    fn latin1_wire_bytes_decode_one_to_one() {
+        // 0xB5 is "µ" in latin-1 — the classic accelerator EGU byte. A
+        // UTF-8-lossy decode destroys it to U+FFFD; PyDM's latin-1 decode
+        // (pyepics EPICS_STR_ENCODING="latin-1") keeps it.
+        let mut snap = Snapshot::new(EpicsValue::Double(1.0), 0, 0, ts());
+        snap.display = Some(DisplayInfo {
+            units: PvString::from_bytes(vec![0xB5, b'm']),
+            ..Default::default()
+        });
+        let mut state = ChannelState::default();
+        apply_metadata(&mut state, &snap, None);
+        assert_eq!(state.units.as_deref(), Some("µm"));
+
+        // String scalar values decode latin-1 too (0xC5 = "Å").
+        assert_eq!(
+            epics_to_pv(&EpicsValue::String(PvString::from_bytes(vec![0xC5])), None),
+            PvValue::Str(Arc::from("Å"))
+        );
+        // ... and string arrays / enum labels via `latin1_strings`
+        // (0xB0 0x43 = "°C").
+        let labels = latin1_strings(&[PvString::from_bytes(vec![0xB0, b'C'])]);
+        assert_eq!(labels.as_ref(), ["°C".to_owned()]);
     }
 
     #[test]
