@@ -31,6 +31,7 @@
 //! the cached choices first, then taken as a numeric index. There is no local
 //! echo: the value only changes when the server confirms through the monitor.
 
+use std::borrow::Cow;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -156,7 +157,7 @@ async fn run_channel(
                 mask_disconnected: false,
             };
             let callback = move |ev: MonitorEvent| match ev {
-                MonitorEvent::Connected => writer.update(|s| s.connected = true),
+                MonitorEvent::Connected { .. } => writer.update(|s| s.connected = true),
                 MonitorEvent::Data { value, .. } => {
                     if let Some(c) = enum_choices_of(&value) {
                         *choices.lock().expect("pva choices cache poisoned") = Some(c);
@@ -172,7 +173,8 @@ async fn run_channel(
                     writer.update(|s| s.connected = false);
                 }
             };
-            let _ = client.pvmonitor_events(&pv, mask, callback).await;
+            // `None` = the default all-fields pvRequest (the 0.18 behaviour).
+            let _ = client.pvmonitor_events(&pv, None, mask, callback).await;
         }
     };
     tokio::pin!(monitor);
@@ -296,10 +298,11 @@ fn scalar_field<'a>(root: &'a PvField, path: &str) -> Option<&'a ScalarValue> {
     }
 }
 
-/// Borrow a dotted path's leaf as a string scalar.
-fn string_field<'a>(root: &'a PvField, path: &str) -> Option<&'a str> {
+/// Borrow a dotted path's leaf as a string scalar, rendered as (lossy) UTF-8
+/// display text (the wire string is raw bytes with no UTF-8 guarantee).
+fn string_field<'a>(root: &'a PvField, path: &str) -> Option<Cow<'a, str>> {
     match field(root, path)? {
-        PvField::Scalar(ScalarValue::String(s)) => Some(s),
+        PvField::Scalar(ScalarValue::String(s)) => Some(s.as_str_lossy()),
         _ => None,
     }
 }
@@ -362,7 +365,7 @@ fn scalar_to_pv(sv: &ScalarValue) -> PvValue {
         ScalarValue::Boolean(b) => PvValue::Bool(*b),
         ScalarValue::Float(v) => PvValue::Float(f64::from(*v)),
         ScalarValue::Double(v) => PvValue::Float(*v),
-        ScalarValue::String(s) => PvValue::Str(Arc::from(s.as_str())),
+        ScalarValue::String(s) => PvValue::Str(Arc::from(s.as_str_lossy())),
         ScalarValue::Byte(v) => PvValue::Int(i64::from(*v)),
         ScalarValue::Short(v) => PvValue::Int(i64::from(*v)),
         ScalarValue::Int(v) => PvValue::Int(i64::from(*v)),
@@ -406,7 +409,9 @@ fn typed_array_to_pv(t: &TypedScalarArray) -> PvValue {
         TypedScalarArray::Boolean(a) => {
             PvValue::IntArray(a.iter().map(|x| i64::from(*x)).collect::<Vec<_>>().into())
         }
-        TypedScalarArray::String(a) => PvValue::StrArray(Arc::from(&a[..])),
+        TypedScalarArray::String(a) => {
+            PvValue::StrArray(a.iter().map(|s| s.as_str_lossy().into_owned()).collect())
+        }
     }
 }
 
@@ -477,7 +482,9 @@ fn scalar_i64(sv: &ScalarValue) -> Option<i64> {
 fn string_array_vec(value: &PvField) -> Option<Vec<String>> {
     match value {
         PvField::ScalarArray(arr) => Some(arr.iter().map(|v| v.to_string()).collect()),
-        PvField::ScalarArrayTyped(TypedScalarArray::String(a)) => Some(a.to_vec()),
+        PvField::ScalarArrayTyped(TypedScalarArray::String(a)) => {
+            Some(a.iter().map(|s| s.as_str_lossy().into_owned()).collect())
+        }
         _ => None,
     }
 }
@@ -583,7 +590,7 @@ mod tests {
         value.set("index", PvField::Scalar(ScalarValue::Int(index)));
         let arr = choices
             .iter()
-            .map(|c| ScalarValue::String((*c).to_string()))
+            .map(|c| ScalarValue::String((*c).into()))
             .collect();
         value.set("choices", PvField::ScalarArray(arr));
         root.set("value", PvField::Structure(value));

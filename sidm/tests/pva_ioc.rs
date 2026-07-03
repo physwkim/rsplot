@@ -58,8 +58,10 @@ fn pva_engine(build: impl FnOnce(&SharedSource)) -> (Engine, PvaServer, tokio::r
 
 /// Open a `SharedPV` with the given descriptor + initial value, and register it.
 fn add_pv(source: &SharedSource, name: &str, desc: FieldDesc, value: PvField) {
-    let pv = SharedPV::new();
-    pv.open(desc, value);
+    // `build_mailbox`, not `new`: since 0.21 a plain `SharedPV` rejects PUTs
+    // (pvxs parity); the round-trip tests write to these PVs.
+    let pv = SharedPV::build_mailbox();
+    pv.open(desc, value).expect("open freshly-created SharedPV");
     source.add(name, pv);
 }
 

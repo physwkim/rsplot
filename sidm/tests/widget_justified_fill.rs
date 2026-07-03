@@ -351,14 +351,14 @@ fn enum_ioc_engine() -> (Engine, tokio::runtime::Runtime) {
     let server_rt = tokio::runtime::Runtime::new().expect("server runtime");
     let server = server_rt.block_on(async {
         let mut rec = BiRecord::new(0);
-        rec.znam = "Off".to_owned();
-        rec.onam = "On".to_owned();
+        rec.znam = "Off".into();
+        rec.onam = "On".into();
         // The same enum with the SECOND state selected, for the narrow-rect
         // probe: the button that used to clip is the last one, so the
         // observable selection paint must sit on it.
         let mut rec_on = BiRecord::new(1);
-        rec_on.znam = "Off".to_owned();
-        rec_on.onam = "On".to_owned();
+        rec_on.znam = "Off".into();
+        rec_on.onam = "On".into();
         CaServer::builder()
             .port(port)
             .record("sidm:jf:bi", rec)

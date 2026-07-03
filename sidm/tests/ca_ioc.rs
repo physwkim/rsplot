@@ -111,8 +111,8 @@ fn ca_enum_put_via_label_resolves_index() {
 
     let (engine, _server_rt) = ioc_engine(|b| {
         let mut rec = BiRecord::new(0);
-        rec.znam = "Off".to_owned();
-        rec.onam = "On".to_owned();
+        rec.znam = "Off".into();
+        rec.onam = "On".into();
         b.record("sidm:test:bi", rec)
     });
     let ch = engine

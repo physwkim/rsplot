@@ -63,22 +63,20 @@ image = { version = "0.25", default-features = false, features = [
     "tiff",
 ] }
 
-# EPICS Channel Access backend (feature `ca`). crates.io 0.18.x — an explicit
-# deviation from siplot's no-new-dependency rule, scoped to this crate. The API
-# is verified against the 0.18.6 source at ~/codes/epics-rs (same version).
-epics-ca-rs = { version = "0.18", optional = true }
+# EPICS Channel Access backend (feature `ca`). crates.io 0.21.x — an explicit
+# deviation from siplot's no-new-dependency rule, scoped to this crate.
+epics-ca-rs = { version = "0.21", optional = true }
 # `Snapshot`/`AlarmInfo`/`DisplayInfo`/`ControlInfo`/`EnumInfo`/`DbrClass`/
 # `EpicsValue` returned by the CA client live here and are not re-exported by
-# epics-ca-rs, so this is a direct dependency. Unified to the same 0.18.6 that
+# epics-ca-rs, so this is a direct dependency. Unified to the same 0.21.x that
 # epics-ca-rs pins, so there is one copy in the tree.
-epics-base-rs = { version = "0.18", optional = true }
-# pvAccess backend (feature `pva`). crates.io 0.18.x, same explicit deviation
-# from siplot's no-new-dependency rule, scoped to this crate. The client/monitor
-# API and the in-process `PvaServer` test harness are verified against the
-# 0.18.6 source at ~/codes/epics-rs (same version). The NT value/structure types
-# (`PvField`/`PvStructure`/`ScalarValue`/`NTScalar`) are re-exported by this
-# crate, so no extra epics-base-rs surface is pulled in for `pva` alone.
-epics-pva-rs = { version = "0.18", optional = true }
+epics-base-rs = { version = "0.21", optional = true }
+# pvAccess backend (feature `pva`). crates.io 0.21.x, same explicit deviation
+# from siplot's no-new-dependency rule, scoped to this crate. The NT
+# value/structure types (`PvField`/`PvStructure`/`ScalarValue`/`NTScalar`) are
+# re-exported by this crate, so no extra epics-base-rs surface is pulled in for
+# `pva` alone.
+epics-pva-rs = { version = "0.21", optional = true }
 # Derived-channel expression evaluator (feature `calc`). Pure Rust, no network;
 # evaluates a PyDM-style `calc://` expression over child channels' scalar values.
 evalexpr = { version = "13", optional = true }

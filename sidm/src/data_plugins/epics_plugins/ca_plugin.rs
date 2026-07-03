@@ -35,7 +35,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use epics_base_rs::server::snapshot::{DbrClass, Snapshot};
-use epics_base_rs::types::{DbFieldType, EpicsValue};
+use epics_base_rs::types::{DbFieldType, EpicsValue, PvString};
 use epics_ca_rs::CaError;
 use epics_ca_rs::client::{CaChannel, CaClient, ConnectionEvent};
 use tokio::sync::{OnceCell, broadcast, mpsc};
@@ -260,7 +260,7 @@ async fn on_connect(
                 .enums
                 .as_ref()
                 .filter(|e| !e.strings.is_empty())
-                .map(|e| Arc::from(e.strings.clone()));
+                .map(|e| lossy_strings(&e.strings));
             *enum_cache = strings.clone();
             // The connect-time snapshot carries the initial value, so post it as
             // a value event (not a bare snapshot update) — the first strip-chart
@@ -282,10 +282,10 @@ fn apply_metadata(s: &mut ChannelState, snap: &Snapshot, enum_strings: Option<Ar
     s.connected = true;
     s.value = Some(epics_to_pv(&snap.value, enum_strings.as_deref()));
     s.severity = AlarmSeverity::from_epics(snap.alarm.severity);
-    s.timestamp = Some(snap.timestamp);
+    s.timestamp = Some(snap.timestamp.into());
     s.enum_strings = enum_strings;
     if let Some(d) = &snap.display {
-        s.units = (!d.units.is_empty()).then(|| Arc::from(d.units.as_str()));
+        s.units = (!d.units.is_empty()).then(|| Arc::from(d.units.as_str_lossy()));
         s.precision = Some(i32::from(d.precision));
         s.display_limits = Some((d.lower_disp_limit, d.upper_disp_limit));
         s.warn_limits = Some((d.lower_warning_limit, d.upper_warning_limit));
@@ -302,25 +302,34 @@ fn apply_value(s: &mut ChannelState, snap: &Snapshot, enum_strings: Option<&[Str
     s.connected = true;
     s.value = Some(epics_to_pv(&snap.value, enum_strings));
     s.severity = AlarmSeverity::from_epics(snap.alarm.severity);
-    s.timestamp = Some(snap.timestamp);
+    s.timestamp = Some(snap.timestamp.into());
 }
 
 /// Normalize an [`EpicsValue`] into a [`PvValue`], resolving an enum label from
 /// `enum_strings` when available.
 fn epics_to_pv(value: &EpicsValue, enum_strings: Option<&[String]>) -> PvValue {
     match value {
-        EpicsValue::String(v) => PvValue::Str(Arc::from(v.as_str())),
+        EpicsValue::String(v) => PvValue::Str(Arc::from(v.as_str_lossy())),
         EpicsValue::Short(v) => PvValue::Int(i64::from(*v)),
         EpicsValue::Float(v) => PvValue::Float(f64::from(*v)),
         EpicsValue::Enum(i) => PvValue::Enum {
             index: *i,
             label: enum_label(enum_strings, *i),
         },
+        // Transient pvalink-only carrier; upstream docs say to read it
+        // exactly like `Enum` (the choices are for a server-side put_field).
+        EpicsValue::EnumWithChoices { index, .. } => PvValue::Enum {
+            index: *index,
+            label: enum_label(enum_strings, *index),
+        },
         EpicsValue::Char(v) => PvValue::Int(i64::from(*v)),
         EpicsValue::Long(v) => PvValue::Int(i64::from(*v)),
         EpicsValue::Double(v) => PvValue::Float(*v),
         EpicsValue::Int64(v) => PvValue::Int(*v),
         EpicsValue::UInt64(v) => PvValue::Int(*v as i64),
+        EpicsValue::UShort(v) => PvValue::Int(i64::from(*v)),
+        EpicsValue::ULong(v) => PvValue::Int(i64::from(*v)),
+        EpicsValue::UChar(v) => PvValue::Int(i64::from(*v)),
         EpicsValue::ShortArray(a) => {
             PvValue::IntArray(a.iter().map(|x| i64::from(*x)).collect::<Vec<_>>().into())
         }
@@ -334,13 +343,32 @@ fn epics_to_pv(value: &EpicsValue, enum_strings: Option<&[String]>) -> PvValue {
         EpicsValue::LongArray(a) => {
             PvValue::IntArray(a.iter().map(|x| i64::from(*x)).collect::<Vec<_>>().into())
         }
-        EpicsValue::CharArray(a) => PvValue::Bytes(Arc::from(a.as_slice())),
+        // Both CHAR waveform shapes stay raw bytes (the formatter decides
+        // string vs array); signed/unsigned share the identical byte layout.
+        EpicsValue::CharArray(a) | EpicsValue::UCharArray(a) => {
+            PvValue::Bytes(Arc::from(a.as_slice()))
+        }
         EpicsValue::Int64Array(a) => PvValue::IntArray(Arc::from(a.as_slice())),
         EpicsValue::UInt64Array(a) => {
             PvValue::IntArray(a.iter().map(|x| *x as i64).collect::<Vec<_>>().into())
         }
-        EpicsValue::StringArray(a) => PvValue::StrArray(Arc::from(a.as_slice())),
+        EpicsValue::UShortArray(a) => {
+            PvValue::IntArray(a.iter().map(|x| i64::from(*x)).collect::<Vec<_>>().into())
+        }
+        EpicsValue::ULongArray(a) => {
+            PvValue::IntArray(a.iter().map(|x| i64::from(*x)).collect::<Vec<_>>().into())
+        }
+        EpicsValue::StringArray(a) => PvValue::StrArray(lossy_strings(a)),
     }
+}
+
+/// Render wire strings ([`PvString`]: raw, not-guaranteed-UTF-8 bytes) into
+/// sidm's `Arc<[String]>` display text; non-UTF-8 bytes become U+FFFD.
+fn lossy_strings(strings: &[PvString]) -> Arc<[String]> {
+    strings
+        .iter()
+        .map(|s| s.as_str_lossy().into_owned())
+        .collect()
 }
 
 /// Resolve an enum index to its label string, if `enum_strings` covers it.
@@ -367,7 +395,9 @@ fn pv_to_epics(
         // Waveforms keep their element type; the IOC coerces to the native FTVL.
         PvValue::FloatArray(a) => Some(EpicsValue::DoubleArray(a.to_vec())),
         PvValue::IntArray(a) => Some(EpicsValue::Int64Array(a.to_vec())),
-        PvValue::StrArray(a) => Some(EpicsValue::StringArray(a.to_vec())),
+        PvValue::StrArray(a) => Some(EpicsValue::StringArray(
+            a.iter().map(PvString::from).collect(),
+        )),
         PvValue::Bytes(a) => Some(EpicsValue::CharArray(a.to_vec())),
         scalar => scalar_to_native(scalar, native, enum_strings),
     }
@@ -381,11 +411,14 @@ fn scalar_to_native(
 ) -> Option<EpicsValue> {
     match native {
         Some(DbFieldType::Enum) => coerce_to_enum(value, enum_strings),
-        Some(DbFieldType::String) => Some(EpicsValue::String(scalar_to_string(value))),
+        Some(DbFieldType::String) => Some(EpicsValue::String(scalar_to_string(value).into())),
         Some(DbFieldType::Float) => scalar_f64(value).map(|v| EpicsValue::Float(v as f32)),
         Some(DbFieldType::Short) => scalar_i64(value).map(|v| EpicsValue::Short(v as i16)),
+        Some(DbFieldType::UShort) => scalar_i64(value).map(|v| EpicsValue::UShort(v as u16)),
         Some(DbFieldType::Char) => scalar_i64(value).map(|v| EpicsValue::Char(v as u8)),
+        Some(DbFieldType::UChar) => scalar_i64(value).map(|v| EpicsValue::UChar(v as u8)),
         Some(DbFieldType::Long) => scalar_i64(value).map(|v| EpicsValue::Long(v as i32)),
+        Some(DbFieldType::ULong) => scalar_i64(value).map(|v| EpicsValue::ULong(v as u32)),
         Some(DbFieldType::Int64) => scalar_i64(value).map(EpicsValue::Int64),
         Some(DbFieldType::UInt64) => scalar_i64(value).map(|v| EpicsValue::UInt64(v as u64)),
         Some(DbFieldType::Double) => scalar_f64(value).map(EpicsValue::Double),
@@ -456,7 +489,7 @@ fn untyped_scalar(value: &PvValue) -> Option<EpicsValue> {
         PvValue::Int(n) => EpicsValue::Int64(*n),
         PvValue::Float(f) => EpicsValue::Double(*f),
         PvValue::Bool(b) => EpicsValue::Long(i32::from(*b)),
-        PvValue::Str(s) => EpicsValue::String(s.to_string()),
+        PvValue::Str(s) => EpicsValue::String(s.to_string().into()),
         PvValue::Enum { index, .. } => EpicsValue::Enum(*index),
         // Arrays do not reach here (handled in `pv_to_epics`).
         _ => return None,
@@ -546,7 +579,7 @@ mod tests {
     fn metadata_snapshot_populates_units_precision_and_limits() {
         let mut snap = Snapshot::new(EpicsValue::Double(2.5), 0, 1, ts());
         snap.display = Some(DisplayInfo {
-            units: "mm".to_owned(),
+            units: "mm".into(),
             precision: 3,
             lower_disp_limit: -10.0,
             upper_disp_limit: 10.0,
@@ -580,11 +613,10 @@ mod tests {
     fn metadata_snapshot_caches_enum_strings_and_resolves_label() {
         let mut snap = Snapshot::new(EpicsValue::Enum(1), 0, 0, ts());
         snap.enums = Some(EnumInfo {
-            strings: vec!["OFF".to_owned(), "ON".to_owned()],
+            strings: vec!["OFF".into(), "ON".into()],
         });
 
-        let strings: Option<Arc<[String]>> =
-            snap.enums.as_ref().map(|e| Arc::from(e.strings.clone()));
+        let strings: Option<Arc<[String]>> = snap.enums.as_ref().map(|e| lossy_strings(&e.strings));
         let mut state = ChannelState::default();
         apply_metadata(&mut state, &snap, strings);
 
@@ -719,7 +751,7 @@ mod tests {
     fn write_formats_scalar_for_string_record() {
         assert_eq!(
             pv_to_epics(&PvValue::Int(7), Some(DbFieldType::String), None),
-            Some(EpicsValue::String("7".to_owned()))
+            Some(EpicsValue::String("7".into()))
         );
         assert_eq!(
             pv_to_epics(
@@ -727,7 +759,7 @@ mod tests {
                 Some(DbFieldType::String),
                 None
             ),
-            Some(EpicsValue::String("hi".to_owned()))
+            Some(EpicsValue::String("hi".into()))
         );
     }
 
