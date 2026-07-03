@@ -58,6 +58,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::address::PvAddress;
 use crate::channel::{AlarmSeverity, ChannelState, PvValue, StateWriter};
+use crate::data_plugins::epics_plugins::pva_codec;
 use crate::data_plugins::{ConnectionCtx, DataPlugin};
 use crate::engine::EngineError;
 
@@ -260,20 +261,51 @@ async fn run_channel(
                     // A non-empty codec name marks a compressed NTNDArray.
                     // PyDM decompresses it (`decompress(value)` via
                     // pva_codec, p4p_plugin_component.py:287-290); sidm
-                    // supports uncompressed arrays only, so the value is
-                    // skipped (metadata still flows) with a one-time warning.
+                    // decodes the lz4/bslz4/blosc codecs in `pva_codec`.
+                    // On any failure (jpeg, an unported blosc sub-codec, a
+                    // malformed stream) the value is skipped with a
+                    // one-time warning — a deliberate deviation from PyDM,
+                    // which logs and then emits the raw compressed bytes
+                    // as the value. Metadata flows either way.
                     if let Some(codec) =
                         string_field(&value, "codec.name").filter(|n| !n.is_empty())
                     {
-                        if !warned_codec {
-                            warned_codec = true;
-                            log::warn!(
-                                "pva://{pv_cb}: compressed NTNDArray codec {codec:?} is \
-                                 not supported (PyDM decompresses via pva_codec); \
-                                 ignoring the array data"
-                            );
+                        let codec = codec.into_owned();
+                        // Subfield addressing into a compressed array would
+                        // index the decoded flat array; PyDM's subfield walk
+                        // predates its decompress call and has no defined
+                        // semantics here either — treat as unsupported.
+                        let decoded = if subfield.is_empty() {
+                            decompressed_array_value(&value)
+                        } else {
+                            Err("subfield addressing into a compressed \
+                                 NTNDArray is not supported"
+                                .into())
+                        };
+                        match decoded {
+                            Ok(pv) => {
+                                let apply = move |s: &mut ChannelState| {
+                                    apply_nt_metadata(s, &value);
+                                    s.value = Some(pv);
+                                };
+                                if value_changed {
+                                    writer.post_value(apply);
+                                } else {
+                                    writer.update(apply);
+                                }
+                            }
+                            Err(err) => {
+                                if !warned_codec {
+                                    warned_codec = true;
+                                    log::warn!(
+                                        "pva://{pv_cb}: compressed NTNDArray \
+                                         codec {codec:?}: {err}; ignoring the \
+                                         array data"
+                                    );
+                                }
+                                writer.update(move |s| apply_nt_metadata(s, &value));
+                            }
                         }
-                        writer.update(move |s| apply_nt_metadata(s, &value));
                         return;
                     }
                     let sf = subfield.clone();
@@ -674,6 +706,141 @@ fn apply_nt_metadata(s: &mut ChannelState, root: &PvField) {
     ) {
         s.alarm_limits = Some(limits);
     }
+}
+
+/// Decode a compressed NTNDArray's `value` into a [`PvValue`] — the sidm
+/// counterpart of PyDM's `pva_codec.decompress` (pva_codec.py:23-60).
+///
+/// The compressed payload is the union's selected ubyte array
+/// (NDPluginCodec stores its output as `ubyteValue`,
+/// ntndArrayConverter.cpp:422-429); `codec.parameters` carries the original
+/// element type as a pvData `ScalarType` ordinal (:414-419, "The
+/// uncompressed data type would be lost … codec.parameters seems like a
+/// good place"), and `uncompressedSize` the decoded byte count. The decoded
+/// bytes are the producer's native array memory — little-endian on every
+/// realistic EPICS host, and PyDM's `np.frombuffer` makes the same
+/// assumption. One deliberate deviation: ordinal 9 (`pvFloat`) decodes as
+/// f32 — PyDM's ScalarType tuple maps index 9 to the 64-bit Python `float`,
+/// which mis-sizes every compressed f32 array.
+fn decompressed_array_value(root: &PvField) -> Result<PvValue, String> {
+    let payload = match field(root, "value") {
+        Some(PvField::Union {
+            selector, value, ..
+        }) if *selector >= 0 => match &**value {
+            PvField::ScalarArrayTyped(TypedScalarArray::UByte(a)) => &a[..],
+            _ => return Err("the compressed payload is not a ubyte array".into()),
+        },
+        _ => return Err("the value is not a selected union".into()),
+    };
+    let name = string_field(root, "codec.name")
+        .unwrap_or_default()
+        .into_owned();
+    let uncompressed = scalar_field(root, "uncompressedSize")
+        .and_then(scalar_i64)
+        .ok_or("missing uncompressedSize")?;
+    let uncompressed = usize::try_from(uncompressed)
+        .map_err(|_| format!("invalid uncompressedSize {uncompressed}"))?;
+    // A missing/non-integer `parameters` falls back to the carrier type
+    // (ubyte), like PyDM's `data.dtype` fallback (pva_codec.py:36-38).
+    let ordinal = match field(root, "codec.parameters") {
+        Some(PvField::Variant(v)) => match &v.value {
+            PvField::Scalar(sv) => scalar_i64(sv).unwrap_or(5),
+            _ => 5,
+        },
+        _ => 5,
+    };
+    let (elem_size, kind) = scalar_type_layout(ordinal)?;
+    let bytes = pva_codec::decompress(&name, payload, uncompressed, elem_size)?;
+    decoded_bytes_to_pv(&bytes, elem_size, kind)
+}
+
+/// The original-element kinds a compressed NTNDArray can decode to.
+#[derive(Clone, Copy)]
+enum NdElemKind {
+    Bool,
+    I8,
+    I16,
+    I32,
+    I64,
+    U8,
+    U16,
+    U32,
+    U64,
+    F32,
+    F64,
+}
+
+/// Byte width and kind for a pvData `ScalarType` ordinal (pvData's
+/// `enum ScalarType`: pvBoolean=0, pvByte..pvLong=1..4, pvUByte..pvULong=
+/// 5..8, pvFloat=9, pvDouble=10; 11 is pvString, which is not an array
+/// element type NDPluginCodec can produce).
+fn scalar_type_layout(ordinal: i64) -> Result<(usize, NdElemKind), String> {
+    use NdElemKind::*;
+    Ok(match ordinal {
+        0 => (1, Bool),
+        1 => (1, I8),
+        2 => (2, I16),
+        3 => (4, I32),
+        4 => (8, I64),
+        5 => (1, U8),
+        6 => (2, U16),
+        7 => (4, U32),
+        8 => (8, U64),
+        9 => (4, F32),
+        10 => (8, F64),
+        other => return Err(format!("unsupported ScalarType ordinal {other}")),
+    })
+}
+
+/// Reinterpret decoded little-endian array memory as a [`PvValue`], with
+/// the same type mapping as [`typed_array_to_pv`] (u8 → `Bytes`, floats →
+/// `FloatArray`, every integer/bool width → `IntArray`).
+fn decoded_bytes_to_pv(
+    bytes: &[u8],
+    elem_size: usize,
+    kind: NdElemKind,
+) -> Result<PvValue, String> {
+    if !bytes.len().is_multiple_of(elem_size) {
+        return Err(format!(
+            "decoded {} bytes is not a whole number of {elem_size}-byte elements",
+            bytes.len()
+        ));
+    }
+    let ints = |f: fn(&[u8]) -> i64| -> PvValue {
+        PvValue::IntArray(
+            bytes
+                .chunks_exact(elem_size)
+                .map(f)
+                .collect::<Vec<_>>()
+                .into(),
+        )
+    };
+    Ok(match kind {
+        NdElemKind::U8 => PvValue::Bytes(Arc::from(bytes)),
+        NdElemKind::Bool => ints(|c| i64::from(c[0] != 0)),
+        NdElemKind::I8 => ints(|c| i64::from(c[0] as i8)),
+        NdElemKind::I16 => ints(|c| i64::from(i16::from_le_bytes(c.try_into().expect("2B")))),
+        NdElemKind::U16 => ints(|c| i64::from(u16::from_le_bytes(c.try_into().expect("2B")))),
+        NdElemKind::I32 => ints(|c| i64::from(i32::from_le_bytes(c.try_into().expect("4B")))),
+        NdElemKind::U32 => ints(|c| i64::from(u32::from_le_bytes(c.try_into().expect("4B")))),
+        NdElemKind::I64 => ints(|c| i64::from_le_bytes(c.try_into().expect("8B"))),
+        // ULong wraps to i64 like `typed_array_to_pv`'s `*x as i64`.
+        NdElemKind::U64 => ints(|c| u64::from_le_bytes(c.try_into().expect("8B")) as i64),
+        NdElemKind::F32 => PvValue::FloatArray(
+            bytes
+                .chunks_exact(4)
+                .map(|c| f64::from(f32::from_le_bytes(c.try_into().expect("4B"))))
+                .collect::<Vec<_>>()
+                .into(),
+        ),
+        NdElemKind::F64 => PvValue::FloatArray(
+            bytes
+                .chunks_exact(8)
+                .map(|c| f64::from_le_bytes(c.try_into().expect("8B")))
+                .collect::<Vec<_>>()
+                .into(),
+        ),
+    })
 }
 
 /// Navigate a dotted field path (`"alarm.severity"`, `"display.units"`) from a
@@ -1490,5 +1657,108 @@ mod tests {
             value: Box::new(PvField::Null),
         };
         assert_eq!(value_to_pv(&union), None);
+    }
+
+    /// A compressed-NTNDArray-shaped root: ubyte payload union, codec
+    /// name + `parameters` ordinal, `uncompressedSize` — the fields
+    /// `decompressed_array_value` consumes (ntndArrayConverter.cpp:410-429).
+    fn compressed_ntnd_root(
+        codec: &str,
+        ordinal: i32,
+        uncompressed: usize,
+        payload: &[u8],
+    ) -> PvField {
+        use epics_pva_rs::pvdata::VariantValue;
+        let mut codec_s = PvStructure::new("codec_t");
+        codec_s.set("name", PvField::Scalar(ScalarValue::String(codec.into())));
+        codec_s.set(
+            "parameters",
+            PvField::Variant(Box::new(VariantValue::scalar(ScalarValue::Int(ordinal)))),
+        );
+        let mut root = PvStructure::new("epics:nt/NTNDArray:1.0");
+        root.set(
+            "value",
+            PvField::Union {
+                selector: 5,
+                variant_name: "ubyteValue".to_owned(),
+                value: Box::new(PvField::ScalarArrayTyped(TypedScalarArray::UByte(
+                    Arc::from(payload),
+                ))),
+            },
+        );
+        root.set("codec", PvField::Structure(codec_s));
+        root.set(
+            "uncompressedSize",
+            PvField::Scalar(ScalarValue::Long(uncompressed as i64)),
+        );
+        PvField::Structure(root)
+    }
+
+    #[test]
+    fn compressed_ntndarray_lz4_decodes_to_typed_values() {
+        // An f32 array (ordinal 9 = pvFloat) — decodes as 4-byte floats,
+        // the deviation from PyDM's f64-typed index 9.
+        let raw: Vec<f32> = (0..64).map(|i| i as f32 * 0.5).collect();
+        let bytes: Vec<u8> = raw.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let comp = lz4_flex::block::compress(&bytes);
+        let root = compressed_ntnd_root("lz4", 9, bytes.len(), &comp);
+        assert_eq!(
+            decompressed_array_value(&root).unwrap(),
+            PvValue::FloatArray(
+                (0..64)
+                    .map(|i| f64::from(i as f32 * 0.5))
+                    .collect::<Vec<_>>()
+                    .into()
+            )
+        );
+
+        // A ubyte image (ordinal 5) lands as Bytes, like the uncompressed
+        // `typed_array_to_pv` path.
+        let img: Vec<u8> = (0..1000u32).map(|i| (i % 251) as u8).collect();
+        let comp = lz4_flex::block::compress(&img);
+        let root = compressed_ntnd_root("lz4", 5, img.len(), &comp);
+        assert_eq!(
+            decompressed_array_value(&root).unwrap(),
+            PvValue::Bytes(Arc::from(img.as_slice()))
+        );
+
+        // An i16 waveform (ordinal 2) becomes an IntArray.
+        let vals: Vec<i16> = (0..256).map(|i| (i as i16) - 128).collect();
+        let bytes: Vec<u8> = vals.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let comp = lz4_flex::block::compress(&bytes);
+        let root = compressed_ntnd_root("lz4", 2, bytes.len(), &comp);
+        assert_eq!(
+            decompressed_array_value(&root).unwrap(),
+            PvValue::IntArray(
+                vals.iter()
+                    .map(|v| i64::from(*v))
+                    .collect::<Vec<_>>()
+                    .into()
+            )
+        );
+    }
+
+    #[test]
+    fn compressed_ntndarray_failures_keep_the_error() {
+        // jpeg stays unsupported (PyDM decodes via PIL; sidm has no JPEG
+        // decoder dependency) — the plugin turns this into the one-time
+        // warn + metadata-only path.
+        let root = compressed_ntnd_root("jpeg", 5, 100, &[0xFF, 0xD8]);
+        assert!(
+            decompressed_array_value(&root)
+                .unwrap_err()
+                .contains("jpeg")
+        );
+
+        // A size lying about the stream is an error, not a torn value.
+        let img = vec![7u8; 100];
+        let comp = lz4_flex::block::compress(&img);
+        let root = compressed_ntnd_root("lz4", 5, 101, &comp);
+        assert!(decompressed_array_value(&root).is_err());
+
+        // uncompressedSize not divisible by the element width.
+        let comp = lz4_flex::block::compress(&[0u8; 10]);
+        let root = compressed_ntnd_root("lz4", 9, 10, &comp);
+        assert!(decompressed_array_value(&root).is_err());
     }
 }

@@ -8,4 +8,6 @@
 #[cfg(feature = "ca")]
 pub mod ca_plugin;
 #[cfg(feature = "pva")]
+pub(crate) mod pva_codec;
+#[cfg(feature = "pva")]
 pub mod pva_plugin;

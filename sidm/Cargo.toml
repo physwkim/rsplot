@@ -28,7 +28,8 @@ ca = ["dep:epics-ca-rs", "dep:epics-base-rs"]
 # pvAccess backend (`pva://`). Pulls epics-pva-rs (client + in-process PvaServer
 # for tests); the NT value/structure types it returns live in epics-pva-rs
 # itself, so no extra epics-base-rs surface is needed beyond what `ca` shares.
-pva = ["dep:epics-pva-rs"]
+# lz4_flex + flate2 decode compressed NTNDArray codecs (PyDM's pva_codec).
+pva = ["dep:epics-pva-rs", "dep:lz4_flex", "dep:flate2"]
 # Derived-channel backend (`calc://`). Pulls evalexpr (a pure-Rust expression
 # evaluator) to compute one channel from an expression over other channels'
 # scalar values, porting PyDM's calc plugin. Also pulls epics-base-rs for the
@@ -82,6 +83,19 @@ epics-base-rs = { version = "0.21", optional = true }
 # re-exported by this crate, so no extra epics-base-rs surface is pulled in for
 # `pva` alone.
 epics-pva-rs = { version = "0.21", optional = true }
+# NTNDArray codec decompression (feature `pva`, `pva_codec.rs`): raw-LZ4-block
+# and blosc/bitshuffle LZ4 sub-streams decode with lz4_flex — the same pure-Rust
+# block codec rust-hdf5's `lz4` feature uses (rust-hdf5's public filter API
+# itself carries HDF5 chunk framing NTNDArray payloads do not have). Block API
+# only: no default `frame` feature (drops twox-hash), safe codecs kept.
+lz4_flex = { version = "0.11", optional = true, default-features = false, features = [
+    "std",
+    "safe-encode",
+    "safe-decode",
+] }
+# The blosc ZLIB sub-codec (a zlib stream per split). Pure-Rust default backend
+# (miniz_oxide); already in the workspace tree via rust-hdf5's deflate feature.
+flate2 = { version = "1", optional = true }
 # Derived-channel expression evaluator (feature `calc`). Pure Rust, no network;
 # evaluates a PyDM-style `calc://` expression over child channels' scalar values.
 evalexpr = { version = "13", optional = true }

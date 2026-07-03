@@ -332,16 +332,22 @@ fn pva_ntndarray_ubyte_image_lands_as_bytes() {
 }
 
 #[test]
-fn pva_compressed_ntndarray_connects_without_a_value() {
-    // A compressed NTNDArray (non-empty codec.name) is not decompressed by
-    // sidm (PyDM does, via pva_codec — p4p_plugin_component.py:287-290): the
-    // channel connects and metadata flows, but the array data is skipped.
+fn pva_compressed_ntndarray_decodes_lz4_end_to_end() {
+    // NDPluginCodec's "lz4" output is one raw LZ4 block over the array
+    // bytes (NDPluginCodec.cpp:483); sidm decompresses it like PyDM's
+    // pva_codec (p4p_plugin_component.py:287-290). `codec.parameters` is
+    // left empty, so the original type falls back to the ubyte carrier
+    // (pva_codec.py:36-38) and the image lands as `Bytes`.
+    let img: Vec<u8> = (0..4096u32).map(|i| (i % 251) as u8).collect();
+    let compressed = lz4_flex::block::compress(&img);
+    let mut array = nd_array(NdArrayBuffer::UByte(compressed), "lz4");
+    array.uncompressed_size = img.len() as i64;
     let (engine, _server, _server_rt) = pva_engine(|source| {
         add_pv(
             source,
             "sidm:test:pva:imgz",
             nt_nd_array_desc(),
-            nt_nd_array_value(&nd_array(NdArrayBuffer::UByte(vec![9, 9]), "blosc")),
+            nt_nd_array_value(&array),
         );
     });
 
@@ -349,15 +355,44 @@ fn pva_compressed_ntndarray_connects_without_a_value() {
         .connect("pva://sidm:test:pva:imgz")
         .expect("connect compressed ntndarray channel");
     assert!(
+        wait_for(|| ch.read(|s| s.value.is_some()), Duration::from_secs(5)),
+        "compressed ntndarray never delivered a decoded value"
+    );
+    assert_eq!(
+        ch.read(|s| s.value.clone()),
+        Some(PvValue::Bytes(Arc::from(img.as_slice()))),
+        "decoded array must round-trip the original image bytes"
+    );
+}
+
+#[test]
+fn pva_undecodable_compressed_ntndarray_connects_without_a_value() {
+    // A compressed NTNDArray sidm cannot decode (here: a "blosc" payload
+    // too short to even hold a frame header) connects and flows metadata,
+    // but the value is skipped with a one-time warning — the documented
+    // deviation from PyDM, which emits the raw compressed bytes instead.
+    let (engine, _server, _server_rt) = pva_engine(|source| {
+        add_pv(
+            source,
+            "sidm:test:pva:imgbad",
+            nt_nd_array_desc(),
+            nt_nd_array_value(&nd_array(NdArrayBuffer::UByte(vec![9, 9]), "blosc")),
+        );
+    });
+
+    let ch = engine
+        .connect("pva://sidm:test:pva:imgbad")
+        .expect("connect compressed ntndarray channel");
+    assert!(
         wait_for(|| ch.is_connected(), Duration::from_secs(5)),
         "compressed ntndarray channel never connected"
     );
     // Give the monitor a moment to (wrongly) deliver a value if it were going
-    // to; the compressed data must never land.
+    // to; the undecodable data must never land.
     std::thread::sleep(Duration::from_millis(300));
     assert_eq!(
         ch.read(|s| s.value.clone()),
         None,
-        "compressed array data must be skipped, not decoded"
+        "undecodable compressed array data must be skipped, not delivered raw"
     );
 }
