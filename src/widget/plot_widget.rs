@@ -1033,8 +1033,11 @@ fn apply_interaction(
         }
         let delta = ui.input(|i| i.pointer.delta());
         if delta != egui::Vec2::ZERO {
-            let next = interaction::pan(base, area, delta, plot.x_scale, plot.y_scale);
-            commit(plot, next);
+            // Pan the whole view: silx `Pan.drag` shifts x, left-y, AND y2 in
+            // the same gesture (`PlotInteraction.py:260-335`).
+            let (next, next_y2) =
+                interaction::pan_view((base, plot.y2), area, delta, plot.x_scale, plot.y_scale);
+            commit(plot, next, next_y2);
         }
     }
 
@@ -1058,11 +1061,23 @@ fn apply_interaction(
             && area.contains(p)
         {
             let (cx, cy) = view.pixel_to_data(p);
+            // The y2 zoom centre is the same pixel mapped through the
+            // right-axis transform (silx `applyZoomToPlot`'s
+            // `pixelToData(cx, cy, axis="right")`, `_utils/panzoom.py:158-166`).
+            let cy2 = plot.transform_y2(area).map(|t| t.pixel_to_data(p).1);
             let factor = interaction::wheel_zoom_factor(scroll);
             // Push the pre-zoom view so zoom-back can step out of the wheel zoom.
             plot.push_limits();
-            let next = interaction::zoom_about(base, factor, cx, cy, plot.x_scale, plot.y_scale);
-            commit(plot, next);
+            let (next, next_y2) = interaction::zoom_view_about(
+                (base, plot.y2),
+                factor,
+                cx,
+                cy,
+                cy2,
+                plot.x_scale,
+                plot.y_scale,
+            );
+            commit(plot, next, next_y2);
         }
     }
 
@@ -1180,7 +1195,9 @@ fn apply_interaction(
                         plot.zoom_x_enabled(),
                         plot.zoom_y_enabled(),
                     );
-                    commit(plot, next);
+                    // Box zoom is left-axes-only by recorded scope decision
+                    // (roadmap row 1583); y2 threads through unchanged.
+                    commit(plot, next, plot.y2);
                 }
             }
         }
@@ -1529,30 +1546,36 @@ fn arrow_pan(plot: &mut Plot, dir: interaction::PanDirection) {
         Left | Right => {
             let x_factor = if dir == Right { FACTOR } else { -FACTOR };
             let (nx0, nx1) = interaction::apply_pan(x_min, x_max, x_factor, x_is_log);
-            commit(plot, (nx0, nx1, y_min, y_max));
+            commit(plot, (nx0, nx1, y_min, y_max), plot.y2);
         }
         Up | Down => {
             // silx flips the sign when the Y axis is displayed inverted.
             let sign = if plot.y_inverted { -1.0 } else { 1.0 };
             let y_factor = sign * if dir == Up { FACTOR } else { -FACTOR };
             let (ny0, ny1) = interaction::apply_pan(y_min, y_max, y_factor, y_is_log);
-            commit(plot, (x_min, x_max, ny0, ny1));
-            // y2 pans with the same factor (silx pans the right axis too).
-            if let Some((y2_min, y2_max)) = plot.y2 {
-                let (n2_0, n2_1) = interaction::apply_pan(y2_min, y2_max, y_factor, y_is_log);
-                if interaction::is_valid((x_min, x_max, n2_0, n2_1)) {
-                    plot.y2 = Some((n2_0, n2_1));
-                }
-            }
+            // y2 pans with the same factor (silx pans the right axis too), in
+            // the same single-owner commit as the left axes.
+            let next_y2 = plot
+                .y2
+                .map(|(lo, hi)| interaction::apply_pan(lo, hi, y_factor, y_is_log));
+            commit(plot, (x_min, x_max, ny0, ny1), next_y2);
         }
     }
 }
 
-/// Adopt `next` limits only if they are non-degenerate, otherwise keep the
-/// current ones (guards against a collapsed/inverted view). Clamps into the
+/// Adopt the next view — left/X `next` limits plus the full next right-axis
+/// range `next_y2` — only if it is non-degenerate, otherwise keep the current
+/// one (guards against a collapsed/inverted view). Clamps into the
 /// float32-safe range (silx `checkAxisLimits` after pan/zoom), then applies
 /// per-axis constraints, before the validity check.
-fn commit(plot: &mut Plot, next: interaction::Limits) {
+///
+/// The single owner through which every gesture (drag-pan, wheel zoom, box
+/// zoom, arrow-key pan) writes the view, so the left, right, and X axes can
+/// never diverge across gesture paths — silx funnels all of them through
+/// `PlotWidget.setLimits(xmin, xmax, ymin, ymax, y2min, y2max)`. `next_y2` is
+/// the *full* next right-axis range (`None` = the plot has no y2 axis), so
+/// callers without a y2 gesture thread `plot.y2` through unchanged.
+fn commit(plot: &mut Plot, next: interaction::Limits, next_y2: Option<(f64, f64)>) {
     // Clamp first so an extreme pan/zoom cannot push a bound past the
     // float32-safe window (silx `PlotInteraction.py:241-250`).
     let next = interaction::clamp_limits(
@@ -1569,6 +1592,11 @@ fn commit(plot: &mut Plot, next: interaction::Limits) {
     let constrained = (x0, x1, y0, y1);
     if interaction::is_valid(constrained) {
         plot.limits = constrained;
+        // The right axis adopts its own checked range in the same write (silx
+        // `setLimits` runs `_checkLimits` on y2 too, `PlotWidget.py:2705-2712`);
+        // the left-Y log flag drives its log lower bound as in silx.
+        plot.y2 = next_y2
+            .map(|(lo, hi)| interaction::clamp_axis_limits(lo, hi, plot.y_scale == Scale::Log10));
     }
 }
 
@@ -1872,6 +1900,82 @@ mod tests {
             on.limits, start,
             "wheel zooms normally when scroll_zoom is enabled"
         );
+    }
+
+    #[test]
+    fn wheel_zoom_scales_y2_with_left_axes() {
+        // silx `applyZoomToPlot` scales the right (y2) axis in the same wheel
+        // gesture, about the wheel centre mapped through the right axis
+        // (_utils/panzoom.py:132-176). The y2 span must shrink by the same
+        // ratio as the left Y span.
+        let ctx = egui::Context::default();
+        let mut plot = Plot::new(0);
+        plot.limits = (0.0, 10.0, 0.0, 10.0);
+        plot.y2 = Some((0.0, 100.0));
+        let screen = egui::vec2(200.0, 200.0);
+
+        let (_r0, area) = run_frame(&ctx, &mut plot, screen_input(screen));
+        let c = area.center();
+        let mut warm = screen_input(screen);
+        warm.events.push(egui::Event::PointerMoved(c));
+        let _ = run_frame(&ctx, &mut plot, warm);
+
+        let mut f = screen_input(screen);
+        f.events.push(egui::Event::PointerMoved(c));
+        f.events.push(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, 7.0),
+            phase: egui::TouchPhase::Move,
+            modifiers: egui::Modifiers::default(),
+        });
+        let _ = run_frame(&ctx, &mut plot, f);
+
+        let (_, _, y0, y1) = plot.limits;
+        let (a, b) = plot.y2.expect("y2 axis still present");
+        assert_ne!((a, b), (0.0, 100.0), "wheel zoom must scale y2");
+        // Same shrink ratio on both Y axes (the zoom factor is axis-agnostic).
+        let ratio_left = (y1 - y0) / 10.0;
+        let ratio_y2 = (b - a) / 100.0;
+        assert!(
+            (ratio_left - ratio_y2).abs() <= 1e-9,
+            "left {ratio_left} vs y2 {ratio_y2}"
+        );
+        assert!(ratio_left < 1.0, "scroll up zooms in");
+    }
+
+    #[test]
+    fn pan_drag_shifts_y2_with_left_axes() {
+        // silx `Pan.drag` (PlotInteraction.py:260-335) pans the right (y2)
+        // axis in the same gesture: a vertical drag shifts left Y and y2 by
+        // the same fraction of their spans.
+        let ctx = egui::Context::default();
+        let mut plot = Plot::new(0);
+        plot.limits = (0.0, 10.0, 0.0, 10.0);
+        plot.y2 = Some((0.0, 100.0));
+        let mode = PlotInteractionMode::Pan;
+        let screen = egui::vec2(200.0, 200.0);
+
+        let (_r0, area) = run_mode_frame(&ctx, &mut plot, mode, screen_input(screen));
+        let start = area.center();
+        let end = start + egui::vec2(0.0, 30.0); // straight down
+
+        let _ = run_mode_frame(&ctx, &mut plot, mode, press_at(screen, start));
+        let _ = run_mode_frame(&ctx, &mut plot, mode, move_to(screen, end));
+        let _ = run_mode_frame(&ctx, &mut plot, mode, release_at(screen, end));
+
+        let (_, _, y0, y1) = plot.limits;
+        let (a, b) = plot.y2.expect("y2 axis still present");
+        assert_ne!((a, b), (0.0, 100.0), "drag pan must shift y2");
+        // Spans preserved, both axes shifted by the same fraction.
+        assert!((b - a - 100.0).abs() <= 1e-9, "y2 span preserved: {a} {b}");
+        assert!((y1 - y0 - 10.0).abs() <= 1e-9, "left span preserved");
+        let frac_left = y0 / 10.0;
+        let frac_y2 = a / 100.0;
+        assert!(
+            (frac_left - frac_y2).abs() <= 1e-9,
+            "left {frac_left} vs y2 {frac_y2}"
+        );
+        assert!(frac_left > 0.0, "downward drag raises the data Y window");
     }
 
     #[test]

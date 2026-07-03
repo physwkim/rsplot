@@ -163,6 +163,75 @@ pub fn zoom_about(
     (new_x_min, new_x_max, new_y_min, new_y_max)
 }
 
+/// A full gesture view snapshot: the left/X `limits` plus the optional right
+/// (y2) axis range. This is the unit pan/zoom gestures operate on, mirroring
+/// the axes silx moves together (`Pan.drag` and `applyZoomToPlot` update x, y,
+/// and y2 in the same call, `PlotInteraction.py:260-335`,
+/// `_utils/panzoom.py:132-176`).
+pub type ViewLimits = (Limits, Option<(f64, f64)>);
+
+/// Translate the whole view — left axes *and* the right (y2) axis — by a
+/// screen-space drag delta, mirroring silx `Pan.drag`
+/// (`PlotInteraction.py:260-335`), which computes its own y2 delta via the
+/// right-axis pixel mapping (`pixelToData(x, y, axis="right")`) and shifts
+/// `y2Min/y2Max` in the same gesture.
+///
+/// The y2 shift applies the same pixel delta across the same axis extent; for
+/// the linear right axis this is exactly silx's `dy2 = y2Data - lastY2`. The
+/// left-Y `y_scale` drives the log math for y2 as well, matching silx (the
+/// right axis shares the left axis' scale there) and the existing arrow-pan /
+/// toolbar-zoom precedent (`plot_widget::arrow_pan`,
+/// `actions::control::apply_zoom`).
+pub fn pan_view(
+    view: ViewLimits,
+    area: Rect,
+    delta_px: Vec2,
+    x_scale: Scale,
+    y_scale: Scale,
+) -> ViewLimits {
+    let (limits, y2) = view;
+    let next = pan(limits, area, delta_px, x_scale, y_scale);
+    let h = area.height().max(1.0) as f64;
+    // Same flipped-Y convention as `pan`: a downward drag shifts the view up.
+    let next_y2 = y2.map(|(lo, hi)| pan_axis(lo, hi, -(delta_px.y as f64), h, y_scale));
+    (next, next_y2)
+}
+
+/// Scale the whole view — left axes *and* the right (y2) axis — about a fixed
+/// data point, mirroring silx `applyZoomToPlot` (`_utils/panzoom.py:132-176`):
+/// x and left-y scale about `(cx, cy)`, and y2 scales about `cy2`, the zoom
+/// centre pixel mapped through the *right-axis* transform (silx
+/// `plot.pixelToData(cx, cy, axis="right")`). The left-Y `y_scale` drives the
+/// y2 log flag exactly as silx passes `plot.getYAxis()._isLogarithmic()` for
+/// the right axis too. A `None` `cy2` (no right-axis transform this frame)
+/// leaves y2 unchanged.
+pub fn zoom_view_about(
+    view: ViewLimits,
+    factor: f64,
+    cx: f64,
+    cy: f64,
+    cy2: Option<f64>,
+    x_scale: Scale,
+    y_scale: Scale,
+) -> ViewLimits {
+    let (limits, y2) = view;
+    let next = zoom_about(limits, factor, cx, cy, x_scale, y_scale);
+    // silx `scale` is the reciprocal of our span-shrink `factor` (see
+    // [`zoom_about`]).
+    let silx_scale = 1.0 / factor;
+    let next_y2 = match (y2, cy2) {
+        (Some((lo, hi)), Some(c)) => Some(scale1d_range(
+            lo,
+            hi,
+            c,
+            silx_scale,
+            y_scale == Scale::Log10,
+        )),
+        (y2, _) => y2,
+    };
+    (next, next_y2)
+}
+
 /// Pan a single axis range by `pan_factor` (a signed proportion of the range),
 /// mirroring silx `applyPan` (`_utils/panzoom.py`). This is the arrow-key /
 /// programmatic pan path (distinct from the mouse-drag [`pan`]). For a log axis
@@ -1993,6 +2062,101 @@ mod tests {
             (fy_before - fy_after).abs() <= 1e-9,
             "y {fy_before} {fy_after}"
         );
+    }
+
+    #[test]
+    fn pan_view_shifts_y2_in_the_same_gesture() {
+        // silx `Pan.drag` (PlotInteraction.py:260-335) shifts the right (y2)
+        // axis in the same gesture, by the same pixel delta through its own
+        // range. Drag 10px down on a 100px-high area: left y [0,10] shifts +1,
+        // y2 [0,100] shifts +10 (both by 10% of their span).
+        let (out, y2) = pan_view(
+            ((0.0, 10.0, 0.0, 10.0), Some((0.0, 100.0))),
+            area_100(),
+            vec2(0.0, 10.0),
+            Scale::Linear,
+            Scale::Linear,
+        );
+        assert!(close(out, (0.0, 10.0, 1.0, 11.0)), "{out:?}");
+        let (lo, hi) = y2.expect("y2 present");
+        assert!(
+            (lo - 10.0).abs() <= 1e-9 && (hi - 110.0).abs() <= 1e-9,
+            "{lo} {hi}"
+        );
+    }
+
+    #[test]
+    fn pan_view_without_y2_axis_stays_none() {
+        // No right axis: the view pans exactly like `pan` and y2 stays absent.
+        let (out, y2) = pan_view(
+            ((0.0, 10.0, 0.0, 10.0), None),
+            area_100(),
+            vec2(10.0, 0.0),
+            Scale::Linear,
+            Scale::Linear,
+        );
+        assert!(close(out, (-1.0, 9.0, 0.0, 10.0)), "{out:?}");
+        assert_eq!(y2, None);
+    }
+
+    #[test]
+    fn zoom_view_about_scales_y2_about_right_axis_centre() {
+        // silx `applyZoomToPlot` (_utils/panzoom.py:132-176) scales y2 about
+        // the zoom centre mapped through the right axis. Shrink to half span
+        // about the middle of both axes: left y [0,10] -> [2.5,7.5], y2
+        // [0,100] about 50 -> [25,75].
+        let (out, y2) = zoom_view_about(
+            ((0.0, 10.0, 0.0, 10.0), Some((0.0, 100.0))),
+            0.5,
+            5.0,
+            5.0,
+            Some(50.0),
+            Scale::Linear,
+            Scale::Linear,
+        );
+        assert!(close(out, (2.5, 7.5, 2.5, 7.5)), "{out:?}");
+        let (lo, hi) = y2.expect("y2 present");
+        assert!(
+            (lo - 25.0).abs() <= 1e-9 && (hi - 75.0).abs() <= 1e-9,
+            "{lo} {hi}"
+        );
+    }
+
+    #[test]
+    fn zoom_view_about_keeps_y2_anchor_fraction_fixed() {
+        // The y2 anchor keeps its fractional position within the y2 range,
+        // exactly like the left axes' anchor (silx scale1DRange invariant).
+        let y2_before = (0.0, 100.0);
+        let cy2 = 80.0;
+        let (_, y2) = zoom_view_about(
+            ((0.0, 10.0, 0.0, 10.0), Some(y2_before)),
+            0.3,
+            5.0,
+            5.0,
+            Some(cy2),
+            Scale::Linear,
+            Scale::Linear,
+        );
+        let (lo, hi) = y2.expect("y2 present");
+        let frac_before = (cy2 - y2_before.0) / (y2_before.1 - y2_before.0);
+        let frac_after = (cy2 - lo) / (hi - lo);
+        assert!((frac_before - frac_after).abs() <= 1e-9, "{lo} {hi}");
+    }
+
+    #[test]
+    fn zoom_view_about_without_centre_leaves_y2_unchanged() {
+        // No right-axis transform this frame (`cy2 == None`): y2 unchanged.
+        let (out, y2) = zoom_view_about(
+            ((0.0, 10.0, 0.0, 10.0), Some((0.0, 100.0))),
+            0.5,
+            5.0,
+            5.0,
+            None,
+            Scale::Linear,
+            Scale::Linear,
+        );
+        assert!(close(out, (2.5, 7.5, 2.5, 7.5)), "{out:?}");
+        assert_eq!(y2, Some((0.0, 100.0)));
     }
 
     #[test]
