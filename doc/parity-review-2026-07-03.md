@@ -1377,6 +1377,16 @@ into main):
   `lower_limit`/`enum_string` extras, float auto-precision (digit count
   capped 8) on init and every float put.
 
+**Round 2 fix batch (structural clusters first; one commit per finding;
+on `main`):**
+
+- R2-1 — `9921117` ImageStack autoscales each frame to its own data
+  (minmax) with the default gray colormap, via a split-out
+  `frame_colormap()` helper (base LUT/normalization preserved, range
+  re-derived); no more frozen `viridis(0.0, 1.0)`. Completes the R1-16
+  default-colormap family at the ImageStack site. Regression tests:
+  range tracks frame data (not the stored span), uniform frame → (v, v).
+
 ## Review Log
 
 - 2026-07-03: round opened; 5 read-only agents spawned (A/B/C/D/E).
