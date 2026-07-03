@@ -58,6 +58,7 @@ pub struct SidmScaleIndicator {
     num_divisions: u32,
     orientation: Orientation,
     inverted_appearance: bool,
+    origin_at_center: bool,
     bar_indicator: bool,
     show_value_label: bool,
     precision: Option<i32>,
@@ -77,6 +78,7 @@ impl SidmScaleIndicator {
             num_divisions: DEFAULT_NUM_DIVISIONS,
             orientation: Orientation::Horizontal,
             inverted_appearance: false,
+            origin_at_center: false,
             bar_indicator: false,
             show_value_label: true,
             precision: None,
@@ -115,6 +117,17 @@ impl SidmScaleIndicator {
     /// (`:973-988`).
     pub fn with_inverted_appearance(mut self, inverted: bool) -> Self {
         self.inverted_appearance = inverted;
+        self
+    }
+
+    /// Fill the bar from the scale's geometric midpoint instead of its origin
+    /// edge (builder style; MEDM bar `fillmod="from center"`). The C widget
+    /// anchors the fill at `mid = len/2` — the CENTRE of the widget, not the
+    /// value-zero position (`xc/BarGraph.c:911,921-988`), which is where this
+    /// deliberately differs from PyDM `QScale.originAtZero`. Only the bar
+    /// indicator uses the origin; the pointer is a single position.
+    pub fn with_origin_at_center(mut self, center: bool) -> Self {
+        self.origin_at_center = center;
         self
     }
 
@@ -248,7 +261,7 @@ impl SidmScaleIndicator {
         // grows from the opposite edge (xc/BarGraph.c XcVertDown/XcHorizLeft).
         if self.bar_indicator {
             painter.rect_filled(
-                self.bar_rect(rect, self.pos(0.0), self.pos(p), horizontal),
+                self.bar_rect(rect, self.pos(self.fill_origin()), self.pos(p), horizontal),
                 egui::CornerRadius::ZERO,
                 bar_color,
             );
@@ -262,6 +275,14 @@ impl SidmScaleIndicator {
     /// appearance is inverted.
     fn pos(&self, q: f64) -> f64 {
         if self.inverted_appearance { 1.0 - q } else { q }
+    }
+
+    /// The bar fill's origin proportion: the geometric midpoint under
+    /// "from center" (`xc/BarGraph.c:911` `mid = len/2`), else the origin
+    /// edge. `pos(0.5) == 0.5` under inversion too, matching the C's XcCenter
+    /// arms in all four orientations.
+    fn fill_origin(&self) -> f64 {
+        if self.origin_at_center { 0.5 } else { 0.0 }
     }
 
     /// Endpoints of the cross-axis line at drawn proportion `p` along the main
@@ -355,5 +376,38 @@ mod tests {
         // The pointer position mirrors the same way.
         let (a, _) = scale.axis_line(h_rect, scale.pos(0.25), true);
         assert_eq!(a.x, 75.0);
+    }
+
+    #[test]
+    fn origin_at_center_fills_between_midpoint_and_value() {
+        let engine = Engine::new();
+        let scale = SidmScaleIndicator::new(&engine, "loc://scale_center")
+            .expect("connect")
+            .with_bar_indicator(true);
+        // Default: the fill anchors on the origin edge.
+        assert_eq!(scale.fill_origin(), 0.0);
+        let scale = scale.with_origin_at_center(true);
+        assert_eq!(scale.fill_origin(), 0.5);
+
+        let rect = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(100.0, 10.0));
+        // MEDM XcCenter (BarGraph.c:956-971): below the midpoint fills
+        // [value, mid]; above fills [mid, value] — anchored at len/2, not at
+        // the value-zero position.
+        let origin = scale.pos(scale.fill_origin());
+        let below = scale.bar_rect(rect, origin, scale.pos(0.25), true);
+        assert_eq!((below.min.x, below.max.x), (25.0, 50.0));
+        let above = scale.bar_rect(rect, origin, scale.pos(0.75), true);
+        assert_eq!((above.min.x, above.max.x), (50.0, 75.0));
+        // At the midpoint the bar is empty (KE's .49 rounding note: no bar at
+        // the centre value).
+        let at_mid = scale.bar_rect(rect, origin, scale.pos(0.5), true);
+        assert_eq!(at_mid.width(), 0.0);
+
+        // Center + inverted (XcHorizLeft/XcCenter, BarGraph.c:973-986): the
+        // same span mirrors, still anchored on the midpoint.
+        let scale = scale.with_inverted_appearance(true);
+        let origin = scale.pos(scale.fill_origin());
+        let below = scale.bar_rect(rect, origin, scale.pos(0.25), true);
+        assert_eq!((below.min.x, below.max.x), (50.0, 75.0));
     }
 }

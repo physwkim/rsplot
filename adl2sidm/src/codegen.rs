@@ -886,15 +886,21 @@ fn emit_scale_indicator(
     if let Some(prec) = precision_default_builder(widget) {
         builders.push(prec);
     }
-    // A `bar`'s value label follows the MEDM decoration `label`: it shows only
-    // for `limits`/`channel` (adl2pydm's `showValue`), unlike `SidmScaleIndicator`
-    // which shows it by default. `indicator`/`meter` keep the default.
-    if bar {
-        let label = widget.assignments.get("label").map(String::as_str);
-        let show_value = matches!(label, Some("limits") | Some("channel"));
-        if !show_value {
-            builders.push(".with_value_label(false)".to_string());
-        }
+    // A bar's `fillmod="from center"` anchors the fill on the scale midpoint
+    // (medmBar.c:496-502 parses the token; xc/BarGraph.c fills between
+    // mid = len/2 and the value). Bar-only: indicator/meter have no fillmod.
+    if bar && widget.assignments.get("fillmod").map(String::as_str) == Some("from center") {
+        builders.push(".with_origin_at_center(true)".to_string());
+    }
+    // The value label follows the MEDM decoration `label` on ALL THREE scale
+    // monitors, not just the bar: valueVisible is TRUE only for
+    // `limits`/`channel` (bar medmBar.c:132-150, indicator
+    // medmIndicator.c:122-140, meter medmMeter.c:134-148; adl2pydm's
+    // `showValue`), unlike `SidmScaleIndicator` which shows it by default.
+    let label = widget.assignments.get("label").map(String::as_str);
+    let show_value = matches!(label, Some("limits") | Some("channel"));
+    if !show_value {
+        builders.push(".with_value_label(false)".to_string());
     }
     push_channel_widget(
         b,
@@ -5339,8 +5345,32 @@ indicator {
                 .contains(".with_orientation(Orientation::Vertical)")
         );
         assert!(g.source.contains(".with_precision(1)"));
-        // label="limits" -> value label shown, so NO with_value_label(false).
-        assert!(!g.source.contains(".with_value_label(false)"));
+        // label="limits" -> value label shown, so the BAR's chain has no
+        // with_value_label(false) (the label-less meter/indicator do).
+        let bar_ctor = g
+            .source
+            .split("SidmScaleIndicator::new(&engine, \"ca://BAR\")")
+            .nth(1)
+            .and_then(|rest| rest.split(';').next())
+            .expect("bar ctor");
+        assert!(
+            !bar_ctor.contains(".with_value_label(false)"),
+            "label=\"limits\" must keep the value label:\n{bar_ctor}"
+        );
+    }
+
+    #[test]
+    fn label_less_meter_and_indicator_hide_the_value_label() {
+        // R1-39: valueVisible is TRUE only for label="limits"/"channel" on ALL
+        // three scale monitors (medmIndicator.c:122-140, medmMeter.c:134-148),
+        // not just the bar. SCALES' meter and indicator carry no label.
+        let g = scales();
+        assert_eq!(
+            g.source.matches(".with_value_label(false)").count(),
+            2,
+            "meter + indicator must both hide the value label:\n{}",
+            g.source
+        );
     }
 
     #[test]
@@ -5425,6 +5455,44 @@ bar {
             g.source.contains(".with_value_label(false)"),
             "{}",
             g.source
+        );
+    }
+
+    #[test]
+    fn bar_fillmod_from_center_anchors_the_fill_on_the_midpoint() {
+        let adl = r#"
+"color map" {
+	colors {
+		ffffff,
+	}
+}
+bar {
+	object {
+		x=0
+		y=0
+		width=100
+		height=20
+	}
+	monitor {
+		chan="CTR"
+	}
+	fillmod="from center"
+}
+"#;
+        let g = generate(&parse(adl), &Options::default());
+        // fillmod="from center" (medmBar.c:496-502) -> origin-at-center fill
+        // (xc/BarGraph.c anchors at mid = len/2).
+        assert!(
+            g.source.contains(".with_origin_at_center(true)"),
+            "{}",
+            g.source
+        );
+        // The default "from edge" (and absence) must not emit the builder:
+        // SCALES' bar has no fillmod.
+        assert!(
+            !scales().source.contains(".with_origin_at_center"),
+            "{}",
+            scales().source
         );
     }
 
