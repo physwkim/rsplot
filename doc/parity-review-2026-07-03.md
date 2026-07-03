@@ -1386,6 +1386,43 @@ on `main`):**
   re-derived); no more frozen `viridis(0.0, 1.0)`. Completes the R1-16
   default-colormap family at the ImageStack site. Regression tests:
   range tracks frame data (not the stored span), uniform frame → (v, v).
+- R2-23 — `3bde59a` ComplexImageView now holds one persistent gray base
+  colormap shared across the non-phase scalar modes (silx binds a single
+  ColormapMixIn colormap), with a `colormap()`/`set_colormap()` surface;
+  each image's range is derived through the new normalization-aware
+  `Colormap::autoscaled()` core primitive instead of a hardcoded viridis
+  + the (removed) non-normalization-aware `finite_range`. Phase keeps its
+  fixed hsv colormap. Regression tests: `Colormap::autoscaled` preserves
+  LUT/nan/normalization while replacing range, and honors log
+  normalization for the derived bound.
+- R2-46 (palette half) — `61b2872` the six plot3d item constructors
+  (Scatter3D/Scatter2D/ColormapMesh3D/ImageData3D/HeightMapData/CutPlane)
+  and CompareImages now default to gray, not viridis — the R1-16 family
+  sweep across the last seven `Colormap::viridis(0.0, 1.0)`-at-
+  construction sites. **Autoscale-follows-data half NOT closed** — see
+  UNFIXED below; it needs the autoscale-representability model decision
+  and would otherwise clobber the explicit ranges examples pin via
+  `with_colormap(Colormap::new(name, -0.5, 1.0))`.
+
+**UNFIXED / deferred — autoscale-representability cluster (needs a model
+decision before the autoscale-follows-data half of R2-1..R2-46 can
+close uniformly):**
+
+- The shared root of R2-14 (per-bound autoscale), R2-46's second half,
+  and the pin-gap left open by the R2-1/R2-23 "always autoscale on
+  rebuild" fixes is that `Colormap` carries plain `f64` vmin/vmax with no
+  way to express silx's `None`-means-autoscale-this-bound contract.
+  Consequences today: R2-1/R2-23 autoscale unconditionally (correct for
+  the default, but a user cannot pin a range — they get re-derived on
+  every rebuild); the six 3D items + CompareImages cannot autoscale on
+  `set_data` at all without clobbering the explicit ranges callers pin
+  via `with_colormap`/`set_images`. Closing this needs either
+  `Colormap { vmin: Option<f64>, vmax: Option<f64> }` resolved against
+  item data at apply time (silx-faithful, closes R2-14 per-bound too,
+  large blast radius across every color_at/GPU-upload/dialog/
+  construction site) or a per-consumer autoscale flag (lighter, does not
+  close R2-14's per-bound half). Surfaced for sign-off; not chosen
+  unilaterally.
 
 ## Review Log
 
