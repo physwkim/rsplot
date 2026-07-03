@@ -12,11 +12,38 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use epics_pva_rs::FieldDesc;
+use epics_pva_rs::nt::nd_array::{
+    NdAlarm, NdArrayBuffer, NdCodec, NdDimension, NdTimeStamp, NtNdArray, nt_nd_array_desc,
+    nt_nd_array_value,
+};
 use epics_pva_rs::nt::{NTEnum, NTScalar, NTTable};
 use epics_pva_rs::pvdata::ScalarType;
 use epics_pva_rs::server_native::{PvaServer, SharedPV, SharedSource};
 use epics_pva_rs::{PvField, PvStructure, ScalarValue};
 use sidm::{Engine, PvValue, PvaPlugin};
+
+/// A minimal NTNDArray carrying `buffer` with the given codec name.
+fn nd_array(buffer: NdArrayBuffer, codec: &str) -> NtNdArray {
+    let size = (buffer.len() * buffer.element_size_bytes()) as i64;
+    NtNdArray {
+        dimension: vec![NdDimension {
+            size: buffer.len() as i32,
+            ..NdDimension::default()
+        }],
+        value: buffer,
+        codec: NdCodec {
+            name: codec.to_owned(),
+            parameters: None,
+        },
+        compressed_size: size,
+        uncompressed_size: size,
+        unique_id: 1,
+        data_time_stamp: NdTimeStamp::default(),
+        alarm: NdAlarm::default(),
+        time_stamp: NdTimeStamp::default(),
+        attribute: Vec::new(),
+    }
+}
 
 /// Poll `cond` until it holds or `timeout` elapses; returns the final result.
 fn wait_for(mut cond: impl FnMut() -> bool, timeout: Duration) -> bool {
@@ -271,5 +298,66 @@ fn pva_rpc_address_calls_the_function_and_publishes_the_result() {
     assert!(
         ch.is_connected(),
         "RPC result must mark the channel connected"
+    );
+}
+
+#[test]
+fn pva_ntndarray_ubyte_image_lands_as_bytes() {
+    // An areaDetector-style NTNDArray: `value` is a union of typed arrays.
+    // The selected ubyte variant must land as PvValue::Bytes — PyDM emits the
+    // (already unwrapped) ndarray (p4p_plugin_component.py:286-290).
+    let (engine, _server, _server_rt) = pva_engine(|source| {
+        add_pv(
+            source,
+            "sidm:test:pva:img",
+            nt_nd_array_desc(),
+            nt_nd_array_value(&nd_array(NdArrayBuffer::UByte(vec![1, 2, 3, 4]), "")),
+        );
+    });
+
+    let ch = engine
+        .connect("pva://sidm:test:pva:img")
+        .expect("connect ntndarray channel");
+    assert!(
+        wait_for(
+            || matches!(
+                ch.read(|s| s.value.clone()),
+                Some(PvValue::Bytes(b)) if b.as_ref() == [1, 2, 3, 4]
+            ),
+            Duration::from_secs(5)
+        ),
+        "did not observe the ubyte image as Bytes([1,2,3,4]) (got {:?})",
+        ch.read(|s| s.value.clone())
+    );
+}
+
+#[test]
+fn pva_compressed_ntndarray_connects_without_a_value() {
+    // A compressed NTNDArray (non-empty codec.name) is not decompressed by
+    // sidm (PyDM does, via pva_codec — p4p_plugin_component.py:287-290): the
+    // channel connects and metadata flows, but the array data is skipped.
+    let (engine, _server, _server_rt) = pva_engine(|source| {
+        add_pv(
+            source,
+            "sidm:test:pva:imgz",
+            nt_nd_array_desc(),
+            nt_nd_array_value(&nd_array(NdArrayBuffer::UByte(vec![9, 9]), "blosc")),
+        );
+    });
+
+    let ch = engine
+        .connect("pva://sidm:test:pva:imgz")
+        .expect("connect compressed ntndarray channel");
+    assert!(
+        wait_for(|| ch.is_connected(), Duration::from_secs(5)),
+        "compressed ntndarray channel never connected"
+    );
+    // Give the monitor a moment to (wrongly) deliver a value if it were going
+    // to; the compressed data must never land.
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(
+        ch.read(|s| s.value.clone()),
+        None,
+        "compressed array data must be skipped, not decoded"
     );
 }

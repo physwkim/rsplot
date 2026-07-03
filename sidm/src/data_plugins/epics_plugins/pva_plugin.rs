@@ -228,6 +228,9 @@ async fn run_channel(
                 mask_connected: false,
                 mask_disconnected: false,
             };
+            // Warn once per connection about a compressed NTNDArray codec.
+            let mut warned_codec = false;
+            let pv_cb = pv.clone();
             let callback = move |ev: MonitorEvent| match ev {
                 MonitorEvent::Connected { .. } => writer.update(|s| {
                     s.connected = true;
@@ -254,6 +257,25 @@ async fn run_channel(
                     // against) — always a value event, like PyDM's first
                     // callback after `clear_cache`.
                     let value_changed = value_marked(marked.as_ref());
+                    // A non-empty codec name marks a compressed NTNDArray.
+                    // PyDM decompresses it (`decompress(value)` via
+                    // pva_codec, p4p_plugin_component.py:287-290); sidm
+                    // supports uncompressed arrays only, so the value is
+                    // skipped (metadata still flows) with a one-time warning.
+                    if let Some(codec) =
+                        string_field(&value, "codec.name").filter(|n| !n.is_empty())
+                    {
+                        if !warned_codec {
+                            warned_codec = true;
+                            log::warn!(
+                                "pva://{pv_cb}: compressed NTNDArray codec {codec:?} is \
+                                 not supported (PyDM decompresses via pva_codec); \
+                                 ignoring the array data"
+                            );
+                        }
+                        writer.update(move |s| apply_nt_metadata(s, &value));
+                        return;
+                    }
                     let sf = subfield.clone();
                     if value_changed {
                         writer.post_value(move |s| apply_ntscalar(s, &value, &sf));
@@ -588,7 +610,7 @@ fn value_marked(marked: Option<&std::collections::HashSet<String>>) -> bool {
 /// not resolve the value is left untouched (PyDM logs the same condition as
 /// an exception and emits nothing).
 fn apply_ntscalar(s: &mut ChannelState, root: &PvField, subfield: &[String]) {
-    s.connected = true;
+    apply_nt_metadata(s, root);
     let extracted = field(root, "value").and_then(|v| {
         if subfield.is_empty() {
             return value_to_pv(v);
@@ -607,6 +629,14 @@ fn apply_ntscalar(s: &mut ChannelState, root: &PvField, subfield: &[String]) {
             subfield.join("/")
         );
     }
+}
+
+/// The metadata half of [`apply_ntscalar`]: `connected`, alarm severity,
+/// timestamp, enum choices, display/control/valueAlarm metadata — everything
+/// except the value. Used alone when a compressed NTNDArray's data must be
+/// skipped while its alarm/timestamp still flow.
+fn apply_nt_metadata(s: &mut ChannelState, root: &PvField) {
+    s.connected = true;
     if let Some(sev) = scalar_field(root, "alarm.severity").and_then(scalar_i64) {
         // `from_epics` maps 0/1/2 and clamps everything else to INVALID; clamp
         // the signed wire value into its `u16` domain first.
@@ -761,6 +791,20 @@ fn value_to_pv(value: &PvField) -> Option<PvValue> {
                 .and_then(string_array_vec)
                 .and_then(|c| c.get(usize::from(index)).map(|s| Arc::from(s.as_str())));
             Some(PvValue::Enum { index, label })
+        }
+        // NTNDArray (and any union-typed value): the selected variant is the
+        // real value — unwrap and recurse. p4p hands PyDM the union already
+        // unwrapped (send_new_value sees a plain ndarray and emits it,
+        // p4p_plugin_component.py:286-290); a ubyte image lands as
+        // `PvValue::Bytes` via the array paths above. `selector == -1` is a
+        // null union (no variant selected) — no value.
+        PvField::Union {
+            selector, value, ..
+        } => {
+            if *selector < 0 {
+                return None;
+            }
+            value_to_pv(value)
         }
         _ => None,
     }
@@ -1407,5 +1451,44 @@ mod tests {
         let mut s = ChannelState::default();
         apply_ntscalar(&mut s, &root, &["nope".to_owned()]);
         assert_eq!(s.value, None);
+    }
+
+    #[test]
+    fn union_value_unwraps_the_selected_variant() {
+        // An NTNDArray's `value` is a union of typed arrays
+        // (nt/nd_array.rs); the selected variant is the real value. A ubyte
+        // image maps to Bytes like every other u8 waveform.
+        let union = PvField::Union {
+            selector: 5,
+            variant_name: "ubyteValue".to_owned(),
+            value: Box::new(PvField::ScalarArrayTyped(TypedScalarArray::UByte(
+                Arc::from([1u8, 2, 3, 4].as_slice()),
+            ))),
+        };
+        assert_eq!(
+            value_to_pv(&union),
+            Some(PvValue::Bytes(Arc::from([1u8, 2, 3, 4].as_slice())))
+        );
+
+        // A double-array variant maps to a float waveform.
+        let union = PvField::Union {
+            selector: 10,
+            variant_name: "doubleValue".to_owned(),
+            value: Box::new(PvField::ScalarArrayTyped(TypedScalarArray::Double(
+                Arc::from([0.5, 1.5].as_slice()),
+            ))),
+        };
+        assert_eq!(
+            value_to_pv(&union),
+            Some(PvValue::FloatArray(Arc::from([0.5, 1.5].as_slice())))
+        );
+
+        // A null union (selector -1, no variant selected) has no value.
+        let union = PvField::Union {
+            selector: -1,
+            variant_name: String::new(),
+            value: Box::new(PvField::Null),
+        };
+        assert_eq!(value_to_pv(&union), None);
     }
 }
