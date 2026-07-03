@@ -496,6 +496,48 @@ into main):
   −12·direction, second viewport+scissor pass top-right 100×100 px, on
   by default, `set_orientation_indicator_visible`.
 
+**Category E batch (`fix/adl2sidm`, cherry-picked onto main at `57ceb01`,
++ follow-up `dec7568`):**
+
+- R1-33 — `cc278de` `calc://` gains a `dialect=medm` mode evaluated by
+  `epics_base_rs::calc` (the libCom postfix/calcPerform port — grammar
+  superset of medmCalc.c, double-typed throughout, so `A=0` on a Float
+  channel is finally true at 0.0); children bind scalar-or-0.0; E–L
+  operand metadata from the first channel; invalid expressions fail
+  VISIBLE (publish 1.0 + warn once — deliberate deviation from MEDM's
+  hide, fail-safe for operator screens). *Residual:* the `I` (alarm
+  status-code) operand binds 0.0 — ChannelState carries no status code.
+- R1-34 — `08bfbd6` visibility gates carry the ORIGINAL MEDM CALC
+  verbatim under `dialect=medm` (only %/& percent-encoded); the lossy
+  `translate_calc_to_evalexpr` table and the `&` bail-out are deleted —
+  closes the whole translation-gap family (functions, ternary, `**`,
+  bitwise keywords, lowercase and E–L operands).
+- R1-35 — `5de60ea` old-format `ctrl`/`rdbk` channel keys accepted
+  (medmControl.c:36-37, medmMonitor.c:77-78).
+- R1-36 — `0d7f3ab` plotcom title/labels/colours + cartesian
+  user-specified axis ranges reach the three sidm plots via new
+  builders; `set_x_range` added beside `set_y_range` (one owner shared
+  with plot_menu); non-portable rangeStyles warn.
+- R1-37 — `68d0657` valuator up/down → vertical slider
+  (`SidmSlider::with_orientation`); bar down/left →
+  `with_inverted_appearance`; indicator keeps MEDM's own down→up/
+  left→right override. *Residual:* valuator down/left max-end reversal
+  warn-only (no slider surface in sidm or PyDM).
+- R1-38 — `3156be9` absent sbit/ebit default 15/0 (medmByte.c:279-280)
+  → stock bytes render 16 bits MSB-first; ALSO fixed the inverted
+  endianness mapping vs xc/Byte.c:513-519 (`sbit > ebit` → MSB-first) —
+  adl2pydm has both bugs; MEDM C is the contract.
+- R1-39 — `bca110b` value-label suppression (label ∉ {limits,channel})
+  now uniform across bar/indicator/meter; `fillmod="from center"` →
+  `SidmScaleIndicator::with_origin_at_center` (geometric-midpoint
+  anchor per BarGraph.c, deliberately NOT PyDM's value-zero
+  originAtZero).
+- R1-40 — `57ceb01` row-stacked choice buttons size fonts from
+  per-button height `h / max(2, round(h/20))`.
+- follow-up — `dec7568` cfg-gate the R1-30 read-only env helpers to the
+  ca/pva features (dead code under adl2sidm's default-features=false
+  sidm build).
+
 **Category D batch (`fix/sidm`, merged at `e4ed898`):**
 
 - R1-25 — `e19bf21` pva Connected publishes `write_access = true`
