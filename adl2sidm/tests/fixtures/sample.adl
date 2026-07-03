@@ -202,6 +202,13 @@ image {
 		width=380
 		height=110
 	}
+	plotcom {
+		title="Readback Trend"
+		xlabel="Time (s)"
+		ylabel="Volts"
+		clr=1
+		bclr=0
+	}
 	period=60
 	units="second"
 	pen[0] {
@@ -216,7 +223,27 @@ image {
 		width=380
 		height=110
 	}
+	plotcom {
+		title="Waveform"
+		xlabel="Index"
+		ylabel="Counts"
+		clr=1
+		bclr=0
+	}
 	count=1000
+	x_axis {
+		rangeStyle="user-specified"
+		minRange=0.000000
+		maxRange=100.000000
+	}
+	y1_axis {
+		rangeStyle="user-specified"
+		minRange=-5.000000
+		maxRange=5.000000
+	}
+	y2_axis {
+		rangeStyle="auto-scale"
+	}
 	trace[0] {
 		xdata="$(P)xwave"
 		ydata="$(P)ywave"

@@ -43,7 +43,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use siplot::egui::Color32;
 use siplot::egui_wgpu::RenderState;
-use siplot::{DataMargins, ItemHandle, Plot1D, PlotId, PlotResponse, TickMode, TimeZone, egui};
+use siplot::{
+    DataMargins, ItemHandle, Plot1D, PlotId, PlotResponse, TickMode, TimeZone, YAxis, egui,
+};
 
 use crate::channel::{Channel, ChannelState, PvValue, ValueEvent, ValueSubscription};
 use crate::engine::{Engine, EngineError};
@@ -370,6 +372,50 @@ impl SidmTimePlot {
     /// [`Self::with_crosshair`].
     pub fn set_crosshair(&mut self, enabled: bool) {
         self.plot.plot_mut().crosshair = enabled;
+    }
+
+    /// Set the plot title (builder style; PyDM `BasePlot.setPlotTitle`, MEDM
+    /// `plotcom` `title`).
+    pub fn with_title(mut self, title: &str) -> Self {
+        self.plot.set_graph_title(title);
+        self
+    }
+
+    /// Set the X-axis label (builder style; PyDM `xLabels`, MEDM `plotcom`
+    /// `xlabel`). Overrides the [`TimeAxisMode`] default label, so apply this
+    /// AFTER [`Self::with_time_axis_mode`] when combining the two.
+    pub fn with_x_label(mut self, label: &str) -> Self {
+        self.plot.set_graph_x_label(label);
+        self
+    }
+
+    /// Set the left Y-axis label (builder style; PyDM `yLabels`, MEDM
+    /// `plotcom` `ylabel`).
+    pub fn with_y_label(mut self, label: &str) -> Self {
+        self.plot.set_graph_y_label(label, YAxis::Left);
+        self
+    }
+
+    /// Pin a fixed Y range, disabling live Y autoscale (builder style; PyDM
+    /// `setAutoRangeY(False)` + `setMinYRange`/`setMaxYRange`). Same rule as
+    /// the Y-axis context menu's manual range.
+    pub fn with_y_range(mut self, min: f64, max: f64) -> Self {
+        set_y_range(&mut self.plot, min, max);
+        self
+    }
+
+    /// Set the axis/label/title foreground colour, grid lines included
+    /// (builder style; PyDM `BasePlot.setAxisColor`, MEDM `plotcom` `clr`).
+    pub fn with_axis_color(mut self, color: Color32) -> Self {
+        self.plot.set_foreground_colors(color, color);
+        self
+    }
+
+    /// Set the plot background colour, data area included (builder style; PyDM
+    /// `BasePlot.setBackgroundColor`, MEDM `plotcom` `bclr`).
+    pub fn with_background_color(mut self, color: Color32) -> Self {
+        self.plot.set_background_colors(color, color);
+        self
     }
 
     /// Whether the hover crosshair + `(x, y)` readout is enabled.

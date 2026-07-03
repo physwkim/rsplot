@@ -105,9 +105,9 @@ impl Screen {
             .with_placeholder_channel();
         let w14 = SidmImage::new("logo.gif")
             .with_size(egui::Vec2::new(80.0, 24.0));
-        let mut w15 = SidmTimePlot::new(rs, __plot_base).with_time_span(60.0);
+        let mut w15 = SidmTimePlot::new(rs, __plot_base).with_time_span(60.0).with_title("Readback Trend").with_x_label("Time (s)").with_y_label("Volts").with_axis_color(Color32::from_rgb(0, 0, 0)).with_background_color(Color32::from_rgb(255, 255, 255));
         w15.add_channel(&engine, "ca://DMM1:readback", Color32::from_rgb(0, 0, 255), "DMM1:readback").expect("adl2sidm: add strip-chart curve DMM1:readback");
-        let mut w16 = SidmWaveformPlot::new(rs, __plot_base + 1);
+        let mut w16 = SidmWaveformPlot::new(rs, __plot_base + 1).with_title("Waveform").with_x_label("Index").with_y_label("Counts").with_x_range(0.0, 100.0).with_y_range(-5.0, 5.0).with_axis_color(Color32::from_rgb(0, 0, 0)).with_background_color(Color32::from_rgb(255, 255, 255));
         w16.add_xy_channel(&engine, "ca://DMM1:ywave", Some("ca://DMM1:xwave"), Color32::from_rgb(255, 0, 0), "curve 1").expect("adl2sidm: add waveform curve 1");
         let w17 = SidmFrame::new(&engine, "loc://adl2sidm_frame_2")
             .expect("adl2sidm: connect loc://adl2sidm_frame_2 (composite)")

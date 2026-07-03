@@ -1321,6 +1321,8 @@ fn emit_strip_chart(b: &mut Builder, widget: &MedmWidget, options: &Options, z: 
     if let Some(span) = strip_chart_span(widget) {
         with.push(format!(".with_time_span({})", float_lit(span)));
     }
+    // plotcom styling (title/labels/colours); a strip chart has no axis blocks.
+    with.extend(plot_style_builders(b, widget, false));
     b.needs_color = true;
     let plot_id = plot_id_expr(b);
     push_plot_widget(
@@ -1451,6 +1453,8 @@ fn emit_cartesian_plot(b: &mut Builder, widget: &MedmWidget, options: &Options, 
     {
         with.push(format!(".with_buffer_size({count})"));
     }
+    // plotcom styling (title/labels/colours) + the x/y1/y2 axis ranges.
+    with.extend(plot_style_builders(b, widget, true));
     b.needs_color = true;
     let plot_id = plot_id_expr(b);
     push_plot_widget(
@@ -1462,6 +1466,83 @@ fn emit_cartesian_plot(b: &mut Builder, widget: &MedmWidget, options: &Options, 
         &with,
         &adds,
     );
+}
+
+/// Plot-styling builders shared by `strip chart` and `cartesian plot`: the
+/// `plotcom` block's `title`/`xlabel`/`ylabel` (MEDM `parsePlotcom`; its
+/// `clr`/`bclr` are hoisted onto the widget colours by the parser, emitted here
+/// as the axis/background colour builders), plus — when `axes` — the cartesian
+/// `x_axis`/`y1_axis`/`y2_axis` blocks (MEDM `parsePlotAxisDefinition`,
+/// medmMonitor.c:193-237): `rangeStyle="user-specified"` pins the axis to
+/// `minRange`..`maxRange`, while "auto-scale"/"from channel" keep sidm's live
+/// autoscale (adl2pydm maps the same tokens onto PyDM's autoRange*/min*Range
+/// properties). A user-specified y2 range and a log10 `axisStyle` have no sidm
+/// surface — warned, not silently dropped.
+fn plot_style_builders(b: &mut Builder, widget: &MedmWidget, axes: bool) -> Vec<String> {
+    let mut with = Vec::new();
+    if let Some(pc) = widget.attributes.get("plotcom") {
+        for (key, method) in [
+            ("title", "with_title"),
+            ("xlabel", "with_x_label"),
+            ("ylabel", "with_y_label"),
+        ] {
+            if let Some(text) = pc.get(key).filter(|t| !t.is_empty()) {
+                let text = medm_str(b, text);
+                with.push(format!(".{method}({text})"));
+            }
+        }
+    }
+    if axes {
+        for (block, method) in [("x_axis", "with_x_range"), ("y1_axis", "with_y_range")] {
+            if let Some((min, max)) = user_axis_range(widget, block) {
+                with.push(format!(".{method}({}, {})", float_lit(min), float_lit(max)));
+            }
+        }
+        if user_axis_range(widget, "y2_axis").is_some() {
+            b.warnings.push(format!(
+                "line {}: cartesian plot y2_axis user-specified range has no sidm \
+                 surface (the plots drive the left Y axis); ignored",
+                widget.line
+            ));
+        }
+        for block in ["x_axis", "y1_axis", "y2_axis"] {
+            if widget
+                .attributes
+                .get(block)
+                .and_then(|a| a.get("axisStyle"))
+                .is_some_and(|s| s == "log10")
+            {
+                b.warnings.push(format!(
+                    "line {}: cartesian plot {block} axisStyle=log10 is not supported; \
+                     kept linear",
+                    widget.line
+                ));
+            }
+        }
+    }
+    if let Some(c) = widget.color {
+        with.push(format!(".with_axis_color({})", color_expr(c)));
+    }
+    if let Some(c) = widget.background_color {
+        with.push(format!(".with_background_color({})", color_expr(c)));
+    }
+    with
+}
+
+/// The `minRange`..`maxRange` of a cartesian axis block when its
+/// `rangeStyle="user-specified"`. An absent range field keeps MEDM's default
+/// (`plotAxisDefinitionInit`, medmMonitor.c:41-49: minRange 0.0, maxRange 1.0).
+fn user_axis_range(widget: &MedmWidget, block: &str) -> Option<(f64, f64)> {
+    let axis = widget.attributes.get(block)?;
+    if axis.get("rangeStyle").map(String::as_str) != Some("user-specified") {
+        return None;
+    }
+    let range = |key: &str, default: f64| {
+        axis.get(key)
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(default)
+    };
+    Some((range("minRange", 0.0), range("maxRange", 1.0)))
 }
 
 /// The strip chart's displayed time span in seconds: `period` scaled by `units`
@@ -6026,6 +6107,117 @@ composite {
             g.warnings
         );
         assert!(!g.source.contains("DEV:Y2"), "{}", g.source);
+    }
+
+    // R1-36: plotcom (title/xlabel/ylabel/clr/bclr) and the cartesian axis
+    // blocks (rangeStyle/minRange/maxRange/axisStyle).
+    const STYLED_PLOTS: &str = r#"
+"color map" {
+	colors {
+		ffffff,
+		000000,
+	}
+}
+"strip chart" {
+	object {
+		x=0
+		y=0
+		width=300
+		height=100
+	}
+	plotcom {
+		title="Trend"
+		xlabel="Time"
+		ylabel="Volts"
+		clr=1
+		bclr=0
+	}
+	period=60
+	pen[0] {
+		chan="DEV:H1"
+		clr=1
+	}
+}
+"cartesian plot" {
+	object {
+		x=0
+		y=120
+		width=300
+		height=100
+	}
+	plotcom {
+		title="Profile"
+		xlabel="Position"
+		ylabel="Counts"
+		clr=0
+		bclr=1
+	}
+	x_axis {
+		rangeStyle="user-specified"
+		minRange=2.000000
+		maxRange=8.000000
+	}
+	y1_axis {
+		axisStyle="log10"
+		rangeStyle="user-specified"
+		maxRange=50.000000
+	}
+	y2_axis {
+		rangeStyle="user-specified"
+		minRange=0.000000
+		maxRange=1.000000
+	}
+	trace[0] {
+		ydata="DEV:Y1"
+		data_clr=1
+	}
+}
+"#;
+
+    #[test]
+    fn strip_chart_plotcom_styles_title_labels_and_colours() {
+        let g = generate(&parse(STYLED_PLOTS), &Options::default());
+        assert!(
+            g.source.contains(
+                ".with_title(\"Trend\").with_x_label(\"Time\").with_y_label(\"Volts\")\
+                 .with_axis_color(Color32::from_rgb(0, 0, 0))\
+                 .with_background_color(Color32::from_rgb(255, 255, 255))"
+            ),
+            "strip-chart plotcom styling missing:\n{}",
+            g.source
+        );
+    }
+
+    #[test]
+    fn cartesian_plot_axis_blocks_pin_user_ranges_and_warn_on_the_rest() {
+        let g = generate(&parse(STYLED_PLOTS), &Options::default());
+        // x_axis user-specified 2..8; y1_axis user-specified with minRange
+        // absent -> MEDM's plotAxisDefinitionInit default 0.0.
+        assert!(
+            g.source.contains(
+                ".with_title(\"Profile\").with_x_label(\"Position\").with_y_label(\"Counts\")\
+                 .with_x_range(2.0, 8.0).with_y_range(0.0, 50.0)\
+                 .with_axis_color(Color32::from_rgb(255, 255, 255))\
+                 .with_background_color(Color32::from_rgb(0, 0, 0))"
+            ),
+            "cartesian plotcom/axis styling missing:\n{}",
+            g.source
+        );
+        // y2 user range and log10 have no sidm surface -> warned, not silent.
+        assert!(
+            g.warnings
+                .iter()
+                .any(|w| w.contains("y2_axis user-specified range")),
+            "{:?}",
+            g.warnings
+        );
+        assert!(
+            g.warnings
+                .iter()
+                .any(|w| w.contains("y1_axis axisStyle=log10")),
+            "{:?}",
+            g.warnings
+        );
     }
 
     #[test]

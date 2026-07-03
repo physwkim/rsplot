@@ -261,13 +261,22 @@ fn parse_object_block(content: &[&str]) -> Option<Geometry> {
 /// Labels that are reserved and must not become a widget `title`.
 const RESERVED_LABELS: &[&str] = &["channel", "limits", "outline", "none", "no decorations"];
 
-/// The attribute sub-blocks lifted into [`MedmWidget::attributes`].
+/// The attribute sub-blocks lifted into [`MedmWidget::attributes`]. `plotcom`
+/// (title/xlabel/ylabel + the plot's clr/bclr — MEDM `parsePlotcom`) and the
+/// cartesian-plot axis blocks (`rangeStyle`/`minRange`/`maxRange`/`axisStyle` —
+/// MEDM `parsePlotAxisDefinition`) appear only on `strip chart`/
+/// `cartesian plot`; like `control`/`monitor`, a `plotcom` block's `clr`/`bclr`
+/// override the widget colours (they ARE the plot's fg/bg in MEDM).
 const ATTRIBUTE_BLOCKS: &[&str] = &[
     "basic attribute",
     "dynamic attribute",
     "control",
     "monitor",
     "param",
+    "plotcom",
+    "x_axis",
+    "y1_axis",
+    "y2_axis",
 ];
 
 /// Parse one widget block's content into a [`MedmWidget`] (generic handling,

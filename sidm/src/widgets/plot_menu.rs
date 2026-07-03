@@ -40,6 +40,14 @@ pub(crate) fn enable_y_autoscale(plot: &mut Plot1D) {
     plot.reset_zoom_to_data();
 }
 
+/// Pin a fixed X range and disable X autoscale (pyqtgraph `setXRange`) — the X
+/// counterpart of [`set_y_range`], same normalize-then-pin rule.
+pub(crate) fn set_x_range(plot: &mut Plot1D, min: f64, max: f64) {
+    let (min, max) = normalize_range(min, max);
+    plot.plot_mut().set_x_autoscale(false);
+    plot.set_graph_x_limits(min, max);
+}
+
 /// What the user committed in the Y-axis menu this frame.
 enum YAxisChoice {
     /// Re-enable live autoscale (pyqtgraph "auto").
