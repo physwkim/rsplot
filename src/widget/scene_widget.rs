@@ -17,9 +17,10 @@
 //! [`SceneWidget::set_geometry`] is merged in beneath the chrome (every channel,
 //! via [`Scene3dGeometry::extend_from`]).
 
-use egui::{Color32, PointerButton, Pos2, Response, Sense, Ui};
+use egui::{Align2, Color32, FontId, PointerButton, Pos2, Response, Sense, Ui};
 use egui_wgpu::RenderState;
 
+use crate::core::scene3d::axes::{dash_segments, labelled_axes_chrome};
 use crate::core::scene3d::camera::{Camera, CameraDirection, CameraFace};
 use crate::core::scene3d::interaction::{OrbitDrag, PanDrag, window_to_ndc};
 use crate::core::scene3d::mat4::Vec3;
@@ -40,6 +41,9 @@ const DEFAULT_FOREGROUND: Color32 = Color32::WHITE;
 /// Default text colour (axis/tick labels): white, as silx `SceneWidget`
 /// (`SceneWidget.py:373` `_textColor = 1., 1., 1., 1.`).
 const DEFAULT_TEXT_COLOR: Color32 = Color32::WHITE;
+/// Font size of the axes labels: silx `LabelledAxes` uses `Font(size=10)`
+/// (`scene/axes.py:48`).
+const AXES_FONT_SIZE: f32 = 10.0;
 
 /// Fog mode of the scene — port of silx `Plot3DWidget.FogMode`
 /// (`Plot3DWidget.py:119-124`): either no fog or a linear fog fading the scene
@@ -64,6 +68,9 @@ pub struct SceneWidget {
     bounds: (Vec3, Vec3),
     box_color: Color32,
     text_color: Color32,
+    /// Axis name labels `(x, y, z)` of the LabelledAxes chrome; empty (the
+    /// silx `Text2D` default) draws no name.
+    axes_labels: [String; 3],
     background: Color32,
     /// Fog mode (silx `Plot3DWidget.setFogMode`); default off.
     fog_mode: FogMode,
@@ -107,6 +114,7 @@ impl SceneWidget {
             bounds,
             box_color: DEFAULT_FOREGROUND,
             text_color: DEFAULT_TEXT_COLOR,
+            axes_labels: [String::new(), String::new(), String::new()],
             background: DEFAULT_BACKGROUND,
             fog_mode: FogMode::None,
             light_shininess: 0.0,
@@ -146,14 +154,44 @@ impl SceneWidget {
 
     /// Set the text colour used for the scene's axis and tick labels. Port of
     /// silx `SceneWidget.setTextColor` (`SceneWidget.py:623`, forwarded to the
-    /// root `LabelledAxes.tickColor`).
-    pub fn set_text_color(&mut self, color: Color32) {
-        self.text_color = color;
+    /// root `LabelledAxes.tickColor` — which also tints the dashed tick lines
+    /// at 60 % alpha, `scene/axes.py:110-118`). Re-uploads the chrome.
+    pub fn set_text_color(&mut self, render_state: &RenderState, color: Color32) {
+        if self.text_color != color {
+            self.text_color = color;
+            self.upload(render_state);
+        }
     }
 
     /// The text colour (silx `SceneWidget.getTextColor`).
     pub fn text_color(&self) -> Color32 {
         self.text_color
+    }
+
+    /// Set the text labels of the three axes (silx `setAxesLabels`,
+    /// `items/core.py:702-717`; `None` leaves an axis unchanged). Names draw
+    /// at the box edge midpoints (`scene/axes.py:57-67`); the default empty
+    /// string draws nothing.
+    pub fn set_axes_labels(
+        &mut self,
+        xlabel: Option<&str>,
+        ylabel: Option<&str>,
+        zlabel: Option<&str>,
+    ) {
+        for (slot, label) in self.axes_labels.iter_mut().zip([xlabel, ylabel, zlabel]) {
+            if let Some(label) = label {
+                *slot = label.to_string();
+            }
+        }
+    }
+
+    /// The current axis labels `(x, y, z)` (silx `getAxesLabels`).
+    pub fn axes_labels(&self) -> (&str, &str, &str) {
+        (
+            &self.axes_labels[0],
+            &self.axes_labels[1],
+            &self.axes_labels[2],
+        )
     }
 
     /// Set the fog mode. Port of silx `Plot3DWidget.setFogMode`
@@ -267,11 +305,82 @@ impl SceneWidget {
     fn upload(&self, render_state: &RenderState) {
         let mut geometry = Scene3dGeometry::new();
         geometry.add_bounding_box_with_axes(self.bounds, self.box_color);
+        self.add_tick_lines(&mut geometry);
         // Append every data-item channel beneath the chrome (points, meshes,
         // images, and textured meshes too — not only lines/triangles), so the
         // P1.x/P2.x items render through the widget.
         geometry.extend_from(&self.content);
         set_scene3d(render_state, self.id, &geometry);
+    }
+
+    /// Dashed tick lines of the LabelledAxes chrome (silx
+    /// `LabelledAxes._updateTicks`, `scene/axes.py:172-213`): per tick one
+    /// segment across each of the two box planes containing its axis, drawn
+    /// in the text colour at 60 % alpha (`axes.py:110-118`). silx dashes
+    /// 5 px on / 10 px off in *screen* space via a fragment shader
+    /// (`axes.py:71-73`, `primitives.py:589-593`); here the dashes are
+    /// generated CPU-side in world units scaled to the bounds diagonal
+    /// (5/500 · diagonal on, 10/500 off — a ~500 px viewport shows roughly
+    /// the silx period), so the on-screen dash length varies with zoom
+    /// (documented deviation).
+    fn add_tick_lines(&self, geometry: &mut Scene3dGeometry) {
+        let chrome = labelled_axes_chrome(self.bounds, ["", "", ""]);
+        let unit = (self.bounds.1 - self.bounds.0).length() / 500.0;
+        let color = Color32::from_rgba_unmultiplied(
+            self.text_color.r(),
+            self.text_color.g(),
+            self.text_color.b(),
+            (self.text_color.a() as f32 * 0.6).round() as u8,
+        );
+        for &(a, b) in &chrome.tick_segments {
+            for (s, e) in dash_segments(a, b, 5.0 * unit, 10.0 * unit) {
+                geometry.add_line(s.to_array(), e.to_array(), color);
+            }
+        }
+    }
+
+    /// Draw the LabelledAxes text — axis names and tick values — as egui
+    /// overlay text at the projected anchors: the port of silx's GL-rendered
+    /// `Text2D` billboards (`scene/axes.py:57-67` names, `:216-245` tick
+    /// values; align/valign center, `Font(size=10)`, foreground = tickColor).
+    /// Because the labels are egui text rather than scene geometry, they
+    /// appear in [`SceneWidget::show`] but not in [`SceneWidget::snapshot`]
+    /// (documented deviation).
+    fn draw_axes_labels(&self, ui: &Ui, rect: egui::Rect) {
+        let chrome = labelled_axes_chrome(
+            self.bounds,
+            [
+                self.axes_labels[0].as_str(),
+                self.axes_labels[1].as_str(),
+                self.axes_labels[2].as_str(),
+            ],
+        );
+        let mvp = self.camera.matrix();
+        let painter = ui.painter_at(rect);
+        let font = FontId::proportional(AXES_FONT_SIZE);
+        for label in chrome.axis_labels.iter().chain(&chrome.tick_labels) {
+            let ndc = mvp.transform_point(label.position, true);
+            // Skip labels outside the frustum (clipped or behind the camera).
+            if !(ndc.x.is_finite()
+                && ndc.y.is_finite()
+                && ndc.x.abs() <= 1.2
+                && ndc.y.abs() <= 1.2
+                && (-1.0..=1.0).contains(&ndc.z))
+            {
+                continue;
+            }
+            let pos = Pos2::new(
+                rect.min.x + (ndc.x + 1.0) * 0.5 * rect.width(),
+                rect.min.y + (1.0 - ndc.y) * 0.5 * rect.height(),
+            );
+            painter.text(
+                pos,
+                Align2::CENTER_CENTER,
+                &label.text,
+                font.clone(),
+                self.text_color,
+            );
+        }
     }
 
     /// Lay out the scene over the available space, handle interaction, and paint.
@@ -364,6 +473,7 @@ impl SceneWidget {
             self.background,
             self.shading(),
         );
+        self.draw_axes_labels(ui, rect);
         response
     }
 

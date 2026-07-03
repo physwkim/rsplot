@@ -133,6 +133,18 @@ impl ScalarFieldView {
         &mut self.scene
     }
 
+    /// Set the text labels of the axes (silx `ScalarFieldView.setAxesLabels`,
+    /// `ScalarFieldView.py:1307-1319`; `None` leaves an axis unchanged),
+    /// forwarded to the inner scene's LabelledAxes chrome.
+    pub fn set_axes_labels(
+        &mut self,
+        xlabel: Option<&str>,
+        ylabel: Option<&str>,
+        zlabel: Option<&str>,
+    ) {
+        self.scene.set_axes_labels(xlabel, ylabel, zlabel);
+    }
+
     /// Set the scale of the field — the size of a voxel per axis (silx
     /// `ScalarFieldView.setScale`, `ScalarFieldView.py:1234-1245`: sets the
     /// data group's `_dataScale` transform, then `centerScene()`). A no-op

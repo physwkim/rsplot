@@ -4,6 +4,7 @@
 //! lives in [`crate::render`] and the interactive widget in [`crate::widget`].
 //! Tracked in `doc/plot3d-parity-roadmap.md`.
 
+pub mod axes;
 pub mod camera;
 pub mod interaction;
 pub mod marching_cubes;
