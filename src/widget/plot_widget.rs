@@ -1182,8 +1182,13 @@ fn apply_interaction(
                 s
             });
             if let (Some(start), Some(end)) = (start, response.interact_pointer_pos()) {
-                // Ignore accidental click-sized drags.
-                if (start - end).length() > 4.0 {
+                // silx `Zoom.endDrag` accepts the gesture only when the
+                // dragged rectangle's pixel AREA reaches SURFACE_THRESHOLD = 5
+                // (PlotInteraction.py:363, :490-498): a zero-height or
+                // zero-width drag is rejected outright, never repaired into a
+                // collapsed-axis zoom.
+                let (dx, dy) = ((start.x - end.x).abs(), (start.y - end.y).abs());
+                if dx * dy >= 5.0 {
                     // Push the pre-zoom view before applying the box zoom (silx
                     // `Zoom._zoom` pushes to the limits history here).
                     plot.push_limits();
@@ -2713,6 +2718,30 @@ mod tests {
             plot.limits
         );
         assert_eq!((y0, y1), (0.0, 10.0), "disabled Y keeps its range");
+    }
+
+    #[test]
+    fn box_zoom_rejects_drag_below_surface_threshold() {
+        // silx Zoom.endDrag accepts only when the dragged rectangle's pixel
+        // area reaches SURFACE_THRESHOLD = 5 (PlotInteraction.py:363,
+        // :490-498). A purely horizontal 20 px drag (zero area) must do
+        // nothing — no zoom, no collapsed-Y repair, no history push.
+        let ctx = egui::Context::default();
+        let mut plot = Plot::new(0);
+        plot.limits = (0.0, 10.0, 0.0, 10.0);
+        let before = plot.limits;
+        let mode = PlotInteractionMode::Zoom;
+        let screen = egui::vec2(200.0, 200.0);
+
+        let (_r0, area) = run_mode_frame(&ctx, &mut plot, mode, screen_input(screen));
+        let a = area.center() - egui::vec2(10.0, 0.0);
+        let b = area.center() + egui::vec2(10.0, 0.0);
+        let _ = run_mode_frame(&ctx, &mut plot, mode, press_at(screen, a));
+        let _ = run_mode_frame(&ctx, &mut plot, mode, move_to(screen, b));
+        let _ = run_mode_frame(&ctx, &mut plot, mode, release_at(screen, b));
+
+        assert_eq!(plot.limits, before, "zero-area drag must be rejected");
+        assert_eq!(plot.limits_history_len(), 0, "no history push either");
     }
 
     #[test]
