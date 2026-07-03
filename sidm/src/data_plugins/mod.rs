@@ -41,12 +41,14 @@ pub struct ConnectionCtx {
 /// flag (`data_plugins.set_read_only` / `is_read_only`,
 /// `pydm/data_plugins/__init__.py:288-309`). Read once at plugin
 /// construction; in read-only mode the EPICS plugins drop every put.
+#[cfg(any(feature = "ca", feature = "pva"))]
 pub(crate) fn env_read_only() -> bool {
     read_only_flag(std::env::var("SIDM_READ_ONLY").ok().as_deref())
 }
 
 /// Parse the `SIDM_READ_ONLY` value: unset, empty and the usual "off" spellings
 /// (`0`, `false`, `no`, `off`, any case) disable it; anything else enables it.
+#[cfg(any(feature = "ca", feature = "pva"))]
 fn read_only_flag(value: Option<&str>) -> bool {
     match value {
         None => false,
@@ -70,7 +72,7 @@ pub trait DataPlugin: Send + Sync + 'static {
     fn connect(&self, ctx: ConnectionCtx) -> Result<(), crate::engine::EngineError>;
 }
 
-#[cfg(test)]
+#[cfg(all(test, any(feature = "ca", feature = "pva")))]
 mod tests {
     use super::read_only_flag;
 
