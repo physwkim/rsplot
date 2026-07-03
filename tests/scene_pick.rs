@@ -8,7 +8,7 @@
 use egui_kittest::wgpu::{create_render_state, default_wgpu_setup};
 use siplot::egui::Color32;
 use siplot::{
-    CameraFace, ImageInterpolation, PointMarker, Scatter2D, Scatter2DVisualization,
+    CameraFace, ImageInterpolation, PointMarker, Scatter2D, Scatter2DVisualization, Scatter3D,
     Scene3dGeometry, Scene3dImageLayer, ScenePickKind, SceneWidget, Vec3,
 };
 
@@ -194,4 +194,34 @@ fn pick_image_quad_returns_row_and_column() {
     assert!(w.pick(ndc_of(&w, Vec3::new(0.9, 0.3, 0.5))).is_none());
     // Behind the origin corner (negative image coordinates): rejected too.
     assert!(w.pick(ndc_of(&w, Vec3::new(-0.2, 0.3, 0.5))).is_none());
+}
+
+#[test]
+fn pick_follows_the_item_transform() {
+    // silx applies the DataItem3D transform stack (items/core.py:288-315) to
+    // rendering AND picking through the shared scene graph. Here the composed
+    // matrix is baked into the geometry at append time, so the pick traversal
+    // reads exactly the positions the renderer draws — assert that a
+    // transformed point picks at its transformed location and no longer at
+    // its raw one.
+    let mut scatter = Scatter3D::new().with_data(&[0.2], &[0.2], &[0.5], &[1.0]);
+    scatter.transform_mut().set_translation(0.4, 0.2, 0.0);
+    let mut geo = Scene3dGeometry::new();
+    scatter.append_to(&mut geo);
+    let w = front_view_widget(27, geo);
+
+    let target = Vec3::new(0.6, 0.4, 0.5);
+    let pick = w.pick(ndc_of(&w, target)).expect("transformed point picks");
+    assert_eq!(pick.kind, ScenePickKind::Point { index: 0 });
+    assert!((pick.position.x - 0.6).abs() < 1e-6);
+    assert!((pick.position.y - 0.4).abs() < 1e-6);
+    assert!((pick.position.z - 0.5).abs() < 1e-6);
+
+    // The raw (untransformed) location no longer picks anything.
+    assert!(w.pick(ndc_of(&w, Vec3::new(0.2, 0.2, 0.5))).is_none());
+
+    // Item bounds report the same composed transform.
+    let (lo, hi) = scatter.bounds().expect("has data");
+    assert!((lo.x - 0.6).abs() < 1e-6 && (lo.y - 0.4).abs() < 1e-6);
+    assert!((hi.x - 0.6).abs() < 1e-6 && (hi.z - 0.5).abs() < 1e-6);
 }

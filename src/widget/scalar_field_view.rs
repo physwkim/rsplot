@@ -133,6 +133,52 @@ impl ScalarFieldView {
         &mut self.scene
     }
 
+    /// Set the scale of the field — the size of a voxel per axis (silx
+    /// `ScalarFieldView.setScale`, `ScalarFieldView.py:1234-1245`: sets the
+    /// data group's `_dataScale` transform, then `centerScene()`). A no-op
+    /// when unchanged; otherwise the geometry is re-baked and the viewpoint
+    /// reset to the new volume box.
+    pub fn set_scale(&mut self, render_state: &RenderState, sx: f32, sy: f32, sz: f32) {
+        if self.field.transform().scale() == Vec3::new(sx, sy, sz) {
+            return;
+        }
+        self.field.transform_mut().set_scale(sx, sy, sz);
+        self.transform_changed(render_state);
+    }
+
+    /// The voxel scale set by [`set_scale`](Self::set_scale) (silx `getScale`).
+    pub fn scale(&self) -> Vec3 {
+        self.field.transform().scale()
+    }
+
+    /// Set the translation of the data origin (silx
+    /// `ScalarFieldView.setTranslation`, `ScalarFieldView.py:1251-1262`: sets
+    /// the data group's `_dataTranslate` transform, then `centerScene()`). A
+    /// no-op when unchanged.
+    pub fn set_translation(&mut self, render_state: &RenderState, x: f32, y: f32, z: f32) {
+        if self.field.transform().translation() == Vec3::new(x, y, z) {
+            return;
+        }
+        self.field.transform_mut().set_translation(x, y, z);
+        self.transform_changed(render_state);
+    }
+
+    /// The offset set by [`set_translation`](Self::set_translation) (silx
+    /// `getTranslation`).
+    pub fn translation(&self) -> Vec3 {
+        self.field.transform().translation()
+    }
+
+    /// Shared tail of the transform setters: the scene bounds follow the
+    /// transformed volume box with the viewpoint reset (silx `centerScene`),
+    /// and the geometry is re-baked through the new transform.
+    fn transform_changed(&mut self, render_state: &RenderState) {
+        if let Some(bounds) = self.field.bounds() {
+            self.scene.set_bounds(render_state, bounds);
+        }
+        self.rebuild(render_state);
+    }
+
     /// Add a fixed-level iso-surface and rebuild (silx `addIsosurface`). Returns
     /// the iso-surface index.
     pub fn add_isosurface(

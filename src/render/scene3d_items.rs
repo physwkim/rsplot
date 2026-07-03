@@ -16,6 +16,7 @@ use crate::core::scatter_viz::delaunay;
 use crate::core::scene3d::marching_cubes::isosurface as marching_cubes_isosurface;
 use crate::core::scene3d::mat4::{Mat4, Vec3, mat4_rotate};
 use crate::core::scene3d::plane::{Plane, box_plane_intersect, segment_plane_intersect};
+use crate::core::scene3d::transform::Item3DTransform;
 use crate::render::gpu_scene3d::{
     ImageInterpolation, PointMarker, Scene3dGeometry, Scene3dImageLayer, Scene3dTexturedMesh,
     flat_normal,
@@ -23,6 +24,57 @@ use crate::render::gpu_scene3d::{
 
 /// silx's default plot symbol size in pixels (`_config.DEFAULT_PLOT_SYMBOL_SIZE`).
 pub const DEFAULT_SCATTER3D_SIZE: f32 = 6.0;
+
+/// Append `build`'s raw geometry through `transform` — the single owner of the
+/// bake-time transform application. silx applies the `DataItem3D` transform
+/// stack in the scene graph at render time (`items/core.py:288-315`); this
+/// port bakes the composed matrix into the channels
+/// ([`Scene3dGeometry::apply_transform`]) when the item appends, so rendering
+/// and the CPU pick traversal read the same transformed positions by
+/// construction. `raw_bounds` are the item's untransformed data bounds,
+/// against which bbox-relative rotation centres resolve
+/// (`items/core.py:376-405`).
+fn append_with_transform(
+    transform: &Item3DTransform,
+    raw_bounds: Option<(Vec3, Vec3)>,
+    geometry: &mut Scene3dGeometry,
+    build: impl FnOnce(&mut Scene3dGeometry),
+) {
+    if transform.is_identity() {
+        build(geometry);
+    } else {
+        let mut local = Scene3dGeometry::new();
+        build(&mut local);
+        local.apply_transform(&transform.composed_matrix(raw_bounds));
+        geometry.extend_from(&local);
+    }
+}
+
+/// Generate the transform-stack accessors of a 3D item. The stack itself —
+/// with the silx public setters `set_scale`/`set_translation`/
+/// `set_rotation_center`/`set_rotation`/`set_matrix`
+/// (`items/core.py:335-485`) — is [`Item3DTransform`], reached through
+/// `transform()`/`transform_mut()` (the names stay on the transform type
+/// because some items already use `set_scale` for their 2D pixel scale).
+macro_rules! impl_item3d_transform {
+    ($ty:ty) => {
+        impl $ty {
+            /// The item's transform stack (silx `DataItem3D` transforms,
+            /// `items/core.py:288-315`).
+            pub fn transform(&self) -> &Item3DTransform {
+                &self.transform
+            }
+
+            /// Mutable access to the transform stack — e.g.
+            /// `item.transform_mut().set_scale(2.0, 2.0, 1.0)` (silx
+            /// `setScale`, `items/core.py:335-345`). Applied on the next
+            /// `append_to`; [`Self::bounds`] reflects it immediately.
+            pub fn transform_mut(&mut self) -> &mut Item3DTransform {
+                &mut self.transform
+            }
+        }
+    };
+}
 
 /// A 3D scatter plot: per-point `(x, y, z)` positions coloured by a per-point
 /// `value` through a [`Colormap`], drawn as [`PointMarker`] sprites of one size.
@@ -40,6 +92,7 @@ pub struct Scatter3D {
     colormap: Colormap,
     marker: PointMarker,
     size: f32,
+    transform: Item3DTransform,
 }
 
 impl Default for Scatter3D {
@@ -60,6 +113,7 @@ impl Scatter3D {
             colormap: Colormap::new(ColormapName::Viridis, 0.0, 1.0),
             marker: PointMarker::Circle,
             size: DEFAULT_SCATTER3D_SIZE,
+            transform: Item3DTransform::default(),
         }
     }
 
@@ -150,10 +204,8 @@ impl Scatter3D {
         self.x.is_empty()
     }
 
-    /// Axis-aligned data bounds `(min, max)` over the points (silx
-    /// `DataItem3D.getBounds`), or `None` when empty. Useful to frame a
-    /// [`crate::widget::scene_widget::SceneWidget`].
-    pub fn bounds(&self) -> Option<(Vec3, Vec3)> {
+    /// Raw (untransformed) data bounds over the points.
+    fn raw_bounds(&self) -> Option<(Vec3, Vec3)> {
         if self.is_empty() {
             return None;
         }
@@ -171,20 +223,32 @@ impl Scatter3D {
         Some((min, max))
     }
 
+    /// Axis-aligned scene bounds `(min, max)` over the points, through the
+    /// item's transform (silx `DataItem3D` bounds, `transformed=True`), or
+    /// `None` when empty. Useful to frame a
+    /// [`crate::widget::scene_widget::SceneWidget`].
+    pub fn bounds(&self) -> Option<(Vec3, Vec3)> {
+        self.transform.transform_bounds(self.raw_bounds())
+    }
+
     /// Append this scatter's points (coloured through the colormap) to
     /// `geometry`, ready to upload via [`crate::render::gpu_scene3d::set_scene3d`].
     pub fn append_to(&self, geometry: &mut Scene3dGeometry) {
-        for i in 0..self.len() {
-            let [r, g, b, a] = self.colormap.color_at(self.values[i]);
-            geometry.add_point(
-                [self.x[i], self.y[i], self.z[i]],
-                Color32::from_rgba_unmultiplied(r, g, b, a),
-                self.size,
-                self.marker,
-            );
-        }
+        append_with_transform(&self.transform, self.raw_bounds(), geometry, |g| {
+            for i in 0..self.len() {
+                let [r, gr, b, a] = self.colormap.color_at(self.values[i]);
+                g.add_point(
+                    [self.x[i], self.y[i], self.z[i]],
+                    Color32::from_rgba_unmultiplied(r, gr, b, a),
+                    self.size,
+                    self.marker,
+                );
+            }
+        });
     }
 }
+
+impl_item3d_transform!(Scatter3D);
 
 /// silx default line width for a [`Scatter2D`] in LINES mode
 /// (`Scatter2D.__init__`: `self._lineWidth = 1.0`).
@@ -229,6 +293,7 @@ pub struct Scatter2D {
     line_width: f32,
     height_map: bool,
     visualization: Scatter2DVisualization,
+    transform: Item3DTransform,
 }
 
 impl Default for Scatter2D {
@@ -252,6 +317,7 @@ impl Scatter2D {
             line_width: DEFAULT_SCATTER2D_LINE_WIDTH,
             height_map: false,
             visualization: Scatter2DVisualization::Points,
+            transform: Item3DTransform::default(),
         }
     }
 
@@ -410,15 +476,21 @@ impl Scatter2D {
         egui::Rgba::from(Color32::from_rgba_unmultiplied(r, g, b, a)).to_array()
     }
 
-    /// Axis-aligned data bounds `(min, max)` over the points (silx
-    /// `DataItem3D.getBounds`), or `None` when empty. In flat mode `z` collapses
-    /// to `[0, 0]`; in height-map mode it spans the value range.
-    pub fn bounds(&self) -> Option<(Vec3, Vec3)> {
+    /// Raw (untransformed) data bounds over the points.
+    fn raw_bounds(&self) -> Option<(Vec3, Vec3)> {
         if self.is_empty() {
             return None;
         }
         let positions: Vec<[f32; 3]> = (0..self.len()).map(|i| self.position(i)).collect();
         positions_bounds(&positions)
+    }
+
+    /// Axis-aligned scene bounds `(min, max)` over the points, through the
+    /// item's transform (silx `DataItem3D` bounds, `transformed=True`), or
+    /// `None` when empty. In flat mode raw `z` collapses to `[0, 0]`; in
+    /// height-map mode it spans the value range.
+    pub fn bounds(&self) -> Option<(Vec3, Vec3)> {
+        self.transform.transform_bounds(self.raw_bounds())
     }
 
     /// Append this scatter's geometry to `geometry` per its visualization mode,
@@ -430,6 +502,13 @@ impl Scatter2D {
         if self.is_empty() {
             return;
         }
+        append_with_transform(&self.transform, self.raw_bounds(), geometry, |g| {
+            self.append_raw(g)
+        });
+    }
+
+    /// Build the raw (untransformed) geometry — see [`Self::append_to`].
+    fn append_raw(&self, geometry: &mut Scene3dGeometry) {
         match self.visualization {
             Scatter2DVisualization::Points => {
                 for i in 0..self.len() {
@@ -483,6 +562,8 @@ impl Scatter2D {
         }
     }
 }
+
+impl_item3d_transform!(Scatter2D);
 
 /// How a mesh's flat vertex stream is grouped into triangles (silx
 /// `Mesh.setData` `mode`).
@@ -593,6 +674,7 @@ pub struct Mesh3D {
     normals: Option<Vec<[f32; 3]>>,
     mode: MeshDrawMode,
     indices: Option<Vec<u32>>,
+    transform: Item3DTransform,
 }
 
 impl Default for Mesh3D {
@@ -610,6 +692,7 @@ impl Mesh3D {
             normals: None,
             mode: MeshDrawMode::Triangles,
             indices: None,
+            transform: Item3DTransform::default(),
         }
     }
 
@@ -671,34 +754,45 @@ impl Mesh3D {
         self.positions.is_empty()
     }
 
-    /// Axis-aligned data bounds `(min, max)`, or `None` when empty.
+    /// Axis-aligned scene bounds `(min, max)` through the item's transform
+    /// (silx `DataItem3D` bounds, `transformed=True`), or `None` when empty.
     pub fn bounds(&self) -> Option<(Vec3, Vec3)> {
-        positions_bounds(&self.positions)
+        self.transform
+            .transform_bounds(positions_bounds(&self.positions))
     }
 
     /// Append this mesh's triangles to `geometry` for upload via
     /// [`crate::render::gpu_scene3d::set_scene3d`].
     pub fn append_to(&self, geometry: &mut Scene3dGeometry) {
-        for [i0, i1, i2] in
-            expand_triangles(self.mode, self.positions.len(), self.indices.as_deref())
-        {
-            let p = [self.positions[i0], self.positions[i1], self.positions[i2]];
-            let normals = match &self.normals {
-                Some(ns) => [ns[i0], ns[i1], ns[i2]],
-                None => [flat_normal(p[0], p[1], p[2]); 3],
-            };
-            let rgba = match &self.colors {
-                MeshColor::Uniform(c) => [egui::Rgba::from(*c).to_array(); 3],
-                MeshColor::PerVertex(cs) => [
-                    egui::Rgba::from(cs[i0]).to_array(),
-                    egui::Rgba::from(cs[i1]).to_array(),
-                    egui::Rgba::from(cs[i2]).to_array(),
-                ],
-            };
-            geometry.add_mesh_triangle_rgba(p, rgba, normals);
-        }
+        append_with_transform(
+            &self.transform,
+            positions_bounds(&self.positions),
+            geometry,
+            |g| {
+                for [i0, i1, i2] in
+                    expand_triangles(self.mode, self.positions.len(), self.indices.as_deref())
+                {
+                    let p = [self.positions[i0], self.positions[i1], self.positions[i2]];
+                    let normals = match &self.normals {
+                        Some(ns) => [ns[i0], ns[i1], ns[i2]],
+                        None => [flat_normal(p[0], p[1], p[2]); 3],
+                    };
+                    let rgba = match &self.colors {
+                        MeshColor::Uniform(c) => [egui::Rgba::from(*c).to_array(); 3],
+                        MeshColor::PerVertex(cs) => [
+                            egui::Rgba::from(cs[i0]).to_array(),
+                            egui::Rgba::from(cs[i1]).to_array(),
+                            egui::Rgba::from(cs[i2]).to_array(),
+                        ],
+                    };
+                    g.add_mesh_triangle_rgba(p, rgba, normals);
+                }
+            },
+        );
     }
 }
+
+impl_item3d_transform!(Mesh3D);
 
 /// A triangle mesh whose vertex colours come from a per-vertex scalar `value`
 /// mapped through a [`Colormap`].
@@ -715,6 +809,7 @@ pub struct ColormapMesh3D {
     mode: MeshDrawMode,
     indices: Option<Vec<u32>>,
     colormap: Colormap,
+    transform: Item3DTransform,
 }
 
 impl Default for ColormapMesh3D {
@@ -734,6 +829,7 @@ impl ColormapMesh3D {
             mode: MeshDrawMode::Triangles,
             indices: None,
             colormap: Colormap::new(ColormapName::Viridis, 0.0, 1.0),
+            transform: Item3DTransform::default(),
         }
     }
 
@@ -823,29 +919,40 @@ impl ColormapMesh3D {
         self.positions.is_empty()
     }
 
-    /// Axis-aligned data bounds `(min, max)`, or `None` when empty.
+    /// Axis-aligned scene bounds `(min, max)` through the item's transform
+    /// (silx `DataItem3D` bounds, `transformed=True`), or `None` when empty.
     pub fn bounds(&self) -> Option<(Vec3, Vec3)> {
-        positions_bounds(&self.positions)
+        self.transform
+            .transform_bounds(positions_bounds(&self.positions))
     }
 
     /// Append this mesh's triangles (coloured through the colormap) to `geometry`.
     pub fn append_to(&self, geometry: &mut Scene3dGeometry) {
-        let rgba_at = |i: usize| {
-            let [r, g, b, a] = self.colormap.color_at(self.values[i]);
-            egui::Rgba::from(Color32::from_rgba_unmultiplied(r, g, b, a)).to_array()
-        };
-        for [i0, i1, i2] in
-            expand_triangles(self.mode, self.positions.len(), self.indices.as_deref())
-        {
-            let p = [self.positions[i0], self.positions[i1], self.positions[i2]];
-            let normals = match &self.normals {
-                Some(ns) => [ns[i0], ns[i1], ns[i2]],
-                None => [flat_normal(p[0], p[1], p[2]); 3],
-            };
-            geometry.add_mesh_triangle_rgba(p, [rgba_at(i0), rgba_at(i1), rgba_at(i2)], normals);
-        }
+        append_with_transform(
+            &self.transform,
+            positions_bounds(&self.positions),
+            geometry,
+            |g| {
+                let rgba_at = |i: usize| {
+                    let [r, gr, b, a] = self.colormap.color_at(self.values[i]);
+                    egui::Rgba::from(Color32::from_rgba_unmultiplied(r, gr, b, a)).to_array()
+                };
+                for [i0, i1, i2] in
+                    expand_triangles(self.mode, self.positions.len(), self.indices.as_deref())
+                {
+                    let p = [self.positions[i0], self.positions[i1], self.positions[i2]];
+                    let normals = match &self.normals {
+                        Some(ns) => [ns[i0], ns[i1], ns[i2]],
+                        None => [flat_normal(p[0], p[1], p[2]); 3],
+                    };
+                    g.add_mesh_triangle_rgba(p, [rgba_at(i0), rgba_at(i1), rgba_at(i2)], normals);
+                }
+            },
+        );
     }
 }
+
+impl_item3d_transform!(ColormapMesh3D);
 
 /// Build the rotation matrix for a silx `Rotate(angle_deg, x, y, z)`: degrees →
 /// radians about the normalized axis. A zero angle or zero axis is the identity
@@ -1040,6 +1147,8 @@ impl Box3D {
         .iter()
         .map(|a| a - 0.5 * alpha)
         .collect();
+        // The item transform lives on the inner mesh; carry it across rebuilds.
+        let transform = *self.mesh.transform();
         self.mesh = cylindrical_volume_mesh(
             &self.positions,
             diagonal / 2.0,
@@ -1049,6 +1158,7 @@ impl Box3D {
             true,
             rotation_matrix(rotation.0, rotation.1),
         );
+        *self.mesh.transform_mut() = transform;
     }
 
     /// Box centre position(s).
@@ -1066,7 +1176,8 @@ impl Box3D {
         &self.colors
     }
 
-    /// Axis-aligned bounds `(min, max)` of the box mesh, or `None` when empty.
+    /// Axis-aligned bounds `(min, max)` of the box mesh (through the item's
+    /// transform), or `None` when empty.
     pub fn bounds(&self) -> Option<(Vec3, Vec3)> {
         self.mesh.bounds()
     }
@@ -1074,6 +1185,19 @@ impl Box3D {
     /// Append the box triangles to `geometry`.
     pub fn append_to(&self, geometry: &mut Scene3dGeometry) {
         self.mesh.append_to(geometry);
+    }
+
+    /// The item's transform stack (silx `DataItem3D` transforms,
+    /// `items/core.py:288-315`), delegated to the underlying mesh so bounds
+    /// and geometry follow it by construction.
+    pub fn transform(&self) -> &Item3DTransform {
+        self.mesh.transform()
+    }
+
+    /// Mutable access to the transform stack (silx setters,
+    /// `items/core.py:335-485`).
+    pub fn transform_mut(&mut self) -> &mut Item3DTransform {
+        self.mesh.transform_mut()
     }
 }
 
@@ -1137,6 +1261,8 @@ impl Cylinder3D {
 
     fn rebuild(&mut self, rotation: (f32, [f32; 3])) {
         let angles = linspace_angles(self.nb_faces);
+        // The item transform lives on the inner mesh; carry it across rebuilds.
+        let transform = *self.mesh.transform();
         self.mesh = cylindrical_volume_mesh(
             &self.positions,
             self.radius,
@@ -1146,6 +1272,7 @@ impl Cylinder3D {
             false,
             rotation_matrix(rotation.0, rotation.1),
         );
+        *self.mesh.transform_mut() = transform;
     }
 
     /// Cylinder centre position(s).
@@ -1168,7 +1295,8 @@ impl Cylinder3D {
         &self.colors
     }
 
-    /// Axis-aligned bounds `(min, max)` of the cylinder mesh, or `None` if empty.
+    /// Axis-aligned bounds `(min, max)` of the cylinder mesh (through the
+    /// item's transform), or `None` if empty.
     pub fn bounds(&self) -> Option<(Vec3, Vec3)> {
         self.mesh.bounds()
     }
@@ -1176,6 +1304,19 @@ impl Cylinder3D {
     /// Append the cylinder triangles to `geometry`.
     pub fn append_to(&self, geometry: &mut Scene3dGeometry) {
         self.mesh.append_to(geometry);
+    }
+
+    /// The item's transform stack (silx `DataItem3D` transforms,
+    /// `items/core.py:288-315`), delegated to the underlying mesh so bounds
+    /// and geometry follow it by construction.
+    pub fn transform(&self) -> &Item3DTransform {
+        self.mesh.transform()
+    }
+
+    /// Mutable access to the transform stack (silx setters,
+    /// `items/core.py:335-485`).
+    pub fn transform_mut(&mut self) -> &mut Item3DTransform {
+        self.mesh.transform_mut()
     }
 }
 
@@ -1236,6 +1377,8 @@ impl Hexagon3D {
     fn rebuild(&mut self, rotation: (f32, [f32; 3])) {
         // silx Hexagon.setData: angles = linspace(0, 2π, 7) → six faces.
         let angles = linspace_angles(6);
+        // The item transform lives on the inner mesh; carry it across rebuilds.
+        let transform = *self.mesh.transform();
         self.mesh = cylindrical_volume_mesh(
             &self.positions,
             self.radius,
@@ -1245,6 +1388,7 @@ impl Hexagon3D {
             true,
             rotation_matrix(rotation.0, rotation.1),
         );
+        *self.mesh.transform_mut() = transform;
     }
 
     /// Prism centre position(s).
@@ -1267,7 +1411,8 @@ impl Hexagon3D {
         &self.colors
     }
 
-    /// Axis-aligned bounds `(min, max)` of the prism mesh, or `None` when empty.
+    /// Axis-aligned bounds `(min, max)` of the prism mesh (through the item's
+    /// transform), or `None` when empty.
     pub fn bounds(&self) -> Option<(Vec3, Vec3)> {
         self.mesh.bounds()
     }
@@ -1275,6 +1420,19 @@ impl Hexagon3D {
     /// Append the prism triangles to `geometry`.
     pub fn append_to(&self, geometry: &mut Scene3dGeometry) {
         self.mesh.append_to(geometry);
+    }
+
+    /// The item's transform stack (silx `DataItem3D` transforms,
+    /// `items/core.py:288-315`), delegated to the underlying mesh so bounds
+    /// and geometry follow it by construction.
+    pub fn transform(&self) -> &Item3DTransform {
+        self.mesh.transform()
+    }
+
+    /// Mutable access to the transform stack (silx setters,
+    /// `items/core.py:335-485`).
+    pub fn transform_mut(&mut self) -> &mut Item3DTransform {
+        self.mesh.transform_mut()
     }
 }
 
@@ -1325,6 +1483,7 @@ pub struct ImageData3D {
     origin: [f32; 3],
     scale: [f32; 2],
     interpolation: ImageInterpolation,
+    transform: Item3DTransform,
 }
 
 impl Default for ImageData3D {
@@ -1345,6 +1504,7 @@ impl ImageData3D {
             origin: [0.0, 0.0, 0.0],
             scale: [1.0, 1.0],
             interpolation: ImageInterpolation::Nearest,
+            transform: Item3DTransform::default(),
         }
     }
 
@@ -1439,9 +1599,16 @@ impl ImageData3D {
         self.data.is_empty()
     }
 
-    /// World bounds `(min, max)` of the image quad, or `None` when empty.
+    /// World bounds `(min, max)` of the image quad through the item's
+    /// transform (silx `DataItem3D` bounds, `transformed=True`), or `None`
+    /// when empty.
     pub fn bounds(&self) -> Option<(Vec3, Vec3)> {
-        image_bounds(self.width, self.height, self.origin, self.scale)
+        self.transform.transform_bounds(image_bounds(
+            self.width,
+            self.height,
+            self.origin,
+            self.scale,
+        ))
     }
 
     /// Append this image as a colormapped layer to `geometry`.
@@ -1449,23 +1616,28 @@ impl ImageData3D {
         if self.is_empty() {
             return;
         }
-        let mut pixels = Vec::with_capacity(self.data.len() * 4);
-        for &v in &self.data {
-            let [r, g, b, a] = self.colormap.color_at(v);
-            pixels.extend_from_slice(&premul_linear_rgba8(Color32::from_rgba_unmultiplied(
-                r, g, b, a,
-            )));
-        }
-        geometry.add_image_layer(Scene3dImageLayer {
-            pixels,
-            width: self.width as u32,
-            height: self.height as u32,
-            origin: self.origin,
-            scale: self.scale,
-            interpolation: self.interpolation,
+        let raw_bounds = image_bounds(self.width, self.height, self.origin, self.scale);
+        append_with_transform(&self.transform, raw_bounds, geometry, |g| {
+            let mut pixels = Vec::with_capacity(self.data.len() * 4);
+            for &v in &self.data {
+                let [r, gr, b, a] = self.colormap.color_at(v);
+                pixels.extend_from_slice(&premul_linear_rgba8(Color32::from_rgba_unmultiplied(
+                    r, gr, b, a,
+                )));
+            }
+            g.add_image_layer(Scene3dImageLayer {
+                pixels,
+                width: self.width as u32,
+                height: self.height as u32,
+                origin: self.origin,
+                scale: self.scale,
+                interpolation: self.interpolation,
+            });
         });
     }
 }
+
+impl_item3d_transform!(ImageData3D);
 
 /// A 2D RGB(A) image displayed as a flat quad (silx `plot3d.items.ImageRgba`).
 /// Pixels are given directly as [`Color32`] (row-major); no colormap.
@@ -1477,6 +1649,7 @@ pub struct ImageRgba3D {
     origin: [f32; 3],
     scale: [f32; 2],
     interpolation: ImageInterpolation,
+    transform: Item3DTransform,
 }
 
 impl Default for ImageRgba3D {
@@ -1496,6 +1669,7 @@ impl ImageRgba3D {
             origin: [0.0, 0.0, 0.0],
             scale: [1.0, 1.0],
             interpolation: ImageInterpolation::Nearest,
+            transform: Item3DTransform::default(),
         }
     }
 
@@ -1560,9 +1734,16 @@ impl ImageRgba3D {
         self.pixels.is_empty()
     }
 
-    /// World bounds `(min, max)` of the image quad, or `None` when empty.
+    /// World bounds `(min, max)` of the image quad through the item's
+    /// transform (silx `DataItem3D` bounds, `transformed=True`), or `None`
+    /// when empty.
     pub fn bounds(&self) -> Option<(Vec3, Vec3)> {
-        image_bounds(self.width, self.height, self.origin, self.scale)
+        self.transform.transform_bounds(image_bounds(
+            self.width,
+            self.height,
+            self.origin,
+            self.scale,
+        ))
     }
 
     /// Append this image as an RGBA layer to `geometry`.
@@ -1570,20 +1751,25 @@ impl ImageRgba3D {
         if self.is_empty() {
             return;
         }
-        let mut pixels = Vec::with_capacity(self.pixels.len() * 4);
-        for &c in &self.pixels {
-            pixels.extend_from_slice(&premul_linear_rgba8(c));
-        }
-        geometry.add_image_layer(Scene3dImageLayer {
-            pixels,
-            width: self.width as u32,
-            height: self.height as u32,
-            origin: self.origin,
-            scale: self.scale,
-            interpolation: self.interpolation,
+        let raw_bounds = image_bounds(self.width, self.height, self.origin, self.scale);
+        append_with_transform(&self.transform, raw_bounds, geometry, |g| {
+            let mut pixels = Vec::with_capacity(self.pixels.len() * 4);
+            for &c in &self.pixels {
+                pixels.extend_from_slice(&premul_linear_rgba8(c));
+            }
+            g.add_image_layer(Scene3dImageLayer {
+                pixels,
+                width: self.width as u32,
+                height: self.height as u32,
+                origin: self.origin,
+                scale: self.scale,
+                interpolation: self.interpolation,
+            });
         });
     }
 }
+
+impl_item3d_transform!(ImageRgba3D);
 
 /// Nearest-neighbour source index for destination index `i` of `dst_len`, onto a
 /// source axis of `src_len` (the silx height-map resample, `floor(i·src/dst)`),
@@ -1630,6 +1816,7 @@ pub struct HeightMapData {
     v_width: usize,
     v_height: usize,
     colormap: Colormap,
+    transform: Item3DTransform,
 }
 
 impl Default for HeightMapData {
@@ -1649,6 +1836,7 @@ impl HeightMapData {
             v_width: 0,
             v_height: 0,
             colormap: Colormap::new(ColormapName::Viridis, 0.0, 1.0),
+            transform: Item3DTransform::default(),
         }
     }
 
@@ -1728,10 +1916,16 @@ impl HeightMapData {
         self.heights.is_empty() || self.values.is_empty()
     }
 
-    /// World bounds `(min, max)` of the height-field point grid, or `None` when
-    /// the height field is empty (independent of whether colour data is set).
+    /// World bounds `(min, max)` of the height-field point grid through the
+    /// item's transform (silx `DataItem3D` bounds, `transformed=True`), or
+    /// `None` when the height field is empty (independent of whether colour
+    /// data is set).
     pub fn bounds(&self) -> Option<(Vec3, Vec3)> {
-        height_grid_bounds(&self.heights, self.h_width, self.h_height)
+        self.transform.transform_bounds(height_grid_bounds(
+            &self.heights,
+            self.h_width,
+            self.h_height,
+        ))
     }
 
     /// Append the height field as colormapped square points to `geometry`.
@@ -1739,22 +1933,27 @@ impl HeightMapData {
         if self.is_empty() {
             return;
         }
-        for row in 0..self.h_height {
-            let vr = nearest_src_index(row, self.h_height, self.v_height);
-            for col in 0..self.h_width {
-                let vc = nearest_src_index(col, self.h_width, self.v_width);
-                let z = self.heights[row * self.h_width + col];
-                let [r, g, b, a] = self.colormap.color_at(self.values[vr * self.v_width + vc]);
-                geometry.add_point(
-                    [col as f32, row as f32, z],
-                    Color32::from_rgba_unmultiplied(r, g, b, a),
-                    1.0,
-                    PointMarker::Square,
-                );
+        let raw_bounds = height_grid_bounds(&self.heights, self.h_width, self.h_height);
+        append_with_transform(&self.transform, raw_bounds, geometry, |g| {
+            for row in 0..self.h_height {
+                let vr = nearest_src_index(row, self.h_height, self.v_height);
+                for col in 0..self.h_width {
+                    let vc = nearest_src_index(col, self.h_width, self.v_width);
+                    let z = self.heights[row * self.h_width + col];
+                    let [r, gr, b, a] = self.colormap.color_at(self.values[vr * self.v_width + vc]);
+                    g.add_point(
+                        [col as f32, row as f32, z],
+                        Color32::from_rgba_unmultiplied(r, gr, b, a),
+                        1.0,
+                        PointMarker::Square,
+                    );
+                }
             }
-        }
+        });
     }
 }
+
+impl_item3d_transform!(HeightMapData);
 
 /// A 2D height field coloured by an RGB(A) image (silx
 /// `plot3d.items.HeightMapRGBA`). Like [`HeightMapData`] but each square point is
@@ -1768,6 +1967,7 @@ pub struct HeightMapRGBA {
     colors: Vec<Color32>,
     c_width: usize,
     c_height: usize,
+    transform: Item3DTransform,
 }
 
 impl Default for HeightMapRGBA {
@@ -1786,6 +1986,7 @@ impl HeightMapRGBA {
             colors: Vec::new(),
             c_width: 0,
             c_height: 0,
+            transform: Item3DTransform::default(),
         }
     }
 
@@ -1837,10 +2038,15 @@ impl HeightMapRGBA {
         self.heights.is_empty() || self.colors.is_empty()
     }
 
-    /// World bounds `(min, max)` of the height-field point grid, or `None` when
-    /// the height field is empty.
+    /// World bounds `(min, max)` of the height-field point grid through the
+    /// item's transform (silx `DataItem3D` bounds, `transformed=True`), or
+    /// `None` when the height field is empty.
     pub fn bounds(&self) -> Option<(Vec3, Vec3)> {
-        height_grid_bounds(&self.heights, self.h_width, self.h_height)
+        self.transform.transform_bounds(height_grid_bounds(
+            &self.heights,
+            self.h_width,
+            self.h_height,
+        ))
     }
 
     /// Append the height field as RGBA square points to `geometry`.
@@ -1848,17 +2054,22 @@ impl HeightMapRGBA {
         if self.is_empty() {
             return;
         }
-        for row in 0..self.h_height {
-            let cr = nearest_src_index(row, self.h_height, self.c_height);
-            for col in 0..self.h_width {
-                let cc = nearest_src_index(col, self.h_width, self.c_width);
-                let z = self.heights[row * self.h_width + col];
-                let color = self.colors[cr * self.c_width + cc];
-                geometry.add_point([col as f32, row as f32, z], color, 1.0, PointMarker::Square);
+        let raw_bounds = height_grid_bounds(&self.heights, self.h_width, self.h_height);
+        append_with_transform(&self.transform, raw_bounds, geometry, |g| {
+            for row in 0..self.h_height {
+                let cr = nearest_src_index(row, self.h_height, self.c_height);
+                for col in 0..self.h_width {
+                    let cc = nearest_src_index(col, self.h_width, self.c_width);
+                    let z = self.heights[row * self.h_width + col];
+                    let color = self.colors[cr * self.c_width + cc];
+                    g.add_point([col as f32, row as f32, z], color, 1.0, PointMarker::Square);
+                }
             }
-        }
+        });
     }
 }
+
+impl_item3d_transform!(HeightMapRGBA);
 
 /// silx's default isosurface colour `#FFD700FF` (gold), `Isosurface.__init__`.
 pub const DEFAULT_ISOSURFACE_COLOR: Color32 = Color32::from_rgb(0xFF, 0xD7, 0x00);
@@ -2285,6 +2496,7 @@ pub struct ScalarField3D {
     data_range: Option<(f32, f32, f32)>,
     isosurfaces: Vec<Isosurface>,
     cut_plane: CutPlane,
+    transform: Item3DTransform,
 }
 
 impl Default for ScalarField3D {
@@ -2304,6 +2516,7 @@ impl ScalarField3D {
             data_range: None,
             isosurfaces: Vec::new(),
             cut_plane: CutPlane::new(),
+            transform: Item3DTransform::default(),
         }
     }
 
@@ -2428,9 +2641,9 @@ impl ScalarField3D {
         (vmin, vmax)
     }
 
-    /// The volume bounding box `(0,0,0)..(width,height,depth)`, or `None` when no
-    /// data is set (silx `BoundedGroup` data bounds, in world `xyz`).
-    pub fn bounds(&self) -> Option<(Vec3, Vec3)> {
+    /// The raw volume box `(0,0,0)..(width,height,depth)` in the object (voxel)
+    /// frame, or `None` when no data is set.
+    fn raw_bounds(&self) -> Option<(Vec3, Vec3)> {
         if self.data.is_empty() {
             return None;
         }
@@ -2440,20 +2653,38 @@ impl ScalarField3D {
         ))
     }
 
-    /// Sample the field value at world position `world`, or `None` when the field
-    /// is empty or `world` lies outside the volume box. Uses the cut plane's
-    /// interpolation (nearest vs trilinear) so a picked value matches the slice
-    /// the user sees. The single field sampler (`sample_field_value`, the same
-    /// owner the cut-plane raster uses), with an explicit box test so a point
-    /// past the edge reads `None` rather than the clamped edge voxel.
-    pub fn value_at(&self, world: Vec3) -> Option<f32> {
-        let (min, max) = self.bounds()?;
-        if world.x < min.x
-            || world.y < min.y
-            || world.z < min.z
-            || world.x > max.x
-            || world.y > max.y
-            || world.z > max.z
+    /// The volume bounding box through the item's transform (silx
+    /// `BoundedGroup` data bounds under the `DataItem3D` transform stack), or
+    /// `None` when no data is set.
+    pub fn bounds(&self) -> Option<(Vec3, Vec3)> {
+        self.transform.transform_bounds(self.raw_bounds())
+    }
+
+    /// Map a scene-frame position into the object (voxel) frame: identity fast
+    /// path, else through the inverse of the composed item transform. `None`
+    /// when the composed matrix is singular (e.g. a zero scale) — nothing is
+    /// pickable then.
+    fn scene_to_object(&self, p: Vec3) -> Option<Vec3> {
+        if self.transform.is_identity() {
+            return Some(p);
+        }
+        let inv = self
+            .transform
+            .composed_matrix(self.raw_bounds())
+            .inverse()?;
+        Some(inv.transform_point(p, false))
+    }
+
+    /// [`value_at`](Self::value_at) with `obj` already in the object (voxel)
+    /// frame — the single box test + sampler both pick paths share.
+    fn value_at_object(&self, obj: Vec3) -> Option<f32> {
+        let (min, max) = self.raw_bounds()?;
+        if obj.x < min.x
+            || obj.y < min.y
+            || obj.z < min.z
+            || obj.x > max.x
+            || obj.y > max.y
+            || obj.z > max.z
         {
             return None;
         }
@@ -2462,25 +2693,47 @@ impl ScalarField3D {
             self.depth,
             self.height,
             self.width,
-            world,
+            obj,
             self.cut_plane.interpolation(),
         ))
     }
 
-    /// Intersect the picking `segment` (`(near, far)` in world space) with the cut
-    /// plane, returning the world position of the hit when the cut plane is
+    /// Sample the field value at scene position `world` (inverse-mapped through
+    /// the item transform into the voxel frame), or `None` when the field is
+    /// empty or the position lies outside the volume box. Uses the cut plane's
+    /// interpolation (nearest vs trilinear) so a picked value matches the slice
+    /// the user sees. The single field sampler (`sample_field_value`, the same
+    /// owner the cut-plane raster uses), with an explicit box test so a point
+    /// past the edge reads `None` rather than the clamped edge voxel.
+    pub fn value_at(&self, world: Vec3) -> Option<f32> {
+        self.value_at_object(self.scene_to_object(world)?)
+    }
+
+    /// Intersect the picking `segment` (`(near, far)` in scene space) with the
+    /// cut plane, returning the scene position of the hit when the cut plane is
     /// **visible** and the hit lies inside the volume box, else `None`. Port of
-    /// silx `items.volume.CutPlane._pickFull` (segment/plane intersection, then a
-    /// data-bounds test). Pair with [`value_at`](Self::value_at) for the sampled
-    /// value at the hit — the value the colormapped slice shows there.
+    /// silx `items.volume.CutPlane._pickFull` (segment/plane intersection, then
+    /// a data-bounds test — silx converts the pick ray into each object's frame
+    /// first, so the segment is mapped through the inverse item transform and
+    /// the hit mapped back). Pair with [`value_at`](Self::value_at) for the
+    /// sampled value at the hit — the value the colormapped slice shows there.
     pub fn pick_cut_plane(&self, segment: (Vec3, Vec3)) -> Option<Vec3> {
         if !self.cut_plane.is_visible() || self.data.is_empty() {
             return None;
         }
+        let a = self.scene_to_object(segment.0)?;
+        let b = self.scene_to_object(segment.1)?;
         let plane = self.cut_plane.plane();
-        segment_plane_intersect(segment.0, segment.1, plane.normal(), plane.point())
+        let hit = segment_plane_intersect(a, b, plane.normal(), plane.point())
             .into_iter()
-            .find(|&hit| self.value_at(hit).is_some())
+            .find(|&hit| self.value_at_object(hit).is_some())?;
+        Some(if self.transform.is_identity() {
+            hit
+        } else {
+            self.transform
+                .composed_matrix(self.raw_bounds())
+                .transform_point(hit, false)
+        })
     }
 
     /// Append every iso-surface's triangles to `geometry`. Iso-surfaces are
@@ -2490,6 +2743,13 @@ impl ScalarField3D {
         if self.data.is_empty() {
             return;
         }
+        append_with_transform(&self.transform, self.raw_bounds(), geometry, |g| {
+            self.append_raw(g)
+        });
+    }
+
+    /// Build the raw (voxel-frame) geometry — see [`Self::append_to`].
+    fn append_raw(&self, geometry: &mut Scene3dGeometry) {
         let mut order: Vec<usize> = (0..self.isosurfaces.len()).collect();
         order.sort_by(|&a, &b| {
             self.isosurfaces[b]
@@ -2540,9 +2800,10 @@ impl ScalarField3D {
             // primitives.py:1082-1101 `boxPlaneIntersect` over the parent data
             // bounds → `Lines(contourVertices, mode="loop")` :1126). The stroke
             // is white by default, silx width 2.0 — drawn 1px here like the
-            // rest of the line chrome, the box wireframe included.
+            // rest of the line chrome, the box wireframe included. Raw bounds:
+            // the contour is built in the voxel frame like the slice itself.
             if self.cut_plane.stroke_visible
-                && let Some(bounds) = self.bounds()
+                && let Some(bounds) = self.raw_bounds()
             {
                 let contour = box_plane_intersect(
                     bounds,
@@ -2559,6 +2820,8 @@ impl ScalarField3D {
         }
     }
 }
+
+impl_item3d_transform!(ScalarField3D);
 
 /// Compute `(min, min_positive, max)` over the finite samples (silx
 /// `ScalarField3D._computeRangeFromData` via `min_max(..., min_positive=True,
@@ -2750,7 +3013,7 @@ impl ComplexField3D {
         &mut self.field
     }
 
-    /// The volume bounding box `(0,0,0)..(width,height,depth)`, or `None` when no
+    /// The volume bounding box through the item's transform, or `None` when no
     /// data is set.
     pub fn bounds(&self) -> Option<(Vec3, Vec3)> {
         self.field.bounds()
@@ -2760,6 +3023,19 @@ impl ComplexField3D {
     /// (delegates to the inner [`ScalarField3D`]).
     pub fn append_to(&self, geometry: &mut Scene3dGeometry) {
         self.field.append_to(geometry);
+    }
+
+    /// The item's transform stack (silx `DataItem3D` transforms,
+    /// `items/core.py:288-315`), delegated to the inner [`ScalarField3D`] so
+    /// bounds, geometry, and the cut-plane pick follow it by construction.
+    pub fn transform(&self) -> &Item3DTransform {
+        self.field.transform()
+    }
+
+    /// Mutable access to the transform stack (silx setters,
+    /// `items/core.py:335-485`).
+    pub fn transform_mut(&mut self) -> &mut Item3DTransform {
+        self.field.transform_mut()
     }
 
     /// Push the current mode's projection into the inner scalar field.
@@ -2851,6 +3127,46 @@ mod tests {
         field.cut_plane_mut().set_point(Vec3::new(0.0, 1.5, 0.0));
         let seg = (Vec3::new(9.0, 3.0, 9.0), Vec3::new(9.0, 0.0, 9.0));
         assert!(field.pick_cut_plane(seg).is_none());
+    }
+
+    #[test]
+    fn field_transform_moves_bounds_value_and_cut_plane_pick_together() {
+        // A translated field (silx DataItem3D setTranslation): bounds, the
+        // scene-frame value sampler, and the cut-plane pick must all read the
+        // same composed transform — one owner, no per-path drift.
+        let mut field = ramp_field();
+        field.transform_mut().set_translation(10.0, 0.0, 0.0);
+
+        // Bounds follow the transform.
+        let (lo, hi) = field.bounds().expect("has data");
+        assert_eq!(lo, Vec3::new(10.0, 0.0, 0.0));
+        assert_eq!(hi, Vec3::new(13.0, 3.0, 3.0));
+
+        // value_at takes scene coordinates: the voxel-frame sample (1.5,1.5,1.5)
+        // (= value 1.0) now lives at x + 10; the raw location reads None.
+        let v = field
+            .value_at(Vec3::new(11.5, 1.5, 1.5))
+            .expect("inside the translated box");
+        assert!((v - 1.0).abs() < 1e-5, "sampled {v}");
+        assert!(field.value_at(Vec3::new(1.5, 1.5, 1.5)).is_none());
+
+        // Cut plane at voxel-frame y = 1.5: a scene-frame segment over the
+        // translated box hits it, and the hit comes back in scene coordinates.
+        field.cut_plane_mut().set_visible(true);
+        field.cut_plane_mut().set_point(Vec3::new(0.0, 1.5, 0.0));
+        let seg = (Vec3::new(11.5, 3.0, 1.5), Vec3::new(11.5, 0.0, 1.5));
+        let hit = field.pick_cut_plane(seg).expect("crosses inside the box");
+        assert!(
+            (hit.x - 11.5).abs() < 1e-4 && (hit.y - 1.5).abs() < 1e-4,
+            "scene-frame hit: {hit:?}"
+        );
+        // Feeding the returned scene position back into value_at agrees.
+        let value = field.value_at(hit).expect("hit inside the box");
+        assert!((value - 1.0).abs() < 1e-5, "value {value}");
+
+        // The same segment placed over the RAW (untransformed) box misses.
+        let raw_seg = (Vec3::new(1.5, 3.0, 1.5), Vec3::new(1.5, 0.0, 1.5));
+        assert!(field.pick_cut_plane(raw_seg).is_none());
     }
 
     #[test]

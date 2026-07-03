@@ -27,7 +27,7 @@ use egui::Color32;
 use egui_wgpu::{RenderState, wgpu};
 
 use crate::core::scene3d::camera::Camera;
-use crate::core::scene3d::mat4::Vec3;
+use crate::core::scene3d::mat4::{Mat4, Vec3};
 
 /// Scene identity key (mirrors [`crate::core::plot::PlotId`]); lets several
 /// independent 3D scenes coexist in one egui app without sharing GPU state.
@@ -431,6 +431,77 @@ impl Scene3dGeometry {
     /// points, not along the segments (`items/scatter.py:509-511`).
     pub fn add_line_pick_anchor(&mut self, pos: [f32; 3]) {
         self.line_pick_anchors.push(pos);
+    }
+
+    /// Bake the matrix `m` into every channel, in place — the single owner of
+    /// the item-transform application. silx applies the `DataItem3D` transform
+    /// stack (`items/core.py:288-315`) in the scene graph at render time; this
+    /// port bakes the composed matrix when an item appends its geometry, so
+    /// rendering and the CPU pick traversal ([`crate::SceneWidget::pick`])
+    /// read the same transformed positions by construction.
+    ///
+    /// Per channel: line / triangle / point / pick-anchor / textured-mesh
+    /// positions map by `m` (point sprite sizes stay in pixels, as silx);
+    /// lit-mesh normals map by the inverse-transpose, renormalized (left
+    /// untouched when `m` is singular — the shader then shades the raw
+    /// normal). Image layers stay axis-aligned layers when `m` is a
+    /// translation + positive per-axis scale (the silx `ScalarFieldView`
+    /// `_dataScale`/`_dataTranslate` case) and otherwise convert to the
+    /// equivalent textured-mesh quad — rendered identically, but no longer
+    /// reachable by the image row/column pick.
+    pub fn apply_transform(&mut self, m: &Mat4) {
+        let map = |pos: &mut [f32; 3]| {
+            *pos = m.transform_point(Vec3::from_array(*pos), false).to_array();
+        };
+        for v in &mut self.lines {
+            map(&mut v.pos);
+        }
+        for v in &mut self.triangles {
+            map(&mut v.pos);
+        }
+        for p in &mut self.points {
+            map(&mut p.pos);
+        }
+        for a in &mut self.line_pick_anchors {
+            map(a);
+        }
+        let inverse = m.inverse();
+        for v in &mut self.meshes {
+            map(&mut v.pos);
+            if let Some(inv) = &inverse {
+                // Inverse-transpose: n'ᵢ = Σⱼ inv[j][i]·nⱼ (translation drops).
+                let n = v.normal;
+                let nt = Vec3::new(
+                    inv.rows[0][0] * n[0] + inv.rows[1][0] * n[1] + inv.rows[2][0] * n[2],
+                    inv.rows[0][1] * n[0] + inv.rows[1][1] * n[1] + inv.rows[2][1] * n[2],
+                    inv.rows[0][2] * n[0] + inv.rows[1][2] * n[1] + inv.rows[2][2] * n[2],
+                );
+                v.normal = nt.normalized().to_array();
+            }
+        }
+        for mesh in &mut self.textured_meshes {
+            for v in &mut mesh.vertices {
+                map(v);
+            }
+        }
+        // Image layers: only a translation + positive per-axis scale keeps the
+        // axis-aligned origin/scale representation (and with it the image
+        // row/column pick); anything else becomes a textured quad.
+        let diag = axis_aligned_positive_scale(m);
+        if let Some((sx, sy, _)) = diag {
+            for layer in &mut self.images {
+                let origin = m
+                    .transform_point(Vec3::from_array(layer.origin), false)
+                    .to_array();
+                layer.origin = origin;
+                layer.scale = [layer.scale[0] * sx, layer.scale[1] * sy];
+            }
+        } else {
+            for layer in std::mem::take(&mut self.images) {
+                self.textured_meshes
+                    .push(image_layer_to_textured_mesh(&layer, m));
+            }
+        }
     }
 
     /// World-space pick-only anchors (see [`Self::add_line_pick_anchor`]).
@@ -1450,6 +1521,57 @@ fn build_image_texture_bind_group(
     }))
 }
 
+/// If `m` is a pure translation + positive per-axis scale, its `(sx, sy, sz)`
+/// diagonal; otherwise `None`. Used by [`Scene3dGeometry::apply_transform`] to
+/// decide whether an image layer can stay axis-aligned.
+fn axis_aligned_positive_scale(m: &Mat4) -> Option<(f32, f32, f32)> {
+    let r = &m.rows;
+    let off_diagonal_zero = r[0][1] == 0.0
+        && r[0][2] == 0.0
+        && r[1][0] == 0.0
+        && r[1][2] == 0.0
+        && r[2][0] == 0.0
+        && r[2][1] == 0.0
+        && r[3][0] == 0.0
+        && r[3][1] == 0.0
+        && r[3][2] == 0.0
+        && r[3][3] == 1.0;
+    (off_diagonal_zero && r[0][0] > 0.0 && r[1][1] > 0.0 && r[2][2] > 0.0)
+        .then_some((r[0][0], r[1][1], r[2][2]))
+}
+
+/// Convert an axis-aligned image layer into the equivalent textured-mesh quad
+/// with its corners mapped through `m` — the same two triangles and corner UVs
+/// [`build_image_gpu`] would emit, so the rendered pixels are unchanged.
+fn image_layer_to_textured_mesh(layer: &Scene3dImageLayer, m: &Mat4) -> Scene3dTexturedMesh {
+    let [ox, oy, oz] = layer.origin;
+    let (sx, sy) = (layer.scale[0], layer.scale[1]);
+    let (x1, y1) = (ox + layer.width as f32 * sx, oy + layer.height as f32 * sy);
+    let corner = |x: f32, y: f32| m.transform_point(Vec3::new(x, y, oz), false).to_array();
+    Scene3dTexturedMesh {
+        pixels: layer.pixels.clone(),
+        width: layer.width,
+        height: layer.height,
+        vertices: vec![
+            corner(ox, oy),
+            corner(x1, oy),
+            corner(x1, y1),
+            corner(ox, oy),
+            corner(x1, y1),
+            corner(ox, y1),
+        ],
+        uvs: vec![
+            [0.0, 0.0],
+            [1.0, 0.0],
+            [1.0, 1.0],
+            [0.0, 0.0],
+            [1.0, 1.0],
+            [0.0, 1.0],
+        ],
+        interpolation: layer.interpolation,
+    }
+}
+
 /// Build the per-image GPU state for one [`Scene3dImageLayer`]: its texture bind
 /// group plus the six-vertex quad (two triangles) at the layer's world rect with
 /// corner UVs. Returns `None` for a degenerate layer (zero dimensions or a pixel
@@ -2017,6 +2139,8 @@ impl egui_wgpu::CallbackTrait for Scene3dCallback {
 mod tests {
     use super::*;
 
+    use crate::core::scene3d::mat4::{mat4_rotate, mat4_scale, mat4_translate};
+
     #[test]
     fn bounding_box_with_axes_has_twelve_lines_and_rgb_axes() {
         let mut g = Scene3dGeometry::new();
@@ -2142,5 +2266,106 @@ mod tests {
         // camera z = -5 → extent 0.
         let fog_flat = Scene3dFog::linear(&camera_front, flat, Color32::BLACK);
         assert_eq!(fog_flat.scale, 0.0);
+    }
+
+    #[test]
+    fn apply_transform_maps_positions_and_inverse_transposes_normals() {
+        let mut g = Scene3dGeometry::new();
+        g.add_line([0.0; 3], [1.0, 0.0, 0.0], Color32::WHITE);
+        g.add_triangle([0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], Color32::RED);
+        g.add_point([1.0, 2.0, 3.0], Color32::GREEN, 4.0, PointMarker::Circle);
+        g.add_line_pick_anchor([1.0, 1.0, 0.0]);
+        // A lit triangle whose (unit) normal is (1,1,0)/√2 at every vertex.
+        let s = std::f32::consts::FRAC_1_SQRT_2;
+        g.add_mesh_triangle(
+            [[0.0; 3], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]],
+            Color32::BLUE,
+            [[s, s, 0.0]; 3],
+        );
+        g.add_textured_mesh(Scene3dTexturedMesh {
+            pixels: vec![0; 4],
+            width: 1,
+            height: 1,
+            vertices: vec![[0.0; 3], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0]],
+            uvs: vec![[0.0; 2], [1.0, 0.0], [1.0; 2]],
+            interpolation: ImageInterpolation::Nearest,
+        });
+
+        // Bake scale (2,1,1) then translate (10,0,0).
+        let m = mat4_translate(10.0, 0.0, 0.0) * mat4_scale(2.0, 1.0, 1.0);
+        g.apply_transform(&m);
+
+        assert_eq!(g.lines[0].pos, [10.0, 0.0, 0.0]);
+        assert_eq!(g.lines[1].pos, [12.0, 0.0, 0.0]);
+        assert_eq!(g.triangles[2].pos, [10.0, 1.0, 0.0]);
+        assert_eq!(g.points[0].pos, [12.0, 2.0, 3.0]);
+        assert_eq!(g.line_pick_anchors[0], [12.0, 1.0, 0.0]);
+        assert_eq!(g.textured_meshes[0].vertices[2], [12.0, 1.0, 0.0]);
+        assert_eq!(g.meshes[1].pos, [12.0, 0.0, 0.0]);
+        // Normals map by the inverse-transpose (diag(1/2, 1, 1) here), then
+        // renormalize: (1,1,0)/√2 → (1,2,0)/√5 — NOT the naive (2,1,0)/√5.
+        let n = g.meshes[0].normal;
+        let expect = [1.0 / 5.0f32.sqrt(), 2.0 / 5.0f32.sqrt(), 0.0];
+        for (got, want) in n.iter().zip(expect) {
+            assert!((got - want).abs() < 1e-5, "normal {n:?}, want {expect:?}");
+        }
+    }
+
+    #[test]
+    fn apply_transform_scales_axis_aligned_image_layers_in_place() {
+        let mut g = Scene3dGeometry::new();
+        g.add_image_layer(Scene3dImageLayer {
+            pixels: vec![0; 4],
+            width: 1,
+            height: 1,
+            origin: [1.0, 1.0, 0.0],
+            scale: [0.5, 0.5],
+            interpolation: ImageInterpolation::Nearest,
+        });
+        // Positive per-axis scale + translation keeps the layer (and with it
+        // the image row/column pick path).
+        let m = mat4_translate(1.0, 2.0, 3.0) * mat4_scale(2.0, 3.0, 4.0);
+        g.apply_transform(&m);
+        assert_eq!(g.images.len(), 1);
+        assert!(g.textured_meshes.is_empty());
+        assert_eq!(g.images[0].origin, [3.0, 5.0, 3.0]);
+        assert_eq!(g.images[0].scale, [1.0, 1.5]);
+    }
+
+    #[test]
+    fn apply_transform_converts_rotated_image_layers_to_textured_quads() {
+        let mut g = Scene3dGeometry::new();
+        g.add_image_layer(Scene3dImageLayer {
+            pixels: vec![0; 2 * 4],
+            width: 2,
+            height: 1,
+            origin: [0.0; 3],
+            scale: [1.0, 1.0],
+            interpolation: ImageInterpolation::Linear,
+        });
+        // 90° about +z is not representable as an axis-aligned layer → the
+        // layer becomes the equivalent textured quad (same corners and UVs as
+        // `build_image_gpu`).
+        let m = mat4_rotate(std::f32::consts::FRAC_PI_2, 0.0, 0.0, 1.0);
+        g.apply_transform(&m);
+        assert!(g.images.is_empty());
+        assert_eq!(g.textured_meshes.len(), 1);
+        let quad = &g.textured_meshes[0];
+        assert_eq!(quad.vertices.len(), 6);
+        assert_eq!(
+            quad.uvs,
+            vec![
+                [0.0, 0.0],
+                [1.0, 0.0],
+                [1.0, 1.0],
+                [0.0, 0.0],
+                [1.0, 1.0],
+                [0.0, 1.0]
+            ]
+        );
+        // Far corner (2, 1, 0) rotates to (-1, 2, 0).
+        let far = quad.vertices[2];
+        assert!((far[0] - (-1.0)).abs() < 1e-5 && (far[1] - 2.0).abs() < 1e-5);
+        assert_eq!(quad.interpolation, ImageInterpolation::Linear);
     }
 }
