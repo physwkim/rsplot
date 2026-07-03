@@ -1255,6 +1255,38 @@ pub fn histogram_edges(positions: &[f64], align: HistogramAlign) -> Vec<f64> {
     }
 }
 
+/// Recover the `N` bin-anchor x positions from `N + 1` bin edges and the
+/// histogram alignment, mirroring silx `Histogram._revertComputeEdges`
+/// (items/histogram.py:386-408) — the x axis the histogram stats context runs
+/// over (`_HistogramContext`, stats.py:380-383).
+///
+/// [`HistogramAlign`] names the variant after where the position sits in its
+/// bin (see [`histogram_edges`]'s note on silx's naming inversion), so:
+/// positions are **left** edges → `edges[:-1]` (silx `"right"`), **right**
+/// edges → `edges[1:]` (silx `"left"`), **centres** → the bin midpoints
+/// `(edges[1:] + edges[:-1]) / 2` (silx `"center"`). Fewer than 2 edges yield
+/// no anchors.
+///
+/// Like silx, the centre revert assumes uniform spacing ("for now we consider
+/// that the spaces between xs are constant", histogram.py:400): for
+/// non-uniform positions it returns the bin midpoints, not the original
+/// positions — reproduced as-is for parity.
+pub fn revert_compute_edges(edges: &[f64], align: HistogramAlign) -> Vec<f64> {
+    if edges.len() < 2 {
+        return Vec::new();
+    }
+    match align {
+        // silx `_revertComputeEdges(x, "right")`: drop the appended trailing
+        // edge -> positions are the left edges.
+        HistogramAlign::Left => edges[..edges.len() - 1].to_vec(),
+        // silx `_revertComputeEdges(x, "left")`: drop the prepended leading
+        // edge -> positions are the right edges.
+        HistogramAlign::Right => edges[1..].to_vec(),
+        // silx `"center"`: bin midpoints.
+        HistogramAlign::Center => edges.windows(2).map(|w| (w[0] + w[1]) / 2.0).collect(),
+    }
+}
+
 /// Pick the filled-histogram bin under data coordinates `(x_data, y_data)`,
 /// mirroring silx `Histogram.__pickFilledHistogram` (items/histogram.py:244-279).
 ///
@@ -1841,6 +1873,17 @@ fn record_log_range(
         Some(RetainedItemData::Curve { x, y }) => {
             log_filtered_curve_range(x, y, x_log, y_log, want_x)
         }
+        // A histogram renders as its 2N step polyline (silx `_addBackendRenderer`
+        // filters that polyline's non-positive points under log,
+        // items/histogram.py:160-180), so rebuild it for the log-range repair.
+        Some(RetainedItemData::Histogram { edges, counts, .. }) => {
+            let (sx, sy) = histogram_step_values(edges, counts).ok()?;
+            log_filtered_curve_range(&sx, &sy, x_log, y_log, want_x)
+        }
+        // A value scatter's rendered vertices are its (x, y) points.
+        Some(RetainedItemData::Scatter { x, y, .. }) => {
+            log_filtered_curve_range(x, y, x_log, y_log, want_x)
+        }
         _ => None,
     }
 }
@@ -1898,6 +1941,26 @@ fn curve_spec_retained_data(spec: &CurveSpec<'_>) -> RetainedItemData {
     RetainedItemData::Curve {
         x: spec.x.to_vec(),
         y: spec.y.to_vec(),
+    }
+}
+
+/// Capture a histogram's raw `(edges, counts)` plus its two derived x-anchor
+/// arrays as [`RetainedItemData::Histogram`]: the alignment-dependent stats
+/// anchors (silx `_revertComputeEdges(edges, alignment)`, the
+/// `_HistogramContext` x axis, stats.py:380-383) and the bin centres (the
+/// snap/fit x coordinates, PositionInfo.py:250-254 / actions/fit.py:379-381).
+/// Single owner of the derived-array computation so the two views cannot
+/// drift from the edges.
+fn histogram_retained_data(
+    edges: &[f64],
+    counts: &[f64],
+    align: HistogramAlign,
+) -> RetainedItemData {
+    RetainedItemData::Histogram {
+        edges: edges.to_vec(),
+        counts: counts.to_vec(),
+        x: revert_compute_edges(edges, align),
+        centers: revert_compute_edges(edges, HistogramAlign::Center),
     }
 }
 
@@ -2032,6 +2095,16 @@ fn retained_data_to_stats_input(
     use crate::widget::stats_widget::StatsInput;
     match data {
         RetainedItemData::Curve { x, y } => StatsInput::Curve { xs: x, ys: y },
+        // silx _HistogramContext: the N raw counts at the _revertComputeEdges
+        // bin anchors (stats.py:376-414), not the rendered 2N step polyline.
+        RetainedItemData::Histogram { x, counts, .. } => StatsInput::Histogram { xs: x, counts },
+        // silx _ScatterContext: stats over the value array, axes (x, y)
+        // (stats.py:425-498).
+        RetainedItemData::Scatter { x, y, values } => StatsInput::Scatter {
+            xs: x,
+            ys: y,
+            values,
+        },
         RetainedItemData::Image {
             data,
             width,
@@ -2069,14 +2142,20 @@ fn autoscaled_colormap(base: &Colormap, mode: AutoscaleMode, pixels: &[f64]) -> 
 
 /// Borrow a [`RetainedItemData`]'s curve `(x, y)` arrays for a live
 /// [`FitWidget`] target (silx `FitWidget.setData`), or `None` when the item is
-/// not a curve. Split out so the data→fit feed is unit-testable without a GPU
-/// backend.
+/// not fittable. silx's fit action targets curves and histograms
+/// (`_getUniqueCurveOrHistogram`, actions/fit.py:52-74); a histogram is fitted
+/// against its bin centres (`(bin_edges[1:] + bin_edges[:-1]) / 2`,
+/// actions/fit.py:379-381). Scatters and images are not silx fit targets.
+/// Split out so the data→fit feed is unit-testable without a GPU backend.
 ///
 /// [`FitWidget`]: crate::widget::fit_widget::FitWidget
 fn retained_curve_xy(data: &RetainedItemData) -> Option<(&[f64], &[f64])> {
     match data {
         RetainedItemData::Curve { x, y } => Some((x, y)),
-        RetainedItemData::Image { .. } => None,
+        RetainedItemData::Histogram {
+            centers, counts, ..
+        } => Some((centers, counts)),
+        RetainedItemData::Scatter { .. } | RetainedItemData::Image { .. } => None,
     }
 }
 
@@ -2124,6 +2203,17 @@ fn roi_stats_rows(
                     )
                 }
                 RetainedItemData::Curve { x, y } => curve_roi_stats(&managed.roi, x, y),
+                // silx _HistogramContext under an ROI masks the N counts on
+                // their bin-anchor x positions (stats.py:395-401), the same
+                // x-span reduction as a curve.
+                RetainedItemData::Histogram { x, counts, .. } => {
+                    curve_roi_stats(&managed.roi, x, counts)
+                }
+                // silx _ScatterContext under an ROI masks the value array on
+                // the points' x positions (stats.py:477-483).
+                RetainedItemData::Scatter { x, values, .. } => {
+                    curve_roi_stats(&managed.roi, x, values)
+                }
             };
             let label = if managed.name.is_empty() {
                 format!("ROI {index}")
@@ -2462,13 +2552,42 @@ fn marker_spec_from_data(marker: &Marker) -> MarkerSpec<'_> {
 
 /// Raw item data retained alongside an [`ItemRecord`] so live consumers (a
 /// [`StatsWidget`], a [`FitWidget`], a raw-pixel autoscale) can read the active
-/// item's data without the caller re-supplying it. Only scalar curves and
-/// scalar images are retained; RGBA images, triangles, shapes, and markers have
-/// no retained data.
+/// item's data without the caller re-supplying it. Only scalar curves,
+/// histograms, value scatters, and scalar images are retained; RGBA images,
+/// triangles, shapes, and markers have no retained data.
 #[derive(Clone, Debug)]
 enum RetainedItemData {
     /// A curve's `(x, y)` arrays.
     Curve { x: Vec<f64>, y: Vec<f64> },
+    /// A histogram's raw data: silx keeps `(counts, edges)` on the item and
+    /// renders the 2N step polyline as a backend artifact, so the retained
+    /// data is the N-count form the silx consumers read — not the step curve.
+    /// The two derived x-anchor arrays are precomputed here (rather than the
+    /// alignment retained) because the stats/fit feeds hand out borrowed
+    /// slices ([`StatsInput`], [`retained_curve_xy`]).
+    ///
+    /// [`StatsInput`]: crate::widget::stats_widget::StatsInput
+    Histogram {
+        /// The `N + 1` bin edges (silx `Histogram.getBinEdgesData`).
+        edges: Vec<f64>,
+        /// The `N` bin counts (silx `Histogram.getValueData`).
+        counts: Vec<f64>,
+        /// The `N` stats x-anchors: silx `_revertComputeEdges(edges,
+        /// alignment)` (`_HistogramContext`, stats.py:380-383).
+        x: Vec<f64>,
+        /// The `N` bin centres `(edges[i] + edges[i+1]) / 2` — the x
+        /// coordinates silx snaps to (PositionInfo.py:250-254) and fits
+        /// against (actions/fit.py:379-381).
+        centers: Vec<f64>,
+    },
+    /// A value scatter's `(x, y, values)` arrays (silx `Scatter` data): the
+    /// per-point `values` drive the stats context (`_ScatterContext`,
+    /// stats.py:425-498) while `(x, y)` are the position axes.
+    Scatter {
+        x: Vec<f64>,
+        y: Vec<f64>,
+        values: Vec<f64>,
+    },
     /// A scalar image's row-major pixels (as `f64`), its geometry, its
     /// colormap, and its global opacity (retained so a raw-pixel autoscale can
     /// re-upload the image with new value limits without depending on transient
@@ -2552,9 +2671,9 @@ impl ImageDisplayAttrs {
 }
 
 impl RetainedItemData {
-    /// The display attributes of a retained scalar image, or `None` for a curve
-    /// (the only other retained variant). Captured by every re-upload path and
-    /// restored via [`ImageDisplayAttrs::apply`].
+    /// The display attributes of a retained scalar image, or `None` for the
+    /// non-image variants (curve, histogram, scatter). Captured by every
+    /// re-upload path and restored via [`ImageDisplayAttrs::apply`].
     fn image_display_attrs(&self) -> Option<ImageDisplayAttrs> {
         match self {
             RetainedItemData::Image {
@@ -2575,7 +2694,9 @@ impl RetainedItemData {
                 aggregation_block: *aggregation_block,
                 alpha_map: alpha_map.clone(),
             }),
-            RetainedItemData::Curve { .. } => None,
+            RetainedItemData::Curve { .. }
+            | RetainedItemData::Histogram { .. }
+            | RetainedItemData::Scatter { .. } => None,
         }
     }
 }
@@ -4090,17 +4211,39 @@ impl PlotWidget {
     }
 
     /// Add a histogram from bin edges and bin counts.
+    ///
+    /// Explicit `N + 1` edges keep silx's default alignment of `"center"`
+    /// (silx `addHistogram(align="center")`, PlotWidget.py:1300), which places
+    /// the stats bin anchors at the bin midpoints.
     pub fn add_histogram(
         &mut self,
         edges: &[f64],
         counts: &[f64],
         color: Color32,
     ) -> Result<ItemHandle, PlotDataError> {
+        self.add_histogram_with_align(edges, counts, color, HistogramAlign::Center)
+    }
+
+    /// Shared histogram-add path: render the step polyline, then retain the
+    /// raw `(edges, counts)` histogram data (silx keeps `(histogram, edges)`
+    /// on the `Histogram` item; the step curve is a backend render artifact,
+    /// items/histogram.py:88-106). The retained form feeds the stats table
+    /// with the N raw counts (silx `_HistogramContext`) instead of the 2N
+    /// step points.
+    fn add_histogram_with_align(
+        &mut self,
+        edges: &[f64],
+        counts: &[f64],
+        color: Color32,
+        align: HistogramAlign,
+    ) -> Result<ItemHandle, PlotDataError> {
         let (x, y) = histogram_step_values(edges, counts)?;
         let mut spec = CurveSpec::new(&x, &y, color);
         spec.fill = true;
         spec.baseline = Baseline::Scalar(0.0);
-        Ok(self.add_curve_spec_as_kind(spec, PlotItemKind::Histogram))
+        let handle = self.add_curve_spec_as_kind(spec, PlotItemKind::Histogram);
+        self.set_retained_data(handle, Some(histogram_retained_data(edges, counts, align)));
+        Ok(handle)
     }
 
     /// Add a histogram and assign a legend label.
@@ -4130,7 +4273,10 @@ impl PlotWidget {
         align: HistogramAlign,
     ) -> Result<ItemHandle, PlotDataError> {
         let edges = histogram_edges(positions, align);
-        self.add_histogram(&edges, counts, color)
+        // Keep the caller's alignment for the retained stats anchors (silx
+        // stores it on the item and _revertComputeEdges recovers the
+        // positions from it, items/histogram.py:373, 386-408).
+        self.add_histogram_with_align(&edges, counts, color, align)
     }
 
     /// Add an aligned histogram (see [`Self::add_histogram_aligned`]) and assign a
@@ -6734,7 +6880,9 @@ impl PlotWidget {
                 (**colormap).clone(),
                 retained.image_display_attrs()?,
             ),
-            RetainedItemData::Curve { .. } => return None,
+            RetainedItemData::Curve { .. }
+            | RetainedItemData::Histogram { .. }
+            | RetainedItemData::Scatter { .. } => return None,
         };
         let cm = autoscaled_colormap(&base, mode, &data);
         let limits = (cm.vmin, cm.vmax);
@@ -7005,13 +7153,13 @@ impl PlotWidget {
     /// `None` result meaning "no snap" (feed `false` to
     /// [`PositionInfo::ui_snapped`](crate::widget::position_info::PositionInfo::ui_snapped)).
     ///
-    /// Curves, histograms, and scatters all participate: each is stored with
-    /// retained `RetainedItemData::Curve { x, y }` vertices (a scatter is a
-    /// symbol-only curve-kind item, [`Self::add_scatter`]), so a `SCATTER`-mode
-    /// snap matches scatter points and a `CURVE`-mode snap matches curve and
-    /// histogram vertices. Items whose data is not retained as vertices (images,
-    /// triangles, shapes, markers) classify as [`SnapItemKind::Other`] and are
-    /// never candidates.
+    /// Curves, histograms, and scatters all participate: curves and plain
+    /// scatters snap to their retained `(x, y)` vertices, value scatters to
+    /// their `(x, y)` points, and histograms to their bin centre + count
+    /// (silx snaps a histogram pick to `0.5 * (edges[i] + edges[i+1])` and
+    /// `value[i]`, PositionInfo.py:246-258 — not to the step polyline). Items
+    /// whose data is not retained as vertices (images, triangles, shapes,
+    /// markers) classify as [`SnapItemKind::Other`] and are never candidates.
     ///
     /// Returns `None` when snapping is not engaged (no `CURVE`/`SCATTER` flag),
     /// nothing is within the radius, or no frame has been rendered yet (the
@@ -7047,11 +7195,21 @@ impl PlotWidget {
                 .curve_data
                 .as_ref()
                 .map_or(YAxis::Left, |curve| curve.y_axis);
-            // Curves, histograms, and scatters all retain Curve{x,y} vertices;
-            // items without retained vertices (images/shapes/markers) never
-            // reach here because they classify as SnapItemKind::Other.
-            if let Some(RetainedItemData::Curve { x, y }) = &record.data {
-                for (&dx, &dy) in x.iter().zip(y) {
+            // Per-kind snap vertices; items without retained vertices
+            // (images/shapes/markers) never reach here because they classify
+            // as SnapItemKind::Other.
+            let vertices: Option<(&[f64], &[f64])> = match &record.data {
+                Some(RetainedItemData::Curve { x, y }) => Some((x, y)),
+                // silx snaps a histogram to its bin centre and count value
+                // (PositionInfo.py:250-254).
+                Some(RetainedItemData::Histogram {
+                    centers, counts, ..
+                }) => Some((centers, counts)),
+                Some(RetainedItemData::Scatter { x, y, .. }) => Some((x, y)),
+                _ => None,
+            };
+            if let Some((xs, ys)) = vertices {
+                for (&dx, &dy) in xs.iter().zip(ys) {
                     if let Some(px) = self.data_to_pixel(dx, dy, axis) {
                         points.push(([px.x as f64, px.y as f64], [dx, dy]));
                     }
@@ -11551,13 +11709,27 @@ impl ScatterView {
                 spec.symbol = Some(crate::core::items::Symbol::Circle);
                 spec.symbol_size = 6.0;
 
-                if let Some(h) = self.scatter_handle {
+                let handle = if let Some(h) = self.scatter_handle {
                     self.inner.update_curve_spec(h, spec);
+                    h
                 } else {
                     let h = self.inner.add_curve_spec(spec);
                     self.scatter_handle = Some(h);
                     self.inner.set_item_legend(h, "scatter");
-                }
+                    h
+                };
+                // Retain the (x, y, values) triple so the stats feeds compute
+                // over the scatter's *value* array (silx _ScatterContext,
+                // stats.py:425-498) instead of the marker curve's y positions.
+                // Overrides the Curve{x,y} data the add/update path retained.
+                self.inner.set_retained_data(
+                    handle,
+                    Some(RetainedItemData::Scatter {
+                        x: x.clone(),
+                        y: y.clone(),
+                        values: values.clone(),
+                    }),
+                );
             }
             ScatterVisualization::Solid => {
                 // Drop the marker cloud / grid image so neither shadows the
@@ -15110,6 +15282,139 @@ mod tests {
             crate::core::stats::StatScope::All,
         );
         assert_eq!(rows[0].1, core);
+    }
+
+    #[test]
+    fn histogram_stats_run_over_raw_counts_not_step_polyline() {
+        // silx _HistogramContext (stats.py:376-414): the stats data is the N
+        // raw counts at the _revertComputeEdges bin anchors — feeding the 2N
+        // rendered step polyline would double the sum and skew mean/COM.
+        use crate::widget::stats_widget::{StatsWidget, UpdateMode};
+        let edges = [0.0, 1.0, 2.0, 3.0];
+        let counts = [2.0, 4.0, 6.0];
+        let data = histogram_retained_data(&edges, &counts, HistogramAlign::Center);
+        let input = retained_data_to_stats_input(&data);
+        let mut w = StatsWidget::new();
+        w.set_update_mode(UpdateMode::Auto);
+        w.recompute(&[("histogram", input)], None);
+        let rows = w.rows();
+        assert_eq!(rows.len(), 1);
+        let s = &rows[0].1;
+        assert_eq!(s.count, 3, "N raw counts, not the 2N step vertices");
+        assert_eq!(s.sum, Some(12.0), "sum is Σcounts exactly, not 2·Σcounts");
+        assert_eq!(s.mean, Some(4.0));
+        assert_eq!(s.min, Some(2.0));
+        assert_eq!(s.max, Some(6.0));
+        // Center-aligned anchors are the bin midpoints [0.5, 1.5, 2.5]:
+        // COM = (0.5·2 + 1.5·4 + 2.5·6) / 12 = 22/12; argmin/argmax land on
+        // the first/last midpoints.
+        assert!((s.com.x.unwrap() - 22.0 / 12.0).abs() < 1e-12);
+        assert_eq!(s.coord_min.x, Some(0.5));
+        assert_eq!(s.coord_max.x, Some(2.5));
+    }
+
+    #[test]
+    fn revert_compute_edges_recovers_positions_per_alignment() {
+        // Round trip: revert_compute_edges(histogram_edges(pos, align), align)
+        // == pos for every alignment (silx items/histogram.py:53-85 compute vs
+        // :386-408 revert), including the naming inversion documented on
+        // histogram_edges. Uniform spacing: silx's Center revert assumes it
+        // ("for now we consider that the spaces between xs are constant",
+        // histogram.py:400) and is approximate otherwise — a deviation we
+        // reproduce for parity.
+        let positions = [1.0, 2.0, 3.0, 4.0];
+        for align in [
+            HistogramAlign::Left,
+            HistogramAlign::Center,
+            HistogramAlign::Right,
+        ] {
+            let edges = histogram_edges(&positions, align);
+            let back = revert_compute_edges(&edges, align);
+            assert_eq!(back.len(), positions.len(), "{align:?}");
+            for (b, p) in back.iter().zip(&positions) {
+                assert!((b - p).abs() < 1e-12, "{align:?}: {back:?}");
+            }
+        }
+        // Explicit edge forms (silx _revertComputeEdges, histogram.py:386-408):
+        // positions at left edges -> drop the trailing edge; at right edges ->
+        // drop the leading edge; centres -> midpoints.
+        let edges = [0.0, 1.0, 3.0];
+        assert_eq!(
+            revert_compute_edges(&edges, HistogramAlign::Left),
+            [0.0, 1.0]
+        );
+        assert_eq!(
+            revert_compute_edges(&edges, HistogramAlign::Right),
+            [1.0, 3.0]
+        );
+        assert_eq!(
+            revert_compute_edges(&edges, HistogramAlign::Center),
+            [0.5, 2.0]
+        );
+        // Degenerate: fewer than 2 edges yield no anchors.
+        assert!(revert_compute_edges(&[1.0], HistogramAlign::Center).is_empty());
+    }
+
+    #[test]
+    fn histogram_retained_data_precomputes_anchors_and_centers() {
+        // The retained form carries both derived x arrays: the
+        // alignment-dependent stats anchors and the alignment-independent bin
+        // centres (snap/fit coordinates, PositionInfo.py:250-254 /
+        // actions/fit.py:379-381).
+        let edges = [0.0, 2.0, 6.0];
+        let counts = [10.0, 20.0];
+        let data = histogram_retained_data(&edges, &counts, HistogramAlign::Left);
+        let RetainedItemData::Histogram {
+            edges: e,
+            counts: c,
+            x,
+            centers,
+        } = &data
+        else {
+            panic!("histogram retained data");
+        };
+        assert_eq!(e.as_slice(), &edges);
+        assert_eq!(c.as_slice(), &counts);
+        // Left alignment: positions are the left edges.
+        assert_eq!(x.as_slice(), &[0.0, 2.0]);
+        // Centres are alignment-independent midpoints.
+        assert_eq!(centers.as_slice(), &[1.0, 4.0]);
+        // The fit feed hands out (centres, counts) — silx fits a histogram
+        // against its bin centres (actions/fit.py:379-381).
+        assert_eq!(
+            retained_curve_xy(&data),
+            Some((centers.as_slice(), counts.as_slice()))
+        );
+    }
+
+    #[test]
+    fn scatter_retained_data_feeds_value_array_stats() {
+        // silx _ScatterContext (stats.py:425-498): stats over the value array
+        // with (x, y) position axes — and a scatter is not a fit target.
+        use crate::widget::stats_widget::{StatsWidget, UpdateMode};
+        let data = RetainedItemData::Scatter {
+            x: vec![0.0, 1.0, 2.0],
+            y: vec![10.0, 11.0, 12.0],
+            values: vec![5.0, 1.0, 3.0],
+        };
+        let input = retained_data_to_stats_input(&data);
+        let mut w = StatsWidget::new();
+        w.set_update_mode(UpdateMode::Auto);
+        w.recompute(&[("scatter", input)], None);
+        let rows = w.rows();
+        assert_eq!(rows.len(), 1);
+        let core = crate::core::stats::Stats::for_scatter(
+            &[0.0, 1.0, 2.0],
+            &[10.0, 11.0, 12.0],
+            &[5.0, 1.0, 3.0],
+            crate::core::stats::StatScope::All,
+        );
+        assert_eq!(rows[0].1, core);
+        // Value-array semantics: max is the largest *value*, at its (x, y).
+        assert_eq!(rows[0].1.max, Some(5.0));
+        assert_eq!(rows[0].1.coord_max.x, Some(0.0));
+        assert_eq!(rows[0].1.coord_max.y, Some(10.0));
+        assert_eq!(retained_curve_xy(&data), None, "scatter is not fittable");
     }
 
     #[test]

@@ -148,6 +148,34 @@ fn profile_mode_drag_samples_a_profile_and_opens_the_window() {
 }
 
 #[test]
+fn scatter_view_stats_run_over_the_value_array() {
+    // silx _ScatterContext (stats.py:425-498): the stats table reduces the
+    // scatter's *value* array with (x, y) as position axes — not the marker
+    // curve's y positions. Exercises the ScatterView Points-arm retained-data
+    // wiring end-to-end through PlotWidget::feed_all_stats.
+    let rs = create_render_state(default_wgpu_setup());
+    siplot::install(&rs);
+
+    let mut view = ScatterView::new(&rs, 0);
+    let (x, y, values) = affine_scatter(); // v = x + 2y on a 4x4 quad
+    view.set_data(&x, &y, &values, Colormap::viridis(0.0, 12.0))
+        .expect("equal-length scatter data");
+
+    let mut stats = siplot::StatsWidget::new();
+    stats.set_update_mode(siplot::UpdateMode::Auto);
+    let fed = view.feed_all_stats(&mut stats, None);
+    assert_eq!(fed, 1, "the scatter item feeds one stats row");
+    let s = &stats.rows()[0].1;
+    // Values are [0, 4, 8, 12]: max 12 at (4, 4), min 0 at (0, 0) — value
+    // extrema at their (x, y), not y extrema.
+    assert_eq!(s.max, Some(12.0));
+    assert_eq!(s.coord_max.x, Some(4.0));
+    assert_eq!(s.coord_max.y, Some(4.0));
+    assert_eq!(s.min, Some(0.0));
+    assert_eq!(s.sum, Some(24.0));
+}
+
+#[test]
 fn disarming_profile_mode_closes_the_window() {
     let rs = create_render_state(default_wgpu_setup());
     siplot::install(&rs);

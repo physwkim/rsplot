@@ -1,7 +1,8 @@
 //! Pure statistics engine ported from silx `gui/plot/stats/stats.py`.
 //!
 //! This module provides GPU-free, pure functions computing the full silx
-//! statistic set over 1D curve data `(xs, ys)` and 2D scalar image data:
+//! statistic set over 1D curve data `(xs, ys)`, scatter data
+//! `(xs, ys, values)`, and 2D scalar image data:
 //!
 //! - `min`, `max`, `delta` (`max - min`) — silx `StatMin` / `StatMax` /
 //!   `StatDelta` (stats.py:783-813)
@@ -73,14 +74,14 @@ pub struct Stats {
     pub sum: Option<f64>,
     /// Center of mass (silx `StatCOM`, stats.py:881). For a curve this is a
     /// single x coordinate stored in `com[0]` with `com[1] == None`; for an
-    /// image it is `(x, y)` in data coords stored as `com[0] = x`,
+    /// image or scatter it is `(x, y)` in data coords stored as `com[0] = x`,
     /// `com[1] = y`.
     pub com: ComCoord,
     /// Data coordinates of the first minimum value (silx `StatCoordMin`,
-    /// stats.py:841). Curve: `(x, None)`. Image: `(x, y)`.
+    /// stats.py:841). Curve: `(x, None)`. Image/scatter: `(x, y)`.
     pub coord_min: ComCoord,
     /// Data coordinates of the first maximum value (silx `StatCoordMax`,
-    /// stats.py:860). Curve: `(x, None)`. Image: `(x, y)`.
+    /// stats.py:860). Curve: `(x, None)`. Image/scatter: `(x, y)`.
     pub coord_max: ComCoord,
 }
 
@@ -170,7 +171,43 @@ impl Stats {
             }
             acc.push(y, x, f64::NAN);
         }
-        acc.finish(count, /* is_image */ false)
+        acc.finish(count, /* two_d */ false)
+    }
+
+    /// Compute the full statistic set for a scatter `(xs, ys, values)`: the
+    /// statistic values are the per-point `values`, the position axes are
+    /// `(x, y)`.
+    ///
+    /// Mirrors silx `_ScatterContext.clipData` (stats.py:425-498): stats run
+    /// over the scatter's *value* array with `axes = (xData, yData)`
+    /// (stats.py:495-498), so COM and the argmin/argmax coordinates are 2D
+    /// `(x, y)` pairs like an image's. With [`StatScope::OnLimits`] a point is
+    /// included when **both** its x and y lie inside the viewport
+    /// (`(x >= minX) & (x <= maxX) & (y >= minY) & (y <= maxY)`,
+    /// stats.py:470-476) — unlike curves, which gate on x only.
+    ///
+    /// Triples where any of `x`, `y`, `value` is non-finite are dropped,
+    /// matching this module's finite-data convention. The shortest of the
+    /// three slices bounds the iteration.
+    pub fn for_scatter(xs: &[f64], ys: &[f64], values: &[f64], scope: StatScope) -> Self {
+        let count = xs.len().min(ys.len()).min(values.len());
+        let mut acc = Accumulator::default();
+        for i in 0..count {
+            let (x, y, v) = (xs[i], ys[i], values[i]);
+            if !x.is_finite() || !y.is_finite() || !v.is_finite() {
+                continue;
+            }
+            // On-limits mask: scatter gates on x AND y (silx stats.py:470-476).
+            if let StatScope::OnLimits { x_range, y_range } = scope {
+                let (lx, hx) = order(x_range.0, x_range.1);
+                let (ly, hy) = order(y_range.0, y_range.1);
+                if x < lx || x > hx || y < ly || y > hy {
+                    continue;
+                }
+            }
+            acc.push(v, x, y);
+        }
+        acc.finish(count, /* two_d */ true)
     }
 
     /// Compute the full statistic set for a 2D scalar image in row-major
@@ -264,7 +301,7 @@ impl Stats {
                 acc.push(v, x, y);
             }
         }
-        acc.finish(count, /* is_image */ true)
+        acc.finish(count, /* two_d */ true)
     }
 }
 
@@ -323,7 +360,9 @@ impl Accumulator {
         }
     }
 
-    fn finish(self, count: usize, is_image: bool) -> Stats {
+    /// `two_d` selects 2D `(x, y)` coordinates for COM/argmin/argmax (image and
+    /// scatter inputs) over the curve's 1D x-only coordinate.
+    fn finish(self, count: usize, two_d: bool) -> Stats {
         if self.finite_count == 0 {
             return Stats {
                 count,
@@ -333,7 +372,7 @@ impl Accumulator {
         }
         let mean = self.sum / self.finite_count as f64;
         let coord = |pos: (f64, f64)| {
-            if is_image {
+            if two_d {
                 ComCoord::xy(pos.0, pos.1)
             } else {
                 ComCoord::x_only(pos.0)
@@ -342,7 +381,7 @@ impl Accumulator {
         // COM: undefined (silx NaN, stats.py:894) when sum == 0.
         let com = if self.sum == 0.0 {
             ComCoord::NONE
-        } else if is_image {
+        } else if two_d {
             ComCoord::xy(self.com_x_num / self.sum, self.com_y_num / self.sum)
         } else {
             ComCoord::x_only(self.com_x_num / self.sum)
@@ -545,6 +584,69 @@ mod tests {
         let s = Stats::for_curve_roi(&xs, &ys, 2.0, 1.0);
         assert_eq!(s.finite_count, 2);
         approx(s.sum.unwrap(), 5.0);
+    }
+
+    #[test]
+    fn scatter_stats_run_over_the_value_array() {
+        // silx _ScatterContext: values are the stat data, axes are (x, y).
+        let xs = [0.0, 1.0, 2.0];
+        let ys = [10.0, 11.0, 12.0];
+        let vs = [5.0, 1.0, 3.0];
+        let s = Stats::for_scatter(&xs, &ys, &vs, StatScope::All);
+        assert_eq!(s.finite_count, 3);
+        approx(s.min.unwrap(), 1.0);
+        approx(s.max.unwrap(), 5.0);
+        approx(s.sum.unwrap(), 9.0);
+        approx(s.mean.unwrap(), 3.0);
+        // argmin at value 1 -> point (1, 11); argmax at value 5 -> (0, 10).
+        approx(s.coord_min.x.unwrap(), 1.0);
+        approx(s.coord_min.y.unwrap(), 11.0);
+        approx(s.coord_max.x.unwrap(), 0.0);
+        approx(s.coord_max.y.unwrap(), 10.0);
+        // COM per axis: sum(axis * v) / sum(v).
+        // x: (0*5 + 1*1 + 2*3) / 9 = 7/9; y: (10*5 + 11*1 + 12*3) / 9 = 97/9.
+        approx(s.com.x.unwrap(), 7.0 / 9.0);
+        approx(s.com.y.unwrap(), 97.0 / 9.0);
+    }
+
+    #[test]
+    fn scatter_on_limits_gates_on_x_and_y() {
+        // silx scatter on-limits masks on BOTH axes (stats.py:470-476),
+        // unlike the curve context's x-only mask.
+        let xs = [0.0, 1.0, 2.0];
+        let ys = [0.0, 100.0, 0.0];
+        let vs = [1.0, 2.0, 4.0];
+        let s = Stats::for_scatter(
+            &xs,
+            &ys,
+            &vs,
+            StatScope::OnLimits {
+                x_range: (0.0, 2.0),
+                y_range: (-1.0, 1.0), // excludes the y=100 point
+            },
+        );
+        assert_eq!(s.finite_count, 2);
+        approx(s.sum.unwrap(), 5.0);
+    }
+
+    #[test]
+    fn scatter_drops_non_finite_components() {
+        // Any non-finite x, y, or value drops the whole triple.
+        let xs = [0.0, f64::NAN, 2.0, 3.0];
+        let ys = [0.0, 1.0, f64::INFINITY, 3.0];
+        let vs = [1.0, 2.0, 4.0, f64::NAN];
+        let s = Stats::for_scatter(&xs, &ys, &vs, StatScope::All);
+        assert_eq!(s.count, 4);
+        assert_eq!(s.finite_count, 1);
+        approx(s.sum.unwrap(), 1.0);
+    }
+
+    #[test]
+    fn scatter_empty_yields_none() {
+        let s = Stats::for_scatter(&[], &[], &[], StatScope::All);
+        assert_eq!(s.finite_count, 0);
+        assert_eq!(s.min, None);
+        assert_eq!(s.com, ComCoord::NONE);
     }
 
     #[test]

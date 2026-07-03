@@ -128,6 +128,35 @@ fn scatter_points_snap_under_scatter_mode_only() {
 }
 
 #[test]
+fn histogram_snaps_to_bin_centre_and_count() {
+    // silx snaps a histogram pick to the bin centre `0.5 * (edges[i] +
+    // edges[i+1])` and the bin's count value (PositionInfo.py:246-258) — not
+    // to a rendered step-polyline vertex.
+    let (plot, _harness) = plot_rendered(|plot| {
+        plot.add_histogram(
+            &[0.0, 2.0, 4.0, 6.0, 8.0, 10.0],
+            &[1.0, 3.0, 5.0, 7.0, 9.0],
+            egui::Color32::from_rgb(0, 180, 90),
+        )
+        .expect("N + 1 edges for N counts");
+    });
+    let plot = plot.borrow();
+
+    // The bin [4, 6) has centre x = 5 and count 5: a cursor there snaps to
+    // (5, 5). The nearest step vertices ((4, 5) / (6, 5)) are ~36 px away
+    // (400 px over 0..10), far beyond the 5-px radius, so a step-polyline
+    // snap would find nothing here.
+    let snap = plot
+        .snap_cursor([5.0, 5.0], SnappingMode::CURVE)
+        .expect("a cursor on a bin centre must snap to it");
+    assert!(
+        (snap.data[0] - 5.0).abs() < 1e-9 && (snap.data[1] - 5.0).abs() < 1e-9,
+        "snapped to the wrong point: {:?}",
+        snap.data
+    );
+}
+
+#[test]
 fn uncached_transform_yields_no_snap() {
     // A widget that has never rendered has no cached transform, so data→pixel
     // projection fails and snapping returns None rather than panicking.

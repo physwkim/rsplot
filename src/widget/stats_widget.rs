@@ -21,9 +21,11 @@ use crate::core::stats::{ComCoord, StatScope, Stats};
 
 /// One tracked input row for the table.
 ///
-/// Curve rows carry `(xs, ys)`; image rows carry scalar pixel data plus the
-/// origin/scale geometry needed to map COM and argmin/argmax indices back to
-/// data coordinates (silx maps through the axes, stats.py:819-838).
+/// Curve rows carry `(xs, ys)`; histogram rows carry the `N` raw counts at
+/// their bin-anchor x positions; scatter rows carry `(xs, ys, values)`; image
+/// rows carry scalar pixel data plus the origin/scale geometry needed to map
+/// COM and argmin/argmax indices back to data coordinates (silx maps through
+/// the axes, stats.py:819-838).
 pub enum StatsInput<'a> {
     /// A curve `(xs, ys)`.
     Curve {
@@ -31,6 +33,26 @@ pub enum StatsInput<'a> {
         xs: &'a [f64],
         /// Y data.
         ys: &'a [f64],
+    },
+    /// A histogram: `N` raw counts at their `N` bin-anchor x positions (silx
+    /// `_HistogramContext`, stats.py:376-414 — `values = yData`, `axes =
+    /// (xData,)` with `xData = item._revertComputeEdges(edges, alignment)`),
+    /// **not** the rendered 2N step polyline.
+    Histogram {
+        /// Bin-anchor x positions (`_revertComputeEdges` output, length `N`).
+        xs: &'a [f64],
+        /// Raw bin counts (length `N`).
+        counts: &'a [f64],
+    },
+    /// A scatter: statistics over the per-point `values` array with `(x, y)`
+    /// position axes (silx `_ScatterContext`, stats.py:425-498).
+    Scatter {
+        /// X positions.
+        xs: &'a [f64],
+        /// Y positions.
+        ys: &'a [f64],
+        /// Per-point values (the statistic data).
+        values: &'a [f64],
     },
     /// A 2D scalar image in row-major order (`data[row * width + col]`).
     Image {
@@ -52,6 +74,11 @@ impl StatsInput<'_> {
     fn compute(&self, scope: StatScope) -> Stats {
         match self {
             StatsInput::Curve { xs, ys } => Stats::for_curve(xs, ys, scope),
+            // silx _HistogramContext reduces exactly like the curve context:
+            // values = the N counts, position axis = the N bin anchors, with
+            // the same x-only on-limits mask (stats.py:387-414).
+            StatsInput::Histogram { xs, counts } => Stats::for_curve(xs, counts, scope),
+            StatsInput::Scatter { xs, ys, values } => Stats::for_scatter(xs, ys, values, scope),
             StatsInput::Image {
                 data,
                 width,
