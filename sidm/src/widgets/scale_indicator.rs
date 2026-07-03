@@ -57,6 +57,7 @@ pub struct SidmScaleIndicator {
     user_limits: Option<(f64, f64)>,
     num_divisions: u32,
     orientation: Orientation,
+    inverted_appearance: bool,
     bar_indicator: bool,
     show_value_label: bool,
     precision: Option<i32>,
@@ -75,6 +76,7 @@ impl SidmScaleIndicator {
             user_limits: None,
             num_divisions: DEFAULT_NUM_DIVISIONS,
             orientation: Orientation::Horizontal,
+            inverted_appearance: false,
             bar_indicator: false,
             show_value_label: true,
             precision: None,
@@ -103,6 +105,16 @@ impl SidmScaleIndicator {
     /// PyDM `orientation`).
     pub fn with_orientation(mut self, orientation: Orientation) -> Self {
         self.orientation = orientation;
+        self
+    }
+
+    /// Grow the value from the right/top edge instead of the left/bottom one
+    /// (builder style; PyDM `QScale.invertedAppearance`). This is MEDM's bar
+    /// with `direction="down"`/`"left"`: `xc/BarGraph.c` fills `XcVertDown`
+    /// from the top edge (`:939-954`) and `XcHorizLeft` from the right edge
+    /// (`:973-988`).
+    pub fn with_inverted_appearance(mut self, inverted: bool) -> Self {
+        self.inverted_appearance = inverted;
         self
     }
 
@@ -232,19 +244,28 @@ impl SidmScaleIndicator {
         let Some(p) = proportion else {
             return;
         };
+        // Inversion remaps the drawn position, not the proportion: the value
+        // grows from the opposite edge (xc/BarGraph.c XcVertDown/XcHorizLeft).
         if self.bar_indicator {
             painter.rect_filled(
-                self.bar_rect(rect, p, horizontal),
+                self.bar_rect(rect, self.pos(0.0), self.pos(p), horizontal),
                 egui::CornerRadius::ZERO,
                 bar_color,
             );
         } else {
-            let (a, b) = self.axis_line(rect, p, horizontal);
+            let (a, b) = self.axis_line(rect, self.pos(p), horizontal);
             painter.line_segment([a, b], Stroke::new(3.0, bar_color));
         }
     }
 
-    /// Endpoints of the cross-axis line at proportion `p` along the main axis.
+    /// The drawn main-axis position for value proportion `q`: mirrored when the
+    /// appearance is inverted.
+    fn pos(&self, q: f64) -> f64 {
+        if self.inverted_appearance { 1.0 - q } else { q }
+    }
+
+    /// Endpoints of the cross-axis line at drawn proportion `p` along the main
+    /// axis.
     fn axis_line(&self, rect: egui::Rect, p: f64, horizontal: bool) -> (egui::Pos2, egui::Pos2) {
         let p = p as f32;
         if horizontal {
@@ -257,18 +278,22 @@ impl SidmScaleIndicator {
         }
     }
 
-    /// The filled bar rectangle from the origin to proportion `p`.
-    fn bar_rect(&self, rect: egui::Rect, p: f64, horizontal: bool) -> egui::Rect {
-        let p = p as f32;
+    /// The filled bar rectangle between drawn main-axis proportions `a` and `b`
+    /// (the bar spans the fill origin's position and the value's position, in
+    /// either order — inversion or a centred origin can put `b` before `a`).
+    fn bar_rect(&self, rect: egui::Rect, a: f64, b: f64, horizontal: bool) -> egui::Rect {
+        let (lo, hi) = (a.min(b) as f32, a.max(b) as f32);
         if horizontal {
             egui::Rect::from_min_max(
-                rect.left_top(),
-                egui::pos2(rect.left() + p * rect.width(), rect.bottom()),
+                egui::pos2(rect.left() + lo * rect.width(), rect.top()),
+                egui::pos2(rect.left() + hi * rect.width(), rect.bottom()),
             )
         } else {
+            // Vertical: proportion 0 is at the bottom, so the higher proportion
+            // is the smaller Y.
             egui::Rect::from_min_max(
-                egui::pos2(rect.left(), rect.bottom() - p * rect.height()),
-                rect.right_bottom(),
+                egui::pos2(rect.left(), rect.bottom() - hi * rect.height()),
+                egui::pos2(rect.right(), rect.bottom() - lo * rect.height()),
             )
         }
     }
@@ -301,5 +326,34 @@ mod tests {
         assert_eq!(division_proportions(4), vec![0.0, 0.25, 0.5, 0.75, 1.0]);
         // Clamped to at least one division.
         assert_eq!(division_proportions(0), vec![0.0, 1.0]);
+    }
+
+    #[test]
+    fn inverted_appearance_fills_from_the_opposite_edge() {
+        let engine = Engine::new();
+        let scale = SidmScaleIndicator::new(&engine, "loc://scale_inv")
+            .expect("connect")
+            .with_bar_indicator(true);
+
+        let h_rect = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(100.0, 10.0));
+        // Non-inverted horizontal control: 25% fills 0..25 from the left.
+        let bar = scale.bar_rect(h_rect, scale.pos(0.0), scale.pos(0.25), true);
+        assert_eq!((bar.min.x, bar.max.x), (0.0, 25.0));
+
+        let scale = scale.with_inverted_appearance(true);
+        // Inverted horizontal (XcHorizLeft, BarGraph.c:973-988: x = x0+len-d,
+        // width = d): 25% fills the rightmost quarter.
+        let bar = scale.bar_rect(h_rect, scale.pos(0.0), scale.pos(0.25), true);
+        assert_eq!((bar.min.x, bar.max.x), (75.0, 100.0));
+
+        // Inverted vertical (XcVertDown, BarGraph.c:939-954: y = y0, height =
+        // d): 25% fills the topmost quarter (proportion 0 = bottom otherwise).
+        let v_rect = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(10.0, 100.0));
+        let bar = scale.bar_rect(v_rect, scale.pos(0.0), scale.pos(0.25), false);
+        assert_eq!((bar.min.y, bar.max.y), (0.0, 25.0));
+
+        // The pointer position mirrors the same way.
+        let (a, _) = scale.axis_line(h_rect, scale.pos(0.25), true);
+        assert_eq!(a.x, 75.0);
     }
 }

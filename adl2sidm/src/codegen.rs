@@ -645,7 +645,9 @@ fn emit_choice_button(b: &mut Builder, widget: &MedmWidget, options: &Options, z
 }
 
 /// `valuator` — a `SidmSlider`. User-defined limits (`*Src == "default"`) and a
-/// `dPrecision` map to `.with_limits` / `.with_precision`.
+/// `dPrecision` map to `.with_limits` / `.with_precision`; `direction`
+/// `up`/`down` turn the track vertical (MEDM medmValuator.c:201-225 sets
+/// `XmVERTICAL` for both; default RIGHT, :1446).
 fn emit_valuator(b: &mut Builder, widget: &MedmWidget, options: &Options, z: ZLayer) {
     let Some((geom, addr)) = resolve_channel(b, widget, options) else {
         return;
@@ -657,6 +659,23 @@ fn emit_valuator(b: &mut Builder, widget: &MedmWidget, options: &Options, z: ZLa
             ".with_limits({}, {})",
             float_lit(lo),
             float_lit(hi)
+        ));
+    }
+    if let Some(orientation) = direction_orientation(b, widget, false) {
+        builders.push(orientation);
+    }
+    // MEDM additionally REVERSES down/left via XmNprocessingDirection
+    // (MAX_ON_BOTTOM / MAX_ON_LEFT, medmValuator.c:203-215). The sidm slider —
+    // like PyDM's, which takes only a Qt orientation (slider.py:35-36) — has
+    // no inverted mode, so the axis is kept and the reversal is warned rather
+    // than silently dropped.
+    if let Some(direction @ ("down" | "left")) =
+        widget.assignments.get("direction").map(String::as_str)
+    {
+        b.warnings.push(format!(
+            "line {}: valuator direction {direction:?} keeps its axis, but MEDM's \
+             reversed max-end has no sidm/PyDM slider surface",
+            widget.line
         ));
     }
     if let Some(prec) = widget
@@ -842,6 +861,21 @@ fn emit_scale_indicator(
     // `SidmScaleIndicator` defaults to horizontal.
     if let Some(orient) = direction_orientation(b, widget, false) {
         builders.push(orient);
+    }
+    // A BAR's `direction="down"`/`"left"` grows from the opposite edge: MEDM
+    // maps them to the inverted Xc orientations (medmBar.c:154-186 →
+    // XcVertDown/XcHorizLeft; xc/BarGraph.c:939-988 fills from the top/right
+    // edge). indicator/meter deliberately get NO inversion: MEDM itself
+    // rejects down/left there, overriding to up/right with a warning
+    // (medmIndicator.c:142-166; medmMeter.c has no direction at all) — which
+    // is exactly what the axis-only mapping above already produces.
+    if bar
+        && matches!(
+            widget.assignments.get("direction").map(String::as_str),
+            Some("down" | "left")
+        )
+    {
+        builders.push(".with_inverted_appearance(true)".to_string());
     }
     if let Some(prec) = precision_default_builder(widget) {
         builders.push(prec);
@@ -5354,6 +5388,160 @@ bar {
         let g = scales();
         assert!(g.source.contains("egui::Order::Middle"));
         assert!(!g.source.contains("egui::Order::Foreground"));
+    }
+
+    // R1-37: MEDM `direction` on the valuator (orientation) and the bar
+    // (orientation + inverted fill for down/left).
+    #[test]
+    fn valuator_direction_up_makes_the_slider_vertical() {
+        let adl = r#"
+"color map" {
+	colors {
+		ffffff,
+	}
+}
+valuator {
+	object {
+		x=0
+		y=0
+		width=24
+		height=180
+	}
+	control {
+		chan="VAL"
+	}
+	direction="up"
+}
+"#;
+        let g = generate(&parse(adl), &Options::default());
+        assert!(
+            g.source
+                .contains("SidmSlider::new(&engine, \"ca://VAL\")\n            .expect"),
+            "{}",
+            g.source
+        );
+        assert!(
+            g.source
+                .contains(".with_orientation(Orientation::Vertical)"),
+            "valuator direction=up must turn the slider vertical:\n{}",
+            g.source
+        );
+        // up is not reversed — no warning.
+        assert!(
+            !g.warnings.iter().any(|w| w.contains("reversed max-end")),
+            "{:?}",
+            g.warnings
+        );
+    }
+
+    #[test]
+    fn valuator_direction_down_is_vertical_with_a_reversal_warning() {
+        let adl = r#"
+"color map" {
+	colors {
+		ffffff,
+	}
+}
+valuator {
+	object {
+		x=0
+		y=0
+		width=24
+		height=180
+	}
+	control {
+		chan="VAL"
+	}
+	direction="down"
+}
+"#;
+        let g = generate(&parse(adl), &Options::default());
+        assert!(
+            g.source
+                .contains(".with_orientation(Orientation::Vertical)"),
+            "{}",
+            g.source
+        );
+        // MEDM's XmMAX_ON_BOTTOM reversal has no sidm/PyDM slider surface.
+        assert!(
+            g.warnings.iter().any(|w| w.contains("reversed max-end")),
+            "{:?}",
+            g.warnings
+        );
+    }
+
+    #[test]
+    fn bar_direction_down_and_left_invert_the_fill() {
+        let adl = r#"
+"color map" {
+	colors {
+		ffffff,
+	}
+}
+bar {
+	object {
+		x=0
+		y=0
+		width=20
+		height=100
+	}
+	monitor {
+		chan="B1"
+	}
+	direction="down"
+}
+bar {
+	object {
+		x=30
+		y=0
+		width=100
+		height=20
+	}
+	monitor {
+		chan="B2"
+	}
+	direction="left"
+}
+indicator {
+	object {
+		x=0
+		y=120
+		width=20
+		height=100
+	}
+	monitor {
+		chan="I1"
+	}
+	direction="down"
+}
+"#;
+        let g = generate(&parse(adl), &Options::default());
+        // bar down: vertical + inverted (medmBar.c:184 XcVertDown).
+        assert!(
+            g.source.contains(
+                ".with_orientation(Orientation::Vertical)\n            .with_inverted_appearance(true)"
+            ),
+            "bar direction=down must be vertical + inverted:\n{}",
+            g.source
+        );
+        // bar left: horizontal is the scale default (no orientation builder),
+        // inverted fill only (medmBar.c:175 XcHorizLeft).
+        // indicator down: vertical but NOT inverted — MEDM overrides down to up
+        // for the Scale Monitor (medmIndicator.c:142-150).
+        assert_eq!(
+            g.source.matches(".with_inverted_appearance(true)").count(),
+            2,
+            "exactly the two bars invert (never the indicator):\n{}",
+            g.source
+        );
+        assert_eq!(
+            g.source
+                .matches(".with_orientation(Orientation::Vertical)")
+                .count(),
+            2,
+            "bar down + indicator down are vertical:\n{}",
+            g.source
+        );
     }
 
     /// A solid filled rectangle, an outline-only oval, and a dynamic-attribute

@@ -1,4 +1,4 @@
-//! `SidmSlider` — a horizontal slider that writes a float.
+//! `SidmSlider` — a slider that writes a float.
 //!
 //! Ports `pydm/widgets/slider.py`: the track spans `num_steps` discrete
 //! positions (PyDM default `101`) linearly mapped across the range
@@ -18,11 +18,12 @@ use siplot::egui;
 use crate::channel::{Channel, PvValue};
 use crate::engine::{Engine, EngineError};
 use crate::widgets::base::{BorderMode, ChannelBase, control_range};
+use crate::widgets::byte::Orientation;
 
 /// PyDM's default number of slider positions (`PyDMSlider._num_steps`).
 pub const DEFAULT_NUM_STEPS: u32 = 101;
 
-/// A writable horizontal slider (PyDM `PyDMSlider`).
+/// A writable slider, horizontal by default (PyDM `PyDMSlider`).
 pub struct SidmSlider {
     base: ChannelBase,
     /// Override the min/max instead of using the PV's control limits (PyDM
@@ -32,6 +33,8 @@ pub struct SidmSlider {
     pub num_steps: u32,
     /// Override the displayed decimals; `None` uses the PV's precision (or `0`).
     pub precision_override: Option<i32>,
+    /// Track direction (PyDM `PyDMSlider(orientation=…)`, Qt orientation).
+    orientation: Orientation,
 }
 
 impl SidmSlider {
@@ -42,12 +45,22 @@ impl SidmSlider {
             user_limits: None,
             num_steps: DEFAULT_NUM_STEPS,
             precision_override: None,
+            orientation: Orientation::Horizontal,
         })
     }
 
     /// Override the min/max range (builder style; PyDM `userDefinedLimits`).
     pub fn with_limits(mut self, min: f64, max: f64) -> Self {
         self.user_limits = Some((min, max));
+        self
+    }
+
+    /// Lay the track out horizontally (default) or vertically (builder style;
+    /// PyDM passes the Qt orientation to `PyDMSlider`, `slider.py:35-36`; a
+    /// vertical track grows upward, like Qt's un-inverted vertical slider and
+    /// MEDM's `direction="up"` valuator).
+    pub fn with_orientation(mut self, orientation: Orientation) -> Self {
+        self.orientation = orientation;
         self
     }
 
@@ -124,6 +137,9 @@ impl SidmSlider {
                     let mut slider = egui::Slider::new(&mut value, lo..=hi)
                         .clamping(egui::SliderClamping::Edits)
                         .max_decimals(decimals.max(0) as usize);
+                    if self.orientation == Orientation::Vertical {
+                        slider = slider.vertical();
+                    }
                     if step > 0.0 {
                         slider = slider.step_by(step);
                     }
@@ -132,7 +148,11 @@ impl SidmSlider {
                 None => {
                     // No limits yet: a disabled placeholder track (PyDM disables
                     // the slider until it has range information).
-                    ui.add_enabled(false, egui::Slider::new(&mut value, 0.0..=1.0));
+                    let mut slider = egui::Slider::new(&mut value, 0.0..=1.0);
+                    if self.orientation == Orientation::Vertical {
+                        slider = slider.vertical();
+                    }
+                    ui.add_enabled(false, slider);
                     false
                 }
             })
@@ -243,6 +263,31 @@ mod tests {
             seed.read(|s| s.value.clone()),
             Some(PvValue::Float(13.6)),
             "slider echoed a write-back put on a pure monitor update"
+        );
+    }
+
+    #[test]
+    fn vertical_orientation_renders_taller_than_wide() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let (_engine, slider) = slider("loc://slider_vertical");
+        let mut slider = slider
+            .with_limits(0.0, 10.0)
+            .with_orientation(Orientation::Vertical);
+        assert_eq!(slider.orientation, Orientation::Vertical);
+
+        let size = Rc::new(RefCell::new(egui::Vec2::ZERO));
+        let out = Rc::clone(&size);
+        let mut harness = egui_kittest::Harness::new_ui(move |ui| {
+            slider.show(ui);
+            *out.borrow_mut() = ui.min_size();
+        });
+        harness.step();
+        let size = *size.borrow();
+        assert!(
+            size.y > size.x,
+            "vertical slider must be taller than wide (got {size:?})"
         );
     }
 
