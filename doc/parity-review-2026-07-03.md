@@ -596,10 +596,13 @@ into main):
   and blosc (c-blosc 1.x frame incl. a BloscLZ decoder port; LZ4/ZLIB
   sub-codecs). `codec.parameters` = pvData ScalarType ordinal; ordinal 9
   decodes f32 (deliberate deviation from PyDM's f64-typed index 9).
-  *Remaining residual:* jpeg (needs a JPEG decoder dep) and the blosc
-  snappy/zstd sub-codecs keep the one-time-warn + metadata-only path,
-  which is also the malformed-stream behavior (deviation from PyDM,
-  which emits the raw compressed bytes as the value on any codec error).
+  *Remaining residual closed* `654db4a` (user approved rust-zstd + the
+  remaining crates): blosc zstd sub-codec via rust-zstd, snappy via
+  snap, jpeg via the image crate's zune-jpeg decoder (`image/jpeg`
+  feature on the dependency sidm already carries — no new crate). The
+  one-time-warn + metadata-only path now fires only for unknown codec
+  names and malformed streams (deviation from PyDM, which emits the
+  raw compressed bytes as the value on any codec error).
 - R1-30 — `985220a` ca+pva puts gate on published write access; CA seeds
   rights from `ChannelInfo` on every connect; `SIDM_READ_ONLY` env
   (PYDM_READ_ONLY parity) read at plugin construction. *Residual:* the
@@ -666,8 +669,9 @@ into main):
   live adl2pydm bug), and the R1-30 read-only helpers were dead code
   under a no-default-features sidm build (`dec7568`). Recorded
   residuals (deliberate/blocked, not silent): compressed NTNDArray
-  codecs (closed post-round by `3f7dbfc` — lz4/bslz4/blosc decode;
-  jpeg + blosc snappy/zstd sub-codecs still warn-and-skip), pva
+  codecs (closed post-round by `3f7dbfc` + `654db4a` — all four
+  NDPluginCodec codecs decode incl. jpeg and the blosc snappy/zstd
+  sub-codecs; only unknown-codec/malformed streams warn-and-skip), pva
   subfield writes (NTTable deferral),
   calc `I` status-code operand (ChannelState gap), cut-plane stroke
   1 px (no wide-line pipeline), LabelledAxes labels absent from
