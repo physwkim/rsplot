@@ -1410,9 +1410,11 @@ pub enum ProfileMethod {
 /// The band is placed exactly as silx does: clip `roi_width` to the image,
 /// `start = ⌊⌊position⌋ + 0.5 − roi_width/2⌋` clamped to `[0, dim − roi_width]`,
 /// `end = start + roi_width`. `roi_width` is treated as at least 1.
-/// [`ProfileMethod::Mean`] divides each sample by the band size;
-/// [`ProfileMethod::Sum`] does not. This generalizes
-/// [`horizontal_profile_values`] / [`vertical_profile_values`] (the
+/// The band is reduced NaN-aware, matching silx's `numpy.nanmean` /
+/// `numpy.nansum`: NaN pixels are skipped, so [`ProfileMethod::Mean`] divides by
+/// the count of finite pixels (NaN for an all-NaN band) and
+/// [`ProfileMethod::Sum`] sums the finite pixels (0.0 for an all-NaN band). This
+/// generalizes [`horizontal_profile_values`] / [`vertical_profile_values`] (the
 /// `roi_width == 1`, [`ProfileMethod::Mean`] case).
 pub fn aligned_profile_values(
     width: u32,
@@ -1441,20 +1443,28 @@ pub fn aligned_profile_values(
     let start_f = position.trunc() + 0.5 - band as f64 / 2.0;
     let start = (start_f.trunc() as i64).clamp(0, (band_dim - band) as i64) as usize;
     let end = start + band;
-    let denom = band as f64;
 
     let profile = (0..profile_len)
         .map(|p| {
-            let acc: f64 = (start..end)
-                .map(|b| {
-                    // Horizontal: p = column, b = row; Vertical: p = row, b = column.
-                    let idx = if horizontal { b * w + p } else { p * w + b };
-                    data[idx] as f64
-                })
-                .sum();
+            // silx reduces the band with numpy.nanmean / numpy.nansum, so NaN
+            // pixels (e.g. masked entries) are skipped rather than poisoning the
+            // whole sample. nansum of an all-NaN band is 0.0; nanmean of an
+            // all-NaN band is NaN.
+            let mut sum = 0.0;
+            let mut count = 0usize;
+            for b in start..end {
+                // Horizontal: p = column, b = row; Vertical: p = row, b = column.
+                let idx = if horizontal { b * w + p } else { p * w + b };
+                let v = data[idx] as f64;
+                if !v.is_nan() {
+                    sum += v;
+                    count += 1;
+                }
+            }
             match method {
-                ProfileMethod::Mean => acc / denom,
-                ProfileMethod::Sum => acc,
+                ProfileMethod::Mean if count == 0 => f64::NAN,
+                ProfileMethod::Mean => sum / count as f64,
+                ProfileMethod::Sum => sum,
             }
         })
         .collect();
@@ -1654,37 +1664,50 @@ pub fn rect_profile_values(
         return Ok((vec![], vec![]));
     }
 
-    let reduce = |sum: f64, count: f64| match method {
-        ProfileMethod::Mean => sum / count,
+    // Reduce NaN-aware, consistent with the axis-aligned profile
+    // (`aligned_profile_values`) and silx's nanmean/nansum: NaN pixels (masked
+    // entries) are skipped, so Mean divides by the finite count (NaN for an
+    // all-NaN strip) and Sum sums the finite pixels (0.0 for an all-NaN strip).
+    let reduce = |sum: f64, count: usize| match method {
+        ProfileMethod::Mean if count == 0 => f64::NAN,
+        ProfileMethod::Mean => sum / count as f64,
         ProfileMethod::Sum => sum,
     };
 
     if horizontal {
-        let num_rows = (row_max - row_min + 1) as f64;
         let mut x_vals = Vec::with_capacity(col_max - col_min + 1);
         let mut y_vals = Vec::with_capacity(col_max - col_min + 1);
 
         for col in col_min..=col_max {
             let mut sum = 0.0;
+            let mut count = 0usize;
             for row in row_min..=row_max {
-                sum += data[row * width as usize + col] as f64;
+                let v = data[row * width as usize + col] as f64;
+                if !v.is_nan() {
+                    sum += v;
+                    count += 1;
+                }
             }
             x_vals.push(col as f64);
-            y_vals.push(reduce(sum, num_rows));
+            y_vals.push(reduce(sum, count));
         }
         Ok((x_vals, y_vals))
     } else {
-        let num_cols = (col_max - col_min + 1) as f64;
         let mut x_vals = Vec::with_capacity(row_max - row_min + 1);
         let mut y_vals = Vec::with_capacity(row_max - row_min + 1);
 
         for row in row_min..=row_max {
             let mut sum = 0.0;
+            let mut count = 0usize;
             for col in col_min..=col_max {
-                sum += data[row * width as usize + col] as f64;
+                let v = data[row * width as usize + col] as f64;
+                if !v.is_nan() {
+                    sum += v;
+                    count += 1;
+                }
             }
             x_vals.push(row as f64);
-            y_vals.push(reduce(sum, num_cols));
+            y_vals.push(reduce(sum, count));
         }
         Ok((x_vals, y_vals))
     }
@@ -14524,6 +14547,31 @@ mod tests {
     }
 
     #[test]
+    fn aligned_profile_is_nan_aware_like_nanmean_nansum() {
+        // R2-3: 3x2 with a NaN at (row 1, col 0): row0=[1,2,3], row1=[NaN,5,6].
+        // silx reduces the band with numpy.nanmean/nansum, so the NaN is skipped
+        // rather than poisoning the whole column sample.
+        let data = [1.0, 2.0, 3.0, f32::NAN, 5.0, 6.0];
+        // Full-height Mean: col 0 averages only the finite row 0 -> 1.0.
+        assert_eq!(
+            aligned_profile_values(3, 2, &data, 0.5, 2, true, ProfileMethod::Mean).unwrap(),
+            vec![1.0, 3.5, 4.5]
+        );
+        // nansum: col 0 = 1.0 (the NaN contributes nothing).
+        assert_eq!(
+            aligned_profile_values(3, 2, &data, 0.5, 2, true, ProfileMethod::Sum).unwrap(),
+            vec![1.0, 7.0, 9.0]
+        );
+        // An all-NaN band: nansum -> 0.0, nanmean -> NaN.
+        let all_nan = [f32::NAN, 2.0, 3.0, f32::NAN, 5.0, 6.0];
+        let sum = aligned_profile_values(3, 2, &all_nan, 0.5, 2, true, ProfileMethod::Sum).unwrap();
+        assert_eq!(sum[0], 0.0);
+        let mean =
+            aligned_profile_values(3, 2, &all_nan, 0.5, 2, true, ProfileMethod::Mean).unwrap();
+        assert!(mean[0].is_nan());
+    }
+
+    #[test]
     fn rect_profile_mean_and_sum_reduce_the_band() {
         // 3x2 image, rows: [1,2,3],[4,5,6]. Whole-rectangle horizontal profile.
         let data = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
@@ -14539,6 +14587,19 @@ mod tests {
         let (xr, yr) = rect_profile_values(3, 2, &data, rect, false, ProfileMethod::Sum).unwrap();
         assert_eq!(xr, vec![0.0, 1.0]);
         assert_eq!(yr, vec![6.0, 15.0]);
+    }
+
+    #[test]
+    fn rect_profile_is_nan_aware() {
+        // R2-3 sibling: a NaN at (row 1, col 0) is skipped in the strip
+        // reduction, consistent with the axis-aligned profile and silx's
+        // nan-aware reduce. row0=[1,2,3], row1=[NaN,5,6].
+        let data = [1.0, 2.0, 3.0, f32::NAN, 5.0, 6.0];
+        let rect = (0.0, 2.0, 0.0, 1.0);
+        let (_, y) = rect_profile_values(3, 2, &data, rect, true, ProfileMethod::Mean).unwrap();
+        assert_eq!(y, vec![1.0, 3.5, 4.5]);
+        let (_, ys) = rect_profile_values(3, 2, &data, rect, true, ProfileMethod::Sum).unwrap();
+        assert_eq!(ys, vec![1.0, 7.0, 9.0]);
     }
 
     #[test]
