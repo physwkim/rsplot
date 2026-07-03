@@ -496,6 +496,43 @@ into main):
   −12·direction, second viewport+scissor pass top-right 100×100 px, on
   by default, `set_orientation_indicator_visible`.
 
+**Category B batch (`fix/items-fit`, cherry-picked onto main at `4649200`,
++ follow-up `4ee4ad6`):**
+
+- R1-10 — `4f2be24` `std` statistic (Welford, ddof=0 = numpy.std);
+  `STAT_COLUMNS` now exactly silx `DEFAULT_STATS` (sum/delta columns
+  removed from the default table; fields kept on `Stats` as API).
+- R1-11 — `7a2776c` histogram stats over the N raw counts at
+  `_revertComputeEdges` anchors (not the 2N step polyline — sum was
+  exactly doubled); `_ScatterContext` port (value-array stats, x-AND-y
+  on-limits mask) wired through `StatsInput::{Histogram,Scatter}`.
+  Side effects (all silx-faithful): histogram snapping/fit target bin
+  centres+counts; value scatters are no longer fit targets or
+  CurvesROIWidget feeds; CSV save of a histogram exports
+  (centres, counts).
+- R1-12 — `5d3a1ef` FitWidget Multi-Gaussian uses FitManager's
+  Sensitivity 2.5 (`DEFAULT_FIT_SENSITIVITY`); the standalone pyx
+  `peak_search` keeps 3.5 (distinct surface).
+- R1-13 — `91aa1a2` `padded_peak_search` ports FitTheories.peak_search
+  (fwhm-copy padding, remap, in-range filter; Yscaling=1.0 default
+  config documented).
+- R1-14 — `560bc9d` step-up/Atan seed: derivative rescaled to max(y),
+  fitted deriv-peak height taken when it exceeds max−min; stepdown
+  keeps the amplitude.
+- R1-15 — `dce1e08` slit beamfwhm REVERTED to silx's exact
+  `0.5·(largestup[2] + largestdown[1])` (upstream index quirk
+  reproduced deliberately — parity over local correction).
+- R1-16 — `1e8af27` default image colormap gray linear (silx
+  DEFAULT_COLORMAP_NAME); LUT verified as the `[i,i,i,255]` ramp.
+- R1-9 — `4649200` (STRUCTURAL) `AutoscaleMode::range` requires a
+  `Normalization` — blind autoscale is unrepresentable;
+  `Colormap::autoscale_range` mirrors `_computeAutoscaleRange`:
+  per-normalizer minmax (log = min_positive), normalized-space stddev3
+  for log/sqrt/arcsinh, is_valid percentile filters, per-normalization
+  DEFAULT_RANGE ((1,10) log). Closes the log-image render collapse.
+- follow-up — `4ee4ad6` re-export `revert_compute_edges` at the crate
+  root beside `histogram_edges`.
+
 **Category E batch (`fix/adl2sidm`, cherry-picked onto main at `57ceb01`,
 + follow-up `dec7568`):**
 
@@ -613,6 +650,20 @@ into main):
     axis blocks) — the parser was built against modern minimal files;
     MEDM's write-only-when-non-default convention makes absent keys
     semantically loaded.
+
+- 2026-07-03/04: **fix round complete — all 40 findings cleared** (see
+  the batches above; every fix one commit, per-crate gates green at
+  every commit, full-workspace gate green at the end). Two extra
+  defects found and fixed during the round beyond the inventory:
+  the R1-38 byte endianness mapping was inverted vs xc/Byte.c (also a
+  live adl2pydm bug), and the R1-30 read-only helpers were dead code
+  under a no-default-features sidm build (`dec7568`). Recorded
+  residuals (deliberate/blocked, not silent): compressed NTNDArray
+  codecs (needs new deps), pva subfield writes (NTTable deferral),
+  calc `I` status-code operand (ChannelState gap), cut-plane stroke
+  1 px (no wide-line pipeline), LabelledAxes labels absent from
+  `snapshot()` (egui overlay text), valuator down/left max-end
+  reversal warn-only, revoked-write-rights path unit-tested only.
 
   Classification (per port-translation-lessons):
   - Reference-independent defects (real regardless of upstream): R1-3,
