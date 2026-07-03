@@ -750,9 +750,12 @@ fn emit_wheel_switch(b: &mut Builder, widget: &MedmWidget, options: &Options, z:
 }
 
 /// `byte` — a `SidmByteIndicator`. `sbit`/`ebit` give the bit count and shift;
-/// `direction` gives the orientation (`right`/`left` -> horizontal). MEDM
-/// `sbit < ebit` is big-endian (MSB first; adl2pydm's `bigEndian`), applied via
-/// `with_big_endian(true)`.
+/// `direction` gives the orientation (`right`/`left` -> horizontal). An absent
+/// `sbit`/`ebit` means MEDM's defaults 15/0 (medmByte.c:279-280; writeDlByte
+/// :366-369 omits exactly those values — adl2pydm's 0/0 fallback is a bug), so
+/// a bare `byte` shows 16 bits. `sbit > ebit` displays the high bit first
+/// (xc/Byte.c:513-519 with `reverse == False` draws segment `i` as bit
+/// `sbit - i`) — sidm's `with_big_endian(true)`.
 fn emit_byte(b: &mut Builder, widget: &MedmWidget, options: &Options, z: ZLayer) {
     let Some((geom, addr)) = resolve_channel(b, widget, options) else {
         return;
@@ -761,7 +764,7 @@ fn emit_byte(b: &mut Builder, widget: &MedmWidget, options: &Options, z: ZLayer)
         .assignments
         .get("sbit")
         .and_then(|s| s.parse::<i32>().ok())
-        .unwrap_or(0);
+        .unwrap_or(15);
     let ebit = widget
         .assignments
         .get("ebit")
@@ -788,10 +791,13 @@ fn emit_byte(b: &mut Builder, widget: &MedmWidget, options: &Options, z: ZLayer)
     if let Some(orient) = direction_orientation(b, widget, true) {
         builders.push(orient);
     }
-    // MEDM `sbit < ebit` is big-endian (MSB first), as adl2pydm maps to PyDM's
-    // `bigEndian`. SidmByteIndicator defaults to little-endian, so apply the
-    // builder only for the big-endian case.
-    if sbit < ebit {
+    // MEDM `sbit > ebit` (the 15..0 default) draws the HIGH bit first:
+    // xc/Byte.c:513-519 sets `reverse` only when `ebit > sbit`, and the
+    // non-reversed segment loop shows bit `sbit - i` (:551-552) — MSB first,
+    // sidm's big-endian display order. SidmByteIndicator defaults to
+    // little-endian, so apply the builder only then. (adl2pydm maps this
+    // exactly backwards — `bigEndian` when sbit < ebit; MEDM C wins.)
+    if sbit > ebit {
         builders.push(".with_big_endian(true)".to_string());
     }
     // MEDM `clr`/`bclr` are the on/off bit colours (adl2pydm maps them to PyDM's
@@ -5113,10 +5119,11 @@ valuator {
             g.source
                 .contains(".with_orientation(Orientation::Horizontal)")
         );
-        // sbit > ebit, so NOT big-endian: no big-endian builder.
+        // sbit=3 > ebit=0 -> MSB first (xc/Byte.c:551-552 draws bit sbit-i):
+        // big-endian display order.
         assert!(
-            !g.source.contains(".with_big_endian"),
-            "little-endian byte must not emit a big-endian builder:\n{}",
+            g.source.contains(".with_big_endian(true)"),
+            "sbit > ebit must display MSB first:\n{}",
             g.source
         );
         // The CONTROLS byte has no clr/bclr, so no on/off colour builders.
@@ -5173,7 +5180,7 @@ byte {
     }
 
     #[test]
-    fn byte_big_endian_applied_when_sbit_below_ebit() {
+    fn byte_with_sbit_below_ebit_is_lsb_first() {
         let adl = r#"
 "color map" {
 	colors {
@@ -5195,19 +5202,57 @@ byte {
 }
 "#;
         let g = generate(&parse(adl), &Options::default());
-        // sbit=0,ebit=3 -> num_bits 4, shift 0, big-endian (sbit<ebit) applied
-        // (SidmByteIndicator's pub `big_endian` field honours the display order).
+        // sbit=0,ebit=3 -> num_bits 4, shift 0, and LSB first: xc/Byte.c:513-515
+        // sets `reverse` for ebit > sbit and draws segment i as bit sbit+i —
+        // sidm's little-endian default, so NO big-endian builder. (The old
+        // mapping emitted with_big_endian here, matching adl2pydm's inverted
+        // `bigEndian = sbit < ebit` instead of the C.)
         assert!(g.source.contains(".with_num_bits(4)"));
         assert!(
-            g.source.contains(".with_big_endian(true)"),
-            "expected big-endian to be applied:\n{}",
+            !g.source.contains(".with_big_endian"),
+            "sbit < ebit displays LSB first — no big-endian builder:\n{}",
             g.source
         );
-        // It is now applied, not dropped — so no warning.
+    }
+
+    #[test]
+    fn byte_without_sbit_ebit_shows_sixteen_bits_msb_first() {
+        // MEDM defaults sbit=15, ebit=0 (medmByte.c:279-280; writeDlByte
+        // :366-369 omits exactly those values from the .adl) -> 16 bits, no
+        // shift, MSB first.
+        let adl = r#"
+"color map" {
+	colors {
+		ffffff,
+	}
+}
+byte {
+	object {
+		x=0
+		y=0
+		width=160
+		height=20
+	}
+	monitor {
+		chan="DFLT"
+	}
+}
+"#;
+        let g = generate(&parse(adl), &Options::default());
         assert!(
-            !g.warnings.iter().any(|w| w.contains("big-endian")),
-            "big-endian must be applied, not warned: {:?}",
-            g.warnings
+            g.source.contains(".with_num_bits(16)"),
+            "default byte must show 16 bits:\n{}",
+            g.source
+        );
+        assert!(
+            !g.source.contains(".with_shift("),
+            "default ebit=0 must not emit a shift:\n{}",
+            g.source
+        );
+        assert!(
+            g.source.contains(".with_big_endian(true)"),
+            "default 15..0 displays MSB first:\n{}",
+            g.source
         );
     }
 

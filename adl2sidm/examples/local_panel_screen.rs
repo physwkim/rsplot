@@ -70,8 +70,7 @@ impl Screen {
             .with_border_mode(BorderMode::DisconnectedOnly)
             .with_num_bits(8)
             .with_show_labels(false)
-            .with_orientation(Orientation::Horizontal)
-            .with_big_endian(true);
+            .with_orientation(Orientation::Horizontal);
         let w8 = SidmLineEdit::new(&engine, "loc://flags?type=int&init=170")
             .expect("adl2sidm: connect loc://flags?type=int&init=170")
             .with_border_mode(BorderMode::DisconnectedOnly)
