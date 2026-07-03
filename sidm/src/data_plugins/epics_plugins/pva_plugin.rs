@@ -261,9 +261,9 @@ async fn run_channel(
                     // A non-empty codec name marks a compressed NTNDArray.
                     // PyDM decompresses it (`decompress(value)` via
                     // pva_codec, p4p_plugin_component.py:287-290); sidm
-                    // decodes the lz4/bslz4/blosc codecs in `pva_codec`.
-                    // On any failure (jpeg, an unported blosc sub-codec, a
-                    // malformed stream) the value is skipped with a
+                    // decodes the lz4/bslz4/blosc/jpeg codecs in
+                    // `pva_codec`. On any failure (an unknown codec name or
+                    // a malformed stream) the value is skipped with a
                     // one-time warning — a deliberate deviation from PyDM,
                     // which logs and then emits the raw compressed bytes
                     // as the value. Metadata flows either way.
@@ -1740,9 +1740,8 @@ mod tests {
 
     #[test]
     fn compressed_ntndarray_failures_keep_the_error() {
-        // jpeg stays unsupported (PyDM decodes via PIL; sidm has no JPEG
-        // decoder dependency) — the plugin turns this into the one-time
-        // warn + metadata-only path.
+        // A truncated JPEG stream fails to decode, naming the codec — the
+        // plugin turns this into the one-time warn + metadata-only path.
         let root = compressed_ntnd_root("jpeg", 5, 100, &[0xFF, 0xD8]);
         assert!(
             decompressed_array_value(&root)

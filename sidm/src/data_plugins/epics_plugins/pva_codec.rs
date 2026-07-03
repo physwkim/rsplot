@@ -20,11 +20,15 @@
 //!   split-stream layout, per-block shuffles and the BloscLZ sub-codec
 //!   ported from `blosc/blosc.c`, `blosc/shuffle*.{c,h}` and
 //!   `blosc/blosclz.c` (c-blosc 1.21.7); LZ4/LZ4HC sub-streams decode with
-//!   `lz4_flex`, ZLIB with `flate2`. The SNAPPY and ZSTD sub-codecs are
-//!   not ported (no decoder in the dependency tree) and return an error,
-//!   which the plugin surfaces as its one-time warning.
-//! - `"jpeg"` — not supported (PyDM decodes via PIL; sidm has no JPEG
-//!   decoder dependency); returns an error.
+//!   `lz4_flex`, ZLIB with `flate2`, ZSTD with `rust_zstd` (the same
+//!   pure-Rust zstd rust-hdf5 uses) and SNAPPY with `snap` (raw format,
+//!   as c-blosc's `snappy_wrap_decompress` calls `snappy_uncompress`).
+//! - `"jpeg"` — decoded with the `image` crate's JPEG decoder (zune-jpeg).
+//!   NDPluginCodec only encodes 8-bit grayscale or RGB inputs
+//!   (`NDPluginCodec.cpp:135-166`; the RGB2/RGB3 plane layouts are
+//!   interleaved into `JCS_RGB` rows at encode time), so the decoded
+//!   pixels are Luma8 or interleaved Rgb8 — the same array PyDM gets
+//!   from PIL's `numpy.asarray`.
 //!
 //! rust-hdf5's *public* filter pipeline is deliberately not used here: its
 //! LZ4 filter expects the registered HDF5 filter framing (12-byte header,
@@ -62,6 +66,7 @@ pub(crate) fn decompress(
         "lz4" => lz4_block_decompress(payload, uncompressed_size)?,
         "bslz4" => bslz4_decompress(payload, uncompressed_size, elem_size)?,
         "blosc" => blosc_decompress(payload)?,
+        "jpeg" => jpeg_decompress(payload)?,
         other => return Err(format!("codec {other:?} is not supported")),
     };
     if out.len() != uncompressed_size {
@@ -85,6 +90,28 @@ fn lz4_block_decompress(payload: &[u8], size: usize) -> Result<Vec<u8>, String> 
         return Err(format!("lz4: decoded {n} bytes, expected {size}"));
     }
     Ok(out)
+}
+
+/// Decode a JPEG frame to its raw pixel bytes — the counterpart of PyDM's
+/// PIL `Image.open` + `numpy.asarray` path. NDPluginCodec encodes only
+/// 8-bit grayscale (2-D) or RGB (3-D) arrays (`NDPluginCodec.cpp:135-166`),
+/// so the stream decodes to Luma8 (`w*h` bytes) or interleaved Rgb8
+/// (`3*w*h` bytes); anything else is a malformed/foreign stream. Note the
+/// RGB2/RGB3 plane layouts were interleaved at encode time, so — exactly
+/// like PyDM — the decoded byte order is interleaved regardless of the
+/// original NDArray layout.
+fn jpeg_decompress(payload: &[u8]) -> Result<Vec<u8>, String> {
+    let img = image::load_from_memory_with_format(payload, image::ImageFormat::Jpeg)
+        .map_err(|e| format!("jpeg: {e}"))?;
+    match img {
+        image::DynamicImage::ImageLuma8(i) => Ok(i.into_raw()),
+        image::DynamicImage::ImageRgb8(i) => Ok(i.into_raw()),
+        other => Err(format!(
+            "jpeg: unsupported pixel layout {:?} (NDPluginCodec produces \
+             8-bit grayscale or RGB only)",
+            other.color()
+        )),
+    }
 }
 
 // =========================================================================
@@ -442,8 +469,25 @@ fn blosc_sub_decompress(compcode: u8, src: &[u8], out: &mut [u8]) -> Result<usiz
             }
             Ok(n)
         }
-        2 => Err("blosc: the snappy sub-codec is not supported".into()),
-        4 => Err("blosc: the zstd sub-codec is not supported".into()),
+        // BLOSC_SNAPPY_LIB — raw snappy (c-blosc's snappy_wrap_decompress
+        // calls snappy_uncompress, the unframed format).
+        2 => {
+            let v = snap::raw::Decoder::new()
+                .decompress_vec(src)
+                .map_err(|e| format!("blosc snappy: {e}"))?;
+            if v.len() == out.len() {
+                out.copy_from_slice(&v);
+            }
+            Ok(v.len())
+        }
+        // BLOSC_ZSTD_LIB — one zstd frame per split (ZSTD_decompress).
+        4 => {
+            let v = rust_zstd::decompress(src).map_err(|e| format!("blosc zstd: {e}"))?;
+            if v.len() == out.len() {
+                out.copy_from_slice(&v);
+            }
+            Ok(v.len())
+        }
         other => Err(format!("blosc: unknown compressor code {other}")),
     }
 }
@@ -698,6 +742,10 @@ mod tests {
                 let split = &transformed[s * neblock..(s + 1) * neblock];
                 let comp = match compcode {
                     1 => lz4_flex::block::compress(split),
+                    2 => snap::raw::Encoder::new()
+                        .compress_vec(split)
+                        .expect("snappy compress"),
+                    4 => rust_zstd::compress(split, 3),
                     _ => split.to_vec(), // store — valid for every codec
                 };
                 if comp.len() < neblock {
@@ -821,6 +869,61 @@ mod tests {
     }
 
     #[test]
+    fn blosc_snappy_and_zstd_subcodecs_round_trip() {
+        let data = pattern(20_000);
+        // (compcode, typesize, flags) — snappy (2) and zstd (4), split and
+        // dont-split, shuffled and plain.
+        for &(cc, ts, flags) in &[
+            (2u8, 4usize, BLOSC_DOSHUFFLE),
+            (2, 1, BLOSC_DONT_SPLIT),
+            (4, 4, BLOSC_DOSHUFFLE),
+            (4, 2, BLOSC_DOSHUFFLE | BLOSC_DONT_SPLIT),
+        ] {
+            let frame = blosc_frame(&data, ts, 8192, flags, cc);
+            let out = decompress("blosc", &frame, data.len(), ts).unwrap();
+            assert_eq!(out, data, "compcode={cc} ts={ts} flags={flags:#x}");
+        }
+    }
+
+    #[test]
+    fn jpeg_grayscale_and_rgb_decode() {
+        use image::codecs::jpeg::JpegEncoder;
+        // JPEG is lossy, so round-trip on uniform images (DC-only blocks,
+        // near-exact reconstruction) with a small tolerance.
+        let (w, h) = (32u32, 16u32);
+        let gray = vec![128u8; (w * h) as usize];
+        let mut stream = Vec::new();
+        JpegEncoder::new_with_quality(&mut stream, 100)
+            .encode(&gray, w, h, image::ExtendedColorType::L8)
+            .expect("encode grayscale jpeg");
+        let out = decompress("jpeg", &stream, gray.len(), 1).unwrap();
+        assert!(
+            out.iter().all(|&p| p.abs_diff(128) <= 3),
+            "grayscale pixels off by more than 3"
+        );
+
+        let rgb: Vec<u8> = [10u8, 200, 60].repeat((w * h) as usize);
+        let mut stream = Vec::new();
+        JpegEncoder::new_with_quality(&mut stream, 100)
+            .encode(&rgb, w, h, image::ExtendedColorType::Rgb8)
+            .expect("encode rgb jpeg");
+        let out = decompress("jpeg", &stream, rgb.len(), 1).unwrap();
+        assert!(
+            out.chunks_exact(3).all(|p| p[0].abs_diff(10) <= 8
+                && p[1].abs_diff(200) <= 8
+                && p[2].abs_diff(60) <= 8),
+            "rgb pixels off by more than 8"
+        );
+
+        // A truncated/garbage stream errors, naming the codec.
+        assert!(
+            decompress("jpeg", &[0xFF, 0xD8], 100, 1)
+                .unwrap_err()
+                .contains("jpeg")
+        );
+    }
+
+    #[test]
     fn blosc_memcpyed_frame_copies_through() {
         let data = pattern(500);
         let mut frame = vec![2u8, 1, BLOSC_MEMCPYED, 1];
@@ -832,7 +935,7 @@ mod tests {
     }
 
     #[test]
-    fn blosc_stored_splits_and_unsupported_subcodecs() {
+    fn blosc_stored_splits_and_unknown_subcodecs() {
         let data = pattern(2048);
         // compcode 0 with store-only splits exercises the cbytes == neblock
         // path without needing a blosclz encoder.
@@ -840,11 +943,11 @@ mod tests {
         assert_eq!(decompress("blosc", &frame, data.len(), 2).unwrap(), data);
         // A stored split decodes regardless of the codec code (cbytes ==
         // neblock short-circuits before the sub-codec dispatch, like the C).
-        let frame = blosc_frame(&data, 1, 2048, BLOSC_DONT_SPLIT, 4);
+        let frame = blosc_frame(&data, 1, 2048, BLOSC_DONT_SPLIT, 7);
         assert_eq!(decompress("blosc", &frame, data.len(), 1).unwrap(), data);
-        // A genuinely compressed split under an unported sub-codec must
-        // fail naming it: one 4-byte block, zstd (code 4), cbytes 1 != 4.
-        let mut frame = vec![2u8, 1, BLOSC_DONT_SPLIT | (4 << 5), 1];
+        // A genuinely compressed split under an unknown compressor code must
+        // fail naming it: one 4-byte block, code 7, cbytes 1 != 4.
+        let mut frame = vec![2u8, 1, BLOSC_DONT_SPLIT | (7 << 5), 1];
         frame.extend_from_slice(&4i32.to_le_bytes()); // nbytes
         frame.extend_from_slice(&4i32.to_le_bytes()); // blocksize
         frame.extend_from_slice(&25i32.to_le_bytes()); // compressedsize
@@ -854,7 +957,7 @@ mod tests {
         assert!(
             decompress("blosc", &frame, 4, 1)
                 .unwrap_err()
-                .contains("zstd")
+                .contains("unknown compressor")
         );
     }
 
@@ -886,11 +989,6 @@ mod tests {
 
     #[test]
     fn unsupported_codecs_are_named() {
-        assert!(
-            decompress("jpeg", &[0xFF, 0xD8], 100, 1)
-                .unwrap_err()
-                .contains("jpeg")
-        );
         assert!(decompress("nope", &[], 0, 1).unwrap_err().contains("nope"));
     }
 }

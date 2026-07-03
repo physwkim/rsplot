@@ -28,8 +28,17 @@ ca = ["dep:epics-ca-rs", "dep:epics-base-rs"]
 # pvAccess backend (`pva://`). Pulls epics-pva-rs (client + in-process PvaServer
 # for tests); the NT value/structure types it returns live in epics-pva-rs
 # itself, so no extra epics-base-rs surface is needed beyond what `ca` shares.
-# lz4_flex + flate2 decode compressed NTNDArray codecs (PyDM's pva_codec).
-pva = ["dep:epics-pva-rs", "dep:lz4_flex", "dep:flate2"]
+# lz4_flex/flate2/rust-zstd/snap decode compressed NTNDArray codecs (PyDM's
+# pva_codec); `image/jpeg` adds the zune-jpeg decoder to the image dependency
+# sidm already carries, for the NDPluginCodec "jpeg" codec.
+pva = [
+    "dep:epics-pva-rs",
+    "dep:lz4_flex",
+    "dep:flate2",
+    "dep:rust-zstd",
+    "dep:snap",
+    "image/jpeg",
+]
 # Derived-channel backend (`calc://`). Pulls evalexpr (a pure-Rust expression
 # evaluator) to compute one channel from an expression over other channels'
 # scalar values, porting PyDM's calc plugin. Also pulls epics-base-rs for the
@@ -96,6 +105,13 @@ lz4_flex = { version = "0.11", optional = true, default-features = false, featur
 # The blosc ZLIB sub-codec (a zlib stream per split). Pure-Rust default backend
 # (miniz_oxide); already in the workspace tree via rust-hdf5's deflate feature.
 flate2 = { version = "1", optional = true }
+# The blosc ZSTD sub-codec — the same pure-Rust zstd implementation rust-hdf5's
+# `zstd` feature uses (its `default-features = false` drops the rayon
+# parallelism, matching rust-hdf5's own declaration).
+rust-zstd = { version = "0.1", optional = true, default-features = false }
+# The blosc SNAPPY sub-codec (raw snappy per split, `snappy_uncompress` in
+# c-blosc's snappy_wrap_decompress) — the crate rust-hdf5's blosc feature uses.
+snap = { version = "1", optional = true }
 # Derived-channel expression evaluator (feature `calc`). Pure Rust, no network;
 # evaluates a PyDM-style `calc://` expression over child channels' scalar values.
 evalexpr = { version = "13", optional = true }
