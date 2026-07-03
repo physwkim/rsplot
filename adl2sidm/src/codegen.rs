@@ -2634,13 +2634,23 @@ fn skip_no_channel(b: &mut Builder, widget: &MedmWidget) {
 }
 
 /// The channel address for a widget: its `control`/`monitor` block's `chan`,
-/// with macros substituted and the protocol prefixed.
+/// with macros substituted and the protocol prefixed. Pre-2.4 MEDM `.adl` files
+/// spell the key `ctrl` (control) / `rdbk` (monitor) instead of `chan` — MEDM
+/// parses both (`medm/medmControl.c:36-37` matches "ctrl"/"chan";
+/// `medm/medmMonitor.c:77-78` matches "rdbk"/"chan"; adl2pydm
+/// `output_handler.py:179-184` get_channel reads all three keys), so each
+/// block falls back to its old-format key.
 fn channel_address(widget: &MedmWidget, options: &Options) -> Option<String> {
     let chan = widget
         .attributes
         .get("control")
-        .and_then(|a| a.get("chan"))
-        .or_else(|| widget.attributes.get("monitor").and_then(|a| a.get("chan")))?;
+        .and_then(|a| a.get("chan").or_else(|| a.get("ctrl")))
+        .or_else(|| {
+            widget
+                .attributes
+                .get("monitor")
+                .and_then(|a| a.get("chan").or_else(|| a.get("rdbk")))
+        })?;
     Some(apply_protocol(chan, options))
 }
 
@@ -7303,5 +7313,60 @@ rectangle {
             g.warnings
         );
         assert!(g.source.contains("DrawingShape::Rectangle"), "{}", g.source);
+    }
+
+    #[test]
+    fn old_format_ctrl_and_rdbk_keys_resolve_the_channel() {
+        // Pre-2.4 MEDM .adl files write `ctrl`/`rdbk` instead of `chan`; MEDM
+        // still parses both (medmControl.c:36-37, medmMonitor.c:77-78).
+        let adl = r#"
+"color map" {
+	colors {
+		ffffff,
+	}
+}
+"text entry" {
+	object {
+		x=0
+		y=0
+		width=60
+		height=20
+	}
+	control {
+		ctrl="OLD:setpoint"
+		clr=0
+		bclr=0
+	}
+}
+"text update" {
+	object {
+		x=0
+		y=30
+		width=60
+		height=20
+	}
+	monitor {
+		rdbk="OLD:readback"
+		clr=0
+		bclr=0
+	}
+}
+"#;
+        let g = generate(&parse(adl), &Options::default());
+        assert!(
+            g.source.contains("\"ca://OLD:setpoint\""),
+            "control ctrl= did not resolve:\n{}",
+            g.source
+        );
+        assert!(
+            g.source.contains("\"ca://OLD:readback\""),
+            "monitor rdbk= did not resolve:\n{}",
+            g.source
+        );
+        assert!(
+            !g.warnings.iter().any(|w| w.contains("has no channel")),
+            "{:?}",
+            g.warnings
+        );
     }
 }
