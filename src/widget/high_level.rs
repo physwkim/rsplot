@@ -7494,33 +7494,43 @@ impl PlotWidget {
     }
 
     fn apply_auto_limits(&mut self) {
-        if self.auto_reset_zoom {
+        // Content-change guard (siplot's `auto_reset_zoom` extension — silx
+        // has no refit-on-content-change): with no data at all, adding or
+        // removing items does not snap the view to the silx (1, 100) empty
+        // home. The explicit reset verbs (`reset_zoom_to_data`, the context
+        // menu, the toolbar) skip this guard so an itemless Reset Zoom gets
+        // the silx `_forceResetZoom` defaults.
+        if self.auto_reset_zoom && !self.data_bounds_empty() {
             self.apply_limits_from_data_bounds();
         }
     }
 
+    /// Whether no axis has accumulated any data bounds.
+    fn data_bounds_empty(&self) -> bool {
+        self.data_bounds.x.is_none()
+            && self.data_bounds.y_left.is_none()
+            && self.data_bounds.y_right.is_none()
+            && self.data_bounds.extra.iter().all(Option::is_none)
+    }
+
     fn apply_limits_from_data_bounds(&mut self) {
-        // Refit the extra axes first, independent of the left/right guard below:
-        // each autoscale-on extra axis fits its own curves (the multi-axis
-        // sibling of the left/right refit). Extra axes are not part of the
-        // limits-history snapshot (interactive pan/zoom of them is not
-        // supported), so this needs no `LimitsChanged` bookkeeping.
+        // Refit the extra axes first: each autoscale-on extra axis fits its
+        // own curves (the multi-axis sibling of the left/right refit). Extra
+        // axes are not part of the limits-history snapshot (interactive
+        // pan/zoom of them is not supported), so this needs no
+        // `LimitsChanged` bookkeeping.
         let extra = extra_data_ranges(&self.data_bounds);
         if !extra.is_empty() {
             self.backend.plot_mut().reset_extra_axes_to(&extra);
         }
-        // Preserve the original guard: a reset-to-data needs both X and left-Y
-        // data accumulated before it does anything.
-        if self.data_bounds.x.is_none() || self.data_bounds.y_left.is_none() {
-            return;
-        }
         // Delegate the per-axis refit decision to the single flag-aware owner
         // (`Plot::reset_zoom_to_data_range`): only autoscale-on axes refit from
         // data, off axes keep their current limits, and log axes force a refit
-        // when their lower limit is <= 0. `WgpuBackend::set_limits` (the prior
-        // path) only assigned `plot.limits`/`plot.y2` — the same two fields the
-        // model owner writes — so delegating regresses no widget-side
-        // bookkeeping; the `LimitsChanged` event is still raised here. The raw
+        // when their lower limit is <= 0. Axes with no data take the silx
+        // `_forceResetZoom` cross-axis defaults (PlotWidget.py:3326-3335):
+        // (1, 100) for X / left-Y, left-Y adopting the right range when only
+        // right-axis data exists — so a right-axis-only plot refits instead
+        // of being skipped (the old x/y_left early-return here). The raw
         // range goes in as-is; the owner repairs degenerate/out-of-float32
         // spans via silx `checkAxisLimits` before applying margins.
         let range = raw_data_range_from_bounds(&self.data_bounds);

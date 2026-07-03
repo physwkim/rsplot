@@ -1029,29 +1029,89 @@ impl Plot {
         self.grid_color.unwrap_or(foreground)
     }
 
-    /// Refit the view to `data` honoring the per-axis autoscale flags, mirroring
-    /// silx `PlotWidget.resetZoom`. An axis whose autoscale flag is off keeps its
-    /// current display range; an axis whose flag is on is refit to its data
-    /// bounds (when present).
+    /// Refit ALL axes to `data` regardless of the autoscale flags, mirroring
+    /// silx `_forceResetZoom` (`PlotWidget.py:3308-3345`) including its
+    /// cross-axis defaults (`:3326-3335`):
+    /// - X with no data → `(1, 100)`;
+    /// - left Y with no data → `(1, 100)`, unless right-axis data exists, in
+    ///   which case the left axis adopts the right range;
+    /// - y2 with no data → the left range.
+    ///
+    /// Every range then goes through `setLimits(margins=True)` semantics: the
+    /// silx `checkAxisLimits` repair first, then the data margins
+    /// (`PlotWidget.py:2705-2716`).
+    ///
+    /// siplot's `y2 == None` means "no right axis displayed" (silx always has
+    /// one), so the y2 range is written only when a right axis already exists
+    /// or right-axis data is present; a `None` y2 on a y2-less plot stays
+    /// `None` rather than conjuring an axis.
+    pub fn force_reset_zoom_to_data_range(&mut self, data: DataRange) {
+        // Cross-axis defaults (silx _forceResetZoom, PlotWidget.py:3326-3335).
+        let (mut x_min, mut x_max) = data.x.unwrap_or((1.0, 100.0));
+        let (mut y_min, mut y_max) = data.y.unwrap_or((1.0, 100.0));
+        let (mut y2_min, mut y2_max) = match data.y2 {
+            None => (y_min, y_max),
+            Some((lo, hi)) => {
+                if data.y.is_none() {
+                    (y_min, y_max) = (lo, hi);
+                }
+                (lo, hi)
+            }
+        };
+
+        let m = self.data_margins;
+        let x_is_log = self.x_scale == Scale::Log10;
+        let y_is_log = self.y_scale == Scale::Log10;
+
+        // Repair through silx `checkAxisLimits` BEFORE margins: silx
+        // `setLimits` runs per-axis `_checkLimits` as its first step
+        // (PlotWidget.py:2705-2712 → _utils/panzoom.py:49-75). This is what
+        // turns a single-point `(v, v)` data range into silx's ±10% window
+        // instead of a degenerate span that NaNs the transform. The y2 axis
+        // uses the left-Y log flag, as silx passes the left yAxis' scale for
+        // the right axis throughout.
+        (x_min, x_max) = clamp_axis_limits(x_min, x_max, x_is_log);
+        (y_min, y_max) = clamp_axis_limits(y_min, y_max, y_is_log);
+        (y2_min, y2_max) = clamp_axis_limits(y2_min, y2_max, y_is_log);
+
+        // Then the data margins (setLimits margins=True; addMarginsToLimits
+        // respects log axes, and y2 reuses the Y margin ratios).
+        (x_min, x_max) = DataMargins::expand_axis(x_min, x_max, m.x_min, m.x_max, x_is_log);
+        (y_min, y_max) = DataMargins::expand_axis(y_min, y_max, m.y_min, m.y_max, y_is_log);
+        (y2_min, y2_max) = DataMargins::expand_axis(y2_min, y2_max, m.y_min, m.y_max, y_is_log);
+
+        self.limits = (x_min, x_max, y_min, y_max);
+        if self.y2.is_some() || data.y2.is_some() {
+            self.y2 = Some((y2_min, y2_max));
+        }
+    }
+
+    /// Refit the view to `data` honoring the per-axis autoscale flags,
+    /// mirroring silx `PlotWidget.resetZoom` (`PlotWidget.py:3347-3399`): run
+    /// the forced refit ([`Self::force_reset_zoom_to_data_range`], with its
+    /// cross-axis defaults), then restore the saved range on every axis whose
+    /// autoscale flag is off. Restored values pass through the silx
+    /// `checkAxisLimits` repair (silx restores via `Axis.setLimits` →
+    /// `_checkLimits`, `PlotWidget.py:3385-3395`) but get no data margins.
     ///
     /// silx also forces autoscale on a log axis whose current lower limit is
-    /// `<= 0` (so toggling to log re-fits to positive data); that rule is applied
-    /// here per axis via the [`Scale::Log10`] check (matches
-    /// `PlotWidget.resetZoom`:3377-3382). Axes with no data bounds and autoscale
-    /// off are left untouched.
+    /// `<= 0` (so toggling to log re-fits to positive data); that rule is
+    /// applied here per axis via the [`Scale::Log10`] check (matches
+    /// `PlotWidget.resetZoom`:3372-3379). With every axis pinned this returns
+    /// without touching anything (silx "Nothing to autoscale", `:3380-3383`).
     ///
     /// This is the pure model operation; the high-level widget owns the actual
     /// `data` accumulation (its `DataBounds`) and calls this with the current
     /// range.
     pub fn reset_zoom_to_data_range(&mut self, data: DataRange) {
-        let (mut x_min, mut x_max, mut y_min, mut y_max) = self.limits;
-        let mut y2 = self.y2;
+        let saved = self.limits;
+        let saved_y2 = self.y2;
 
         // Force autoscale on a log axis whose lower limit is <= 0 (silx
-        // resetZoom:3377-3382).
-        let x_auto = self.x_autoscale || (self.x_scale == Scale::Log10 && x_min <= 0.0);
+        // resetZoom:3372-3379).
+        let x_auto = self.x_autoscale || (self.x_scale == Scale::Log10 && saved.0 <= 0.0);
         let y_log_force = self.y_scale == Scale::Log10
-            && (y_min <= 0.0 || self.y2.map(|(lo, _)| lo <= 0.0).unwrap_or(false));
+            && (saved.2 <= 0.0 || saved_y2.map(|(lo, _)| lo <= 0.0).unwrap_or(false));
         let y_auto = self.y_autoscale || y_log_force;
         let y2_auto = self.y2_autoscale || y_log_force;
 
@@ -1062,61 +1122,24 @@ impl Plot {
             return;
         }
 
-        // Track which axes are refit; only those receive data margins, matching
-        // silx (pinned axes are restored after _forceResetZoom without margins).
-        let mut x_refit = false;
-        let mut y_refit = false;
-        let mut y2_refit = false;
+        self.force_reset_zoom_to_data_range(data);
 
-        if x_auto && let Some((dmin, dmax)) = data.x {
-            x_min = dmin;
-            x_max = dmax;
-            x_refit = true;
-        }
-        if y_auto && let Some((dmin, dmax)) = data.y {
-            y_min = dmin;
-            y_max = dmax;
-            y_refit = true;
-        }
-        if y2_auto && let Some((dmin, dmax)) = data.y2 {
-            y2 = Some((dmin, dmax));
-            y2_refit = true;
-        }
-
-        let m = self.data_margins;
+        // Restore the saved range on pinned axes (silx resetZoom:3385-3395;
+        // silx's y2 restore rides the left-Y autoscale flag, and siplot's
+        // separate `y2_autoscale` extension generalizes that per axis).
+        // Restored values are `_checkLimits`-repaired but get no margins,
+        // matching silx restoring through `Axis.setLimits`.
         let x_is_log = self.x_scale == Scale::Log10;
         let y_is_log = self.y_scale == Scale::Log10;
-
-        // Repair every adopted range through silx `checkAxisLimits` BEFORE
-        // margins: silx `setLimits` runs per-axis `_checkLimits` as its first
-        // step (PlotWidget.py:2705-2712 → _utils/panzoom.py:49-75), and the
-        // preserved ranges of pinned axes are restored via `Axis.setLimits`,
-        // which checks them too (resetZoom, PlotWidget.py:3385-3395). This is
-        // what turns a single-point `(v, v)` data range into silx's ±10%
-        // window instead of a degenerate span that NaNs the transform.
-        (x_min, x_max) = clamp_axis_limits(x_min, x_max, x_is_log);
-        (y_min, y_max) = clamp_axis_limits(y_min, y_max, y_is_log);
-        // The y2 axis uses the left-Y log flag, as silx passes the left
-        // yAxis' scale for the right axis throughout.
-        y2 = y2.map(|(lo, hi)| clamp_axis_limits(lo, hi, y_is_log));
-
-        // Expand refit axes by the data margins (silx applies margins=True in
-        // setLimits during _forceResetZoom; addMarginsToLimits respects log
-        // axes and the shared y/y2 margin ratios).
-        if x_refit {
-            (x_min, x_max) = DataMargins::expand_axis(x_min, x_max, m.x_min, m.x_max, x_is_log);
+        if !x_auto {
+            (self.limits.0, self.limits.1) = clamp_axis_limits(saved.0, saved.1, x_is_log);
         }
-        if y_refit {
-            (y_min, y_max) = DataMargins::expand_axis(y_min, y_max, m.y_min, m.y_max, y_is_log);
+        if !y_auto {
+            (self.limits.2, self.limits.3) = clamp_axis_limits(saved.2, saved.3, y_is_log);
         }
-        if y2_refit && let Some((lo, hi)) = y2 {
-            // y2 axis uses the Y margin ratios and the Y log flag (silx reuses
-            // yMinMargin/yMaxMargin and isYLog for the y2 branch).
-            y2 = Some(DataMargins::expand_axis(lo, hi, m.y_min, m.y_max, y_is_log));
+        if !y2_auto {
+            self.y2 = saved_y2.map(|(lo, hi)| clamp_axis_limits(lo, hi, y_is_log));
         }
-
-        self.limits = (x_min, x_max, y_min, y_max);
-        self.y2 = y2;
         // NB: this low-level refit deliberately does NOT arm `reset_scroll_guard`.
         // It is the shared path for the widget's autoscale-refit-on-content-change
         // (every add/clear/remove), which is not a user gesture and must not
@@ -1537,8 +1560,10 @@ mod tests {
     }
 
     #[test]
-    fn reset_zoom_autoscale_on_axis_with_no_data_is_preserved() {
-        // Boundary: autoscale on but no data bounds -> range left untouched.
+    fn reset_zoom_axis_with_no_data_defaults_to_silx_home() {
+        // Boundary: autoscale on but no data bounds -> the silx
+        // _forceResetZoom default (1, 100) (PlotWidget.py:3326-3335), not the
+        // preserved current range.
         let mut plot = Plot::new(0);
         plot.limits = (3.0, 7.0, 2.0, 8.0);
         plot.reset_zoom_to_data_range(DataRange {
@@ -1546,8 +1571,70 @@ mod tests {
             y: Some((-1.0, 1.0)),
             y2: None,
         });
-        // X has no data -> preserved; Y refit.
-        assert_eq!(plot.limits, (3.0, 7.0, -1.0, 1.0));
+        // X has no data -> (1, 100); Y refit from data.
+        assert_eq!(plot.limits, (1.0, 100.0, -1.0, 1.0));
+    }
+
+    #[test]
+    fn reset_zoom_empty_data_resets_to_silx_home_view() {
+        // An itemless reset is silx's (1, 100)/(1, 100) home view, not a
+        // no-op (PlotWidget.py:3326-3335).
+        let mut plot = Plot::new(0);
+        plot.limits = (3.0, 7.0, 2.0, 8.0);
+        plot.reset_zoom_to_data_range(DataRange::default());
+        assert_eq!(plot.limits, (1.0, 100.0, 1.0, 100.0));
+        // No right axis exists and no right data arrived: y2 stays absent.
+        assert_eq!(plot.y2, None);
+    }
+
+    #[test]
+    fn reset_zoom_right_axis_only_data_refits_left_from_right() {
+        // silx _forceResetZoom: `ranges.y is None` with yright present -> the
+        // LEFT axis adopts ranges.yright, and X refits from its own data
+        // (PlotWidget.py:3330-3335). This is the y2-only-plot refit.
+        let mut plot = Plot::new(0);
+        plot.limits = (0.0, 1.0, 0.0, 1.0);
+        plot.y2 = Some((0.0, 1.0));
+        plot.reset_zoom_to_data_range(DataRange {
+            x: Some((10.0, 20.0)),
+            y: None,
+            y2: Some((100.0, 200.0)),
+        });
+        assert_eq!(plot.limits, (10.0, 20.0, 100.0, 200.0));
+        assert_eq!(plot.y2, Some((100.0, 200.0)));
+    }
+
+    #[test]
+    fn reset_zoom_y2_with_no_data_adopts_left_range() {
+        // silx _forceResetZoom: `ranges.yright is None` -> y2 := (ymin, ymax)
+        // (PlotWidget.py:3331-3332). Only applies when a right axis exists.
+        let mut plot = Plot::new(0);
+        plot.limits = (0.0, 1.0, 0.0, 1.0);
+        plot.y2 = Some((50.0, 60.0));
+        plot.reset_zoom_to_data_range(DataRange {
+            x: Some((10.0, 20.0)),
+            y: Some((-5.0, 5.0)),
+            y2: None,
+        });
+        assert_eq!(plot.limits, (10.0, 20.0, -5.0, 5.0));
+        assert_eq!(plot.y2, Some((-5.0, 5.0)));
+    }
+
+    #[test]
+    fn force_reset_zoom_ignores_autoscale_flags() {
+        // silx _forceResetZoom "does not check axis autoscale"
+        // (PlotWidget.py:3308-3315): every axis refits even when pinned.
+        let mut plot = Plot::new(0);
+        plot.limits = (0.0, 1.0, 0.0, 1.0);
+        plot.set_x_autoscale(false);
+        plot.set_y_autoscale(false);
+        plot.set_y2_autoscale(false);
+        plot.force_reset_zoom_to_data_range(DataRange {
+            x: Some((10.0, 20.0)),
+            y: Some((-5.0, 5.0)),
+            y2: None,
+        });
+        assert_eq!(plot.limits, (10.0, 20.0, -5.0, 5.0));
     }
 
     #[test]
