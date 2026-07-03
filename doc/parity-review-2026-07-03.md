@@ -1404,6 +1404,31 @@ on `main`):**
   and would otherwise clobber the explicit ranges examples pin via
   `with_colormap(Colormap::new(name, -0.5, 1.0))`.
 
+**Round 2 profile-subsystem cluster (on `main`):**
+
+- R2-4 — `d00ae1c` ProfileWindow retains the (image, ROI) it extracted
+  from (`ProfileSource`) and owns one `recompute()`; `set_line_width`/
+  `set_method` recompute from it, `refresh_image` re-derives on a new
+  image (wired into `ImageView::set_image` and `StackView`'s per-frame
+  dirty upload), and the precomputed-curve path clears the source. Width/
+  Method edits and image/frame changes now update the profile without a
+  fresh drag (silx `invalidateProfile` / recompute-on-DATA). Tests:
+  width/method recompute; frame scrub recompute; precomputed-curve clear.
+- R2-3 — `2cef1d4` axis-aligned (`aligned_profile_values`) and rect
+  (`rect_profile_values`) band reductions are NaN-aware (numpy
+  nanmean/nansum): NaN pixels are skipped, Mean divides by the finite
+  count (NaN for an all-NaN band), Sum sums the finite pixels (0.0 for an
+  all-NaN band). Was plain sum ÷ full band, so one masked NaN poisoned the
+  whole sample. Tests: aligned + rect skip a NaN; all-NaN → sum 0 / mean
+  NaN.
+- R2-5 — `09b8f40` StackView's 2D stack profile reads the shared line
+  width / method from the profile window (silx Profile3DToolBar's single
+  setting) instead of hardcoded 1 / Mean, and its line profile is the
+  bilinear band (`line_profile_band`) matching the 1D line. StackProfile
+  is retained (`StackProfileWindow::profile()`) for observability. Tests:
+  stack line profile varies with width/method; 2D profile equals a
+  width-3 Sum extraction, not width-1 Mean.
+
 **UNFIXED / deferred — autoscale-representability cluster (needs a model
 decision before the autoscale-follows-data half of R2-1..R2-46 can
 close uniformly):**
