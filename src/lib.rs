@@ -37,10 +37,10 @@ pub use crate::core::dtime_ticks::{
     calc_ticks_tz, format_tick, format_tick_tz, format_ticks, format_ticks_tz,
 };
 pub use crate::core::fitting::{
-    BackgroundPeakFit, Constraint, DEFAULT_DELTACHI, DEFAULT_MAX_ITER, FitError, FitFunction,
-    FitResult, GaussianEstimateFit, IterativeFit, IterativeFitResult, LOG2, LeastSqResult,
-    LinearFit, PeakModel, atan_stepup_model, estimate_atan_stepup, estimate_gaussian,
-    estimate_gaussian_area, estimate_height_position_fwhm, estimate_lorentzian,
+    BackgroundPeakFit, Constraint, DEFAULT_DELTACHI, DEFAULT_FIT_SENSITIVITY, DEFAULT_MAX_ITER,
+    FitError, FitFunction, FitResult, GaussianEstimateFit, IterativeFit, IterativeFitResult, LOG2,
+    LeastSqResult, LinearFit, PeakModel, atan_stepup_model, estimate_atan_stepup,
+    estimate_gaussian, estimate_gaussian_area, estimate_height_position_fwhm, estimate_lorentzian,
     estimate_multi_gaussian, estimate_pseudo_voigt, estimate_slit, estimate_stepdown,
     estimate_stepup, fit_in_range, fit_multi_gaussian, fit_multi_gaussian_full,
     fit_peak_constrained, fit_peak_from, fit_peak_with_background, fwhm_to_sigma_factor,

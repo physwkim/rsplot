@@ -7,11 +7,11 @@ use crate::core::background::{
     DEFAULT_STRIP_WIDTH,
 };
 use crate::core::fitting::{
-    Constraint, DEFAULT_DELTACHI, DEFAULT_MAX_ITER, FitFunction, FitResult, GaussianEstimateFit,
-    IterativeFit, IterativeFitResult, LinearFit, PeakModel, fit_multi_gaussian_full,
-    fit_peak_constrained, fit_peak_from, fit_peak_with_background,
+    Constraint, DEFAULT_DELTACHI, DEFAULT_FIT_SENSITIVITY, DEFAULT_MAX_ITER, FitFunction,
+    FitResult, GaussianEstimateFit, IterativeFit, IterativeFitResult, LinearFit, PeakModel,
+    fit_multi_gaussian_full, fit_peak_constrained, fit_peak_from, fit_peak_with_background,
 };
-use crate::core::peaks::{DEFAULT_PEAK_SENSITIVITY, guess_fwhm};
+use crate::core::peaks::guess_fwhm;
 use crate::core::plot::PlotId;
 use crate::render::gpu_curve::CurveData;
 use crate::widget::high_level::Plot1D;
@@ -619,14 +619,17 @@ impl FitWidget {
             FitModelChoice::MultiGaussian => {
                 // Auto peak-search multi-Gaussian (silx `sum_gauss` theory):
                 // seed the search width from the data (`guess_fwhm`) and fit all
-                // located peaks simultaneously. The background combo does not
-                // apply — the multi-gaussian model carries no per-peak constant
-                // and silx's `StripBackgroundFlag` is off by default.
+                // located peaks simultaneously with the FitManager default
+                // sensitivity (DEFAULT_CONFIG["Sensitivity"] = 2.5,
+                // fittheories.py:107, passed as search_sens at :338/:356). The
+                // background combo does not apply — the multi-gaussian model
+                // carries no per-peak constant and silx's `StripBackgroundFlag`
+                // is off by default.
                 match fit_multi_gaussian_full(
                     &xs,
                     &ys,
                     guess_fwhm(&ys),
-                    DEFAULT_PEAK_SENSITIVITY,
+                    DEFAULT_FIT_SENSITIVITY,
                     DEFAULT_MAX_ITER,
                     DEFAULT_DELTACHI,
                 ) {

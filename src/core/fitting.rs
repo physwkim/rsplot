@@ -410,6 +410,18 @@ pub const DEFAULT_DELTACHI: f64 = 0.001;
 /// Default maximum number of iterations (silx `max_iter=100`).
 pub const DEFAULT_MAX_ITER: usize = 100;
 
+/// Default peak-search sensitivity used by the FitManager theory estimators
+/// (silx `fittheories.DEFAULT_CONFIG["Sensitivity"] = 2.5`, fittheories.py:107;
+/// `estimate_height_position_fwhm` passes
+/// `search_sens = float(self.config["Sensitivity"])` into its peak search,
+/// fittheories.py:338/:356).
+///
+/// Distinct from
+/// [`DEFAULT_PEAK_SENSITIVITY`](crate::core::peaks::DEFAULT_PEAK_SENSITIVITY)
+/// (3.5) — the standalone `silx.math.fit.peak_search` pyx default, which the
+/// FitManager estimation path does not use.
+pub const DEFAULT_FIT_SENSITIVITY: f64 = 2.5;
+
 /// Run an iterative Levenberg-Marquardt least-squares fit.
 ///
 /// `model(x, params) -> y_hat` is evaluated over the whole `x` array. `p0` is
@@ -2617,7 +2629,6 @@ pub fn fit_peak_with_background(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::peaks::DEFAULT_PEAK_SENSITIVITY;
 
     /// Synthetic noiseless Gaussian sampled on a grid.
     fn synth_gaussian(xs: &[f64], height: f64, center: f64, fwhm: f64, bg: f64) -> Vec<f64> {
@@ -3578,7 +3589,7 @@ mod tests {
             &xs,
             &ys,
             8.0,
-            DEFAULT_PEAK_SENSITIVITY,
+            DEFAULT_FIT_SENSITIVITY,
             DEFAULT_MAX_ITER,
             DEFAULT_DELTACHI,
         )
@@ -3608,7 +3619,7 @@ mod tests {
             &xs,
             &ys,
             8.0,
-            DEFAULT_PEAK_SENSITIVITY,
+            DEFAULT_FIT_SENSITIVITY,
             DEFAULT_MAX_ITER,
             DEFAULT_DELTACHI,
         )
@@ -3741,7 +3752,7 @@ mod tests {
             &xs,
             &ys,
             7.0,
-            DEFAULT_PEAK_SENSITIVITY,
+            DEFAULT_FIT_SENSITIVITY,
             DEFAULT_MAX_ITER,
             DEFAULT_DELTACHI,
         )
@@ -3757,7 +3768,7 @@ mod tests {
         let xs = grid(100);
         let ys = gaussian_model(&xs, &[50.0, 45.0, 7.0, 0.0]);
         let (seeds, cons) =
-            estimate_multi_gaussian(&xs, &ys, 7.0, DEFAULT_PEAK_SENSITIVITY).unwrap();
+            estimate_multi_gaussian(&xs, &ys, 7.0, DEFAULT_FIT_SENSITIVITY).unwrap();
         assert_eq!(seeds.len() % 3, 0);
         assert_eq!(seeds.len(), cons.len());
         // Final constraints: height Positive, centre Free, FWHM Positive.
@@ -3770,6 +3781,43 @@ mod tests {
     fn estimate_multi_gaussian_rejects_empty_and_mismatch() {
         assert!(estimate_multi_gaussian(&[], &[], 5.0, 2.5).is_none());
         assert!(estimate_multi_gaussian(&[0.0, 1.0], &[1.0], 5.0, 2.5).is_none());
+    }
+
+    #[test]
+    fn fit_manager_sensitivity_seeds_marginal_peaks_the_pyx_default_misses() {
+        // silx FitManager estimation searches with DEFAULT_CONFIG
+        // ["Sensitivity"] = 2.5 (fittheories.py:107, passed as search_sens at
+        // :338/:356), not the standalone peak_search pyx default of 3.5. On a
+        // high baseline, a small peak's significance (~curvature / sqrt(level))
+        // can land between the two: here the h=100 peak at x=140 on a 10000
+        // baseline is found at 2.5 but dropped at 3.5, so the FitManager
+        // default seeds 2 peaks (6 params) where 3.5 would seed only 1.
+        assert_eq!(DEFAULT_FIT_SENSITIVITY, 2.5);
+        let fwhm = 8.0;
+        let xs = grid(200);
+        let ys: Vec<f64> = xs
+            .iter()
+            .map(|&x| {
+                10000.0
+                    + gaussian_model(&[x], &[2000.0, 60.0, fwhm, 0.0])[0]
+                    + gaussian_model(&[x], &[100.0, 140.0, fwhm, 0.0])[0]
+            })
+            .collect();
+        let (seeds_fit, _) =
+            estimate_multi_gaussian(&xs, &ys, fwhm, DEFAULT_FIT_SENSITIVITY).unwrap();
+        assert_eq!(
+            seeds_fit.len(),
+            6,
+            "FitManager sensitivity must seed both peaks"
+        );
+        let (seeds_pyx, _) =
+            estimate_multi_gaussian(&xs, &ys, fwhm, crate::core::peaks::DEFAULT_PEAK_SENSITIVITY)
+                .unwrap();
+        assert_eq!(
+            seeds_pyx.len(),
+            3,
+            "the pyx default 3.5 drops the marginal peak"
+        );
     }
 
     // --- Non-peak theories: erf, step/slit/atan models, estimators ---------
