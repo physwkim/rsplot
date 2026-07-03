@@ -39,7 +39,7 @@ use std::sync::mpsc::{Receiver, Sender};
 use egui_wgpu::RenderState;
 
 use crate::core::backend::ItemHandle;
-use crate::core::colormap::Colormap;
+use crate::core::colormap::{AutoscaleMode, Colormap, ColormapName};
 use crate::core::plot::PlotId;
 use crate::widget::high_level::Plot2D;
 
@@ -508,6 +508,21 @@ pub struct ImageStack {
     load_rx: Receiver<(usize, Option<Frame>)>,
 }
 
+/// Clone `base` with its value range autoscaled to `data` (minmax, silx's
+/// default autoscale mode), honoring the base colormap's normalization — the
+/// LUT / normalization / gamma / NaN color are preserved, only `vmin`/`vmax`
+/// change. silx frames carry `vmin`/`vmax = None`, so each frame's range tracks
+/// its own data rather than a fixed span. Split out so the per-frame range
+/// derivation is unit-testable without a GPU backend.
+fn frame_colormap(base: &Colormap, data: &[f32]) -> Colormap {
+    let data_f64: Vec<f64> = data.iter().map(|&v| v as f64).collect();
+    let (vmin, vmax) = base.autoscale_range(AutoscaleMode::MinMax, &data_f64);
+    let mut cm = base.clone();
+    cm.vmin = vmin;
+    cm.vmax = vmax;
+    cm
+}
+
 impl ImageStack {
     /// Create an empty image stack backed by wgpu plot id `id`.
     pub fn new(render_state: &RenderState, id: PlotId) -> Self {
@@ -518,7 +533,11 @@ impl ImageStack {
         Self {
             plot,
             nav: FrameNav::default(),
-            colormap: Colormap::viridis(0.0, 1.0),
+            // silx frames use the plot's default colormap — gray, autoscaled
+            // per frame (`addImage` with no colormap → vmin/vmax = None). The
+            // stored range here is a placeholder; `rebuild_image` re-derives it
+            // from each frame's own data (see `set_colormap`).
+            colormap: Colormap::new(ColormapName::Gray, 0.0, 1.0),
             image_handle: None,
             // silx ImageStack defaults _autoResetZoom = True.
             auto_reset_zoom: true,
@@ -695,7 +714,11 @@ impl ImageStack {
     }
 
     /// Set the colormap applied to every frame (silx frames use the plot's
-    /// active colormap; this exposes it directly).
+    /// active colormap; this exposes it directly). Only the name /
+    /// normalization / gamma are honored — the value range is re-derived from
+    /// each frame's own data by [`Self::rebuild_image`], matching silx's
+    /// default autoscale (`vmin`/`vmax = None`). Pinning an explicit range is
+    /// the per-bound-autoscale surface silx exposes but siplot does not yet.
     pub fn set_colormap(&mut self, colormap: Colormap) {
         self.colormap = colormap;
         self.image_handle = None;
@@ -804,7 +827,11 @@ impl ImageStack {
         // Clone the row data out so the immutable borrow of `self.nav` ends
         // before the mutable plot borrow begins.
         let data = frame.data.clone();
-        let colormap = self.colormap.clone();
+        // silx autoscales each frame to its own data range (the frame's
+        // colormap carries `vmin`/`vmax = None`), honoring the base colormap's
+        // normalization. Re-derive the range here rather than reusing a fixed
+        // span.
+        let colormap = frame_colormap(&self.colormap, &data);
 
         if self.auto_reset_zoom {
             // Re-add to refit the view to the new frame.
@@ -972,6 +999,30 @@ mod tests {
         let mut n = FrameNav::default();
         n.set_frames(frames);
         n
+    }
+
+    // ── Per-frame autoscale (R2-1) ──────────────────────────────────────────
+
+    #[test]
+    fn frame_colormap_autoscales_to_frame_data() {
+        // silx frames carry no explicit range; the per-frame colormap must
+        // track the frame's own min/max, not a fixed [0, 1] span, and must
+        // keep the base colormap's LUT (gray by default).
+        let base = Colormap::new(ColormapName::Gray, 0.0, 1.0);
+        let cm = frame_colormap(&base, &[10.0, 20.0, 30.0, 40.0]);
+        assert_eq!((cm.vmin, cm.vmax), (10.0, 40.0));
+        assert_eq!(cm.lut, base.lut);
+    }
+
+    #[test]
+    fn frame_colormap_tracks_data_not_stored_range() {
+        // Even when the base carries a stale span, the per-frame range comes
+        // from the frame data (silx re-autoscales each frame), so the stored
+        // (0, 1) does not leak through. A uniform frame minmax-autoscales to
+        // (v, v), matching silx `getColormapRange` for constant data.
+        let base = Colormap::new(ColormapName::Gray, 0.0, 1.0);
+        let cm = frame_colormap(&base, &[7.0, 7.0, 7.0, 7.0]);
+        assert_eq!((cm.vmin, cm.vmax), (7.0, 7.0));
     }
 
     // ── Frame::is_displayable boundaries ────────────────────────────────────
