@@ -14,21 +14,15 @@ use egui::{Pos2, Rect, Vec2};
 use crate::core::marker::{Marker, MarkerConstraint, MarkerKind};
 use crate::core::roi::{HandleKind, ManagedRoi, Roi, RoiEdge, RoiHandle, RoiInteractionMode};
 use crate::core::transform::{Scale, Transform};
+// The float32-safe window and the silx `checkAxisLimits` repair live in the
+// core transform module (they are shared by the core reset-zoom refit and the
+// widget gesture commits); re-exported here for the existing gesture-side API.
+pub use crate::core::transform::{
+    FLOAT32_MINPOS, FLOAT32_SAFE_MAX, FLOAT32_SAFE_MIN, clamp_axis_limits,
+};
 
 /// Data limits `(x_min, x_max, y_min, y_max)`.
 pub type Limits = (f64, f64, f64, f64);
-
-/// Float32 safe lower bound, mirroring silx `_utils/panzoom.py`
-/// `FLOAT32_SAFE_MIN`. Linear-axis limits are kept inside `[FLOAT32_SAFE_MIN,
-/// FLOAT32_SAFE_MAX]` so that span subtractions (`max - min`) do not overflow
-/// float32 downstream in the shaders.
-pub const FLOAT32_SAFE_MIN: f64 = -1e37;
-/// Float32 safe upper bound, mirroring silx `FLOAT32_SAFE_MAX`.
-pub const FLOAT32_SAFE_MAX: f64 = 1e37;
-/// Smallest positive normal float32 (`numpy.finfo(numpy.float32).tiny`),
-/// mirroring silx `FLOAT32_MINPOS`. The lower clamp bound on a log axis (where
-/// the min must stay strictly positive).
-pub const FLOAT32_MINPOS: f64 = 1.1754943508222875e-38;
 
 /// Translate a single axis range by a screen-space drag of `delta_px` pixels
 /// across an axis of `extent_px` pixels, mirroring silx `Pan.drag`
@@ -331,56 +325,6 @@ pub fn wheel_zoom_factor(scroll_y: f32) -> f64 {
 pub fn is_valid(limits: Limits) -> bool {
     let (x_min, x_max, y_min, y_max) = limits;
     x_max > x_min && y_max > y_min
-}
-
-/// Clamp one axis range into the float32-safe window and repair degenerate
-/// ranges, mirroring silx `_utils/panzoom.checkAxisLimits` (panzoom.py:51-77).
-///
-/// Both bounds are clamped to `[lower, FLOAT32_SAFE_MAX]`, where `lower` is
-/// [`FLOAT32_MINPOS`] on a log axis (`is_log == true`) and [`FLOAT32_SAFE_MIN`]
-/// otherwise. If the clamp leaves `max < min` the two are swapped; if it leaves
-/// `max == min` the range is expanded the way silx does:
-/// - `v == 0` → `(-0.1, 0.1)`
-/// - `v < 0`  → `(max(v * 1.1, FLOAT32_SAFE_MIN), v * 0.9)`
-/// - `v > 0`  → `(v * 0.9, min(v * 1.1, FLOAT32_SAFE_MAX))`
-///
-/// A `NaN` bound clamps to `lower` (matching `numpy.clip`'s NaN→bound on the
-/// platforms silx targets), so the result is always finite and ordered.
-pub fn clamp_axis_limits(min: f64, max: f64, is_log: bool) -> (f64, f64) {
-    let lower = if is_log {
-        FLOAT32_MINPOS
-    } else {
-        FLOAT32_SAFE_MIN
-    };
-    let clip = |v: f64| -> f64 {
-        // numpy.clip with a NaN input yields the NaN, but silx's downstream
-        // expects a finite ordered range; map NaN to the lower bound so the
-        // window is always usable.
-        if v.is_nan() {
-            lower
-        } else {
-            v.clamp(lower, FLOAT32_SAFE_MAX)
-        }
-    };
-    let mut vmin = clip(min);
-    let mut vmax = clip(max);
-
-    if vmax < vmin {
-        std::mem::swap(&mut vmin, &mut vmax);
-    } else if vmax == vmin {
-        let v = vmin;
-        if v == 0.0 {
-            vmin = -0.1;
-            vmax = 0.1;
-        } else if v < 0.0 {
-            vmax = v * 0.9;
-            vmin = (v * 1.1).max(FLOAT32_SAFE_MIN);
-        } else {
-            vmax = (v * 1.1).min(FLOAT32_SAFE_MAX);
-            vmin = v * 0.9;
-        }
-    }
-    (vmin, vmax)
 }
 
 /// Clamp both axes of `limits` into the float32-safe window via

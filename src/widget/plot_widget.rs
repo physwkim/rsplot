@@ -302,11 +302,6 @@ impl<'a> PlotView<'a> {
         let menu_ext = self.menu_ext;
         let (rect, response) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
 
-        // Capture the initial view once; the Reset Zoom context-menu item
-        // restores it.
-        let current = plot.limits;
-        plot.home_limits.get_or_insert(current);
-
         // Chrome gutters depend only on which axes/colorbar/labels show, not on
         // limits.
         let with_colorbar = plot.colormap.is_some() && plot.show_colorbar;
@@ -1434,7 +1429,7 @@ fn apply_interaction(
         // Reset Zoom: refit to the current data range (silx `resetZoom`), matching
         // the toolbar Home button, then clear the limits history. `reset_zoom`
         // refits the autoscale-on axes to the live data bounds and arms
-        // `reset_scroll_guard`. Restoring a `home_limits` snapshot instead would
+        // `reset_scroll_guard`. Restoring a first-show snapshot instead would
         // revert to whatever view was captured on the last first-show — which is
         // the zoomed view when the plot was rebuilt while zoomed — so a refit is
         // both silx-correct and free of that stale-home failure.
@@ -2300,7 +2295,7 @@ mod tests {
         let mut plot = Plot::new(0);
         plot.limits = (0.0, 10.0, 0.0, 10.0);
         let screen = egui::vec2(200.0, 200.0);
-        // Frame 1 captures home_limits = (0, 10, 0, 10) and the data area.
+        // Frame 1 discovers the data area.
         let (_r0, area) = run_frame(&ctx, &mut plot, screen_input(screen));
         let px = area.center();
         // Move the view away from home, as a pan/zoom would.
@@ -2330,7 +2325,7 @@ mod tests {
             resp.pointer_event,
             Some(interaction::PlotPointerEvent::DoubleClicked { .. })
         ));
-        // ...but no longer reverts the view to home_limits.
+        // ...but no longer reverts the view to the first-shown limits.
         assert_eq!(plot.limits, (5.0, 15.0, 5.0, 15.0));
     }
 

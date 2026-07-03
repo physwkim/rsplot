@@ -13,7 +13,9 @@ use crate::core::dtime_ticks::TimeZone;
 use crate::core::marker::Marker;
 use crate::core::roi::{DEFAULT_ROI_COLOR, ManagedRoi};
 use crate::core::shape::{Line, Shape};
-use crate::core::transform::{Axis, AxisSide, Margins, Scale, Transform, keep_aspect_limits};
+use crate::core::transform::{
+    Axis, AxisSide, Margins, Scale, Transform, clamp_axis_limits, keep_aspect_limits,
+};
 use crate::core::triangles::Triangles;
 
 /// Per-axis pan/zoom range constraints mirroring silx
@@ -356,10 +358,6 @@ pub struct Plot {
     /// Reserve the (left) Y-axis-label gutter even when [`y_label`](Self::y_label)
     /// is `None` (see [`reserve_title_gutter`](Self::reserve_title_gutter)).
     pub reserve_y_label_gutter: bool,
-    /// Limits to restore via the Reset Zoom context-menu item. The widget
-    /// captures the first observed `limits` here so the home view survives
-    /// pan/zoom (`doc/design.md` §8·§11.6). `None` until the first frame.
-    pub home_limits: Option<(f64, f64, f64, f64)>,
     /// Armed by a view reset (Reset Zoom / Zoom Back / reset-to-data) so residual
     /// pointer-scroll *momentum* cannot immediately re-zoom and undo the reset.
     /// The pointer sits over the data area during a right-click "Reset Zoom", and
@@ -578,7 +576,6 @@ impl Plot {
             reserve_title_gutter: false,
             reserve_x_label_gutter: false,
             reserve_y_label_gutter: false,
-            home_limits: None,
             reset_scroll_guard: false,
             scroll_zoom: true,
             x_scale: Scale::Linear,
@@ -1058,6 +1055,13 @@ impl Plot {
         let y_auto = self.y_autoscale || y_log_force;
         let y2_auto = self.y2_autoscale || y_log_force;
 
+        // Nothing to autoscale: silx `resetZoom` returns without touching any
+        // axis (PlotWidget.py:3380-3383), so the pinned view is not even
+        // re-checked here.
+        if !(x_auto || y_auto || y2_auto) {
+            return;
+        }
+
         // Track which axes are refit; only those receive data margins, matching
         // silx (pinned axes are restored after _forceResetZoom without margins).
         let mut x_refit = false;
@@ -1079,12 +1083,26 @@ impl Plot {
             y2_refit = true;
         }
 
-        // Expand refit axes by the data margins (silx applies margins=True in
-        // setLimits during _forceResetZoom; addMarginsToLimits respects log
-        // axes and the shared y/y2 margin ratios).
         let m = self.data_margins;
         let x_is_log = self.x_scale == Scale::Log10;
         let y_is_log = self.y_scale == Scale::Log10;
+
+        // Repair every adopted range through silx `checkAxisLimits` BEFORE
+        // margins: silx `setLimits` runs per-axis `_checkLimits` as its first
+        // step (PlotWidget.py:2705-2712 → _utils/panzoom.py:49-75), and the
+        // preserved ranges of pinned axes are restored via `Axis.setLimits`,
+        // which checks them too (resetZoom, PlotWidget.py:3385-3395). This is
+        // what turns a single-point `(v, v)` data range into silx's ±10%
+        // window instead of a degenerate span that NaNs the transform.
+        (x_min, x_max) = clamp_axis_limits(x_min, x_max, x_is_log);
+        (y_min, y_max) = clamp_axis_limits(y_min, y_max, y_is_log);
+        // The y2 axis uses the left-Y log flag, as silx passes the left
+        // yAxis' scale for the right axis throughout.
+        y2 = y2.map(|(lo, hi)| clamp_axis_limits(lo, hi, y_is_log));
+
+        // Expand refit axes by the data margins (silx applies margins=True in
+        // setLimits during _forceResetZoom; addMarginsToLimits respects log
+        // axes and the shared y/y2 margin ratios).
         if x_refit {
             (x_min, x_max) = DataMargins::expand_axis(x_min, x_max, m.x_min, m.x_max, x_is_log);
         }
@@ -1201,6 +1219,11 @@ impl Plot {
                 continue;
             }
             if let Some(Some((lo, hi))) = data.get(i).copied() {
+                // silx `checkAxisLimits` repair before margins, exactly like
+                // the left/right refit (setLimits runs `_checkLimits` first,
+                // PlotWidget.py:2705-2712): a single-point `(v, v)` range
+                // becomes a ±10% window instead of a degenerate span.
+                let (lo, hi) = clamp_axis_limits(lo, hi, is_log);
                 ax.range = Some(DataMargins::expand_axis(lo, hi, m.y_min, m.y_max, is_log));
             }
         }

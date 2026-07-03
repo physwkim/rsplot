@@ -1691,15 +1691,6 @@ impl Bounds1D {
         self.min = self.min.min(other.min);
         self.max = self.max.max(other.max);
     }
-
-    fn as_non_degenerate(self) -> (f64, f64) {
-        if self.max > self.min {
-            (self.min, self.max)
-        } else {
-            let pad = (self.min.abs() * 0.05).max(0.5);
-            (self.min - pad, self.max + pad)
-        }
-    }
 }
 
 // Holds a per-extra-axis `Vec`, so it is `Clone` but not `Copy`; callers that
@@ -1757,39 +1748,29 @@ fn include_axis(slot: &mut Option<Bounds1D>, bounds: Bounds1D) {
     }
 }
 
-/// Map accumulated widget [`DataBounds`] to the model [`DataRange`] consumed by
-/// [`Plot::reset_zoom_to_data_range`], padding degenerate (single-point) bounds
-/// via [`Bounds1D::as_non_degenerate`] so each refit axis gets a non-degenerate
-/// span. An axis with no data maps to `None`, leaving it pinned by the model's
-/// per-axis autoscale logic (silx `PlotWidget.resetZoom` restores axes without
-/// data). Pure (no `RenderState`/GPU) so the reset path is unit-testable.
-fn data_range_from_bounds(bounds: &DataBounds) -> DataRange {
-    DataRange {
-        x: bounds.x.map(Bounds1D::as_non_degenerate),
-        y: bounds.y_left.map(Bounds1D::as_non_degenerate),
-        y2: bounds.y_right.map(Bounds1D::as_non_degenerate),
-    }
-}
-
-/// Per-extra-axis data bounds (non-degenerate-padded) for
-/// [`Plot::reset_extra_axes_to`], parallel to `Plot::extra`. The model side
-/// holds extra-axis ranges in their own `Vec`, so they ride alongside the
-/// left/right [`DataRange`] rather than inside it.
+/// Per-extra-axis raw data bounds for [`Plot::reset_extra_axes_to`], parallel
+/// to `Plot::extra`. The model side holds extra-axis ranges in their own
+/// `Vec`, so they ride alongside the left/right [`DataRange`] rather than
+/// inside it. Raw, like [`raw_data_range_from_bounds`]: the degenerate-span
+/// repair is the refit owner's job (silx `checkAxisLimits` inside
+/// `reset_extra_axes_to`), not the cache's.
 fn extra_data_ranges(bounds: &DataBounds) -> Vec<Option<(f64, f64)>> {
     bounds
         .extra
         .iter()
-        .map(|b| b.map(Bounds1D::as_non_degenerate))
+        .map(|b| b.map(|b| (b.min, b.max)))
         .collect()
 }
 
-/// Map accumulated widget [`DataBounds`] to the model [`DataRange`] *cache*
-/// (silx `_updateDataRange`, returned by `getDataRange`): the raw per-axis
-/// min/max with no degenerate-span padding — a single data point reads as
-/// `(v, v)`, matching silx (the non-degenerate span + data margins are a
-/// refit-time concern applied by [`data_range_from_bounds`], not stored in the
-/// cache). An axis with no data maps to `None`. Pure (no GPU) so it is
-/// unit-testable.
+/// Map accumulated widget [`DataBounds`] to the model [`DataRange`] (silx
+/// `_updateDataRange`, returned by `getDataRange`): the raw per-axis min/max
+/// with no degenerate-span padding — a single data point reads as `(v, v)`,
+/// matching silx. Both consumers take the raw range: the cache
+/// (`set_data_range`) stores it as silx does, and the refit
+/// (`Plot::reset_zoom_to_data_range`) repairs it through silx
+/// `checkAxisLimits` before adding margins, so the two reset verbs cannot
+/// disagree on degenerate data. An axis with no data maps to `None`. Pure (no
+/// GPU) so it is unit-testable.
 fn raw_data_range_from_bounds(bounds: &DataBounds) -> DataRange {
     DataRange {
         x: bounds.x.map(|b| (b.min, b.max)),
@@ -7539,8 +7520,10 @@ impl PlotWidget {
         // when their lower limit is <= 0. `WgpuBackend::set_limits` (the prior
         // path) only assigned `plot.limits`/`plot.y2` — the same two fields the
         // model owner writes — so delegating regresses no widget-side
-        // bookkeeping; the `LimitsChanged` event is still raised here.
-        let range = data_range_from_bounds(&self.data_bounds);
+        // bookkeeping; the `LimitsChanged` event is still raised here. The raw
+        // range goes in as-is; the owner repairs degenerate/out-of-float32
+        // spans via silx `checkAxisLimits` before applying margins.
+        let range = raw_data_range_from_bounds(&self.data_bounds);
         let before = self.limits_snapshot();
         self.backend.plot_mut().reset_zoom_to_data_range(range);
         self.push_limits_changed_if(before);
@@ -13575,7 +13558,8 @@ mod tests {
     }
 
     /// Build the `DataBounds` the widget would accumulate, with non-degenerate
-    /// spans on every axis so `as_non_degenerate` does not pad.
+    /// spans on every axis so the refit-side `checkAxisLimits` repair does not
+    /// expand them.
     fn data_bounds(x: (f64, f64), y_left: (f64, f64), y_right: Option<(f64, f64)>) -> DataBounds {
         DataBounds {
             x: Some(Bounds1D::new(x.0, x.1).unwrap()),
@@ -13586,12 +13570,13 @@ mod tests {
     }
 
     /// Reproduce the exact composition `apply_limits_from_data_bounds` now
-    /// performs on its model owner: map widget `DataBounds` -> `DataRange`, then
-    /// apply through `Plot::reset_zoom_to_data_range`. `PlotWidget` itself needs
-    /// a GPU `RenderState`, so this asserts the flag-aware behavior via the
-    /// model owner the widget routes through.
+    /// performs on its model owner: map widget `DataBounds` -> raw `DataRange`,
+    /// then apply through `Plot::reset_zoom_to_data_range` (which owns the silx
+    /// `checkAxisLimits` repair). `PlotWidget` itself needs a GPU
+    /// `RenderState`, so this asserts the flag-aware behavior via the model
+    /// owner the widget routes through.
     fn apply_widget_reset(plot: &mut Plot, bounds: DataBounds) {
-        plot.reset_zoom_to_data_range(data_range_from_bounds(&bounds));
+        plot.reset_zoom_to_data_range(raw_data_range_from_bounds(&bounds));
     }
 
     #[test]
@@ -13652,27 +13637,30 @@ mod tests {
     }
 
     #[test]
-    fn data_range_from_bounds_pads_degenerate_axis() {
-        // A single-point X span pads via as_non_degenerate before reaching the
-        // model, so a refit axis never gets a zero-width range.
-        let bounds = DataBounds {
-            x: Some(Bounds1D::new(4.0, 4.0).unwrap()),
-            y_left: Some(Bounds1D::new(-1.0, 1.0).unwrap()),
-            y_right: None,
-            extra: Vec::new(),
-        };
-        let range = data_range_from_bounds(&bounds);
-        let (xmin, xmax) = range.x.unwrap();
-        assert!(xmax > xmin, "degenerate X must be padded: {xmin}..{xmax}");
-        assert_eq!(range.y, Some((-1.0, 1.0)));
-        assert_eq!(range.y2, None);
+    fn widget_reset_repairs_single_point_data_via_check_axis_limits() {
+        // Both reset verbs consume the raw (v, v) cache range; the model owner
+        // repairs it through silx checkAxisLimits (v>0 → (0.9v, 1.1v),
+        // _utils/panzoom.py:49-75) before margins, so a single-point axis gets
+        // silx's ±10% window instead of a degenerate span that NaNs the
+        // transform.
+        let mut plot = Plot::new(0);
+        plot.set_x_autoscale(true);
+        plot.set_y_autoscale(true);
+        apply_widget_reset(&mut plot, data_bounds((4.0, 4.0), (-1.0, 1.0), None));
+        let (x0, x1, y0, y1) = plot.limits;
+        assert!(
+            (x0 - 3.6).abs() <= 1e-12 && (x1 - 4.4).abs() <= 1e-12,
+            "{x0} {x1}"
+        );
+        assert_eq!((y0, y1), (-1.0, 1.0));
     }
 
     #[test]
     fn raw_data_range_from_bounds_keeps_raw_bounds_unpadded() {
         // The data-range CACHE (silx getDataRange) holds the raw min/max: a
-        // single data point reads as (v, v), NOT the as_non_degenerate padding
-        // the refit path applies. An axis with no data stays None.
+        // single data point reads as (v, v); the degenerate-span repair is
+        // applied at refit time by the model owner, never stored. An axis
+        // with no data stays None.
         let bounds = DataBounds {
             x: Some(Bounds1D::new(4.0, 4.0).unwrap()),
             y_left: Some(Bounds1D::new(-5.0, 5.0).unwrap()),
@@ -13908,15 +13896,7 @@ mod tests {
     #[test]
     fn finite_bounds_ignores_non_finite_values() {
         let bounds = finite_bounds(&[f64::NAN, 2.0, -1.0, f64::INFINITY]).unwrap();
-        assert_eq!(bounds.as_non_degenerate(), (-1.0, 2.0));
-    }
-
-    #[test]
-    fn degenerate_bounds_get_padded() {
-        assert_eq!(
-            Bounds1D::new(2.0, 2.0).unwrap().as_non_degenerate(),
-            (1.5, 2.5)
-        );
+        assert_eq!((bounds.min, bounds.max), (-1.0, 2.0));
     }
 
     #[test]
@@ -13932,9 +13912,10 @@ mod tests {
             Bounds1D::new(100.0, 200.0).unwrap(),
             YAxis::Right,
         );
-        assert_eq!(bounds.x.unwrap().as_non_degenerate(), (0.0, 20.0));
-        assert_eq!(bounds.y_left.unwrap().as_non_degenerate(), (-1.0, 1.0));
-        assert_eq!(bounds.y_right.unwrap().as_non_degenerate(), (100.0, 200.0));
+        let raw = |b: Bounds1D| (b.min, b.max);
+        assert_eq!(raw(bounds.x.unwrap()), (0.0, 20.0));
+        assert_eq!(raw(bounds.y_left.unwrap()), (-1.0, 1.0));
+        assert_eq!(raw(bounds.y_right.unwrap()), (100.0, 200.0));
     }
 
     #[test]
