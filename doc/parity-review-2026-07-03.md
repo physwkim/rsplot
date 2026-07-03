@@ -590,9 +590,16 @@ into main):
   *Residual:* pva subfield **writes** dropped with warning (part of the
   recorded NTTable value-model deferral).
 - R1-29 — `cdb8d3d` `PvField::Union` unwraps the selected variant and
-  recurses; NTNDArray ubyte lands as `Bytes`. *Residual:* compressed-codec
-  arrays (blosc/lz4/bslz4/jpeg) skip the value with a one-time warning —
-  decompression needs new deps.
+  recurses; NTNDArray ubyte lands as `Bytes`. *Residual closed* `3f7dbfc`:
+  `pva_codec.rs` decompresses lz4 (raw block via lz4_flex), bslz4
+  (bitshuffle stream, transpose + block walk ported from bitshuffle C)
+  and blosc (c-blosc 1.x frame incl. a BloscLZ decoder port; LZ4/ZLIB
+  sub-codecs). `codec.parameters` = pvData ScalarType ordinal; ordinal 9
+  decodes f32 (deliberate deviation from PyDM's f64-typed index 9).
+  *Remaining residual:* jpeg (needs a JPEG decoder dep) and the blosc
+  snappy/zstd sub-codecs keep the one-time-warn + metadata-only path,
+  which is also the malformed-stream behavior (deviation from PyDM,
+  which emits the raw compressed bytes as the value on any codec error).
 - R1-30 — `985220a` ca+pva puts gate on published write access; CA seeds
   rights from `ChannelInfo` on every connect; `SIDM_READ_ONLY` env
   (PYDM_READ_ONLY parity) read at plugin construction. *Residual:* the
@@ -659,7 +666,9 @@ into main):
   live adl2pydm bug), and the R1-30 read-only helpers were dead code
   under a no-default-features sidm build (`dec7568`). Recorded
   residuals (deliberate/blocked, not silent): compressed NTNDArray
-  codecs (needs new deps), pva subfield writes (NTTable deferral),
+  codecs (closed post-round by `3f7dbfc` — lz4/bslz4/blosc decode;
+  jpeg + blosc snappy/zstd sub-codecs still warn-and-skip), pva
+  subfield writes (NTTable deferral),
   calc `I` status-code operand (ChannelState gap), cut-plane stroke
   1 px (no wide-line pipeline), LabelledAxes labels absent from
   `snapshot()` (egui overlay text), valuator down/left max-end
