@@ -25,7 +25,8 @@ use crate::core::scene3d::interaction::{OrbitDrag, PanDrag, window_to_ndc};
 use crate::core::scene3d::mat4::Vec3;
 use crate::core::scene3d::pick::{picking_segment, segment_triangles_intersection};
 use crate::render::gpu_scene3d::{
-    Scene3dGeometry, Scene3dId, install_scene3d, paint_scene3d, set_scene3d, snapshot_scene3d,
+    Scene3dFog, Scene3dGeometry, Scene3dId, Scene3dShading, install_scene3d, paint_scene3d_with,
+    set_scene3d, snapshot_scene3d_with,
 };
 
 /// Default scene background: silx `Plot3DWidget` clears to `(0.2, 0.2, 0.2, 1.0)`
@@ -39,6 +40,18 @@ const DEFAULT_FOREGROUND: Color32 = Color32::WHITE;
 /// (`SceneWidget.py:373` `_textColor = 1., 1., 1., 1.`).
 const DEFAULT_TEXT_COLOR: Color32 = Color32::WHITE;
 
+/// Fog mode of the scene — port of silx `Plot3DWidget.FogMode`
+/// (`Plot3DWidget.py:119-124`): either no fog or a linear fog fading the scene
+/// content toward the background colour over its depth extent.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FogMode {
+    /// No fog (the silx default).
+    #[default]
+    None,
+    /// Linear fog over the scene's camera-space depth extent.
+    Linear,
+}
+
 /// An interactive 3D scene widget. Construct with [`SceneWidget::new`], optionally
 /// set the data bounds and content geometry, then call [`SceneWidget::show`] each
 /// frame.
@@ -51,6 +64,11 @@ pub struct SceneWidget {
     box_color: Color32,
     text_color: Color32,
     background: Color32,
+    /// Fog mode (silx `Plot3DWidget.setFogMode`); default off.
+    fog_mode: FogMode,
+    /// Phong shininess of the viewport light (silx `viewport.light.shininess`);
+    /// 0 (no specular) for plain scenes, 32 in [`crate::ScalarFieldView`].
+    light_shininess: f32,
     /// Data-item geometry (excludes the box/axes chrome, which is regenerated
     /// from `bounds` on every upload). Empty until [`SceneWidget::set_geometry`].
     content: Scene3dGeometry,
@@ -89,6 +107,8 @@ impl SceneWidget {
             box_color: DEFAULT_FOREGROUND,
             text_color: DEFAULT_TEXT_COLOR,
             background: DEFAULT_BACKGROUND,
+            fog_mode: FogMode::None,
+            light_shininess: 0.0,
             content: Scene3dGeometry::new(),
             orbit: None,
             pan: None,
@@ -133,6 +153,41 @@ impl SceneWidget {
     /// The text colour (silx `SceneWidget.getTextColor`).
     pub fn text_color(&self) -> Color32 {
         self.text_color
+    }
+
+    /// Set the fog mode. Port of silx `Plot3DWidget.setFogMode`
+    /// (`Plot3DWidget.py:279-288`: `viewport.fog.isOn = mode is FogMode.LINEAR`).
+    pub fn set_fog_mode(&mut self, mode: FogMode) {
+        self.fog_mode = mode;
+    }
+
+    /// The fog mode (silx `Plot3DWidget.getFogMode`).
+    pub fn fog_mode(&self) -> FogMode {
+        self.fog_mode
+    }
+
+    /// Set the Phong shininess of the viewport's directional light; `0`
+    /// disables the specular term (the silx `DirectionalLight` default,
+    /// `function.py:296-300`). `ScalarFieldView` sets 32
+    /// (`ScalarFieldView.py:928`).
+    pub fn set_light_shininess(&mut self, shininess: f32) {
+        self.light_shininess = shininess;
+    }
+
+    /// The viewport light's Phong shininess (`0` = no specular).
+    pub fn light_shininess(&self) -> f32 {
+        self.light_shininess
+    }
+
+    /// The per-frame shading options (fog + shininess) matching this widget's
+    /// current state — the one owner used by both [`SceneWidget::show`] and
+    /// [`SceneWidget::snapshot`], so the snapshot matches the screen.
+    fn shading(&self) -> Scene3dShading {
+        Scene3dShading {
+            fog: (self.fog_mode == FogMode::Linear)
+                .then(|| Scene3dFog::linear(&self.camera, self.bounds, self.background)),
+            shininess: self.light_shininess,
+        }
     }
 
     /// The scene's centre of bounds (centre of rotation for orbit/pan).
@@ -300,7 +355,14 @@ impl SceneWidget {
         // Keep the scene within the depth frustum after any interaction.
         self.camera.adjust_depth_extent(self.bounds);
 
-        paint_scene3d(ui, rect, self.id, &self.camera, self.background);
+        paint_scene3d_with(
+            ui,
+            rect,
+            self.id,
+            &self.camera,
+            self.background,
+            self.shading(),
+        );
         response
     }
 
@@ -310,12 +372,13 @@ impl SceneWidget {
     /// synchronous — independent of the egui frame loop — so it suits saving a
     /// scene to an image file (pair with [`crate::encode_png`]).
     pub fn snapshot(&self, render_state: &RenderState, size_px: (u32, u32)) -> Option<Vec<u8>> {
-        snapshot_scene3d(
+        snapshot_scene3d_with(
             render_state,
             self.id,
             &self.camera,
             self.background,
             size_px,
+            self.shading(),
         )
     }
 

@@ -264,31 +264,48 @@ pub struct Scene3dTexturedMesh {
     pub interpolation: ImageInterpolation,
 }
 
-/// Uniform block for `scene3d.wgsl`: the column-major, clip-corrected MVP.
+/// Uniform block for `scene3d.wgsl` **and** `scene3d_image.wgsl` (the image
+/// pipeline binds the same buffer at group 0): the column-major, clip-corrected
+/// MVP plus the linear-fog datum.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct Scene3dParams {
     /// `camera.matrix() × model`, transposed to column-major and depth-corrected
     /// for wgpu z∈[0,1] (see [`crate::core::scene3d::mat4::Mat4::to_gpu_clip_cols`]).
     mvp: [[f32; 4]; 4],
+    /// silx `fogExtentInfo` (function.py:135-146): `(scale, near, on, 0)`.
+    fog_info: [f32; 4],
+    /// silx `fogColor` = viewport background rgb (function.py:148-151); w unused.
+    fog_color: [f32; 4],
+    /// Row 2 of the view matrix: `dot(view_row_z, (pos, 1))` = camera-space z.
+    view_row_z: [f32; 4],
 }
 
-/// Uniform block for `scene3d_mesh.wgsl`: the clip MVP plus the camera-space
-/// normal transform (the view matrix, column-major, no depth correction).
+/// Uniform block for `scene3d_mesh.wgsl`: the clip MVP, the camera-space
+/// normal transform (the view matrix, column-major, no depth correction), the
+/// fog datum, and the Phong shininess.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct Scene3dMeshParams {
     mvp: [[f32; 4]; 4],
     normal_mat: [[f32; 4]; 4],
+    fog_info: [f32; 4],
+    fog_color: [f32; 4],
+    /// `(shininess, 0, 0, 0)` — 0 disables the specular term, the silx
+    /// `DirectionalLight` default (function.py:296-300).
+    light: [f32; 4],
 }
 
-/// Uniform block for `scene3d_points.wgsl`: the MVP plus the offscreen viewport
-/// pixel size (the sprite-corner offset is computed in pixels then converted to
-/// NDC, so the shader needs the viewport extent).
+/// Uniform block for `scene3d_points.wgsl`: the MVP, the fog datum, plus the
+/// offscreen viewport pixel size (the sprite-corner offset is computed in
+/// pixels then converted to NDC, so the shader needs the viewport extent).
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct Scene3dPointParams {
     mvp: [[f32; 4]; 4],
+    fog_info: [f32; 4],
+    fog_color: [f32; 4],
+    view_row_z: [f32; 4],
     viewport: [f32; 2],
     _pad: [f32; 2],
 }
@@ -639,11 +656,13 @@ impl Scene3dPipeline {
             label: Some("siplot scene3d scene bgl"),
             entries: &[wgpu::BindGroupLayoutEntry {
                 binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
+                // The fragment stage reads the fog uniform (silx applies fog
+                // per-fragment, viewport.py RenderContext scene_post).
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: false,
-                    min_binding_size: NonZeroU64::new(64),
+                    min_binding_size: NonZeroU64::new(std::mem::size_of::<Scene3dParams>() as u64),
                 },
                 count: None,
             }],
@@ -708,14 +727,15 @@ impl Scene3dPipeline {
             "siplot scene3d triangles",
         );
 
-        // Point sprites: their own uniform (MVP + viewport, 80 bytes) and an
+        // Point sprites: their own uniform (MVP + fog + viewport) and an
         // instanced billboard pipeline with premultiplied-alpha blending so the
         // antialiased marker edges composite over the opaque scene behind them.
         let point_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("siplot scene3d point bgl"),
             entries: &[wgpu::BindGroupLayoutEntry {
                 binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
+                // Fragment stage reads the fog uniform.
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: false,
@@ -773,14 +793,15 @@ impl Scene3dPipeline {
             cache: None,
         });
 
-        // Shaded meshes: their own uniform (MVP + normal matrix, 128 bytes) and a
-        // depth-tested, opaque, double-sided triangle pipeline with headlight
-        // lighting in the fragment shader.
+        // Shaded meshes: their own uniform (MVP + normal matrix + fog +
+        // shininess) and a depth-tested, opaque, double-sided triangle pipeline
+        // with headlight lighting in the fragment shader.
         let mesh_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("siplot scene3d mesh bgl"),
             entries: &[wgpu::BindGroupLayoutEntry {
                 binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
+                // Fragment stage reads the fog + shininess uniforms.
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: false,
@@ -1523,23 +1544,7 @@ impl Scene3dResources {
             .entry(frame.id)
             .or_insert_with(|| Scene3dGpu::new(device, pipeline));
         scene.ensure_offscreen(device, pipeline, frame.size_px);
-        let params = Scene3dParams { mvp: frame.mvp };
-        queue.write_buffer(&scene.params_buf, 0, bytemuck::bytes_of(&params));
-        let point_params = Scene3dPointParams {
-            mvp: frame.mvp,
-            viewport: [frame.size_px[0] as f32, frame.size_px[1] as f32],
-            _pad: [0.0, 0.0],
-        };
-        queue.write_buffer(
-            &scene.point_params_buf,
-            0,
-            bytemuck::bytes_of(&point_params),
-        );
-        let mesh_params = Scene3dMeshParams {
-            mvp: frame.mvp,
-            normal_mat: frame.view,
-        };
-        queue.write_buffer(&scene.mesh_params_buf, 0, bytemuck::bytes_of(&mesh_params));
+        frame.write_uniforms(queue, scene);
         if let (Some(color_view), Some(depth_view)) =
             (scene.color_view.as_ref(), scene.depth_view.as_ref())
         {
@@ -1568,25 +1573,9 @@ impl Scene3dResources {
         let scene = scenes.get(&frame.id)?;
         let (w, h) = (frame.size_px[0].max(1), frame.size_px[1].max(1));
 
-        // Stamp this snapshot's uniforms (mirrors `prepare_scene`). The next
-        // on-screen frame rewrites these, so clobbering them here is harmless.
-        let params = Scene3dParams { mvp: frame.mvp };
-        queue.write_buffer(&scene.params_buf, 0, bytemuck::bytes_of(&params));
-        let point_params = Scene3dPointParams {
-            mvp: frame.mvp,
-            viewport: [w as f32, h as f32],
-            _pad: [0.0, 0.0],
-        };
-        queue.write_buffer(
-            &scene.point_params_buf,
-            0,
-            bytemuck::bytes_of(&point_params),
-        );
-        let mesh_params = Scene3dMeshParams {
-            mvp: frame.mvp,
-            normal_mat: frame.view,
-        };
-        queue.write_buffer(&scene.mesh_params_buf, 0, bytemuck::bytes_of(&mesh_params));
+        // Stamp this snapshot's uniforms (same owner as `prepare_scene`). The
+        // next on-screen frame rewrites these, so clobbering them is harmless.
+        frame.write_uniforms(queue, scene);
 
         let extent = wgpu::Extent3d {
             width: w,
@@ -1706,9 +1695,121 @@ pub fn set_scene3d(render_state: &RenderState, id: Scene3dId, geometry: &Scene3d
     );
 }
 
+/// Linear-fog datum for one frame — the port of silx `scene/function.py Fog`
+/// (`:70-151`). silx computes the camera-space z extent of the scene bounds and
+/// fades each fragment's colour toward the viewport background over
+/// `0.9 ×` that extent; [`Scene3dFog::linear`] reproduces `Fog.setupProgram`.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Scene3dFog {
+    /// `fogExtentInfo.x`: `0.9 / (far − near)` in camera-space z (`0` when the
+    /// extent is zero) — negative, since camera z runs toward `−∞`.
+    pub scale: f32,
+    /// `fogExtentInfo.y`: the near end of the scene's camera-space z extent
+    /// (the corner closest to the camera), where the fog factor is 0.
+    pub near: f32,
+    /// Fog colour = viewport background rgb (`function.py:148-151`).
+    pub color: [f32; 3],
+}
+
+impl Scene3dFog {
+    /// Compute the linear-fog datum for `camera` over the scene `bounds`,
+    /// fading toward `background` — silx `Fog.setupProgram` +
+    /// `Fog._zExtentCamera` (`function.py:124-151`): `(far, near)` is the
+    /// camera-space z extent of the bounds corners, `scale = 0.9/(far − near)`
+    /// (or 0), and the factor at depth z is `clamp(scale · (z − near), 0, 1)`.
+    pub fn linear(camera: &Camera, bounds: (Vec3, Vec3), background: Color32) -> Self {
+        let view = camera.extrinsic.matrix();
+        let (mn, mx) = bounds;
+        let mut far = f32::INFINITY; // most negative camera z
+        let mut near = f32::NEG_INFINITY;
+        for corner in [
+            Vec3::new(mn.x, mn.y, mn.z),
+            Vec3::new(mx.x, mn.y, mn.z),
+            Vec3::new(mn.x, mx.y, mn.z),
+            Vec3::new(mx.x, mx.y, mn.z),
+            Vec3::new(mn.x, mn.y, mx.z),
+            Vec3::new(mx.x, mn.y, mx.z),
+            Vec3::new(mn.x, mx.y, mx.z),
+            Vec3::new(mx.x, mx.y, mx.z),
+        ] {
+            let z = view.transform_point(corner, false).z;
+            far = far.min(z);
+            near = near.max(z);
+        }
+        let extent = far - near;
+        let scale = if extent != 0.0 { 0.9 / extent } else { 0.0 };
+        let rgba = egui::Rgba::from(background);
+        Scene3dFog {
+            scale,
+            near,
+            color: [rgba.r(), rgba.g(), rgba.b()],
+        }
+    }
+
+    /// The fog factor at camera-space depth `cam_z` — the CPU mirror of the
+    /// WGSL `apply_fog` mix weight, for tests and previews.
+    pub fn factor_at(&self, cam_z: f32) -> f32 {
+        (self.scale * (cam_z - self.near)).clamp(0.0, 1.0)
+    }
+}
+
+/// Per-frame shading options shared by every scene pipeline: silx's viewport
+/// fog (`Plot3DWidget.setFogMode`) and the directional light's shininess
+/// (`viewport.light.shininess`; 0 in `Plot3DWidget`/`SceneWidget`, 32 in
+/// `ScalarFieldView`, `ScalarFieldView.py:928`). The default — no fog,
+/// shininess 0 — matches the silx `Plot3DWidget` defaults, which is what the
+/// plain [`paint_scene3d`] / [`snapshot_scene3d`] entry points use.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Scene3dShading {
+    /// Linear fog for this frame; `None` = off (silx `FogMode.NONE`).
+    pub fog: Option<Scene3dFog>,
+    /// Phong shininess exponent for lit meshes; `0` disables specular.
+    pub shininess: f32,
+}
+
+/// Build the per-frame render request: camera matrices at the target size,
+/// plus the shading uniforms. One owner for the maths shared by the paint and
+/// snapshot paths.
+fn build_frame(
+    id: Scene3dId,
+    camera: &Camera,
+    background: Color32,
+    size_px: [u32; 2],
+    shading: Scene3dShading,
+) -> Scene3dFrame {
+    let mut cam = *camera;
+    cam.set_size((size_px[0] as f32, size_px[1] as f32));
+    let mvp = cam.matrix().to_gpu_clip_cols();
+    // The view matrix (camera-space transform) drives mesh-normal lighting and
+    // the fog/specular positions; it carries no projection, so plain
+    // column-major, no depth correction.
+    let view_mat = cam.extrinsic.matrix();
+    let view = view_mat.to_gpu_cols();
+    // Row 2 of the (row-major) view matrix: camera-space z as a dot product.
+    let view_row_z = view_mat.rows[2];
+    let fog = shading.fog.unwrap_or_default();
+    Scene3dFrame {
+        id,
+        mvp,
+        view,
+        view_row_z,
+        size_px,
+        background: egui::Rgba::from(background).to_array(),
+        fog_info: [
+            fog.scale,
+            fog.near,
+            if shading.fog.is_some() { 1.0 } else { 0.0 },
+            0.0,
+        ],
+        fog_color: [fog.color[0], fog.color[1], fog.color[2], 0.0],
+        shininess: shading.shininess,
+    }
+}
+
 /// Register the paint callback that renders scene `id` into `rect` from
-/// `camera`'s viewpoint, on `background`. The camera's aspect is taken from
-/// `rect`'s pixel size for this frame (the passed `camera` is not mutated).
+/// `camera`'s viewpoint, on `background`, with the silx `Plot3DWidget` default
+/// shading (no fog, shininess 0). The camera's aspect is taken from `rect`'s
+/// pixel size for this frame (the passed `camera` is not mutated).
 /// Requires [`install_scene3d`] + [`set_scene3d`].
 pub fn paint_scene3d(
     ui: &mut egui::Ui,
@@ -1717,34 +1818,34 @@ pub fn paint_scene3d(
     camera: &Camera,
     background: Color32,
 ) {
+    paint_scene3d_with(ui, rect, id, camera, background, Scene3dShading::default());
+}
+
+/// [`paint_scene3d`] with explicit per-frame [`Scene3dShading`] (fog +
+/// shininess) — the full silx viewport model.
+pub fn paint_scene3d_with(
+    ui: &mut egui::Ui,
+    rect: egui::Rect,
+    id: Scene3dId,
+    camera: &Camera,
+    background: Color32,
+    shading: Scene3dShading,
+) {
     let ppp = ui.ctx().pixels_per_point();
     let w = (rect.width() * ppp).round().max(1.0) as u32;
     let h = (rect.height() * ppp).round().max(1.0) as u32;
-    let mut cam = *camera;
-    cam.set_size((w as f32, h as f32));
-    let mvp = cam.matrix().to_gpu_clip_cols();
-    // The view matrix (camera-space transform) drives mesh-normal lighting; it
-    // carries no projection, so plain column-major, no depth correction.
-    let view = cam.extrinsic.matrix().to_gpu_cols();
-    let background = egui::Rgba::from(background).to_array();
+    let frame = build_frame(id, camera, background, [w, h], shading);
     ui.painter().add(egui_wgpu::Callback::new_paint_callback(
         rect,
-        Scene3dCallback {
-            frame: Scene3dFrame {
-                id,
-                mvp,
-                view,
-                size_px: [w, h],
-                background,
-            },
-        },
+        Scene3dCallback { frame },
     ));
 }
 
 /// Render scene `id` at `size_px` physical pixels from `camera`'s viewpoint on
-/// `background`, reading the result back as tightly packed RGBA8
-/// (`width * height * 4`, top row first). Returns `None` if the scene has no
-/// uploaded geometry or the GPU readback fails.
+/// `background` with the default shading (no fog, shininess 0), reading the
+/// result back as tightly packed RGBA8 (`width * height * 4`, top row first).
+/// Returns `None` if the scene has no uploaded geometry or the GPU readback
+/// fails.
 ///
 /// The passed `camera` is not mutated; its aspect is taken from `size_px` for
 /// this render, exactly as [`paint_scene3d`] does — so the snapshot matches the
@@ -1760,27 +1861,37 @@ pub fn snapshot_scene3d(
     background: Color32,
     size_px: (u32, u32),
 ) -> Option<Vec<u8>> {
-    let (w, h) = (size_px.0.max(1), size_px.1.max(1));
-    let mut cam = *camera;
-    cam.set_size((w as f32, h as f32));
-    let mvp = cam.matrix().to_gpu_clip_cols();
-    let view = cam.extrinsic.matrix().to_gpu_cols();
-    let background = egui::Rgba::from(background).to_array();
-    let frame = Scene3dFrame {
+    snapshot_scene3d_with(
+        render_state,
         id,
-        mvp,
-        view,
-        size_px: [w, h],
+        camera,
         background,
-    };
+        size_px,
+        Scene3dShading::default(),
+    )
+}
+
+/// [`snapshot_scene3d`] with explicit per-frame [`Scene3dShading`] (fog +
+/// shininess), so a snapshot matches a widget rendering with the same options.
+pub fn snapshot_scene3d_with(
+    render_state: &RenderState,
+    id: Scene3dId,
+    camera: &Camera,
+    background: Color32,
+    size_px: (u32, u32),
+    shading: Scene3dShading,
+) -> Option<Vec<u8>> {
+    let (w, h) = (size_px.0.max(1), size_px.1.max(1));
+    let frame = build_frame(id, camera, background, [w, h], shading);
     let renderer = render_state.renderer.read();
     let res: &Scene3dResources = renderer.callback_resources.get()?;
     res.snapshot_scene(&render_state.device, &render_state.queue, &frame)
 }
 
 /// The per-frame render request for one scene: which scene, the camera MVP, the
-/// target pixel size, and the clear color. Grouping these keeps the prepare API
-/// to a single owner rather than a long positional argument list.
+/// target pixel size, the clear color, and the shading uniforms. Grouping these
+/// keeps the prepare API to a single owner rather than a long positional
+/// argument list.
 #[derive(Clone, Copy)]
 struct Scene3dFrame {
     id: Scene3dId,
@@ -1789,10 +1900,54 @@ struct Scene3dFrame {
     /// Column-major view matrix (no depth correction); the camera-space normal
     /// transform for mesh lighting.
     view: [[f32; 4]; 4],
+    /// Row 2 of the (row-major) view matrix — camera-space z for fog.
+    view_row_z: [f32; 4],
     /// Offscreen target size in physical pixels.
     size_px: [u32; 2],
     /// Clear color, linear premultiplied.
     background: [f32; 4],
+    /// `(scale, near, on, 0)` — see [`Scene3dFog`].
+    fog_info: [f32; 4],
+    /// Fog rgb + unused w.
+    fog_color: [f32; 4],
+    /// Phong shininess for lit meshes (0 = no specular).
+    shininess: f32,
+}
+
+impl Scene3dFrame {
+    /// Write this frame's camera + shading uniforms into `scene`'s param
+    /// buffers — the single owner of the uniform layout, shared by the
+    /// on-screen (`prepare_scene`) and snapshot paths so they cannot drift.
+    fn write_uniforms(&self, queue: &wgpu::Queue, scene: &Scene3dGpu) {
+        let params = Scene3dParams {
+            mvp: self.mvp,
+            fog_info: self.fog_info,
+            fog_color: self.fog_color,
+            view_row_z: self.view_row_z,
+        };
+        queue.write_buffer(&scene.params_buf, 0, bytemuck::bytes_of(&params));
+        let point_params = Scene3dPointParams {
+            mvp: self.mvp,
+            fog_info: self.fog_info,
+            fog_color: self.fog_color,
+            view_row_z: self.view_row_z,
+            viewport: [self.size_px[0] as f32, self.size_px[1] as f32],
+            _pad: [0.0, 0.0],
+        };
+        queue.write_buffer(
+            &scene.point_params_buf,
+            0,
+            bytemuck::bytes_of(&point_params),
+        );
+        let mesh_params = Scene3dMeshParams {
+            mvp: self.mvp,
+            normal_mat: self.view,
+            fog_info: self.fog_info,
+            fog_color: self.fog_color,
+            light: [self.shininess, 0.0, 0.0, 0.0],
+        };
+        queue.write_buffer(&scene.mesh_params_buf, 0, bytemuck::bytes_of(&mesh_params));
+    }
 }
 
 /// Lightweight per-frame paint callback (the heavy GPU state lives in
@@ -1915,5 +2070,52 @@ mod tests {
         dst.extend_from(&src);
         assert_eq!(dst.lines.len(), 4);
         assert_eq!(dst.textured_meshes.len(), 2);
+    }
+
+    #[test]
+    fn linear_fog_matches_silx_setup_program() {
+        // Camera at (0,0,5) looking down -z; unit cube bounds. Corner camera-z
+        // spans [-6, -4]: far = -6, near = -4, extent = -2 →
+        // scale = 0.9 / -2 = -0.45 (silx Fog.setupProgram, function.py:135-146).
+        let camera = Camera::new(
+            30.0,
+            0.1,
+            100.0,
+            (100.0, 100.0),
+            Vec3::new(0.0, 0.0, 5.0),
+            Vec3::new(0.0, 0.0, -1.0),
+            Vec3::new(0.0, 1.0, 0.0),
+        );
+        let bounds = (Vec3::new(-1.0, -1.0, -1.0), Vec3::new(1.0, 1.0, 1.0));
+        let fog = Scene3dFog::linear(&camera, bounds, Color32::from_gray(51));
+
+        assert!((fog.scale - (-0.45)).abs() < 1e-5, "scale = {}", fog.scale);
+        assert!((fog.near - (-4.0)).abs() < 1e-5, "near = {}", fog.near);
+        // Fog colour is the background rgb (linear space, grey 51 → 0.2 sRGB).
+        assert!(fog.color.iter().all(|&c| c > 0.0 && c < 1.0));
+
+        // Factor: 0 at the near end, 0.9 at the far end, clamped past it.
+        assert_eq!(fog.factor_at(-4.0), 0.0);
+        assert!((fog.factor_at(-6.0) - 0.9).abs() < 1e-5);
+        assert!((fog.factor_at(-5.0) - 0.45).abs() < 1e-5);
+        assert_eq!(fog.factor_at(-3.0), 0.0); // nearer than near → clamp low
+        assert_eq!(fog.factor_at(-100.0), 1.0); // far beyond → clamp high
+
+        // Degenerate extent (flat bounds slab facing the camera): scale = 0,
+        // silx's `0.9/extent if extent != 0 else 0`.
+        let flat = (Vec3::new(-1.0, -1.0, 0.0), Vec3::new(1.0, 1.0, 0.0));
+        let camera_front = Camera::new(
+            30.0,
+            0.1,
+            100.0,
+            (100.0, 100.0),
+            Vec3::new(0.0, 0.0, 5.0),
+            Vec3::new(0.0, 0.0, -1.0),
+            Vec3::new(0.0, 1.0, 0.0),
+        );
+        // A z=0 plane seen face-on still spans x/y, but all corners share
+        // camera z = -5 → extent 0.
+        let fog_flat = Scene3dFog::linear(&camera_front, flat, Color32::BLACK);
+        assert_eq!(fog_flat.scale, 0.0);
     }
 }

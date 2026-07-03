@@ -100,9 +100,10 @@ pub use crate::render::gpu_image::{
     AggregationMode, ImageData, ImagePixels, InterpolationMode, aggregate_blocks,
 };
 pub use crate::render::gpu_scene3d::{
-    ImageInterpolation, PointMarker, Scene3dGeometry, Scene3dId, Scene3dImageLayer,
-    Scene3dMeshVertex, Scene3dPoint, Scene3dResources, Scene3dTexturedMesh, Scene3dVertex,
-    install_scene3d, paint_scene3d, set_scene3d, snapshot_scene3d,
+    ImageInterpolation, PointMarker, Scene3dFog, Scene3dGeometry, Scene3dId, Scene3dImageLayer,
+    Scene3dMeshVertex, Scene3dPoint, Scene3dResources, Scene3dShading, Scene3dTexturedMesh,
+    Scene3dVertex, install_scene3d, paint_scene3d, paint_scene3d_with, set_scene3d,
+    snapshot_scene3d, snapshot_scene3d_with,
 };
 pub use crate::render::save::{
     SaveError, SaveFormat, encode_eps, encode_pdf, encode_png, encode_ppm, encode_svg, encode_tiff,
@@ -178,7 +179,7 @@ pub use crate::widget::scalar_field_view::{FieldPick, ScalarFieldView};
 pub use crate::widget::scatter_mask::{ScatterMaskWidget, point_in_polygon};
 pub use crate::widget::scene_position_info::ScenePositionInfo;
 pub use crate::widget::scene_widget::{
-    PICK_POINT_TOLERANCE_PX, ScenePick, ScenePickKind, SceneWidget, viewpoint_menu,
+    FogMode, PICK_POINT_TOLERANCE_PX, ScenePick, ScenePickKind, SceneWidget, viewpoint_menu,
 };
 pub use crate::widget::scene_window::SceneWindow;
 pub use crate::widget::stack_profile_window::StackProfileWindow;

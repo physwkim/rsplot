@@ -12,6 +12,12 @@
 struct PointParams {
     // camera.matrix() × model, column-major, depth-corrected (same as scene3d.wgsl).
     mvp: mat4x4<f32>,
+    // Linear fog datum (see scene3d.wgsl): x = scale, y = near, z = on/off.
+    fog_info: vec4<f32>,
+    fog_color: vec4<f32>,
+    // Row 2 of the view matrix — camera-space z of the point centre (silx fogs
+    // `_Points` on the point's `vCameraPosition`, primitives.py).
+    view_row_z: vec4<f32>,
     // Offscreen target size in physical pixels (for the pixel→NDC offset).
     viewport: vec2<f32>,
     _pad: vec2<f32>,
@@ -26,6 +32,8 @@ struct VsOut {
     @location(1) color: vec4<f32>,
     @location(2) @interpolate(flat) marker: u32,
     @location(3) size: f32,
+    // Camera-space z of the point centre (shared by the whole sprite).
+    @location(4) cam_z: f32,
 };
 
 @vertex
@@ -61,7 +69,19 @@ fn vs_main(
     out.color = color;
     out.marker = marker;
     out.size = size;
+    out.cam_z = dot(params.view_row_z, vec4<f32>(pos, 1.0));
     return out;
+}
+
+// Linear fog, port of silx scene/function.py Fog._fragDecl (:79-93); colours
+// are premultiplied, so the fog colour is scaled by alpha (see scene3d.wgsl).
+fn apply_fog(color: vec4<f32>, cam_z: f32) -> vec4<f32> {
+    if (params.fog_info.z == 0.0) {
+        return color;
+    }
+    let factor = clamp(params.fog_info.x * (cam_z - params.fog_info.y), 0.0, 1.0);
+    let rgb = mix(color.rgb, params.fog_color.rgb * color.a, factor);
+    return vec4<f32>(rgb, color.a);
 }
 
 // Per-marker coverage in [0, 1], ported one-for-one from silx
@@ -135,5 +155,5 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     }
     // `color` is linear, premultiplied alpha; scaling every channel by the
     // coverage keeps it premultiplied for the One/OneMinusSrcAlpha blend.
-    return in.color * a;
+    return apply_fog(in.color * a, in.cam_z);
 }

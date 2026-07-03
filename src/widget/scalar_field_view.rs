@@ -65,8 +65,13 @@ impl ScalarFieldView {
     /// into `render_state` if needed. Starts empty (no data, no iso-surfaces,
     /// hidden cut plane).
     pub fn new(render_state: &RenderState, id: Scene3dId) -> Self {
+        let mut scene = SceneWidget::new(render_state, id);
+        // silx ScalarFieldView turns the specular highlight on:
+        // `viewport.light.shininess = 32` (ScalarFieldView.py:928); the plain
+        // SceneWidget keeps the DirectionalLight default of 0 (off).
+        scene.set_light_shininess(32.0);
         ScalarFieldView {
-            scene: SceneWidget::new(render_state, id),
+            scene,
             field: ScalarField3D::new(),
             had_data: false,
         }
