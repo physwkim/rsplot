@@ -24,10 +24,16 @@ use crate::render::gpu_scene3d::{
     Scene3dGeometry, Scene3dId, install_scene3d, paint_scene3d, set_scene3d, snapshot_scene3d,
 };
 
-/// Default scene background (a dark neutral grey, as in silx's 3D views).
-const DEFAULT_BACKGROUND: Color32 = Color32::from_gray(30);
-/// Default bounding-box / wireframe stroke colour.
-const DEFAULT_BOX_COLOR: Color32 = Color32::from_gray(200);
+/// Default scene background: silx `Plot3DWidget` clears to `(0.2, 0.2, 0.2, 1.0)`
+/// (`Plot3DWidget.py:161`), i.e. grey 51.
+const DEFAULT_BACKGROUND: Color32 = Color32::from_gray(51);
+/// Default foreground (bounding-box / wireframe) colour: white, as silx
+/// `SceneWidget` (`SceneWidget.py:374` `_foregroundColor = 1., 1., 1., 1.`,
+/// matching `primitives.py` `BoxWithAxes(color=(1., 1., 1., 1.))`).
+const DEFAULT_FOREGROUND: Color32 = Color32::WHITE;
+/// Default text colour (axis/tick labels): white, as silx `SceneWidget`
+/// (`SceneWidget.py:373` `_textColor = 1., 1., 1., 1.`).
+const DEFAULT_TEXT_COLOR: Color32 = Color32::WHITE;
 
 /// An interactive 3D scene widget. Construct with [`SceneWidget::new`], optionally
 /// set the data bounds and content geometry, then call [`SceneWidget::show`] each
@@ -39,6 +45,7 @@ pub struct SceneWidget {
     /// derive from these.
     bounds: (Vec3, Vec3),
     box_color: Color32,
+    text_color: Color32,
     background: Color32,
     /// Data-item geometry (excludes the box/axes chrome, which is regenerated
     /// from `bounds` on every upload). Empty until [`SceneWidget::set_geometry`].
@@ -75,7 +82,8 @@ impl SceneWidget {
             id,
             camera,
             bounds,
-            box_color: DEFAULT_BOX_COLOR,
+            box_color: DEFAULT_FOREGROUND,
+            text_color: DEFAULT_TEXT_COLOR,
             background: DEFAULT_BACKGROUND,
             content: Scene3dGeometry::new(),
             orbit: None,
@@ -86,8 +94,41 @@ impl SceneWidget {
     }
 
     /// Set the scene background colour (used to clear the offscreen target).
+    /// Port of silx `Plot3DWidget.setBackgroundColor`.
     pub fn set_background(&mut self, color: Color32) {
         self.background = color;
+    }
+
+    /// The scene background colour (silx `Plot3DWidget.getBackgroundColor`).
+    pub fn background(&self) -> Color32 {
+        self.background
+    }
+
+    /// Set the foreground colour — the bounding-box wireframe stroke. Port of
+    /// silx `SceneWidget.setForegroundColor` (`SceneWidget.py:648`, applied to
+    /// the root `BoxWithAxes`). Re-uploads the chrome geometry.
+    pub fn set_foreground_color(&mut self, render_state: &RenderState, color: Color32) {
+        if self.box_color != color {
+            self.box_color = color;
+            self.upload(render_state);
+        }
+    }
+
+    /// The foreground (bounding-box) colour (silx `SceneWidget.getForegroundColor`).
+    pub fn foreground_color(&self) -> Color32 {
+        self.box_color
+    }
+
+    /// Set the text colour used for the scene's axis and tick labels. Port of
+    /// silx `SceneWidget.setTextColor` (`SceneWidget.py:623`, forwarded to the
+    /// root `LabelledAxes.tickColor`).
+    pub fn set_text_color(&mut self, color: Color32) {
+        self.text_color = color;
+    }
+
+    /// The text colour (silx `SceneWidget.getTextColor`).
+    pub fn text_color(&self) -> Color32 {
+        self.text_color
     }
 
     /// The scene's centre of bounds (centre of rotation for orbit/pan).
