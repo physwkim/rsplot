@@ -1060,24 +1060,34 @@ fn apply_interaction(
             && let Some(p) = response.hover_pos()
             && area.contains(p)
         {
-            let (cx, cy) = view.pixel_to_data(p);
-            // The y2 zoom centre is the same pixel mapped through the
-            // right-axis transform (silx `applyZoomToPlot`'s
-            // `pixelToData(cx, cy, axis="right")`, `_utils/panzoom.py:158-166`).
-            let cy2 = plot.transform_y2(area).map(|t| t.pixel_to_data(p).1);
-            let factor = interaction::wheel_zoom_factor(scroll);
-            // Push the pre-zoom view so zoom-back can step out of the wheel zoom.
-            plot.push_limits();
-            let (next, next_y2) = interaction::zoom_view_about(
-                (base, plot.y2),
-                factor,
-                cx,
-                cy,
-                cy2,
-                plot.x_scale,
-                plot.y_scale,
-            );
-            commit(plot, next, next_y2);
+            // silx `_onWheel` (PlotInteraction.py:1894-1913): all axes zoom
+            // when keep-aspect is on; otherwise the per-axis zoom flags apply,
+            // and with every axis disabled the wheel does not zoom at all.
+            let enabled = if plot.keep_aspect {
+                (true, true)
+            } else {
+                (plot.zoom_x_enabled(), plot.zoom_y_enabled())
+            };
+            if enabled != (false, false) {
+                let centre = view.pixel_to_data(p);
+                // The y2 zoom centre is the same pixel mapped through the
+                // right-axis transform (silx `applyZoomToPlot`'s
+                // `pixelToData(cx, cy, axis="right")`, `_utils/panzoom.py:158-166`).
+                let cy2 = plot.transform_y2(area).map(|t| t.pixel_to_data(p).1);
+                let factor = interaction::wheel_zoom_factor(scroll);
+                // Push the pre-zoom view so zoom-back can step out of the wheel zoom.
+                plot.push_limits();
+                let (next, next_y2) = interaction::zoom_view_about(
+                    (base, plot.y2),
+                    factor,
+                    centre,
+                    cy2,
+                    plot.x_scale,
+                    plot.y_scale,
+                    enabled,
+                );
+                commit(plot, next, next_y2);
+            }
         }
     }
 
@@ -1186,15 +1196,22 @@ fn apply_interaction(
                     let (bx, by) = view.pixel_to_data(end);
                     // Constrain to the axes enabled for zoom (silx
                     // `ZoomEnabledAxesMenu`): a disabled axis keeps its current
-                    // displayed range. With both enabled (the default) this is
-                    // the box result unchanged.
+                    // displayed range. silx `_getAxesExtent` applies this
+                    // substitution only when keep-aspect is OFF
+                    // (PlotInteraction.py:390-397) — with keep-aspect on the
+                    // flags are ignored so the aspect ratio stays intact.
+                    let boxed = interaction::box_zoom(ax, ay, bx, by);
                     let current = (view.x.min, view.x.max, view.y.min, view.y.max);
-                    let next = interaction::constrain_zoom_axes(
-                        interaction::box_zoom(ax, ay, bx, by),
-                        current,
-                        plot.zoom_x_enabled(),
-                        plot.zoom_y_enabled(),
-                    );
+                    let next = if plot.keep_aspect {
+                        boxed
+                    } else {
+                        interaction::constrain_zoom_axes(
+                            boxed,
+                            current,
+                            plot.zoom_x_enabled(),
+                            plot.zoom_y_enabled(),
+                        )
+                    };
                     // Box zoom is left-axes-only by recorded scope decision
                     // (roadmap row 1583); y2 threads through unchanged.
                     commit(plot, next, plot.y2);
@@ -1943,6 +1960,82 @@ mod tests {
         assert!(ratio_left < 1.0, "scroll up zooms in");
     }
 
+    /// One warm-up frame + one wheel frame over the data-area centre.
+    /// Returns nothing; the caller inspects `plot` afterwards.
+    fn drive_wheel_at_centre(ctx: &egui::Context, plot: &mut Plot, scroll_y: f32) {
+        let screen = egui::vec2(200.0, 200.0);
+        let (_r0, area) = run_frame(ctx, plot, screen_input(screen));
+        let c = area.center();
+        let mut warm = screen_input(screen);
+        warm.events.push(egui::Event::PointerMoved(c));
+        let _ = run_frame(ctx, plot, warm);
+        let mut f = screen_input(screen);
+        f.events.push(egui::Event::PointerMoved(c));
+        f.events.push(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, scroll_y),
+            phase: egui::TouchPhase::Move,
+            modifiers: egui::Modifiers::default(),
+        });
+        let _ = run_frame(ctx, plot, f);
+    }
+
+    #[test]
+    fn wheel_zoom_honours_zoom_enabled_axes() {
+        // silx `_onWheel` uses the per-axis zoom flags when keep-aspect is
+        // off (PlotInteraction.py:1894-1913): with Y disabled the wheel
+        // zooms X only, and the left-Y and y2 ranges stay put.
+        let ctx = egui::Context::default();
+        let mut plot = Plot::new(0);
+        plot.limits = (0.0, 10.0, 0.0, 10.0);
+        plot.y2 = Some((0.0, 100.0));
+        plot.set_zoom_enabled_axes(true, false);
+        drive_wheel_at_centre(&ctx, &mut plot, 7.0);
+        let (x0, x1, y0, y1) = plot.limits;
+        assert!(x1 - x0 < 10.0, "X zooms: {:?}", plot.limits);
+        assert_eq!((y0, y1), (0.0, 10.0), "disabled Y keeps its range");
+        assert_eq!(plot.y2, Some((0.0, 100.0)), "y2 follows the Y flag");
+    }
+
+    #[test]
+    fn wheel_zoom_with_all_axes_disabled_does_nothing() {
+        // silx `_onWheel` returns before zooming (and before any history
+        // push) when every axis is disabled for zoom.
+        let ctx = egui::Context::default();
+        let mut plot = Plot::new(0);
+        plot.limits = (0.0, 10.0, 0.0, 10.0);
+        plot.set_zoom_enabled_axes(false, false);
+        drive_wheel_at_centre(&ctx, &mut plot, 7.0);
+        assert_eq!(plot.limits, (0.0, 10.0, 0.0, 10.0));
+        assert_eq!(plot.limits_history_len(), 0, "no history push either");
+    }
+
+    #[test]
+    fn wheel_zoom_keep_aspect_overrides_disabled_axes() {
+        // silx `_onWheel`: keep-aspect forces all axes enabled, overriding
+        // the per-axis flags entirely.
+        let ctx = egui::Context::default();
+        let mut plot = Plot::new(0);
+        plot.limits = (0.0, 10.0, 0.0, 10.0);
+        plot.set_zoom_enabled_axes(false, false);
+        plot.keep_aspect = true;
+        // Strong scroll: keep-aspect widens the base range of one axis to
+        // equalise data-units-per-pixel, so the committed span only drops
+        // below the original once the zoom factor beats that expansion.
+        drive_wheel_at_centre(&ctx, &mut plot, 400.0);
+        let (x0, x1, y0, y1) = plot.limits;
+        assert!(
+            x1 - x0 < 10.0,
+            "X zooms under keep-aspect: {:?}",
+            plot.limits
+        );
+        assert!(
+            y1 - y0 < 10.0,
+            "Y zooms under keep-aspect: {:?}",
+            plot.limits
+        );
+    }
+
     #[test]
     fn pan_drag_shifts_y2_with_left_axes() {
         // silx `Pan.drag` (PlotInteraction.py:260-335) pans the right (y2)
@@ -2566,6 +2659,65 @@ mod tests {
             before,
             plot.limits
         );
+    }
+
+    #[test]
+    fn box_zoom_keep_aspect_ignores_disabled_axes() {
+        // silx `_getAxesExtent` applies the disabled-axes substitution only
+        // when keep-aspect is OFF (PlotInteraction.py:390-397): with
+        // keep-aspect on, a box zoom narrows both axes even when the flags
+        // disable them.
+        let ctx = egui::Context::default();
+        let mut plot = Plot::new(0);
+        plot.limits = (0.0, 10.0, 0.0, 10.0);
+        plot.set_zoom_enabled_axes(false, false);
+        plot.keep_aspect = true;
+        let before = plot.limits;
+        let mode = PlotInteractionMode::Zoom;
+        let screen = egui::vec2(200.0, 200.0);
+
+        let (_r0, area) = run_mode_frame(&ctx, &mut plot, mode, screen_input(screen));
+        let a = area.center() - egui::vec2(20.0, 20.0);
+        let b = area.center() + egui::vec2(20.0, 20.0);
+        let _ = run_mode_frame(&ctx, &mut plot, mode, press_at(screen, a));
+        let _ = run_mode_frame(&ctx, &mut plot, mode, move_to(screen, b));
+        let _ = run_mode_frame(&ctx, &mut plot, mode, release_at(screen, b));
+
+        let (x0, x1, y0, y1) = plot.limits;
+        assert!(
+            x1 - x0 < before.1 - before.0 && y1 - y0 < before.3 - before.2,
+            "keep-aspect box zoom narrows both axes: {:?} -> {:?}",
+            before,
+            plot.limits
+        );
+    }
+
+    #[test]
+    fn box_zoom_disabled_axis_keeps_current_range() {
+        // With keep-aspect off the zoom-enabled flags apply to a box zoom
+        // (silx `_getAxesExtent`): Y disabled keeps the current Y range.
+        let ctx = egui::Context::default();
+        let mut plot = Plot::new(0);
+        plot.limits = (0.0, 10.0, 0.0, 10.0);
+        plot.set_zoom_enabled_axes(true, false);
+        let before = plot.limits;
+        let mode = PlotInteractionMode::Zoom;
+        let screen = egui::vec2(200.0, 200.0);
+
+        let (_r0, area) = run_mode_frame(&ctx, &mut plot, mode, screen_input(screen));
+        let a = area.center() - egui::vec2(20.0, 20.0);
+        let b = area.center() + egui::vec2(20.0, 20.0);
+        let _ = run_mode_frame(&ctx, &mut plot, mode, press_at(screen, a));
+        let _ = run_mode_frame(&ctx, &mut plot, mode, move_to(screen, b));
+        let _ = run_mode_frame(&ctx, &mut plot, mode, release_at(screen, b));
+
+        let (x0, x1, y0, y1) = plot.limits;
+        assert!(
+            x1 - x0 < before.1 - before.0,
+            "X narrows: {:?}",
+            plot.limits
+        );
+        assert_eq!((y0, y1), (0.0, 10.0), "disabled Y keeps its range");
     }
 
     #[test]

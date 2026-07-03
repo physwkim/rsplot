@@ -205,22 +205,39 @@ pub fn pan_view(
 /// y2 log flag exactly as silx passes `plot.getYAxis()._isLogarithmic()` for
 /// the right axis too. A `None` `cy2` (no right-axis transform this frame)
 /// leaves y2 unchanged.
+///
+/// `enabled = (x, y)` mirrors silx's `EnabledAxes` gating inside
+/// `applyZoomToPlot` (`if enabled.xaxis: ...`): a disabled axis keeps its
+/// current range. The plot model tracks no separate y2 zoom flag (recorded
+/// scope decision on `Plot::zoom_y_enabled`), so silx's `y2axis` flag folds
+/// into the `y` flag here. `centre` is the left-axes data centre `(cx, cy)`.
 pub fn zoom_view_about(
     view: ViewLimits,
     factor: f64,
-    cx: f64,
-    cy: f64,
+    centre: (f64, f64),
     cy2: Option<f64>,
     x_scale: Scale,
     y_scale: Scale,
+    enabled: (bool, bool),
 ) -> ViewLimits {
-    let (limits, y2) = view;
-    let next = zoom_about(limits, factor, cx, cy, x_scale, y_scale);
+    let ((x_min, x_max, y_min, y_max), y2) = view;
+    let (cx, cy) = centre;
+    let (x_enabled, y_enabled) = enabled;
     // silx `scale` is the reciprocal of our span-shrink `factor` (see
     // [`zoom_about`]).
     let silx_scale = 1.0 / factor;
+    let (nx0, nx1) = if x_enabled {
+        scale1d_range(x_min, x_max, cx, silx_scale, x_scale == Scale::Log10)
+    } else {
+        (x_min, x_max)
+    };
+    let (ny0, ny1) = if y_enabled {
+        scale1d_range(y_min, y_max, cy, silx_scale, y_scale == Scale::Log10)
+    } else {
+        (y_min, y_max)
+    };
     let next_y2 = match (y2, cy2) {
-        (Some((lo, hi)), Some(c)) => Some(scale1d_range(
+        (Some((lo, hi)), Some(c)) if y_enabled => Some(scale1d_range(
             lo,
             hi,
             c,
@@ -229,7 +246,7 @@ pub fn zoom_view_about(
         )),
         (y2, _) => y2,
     };
-    (next, next_y2)
+    ((nx0, nx1, ny0, ny1), next_y2)
 }
 
 /// Pan a single axis range by `pan_factor` (a signed proportion of the range),
@@ -2108,11 +2125,11 @@ mod tests {
         let (out, y2) = zoom_view_about(
             ((0.0, 10.0, 0.0, 10.0), Some((0.0, 100.0))),
             0.5,
-            5.0,
-            5.0,
+            (5.0, 5.0),
             Some(50.0),
             Scale::Linear,
             Scale::Linear,
+            (true, true),
         );
         assert!(close(out, (2.5, 7.5, 2.5, 7.5)), "{out:?}");
         let (lo, hi) = y2.expect("y2 present");
@@ -2120,6 +2137,38 @@ mod tests {
             (lo - 25.0).abs() <= 1e-9 && (hi - 75.0).abs() <= 1e-9,
             "{lo} {hi}"
         );
+    }
+
+    #[test]
+    fn zoom_view_about_disabled_axis_keeps_its_range() {
+        // silx `applyZoomToPlot` skips a disabled axis (`if enabled.xaxis:`,
+        // _utils/panzoom.py:150-166); the y2 axis follows the Y flag (silx's
+        // separate y2axis flag folds into it, see `Plot::zoom_y_enabled`).
+        let view = ((0.0, 10.0, 0.0, 10.0), Some((0.0, 100.0)));
+        // X disabled: X kept, Y and y2 scaled.
+        let (out, y2) = zoom_view_about(
+            view,
+            0.5,
+            (5.0, 5.0),
+            Some(50.0),
+            Scale::Linear,
+            Scale::Linear,
+            (false, true),
+        );
+        assert!(close(out, (0.0, 10.0, 2.5, 7.5)), "{out:?}");
+        assert_eq!(y2, Some((25.0, 75.0)));
+        // Y disabled: Y and y2 kept, X scaled.
+        let (out, y2) = zoom_view_about(
+            view,
+            0.5,
+            (5.0, 5.0),
+            Some(50.0),
+            Scale::Linear,
+            Scale::Linear,
+            (true, false),
+        );
+        assert!(close(out, (2.5, 7.5, 0.0, 10.0)), "{out:?}");
+        assert_eq!(y2, Some((0.0, 100.0)));
     }
 
     #[test]
@@ -2131,11 +2180,11 @@ mod tests {
         let (_, y2) = zoom_view_about(
             ((0.0, 10.0, 0.0, 10.0), Some(y2_before)),
             0.3,
-            5.0,
-            5.0,
+            (5.0, 5.0),
             Some(cy2),
             Scale::Linear,
             Scale::Linear,
+            (true, true),
         );
         let (lo, hi) = y2.expect("y2 present");
         let frac_before = (cy2 - y2_before.0) / (y2_before.1 - y2_before.0);
@@ -2149,11 +2198,11 @@ mod tests {
         let (out, y2) = zoom_view_about(
             ((0.0, 10.0, 0.0, 10.0), Some((0.0, 100.0))),
             0.5,
-            5.0,
-            5.0,
+            (5.0, 5.0),
             None,
             Scale::Linear,
             Scale::Linear,
+            (true, true),
         );
         assert!(close(out, (2.5, 7.5, 2.5, 7.5)), "{out:?}");
         assert_eq!(y2, Some((0.0, 100.0)));
