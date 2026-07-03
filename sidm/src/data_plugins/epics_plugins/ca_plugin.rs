@@ -6,15 +6,21 @@
 //!
 //! - **connection events** ([`CaChannel::connection_events`]) — connect /
 //!   disconnect / access-rights / native-type-changed,
-//! - **the monitor** ([`CaChannel::subscribe`]) — value + alarm + timestamp,
+//! - **the value monitor** (`subscribe_with_mask`, `DBE_VALUE | DBE_ALARM |
+//!   DBE_PROPERTY` — pyepics' `auto_monitor` mask,
+//!   `pyepics_plugin_component.py:59-64`) — value + alarm + timestamp,
+//! - **the property monitor** (`DBE_PROPERTY` only) — each event triggers a
+//!   ctrl-metadata refetch, the `update_ctrl_vars` path
+//!   (`pyepics_plugin_component.py:120-177`),
 //! - **the GUI write queue** — [`crate::Channel::put`] values, and
 //! - **cancellation** — fired when the last [`crate::Channel`] drops.
 //!
 //! On connect (and reconnect / native-type change) the task issues one
 //! `get_with_metadata(DbrClass::Ctrl)` to publish units / precision / limits /
-//! enum strings together with the initial value, then the monitor streams
-//! value+alarm updates (metadata is connect-time, refetched on
-//! [`ConnectionEvent::NativeTypeChanged`], matching PyDM). On disconnect the
+//! enum strings together with the initial value; afterwards a runtime
+//! metadata change (`caput PV.PREC` / `.EGU` / mbbo strings) posts a
+//! `DBE_PROPERTY` event and the task refetches + re-applies the ctrl
+//! metadata, so widgets track it live like PyDM. On disconnect the
 //! stale value is kept and only `connected` flips, which drives
 //! [`crate::AlarmSeverity::Disconnected`] styling.
 //!
@@ -38,6 +44,7 @@ use epics_base_rs::server::snapshot::{DbrClass, Snapshot};
 use epics_base_rs::types::{DbFieldType, EpicsValue, PvString};
 use epics_ca_rs::CaError;
 use epics_ca_rs::client::{CaChannel, CaClient, ConnectionEvent};
+use epics_ca_rs::protocol::{DBE_ALARM, DBE_PROPERTY, DBE_VALUE};
 use tokio::sync::{OnceCell, broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
 
@@ -133,7 +140,27 @@ async fn run_channel(
 
     let ch = client.create_channel(&pv);
     let mut events = ch.connection_events();
-    let mut monitor = match ch.subscribe().await {
+    // pyepics' auto_monitor mask: DBE_VALUE | DBE_ALARM | DBE_PROPERTY
+    // (pyepics_plugin_component.py:59-64). Note DBE_LOG — part of the
+    // library's default mask — is deliberately absent: PyDM does not
+    // request archive-deadband (ADEL) events, so neither do we.
+    let mut monitor = match ch
+        .subscribe_with_mask(0.0, DBE_VALUE | DBE_ALARM | DBE_PROPERTY)
+        .await
+    {
+        Ok(m) => m,
+        Err(_) => {
+            writer.update(|s| s.connected = false);
+            return;
+        }
+    };
+    // Property-only subscription: fires when the IOC posts DBE_PROPERTY
+    // (a runtime `caput PV.PREC` / `.EGU` / limit / mbbo-string change).
+    // The value monitor's snapshots are TIME-class (no ctrl metadata), so
+    // this dedicated stream is what tells us to refetch the CTRL metadata —
+    // the equivalent of pyepics' CTRL-form monitor feeding
+    // `update_ctrl_vars` (pyepics_plugin_component.py:120-177).
+    let mut prop_monitor = match ch.subscribe_with_mask(0.0, DBE_PROPERTY).await {
         Ok(m) => m,
         Err(_) => {
             writer.update(|s| s.connected = false);
@@ -207,6 +234,20 @@ async fn run_channel(
                 None => break,      // subscription ended (channel shutdown)
             },
 
+            prop = prop_monitor.recv() => match prop {
+                Some(Ok(_)) => {
+                    // DBE_PROPERTY: metadata changed on the IOC. The event's
+                    // TIME-class snapshot carries no ctrl metadata, so
+                    // refetch it and re-apply — PyDM's `update_ctrl_vars`
+                    // re-emits precision/units/enum_strs/limits whenever a
+                    // property event delivers a change
+                    // (pyepics_plugin_component.py:120-177).
+                    on_property_change(&ch, &writer, &mut enum_cache).await;
+                }
+                Some(Err(_)) => {}  // transient monitor error; keep the connection
+                None => break,      // subscription ended (channel shutdown)
+            },
+
             maybe = writes.recv() => match maybe {
                 Some(value) => {
                     // CA cannot honour a write on a disconnected channel;
@@ -275,6 +316,32 @@ async fn on_connect(
     }
 }
 
+/// Refetch ctrl metadata after a `DBE_PROPERTY` event and re-apply it.
+///
+/// The `update_ctrl_vars` path (pyepics_plugin_component.py:120-177):
+/// units / precision / all limits / enum strings are re-published; the
+/// value stays untouched (a value change flows through the value monitor),
+/// so no spurious value event is emitted. The enum cache is refreshed so
+/// the write path resolves labels against the new mbbo strings.
+async fn on_property_change(
+    ch: &CaChannel,
+    writer: &StateWriter,
+    enum_cache: &mut Option<Arc<[String]>>,
+) {
+    // On a transient read failure the current metadata is simply kept.
+    if let Ok(snap) = ch.get_with_metadata(DbrClass::Ctrl).await {
+        let strings: Option<Arc<[String]>> = snap
+            .enums
+            .as_ref()
+            .filter(|e| !e.strings.is_empty())
+            .map(|e| latin1_strings(&e.strings));
+        if strings.is_some() {
+            *enum_cache = strings.clone();
+        }
+        writer.update(move |s| apply_property_metadata(s, &snap, strings));
+    }
+}
+
 /// Apply a `DBR_CTRL_*` snapshot: value + alarm + timestamp + units / precision
 /// / limits / enum strings. `enum_strings` is moved into the state and reused to
 /// resolve the value's enum label.
@@ -284,6 +351,28 @@ fn apply_metadata(s: &mut ChannelState, snap: &Snapshot, enum_strings: Option<Ar
     s.severity = AlarmSeverity::from_epics(snap.alarm.severity);
     s.timestamp = Some(snap.timestamp.into());
     s.enum_strings = enum_strings;
+    apply_display_control(s, snap);
+}
+
+/// Re-apply only the metadata a `DBE_PROPERTY` refetch delivers: severity +
+/// units / precision / limits / enum strings (PyDM `update_ctrl_vars`,
+/// pyepics_plugin_component.py:120-177). Value and timestamp are left alone
+/// so a metadata-only change never looks like a value arrival.
+fn apply_property_metadata(
+    s: &mut ChannelState,
+    snap: &Snapshot,
+    enum_strings: Option<Arc<[String]>>,
+) {
+    s.severity = AlarmSeverity::from_epics(snap.alarm.severity);
+    if enum_strings.is_some() {
+        s.enum_strings = enum_strings;
+    }
+    apply_display_control(s, snap);
+}
+
+/// Shared display/control application: units, precision, display / warning /
+/// alarm limits (`DisplayInfo`) and control limits (`ControlInfo`).
+fn apply_display_control(s: &mut ChannelState, snap: &Snapshot) {
     if let Some(d) = &snap.display {
         s.units = (!d.units.is_empty()).then(|| Arc::from(latin1_str(&d.units)));
         s.precision = Some(i32::from(d.precision));
@@ -637,6 +726,42 @@ mod tests {
             })
         );
         assert_eq!(state.enum_strings.as_deref().map(|s| s.len()), Some(2));
+    }
+
+    #[test]
+    fn property_metadata_refreshes_without_touching_the_value() {
+        // A DBE_PROPERTY refetch must re-apply units/precision/limits/enum
+        // strings (PyDM update_ctrl_vars) but never look like a value
+        // arrival: value and timestamp stay whatever the value monitor
+        // last delivered.
+        let mut state = ChannelState {
+            connected: true,
+            value: Some(PvValue::Float(4.0)),
+            units: Some(Arc::from("mm")),
+            precision: Some(3),
+            timestamp: Some(ts()),
+            ..Default::default()
+        };
+        // The refetched CTRL snapshot carries a (stale) value 9.9 that must
+        // NOT overwrite the monitor's 4.0.
+        let mut snap = Snapshot::new(EpicsValue::Double(9.9), 0, 1, ts());
+        snap.display = Some(DisplayInfo {
+            units: "um".into(),
+            precision: 5,
+            ..Default::default()
+        });
+        snap.control = Some(ControlInfo {
+            lower_ctrl_limit: -1.0,
+            upper_ctrl_limit: 1.0,
+        });
+        apply_property_metadata(&mut state, &snap, None);
+
+        assert_eq!(state.value, Some(PvValue::Float(4.0)));
+        assert_eq!(state.timestamp, Some(ts()));
+        assert_eq!(state.units.as_deref(), Some("um"));
+        assert_eq!(state.precision, Some(5));
+        assert_eq!(state.ctrl_limits, Some((-1.0, 1.0)));
+        assert_eq!(state.severity, AlarmSeverity::Minor);
     }
 
     #[test]

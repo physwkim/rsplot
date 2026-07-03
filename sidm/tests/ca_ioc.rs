@@ -13,6 +13,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use epics_base_rs::server::database::PvDatabase;
 use epics_ca_rs::EpicsValue;
 use epics_ca_rs::server::{CaServer, CaServerBuilder};
 use sidm::{CaPlugin, Engine, PvValue};
@@ -43,10 +44,12 @@ fn free_port() -> u16 {
 /// `Engine::new()` builds its OWN runtime, so it must not be created inside the
 /// server runtime — `block_on` is used only for setup, and we are back on a
 /// plain thread before the engine is built. The returned server runtime is kept
-/// alive for the test's duration (dropping it stops the IOC).
+/// alive for the test's duration (dropping it stops the IOC). The returned
+/// database handle lets a test mutate server-side PVs at runtime (e.g. post a
+/// `DBE_PROPERTY` metadata change).
 fn ioc_engine(
     setup: impl FnOnce(CaServerBuilder) -> CaServerBuilder,
-) -> (Engine, tokio::runtime::Runtime) {
+) -> (Engine, Arc<PvDatabase>, tokio::runtime::Runtime) {
     let port = free_port();
     let server_rt = tokio::runtime::Runtime::new().expect("server runtime");
     let server = server_rt.block_on(async {
@@ -55,6 +58,7 @@ fn ioc_engine(
             .await
             .expect("build in-process CA server")
     });
+    let db = server.database().clone();
     server_rt.spawn(async move {
         let _ = server.run().await;
     });
@@ -68,12 +72,12 @@ fn ioc_engine(
     // Override the default CA plugin with one that searches the loopback IOC
     // directly — no process-global EPICS_CA_* env, so tests stay parallel-safe.
     engine.register_plugin(Arc::new(CaPlugin::with_addresses(vec![addr])));
-    (engine, server_rt)
+    (engine, db, server_rt)
 }
 
 #[test]
 fn ca_roundtrip_monitor_and_put() {
-    let (engine, _server_rt) = ioc_engine(|b| b.pv("sidm:test:ao", EpicsValue::Double(1.5)));
+    let (engine, _db, _server_rt) = ioc_engine(|b| b.pv("sidm:test:ao", EpicsValue::Double(1.5)));
     let ch = engine
         .connect("ca://sidm:test:ao")
         .expect("connect ca channel");
@@ -109,7 +113,7 @@ fn ca_roundtrip_monitor_and_put() {
 fn ca_enum_put_via_label_resolves_index() {
     use epics_base_rs::server::records::bi::BiRecord;
 
-    let (engine, _server_rt) = ioc_engine(|b| {
+    let (engine, _db, _server_rt) = ioc_engine(|b| {
         let mut rec = BiRecord::new(0);
         rec.znam = "Off".into();
         rec.onam = "On".into();
@@ -151,5 +155,50 @@ fn ca_enum_put_via_label_resolves_index() {
         ),
         "did not observe enum index 1 / label On after writing the label (got {:?})",
         ch.read(|s| s.value.clone())
+    );
+}
+
+#[test]
+fn ca_property_event_refreshes_metadata_live() {
+    use epics_base_rs::server::snapshot::{DisplayInfo, Snapshot};
+    use std::time::SystemTime;
+
+    let (engine, db, server_rt) = ioc_engine(|b| b.pv("sidm:test:prop", EpicsValue::Double(1.5)));
+    let ch = engine
+        .connect("ca://sidm:test:prop")
+        .expect("connect ca channel");
+
+    assert!(
+        wait_for(|| ch.is_connected(), Duration::from_secs(5)),
+        "channel never connected to the in-process IOC"
+    );
+    assert!(
+        wait_for(|| ch.read(|s| s.value.is_some()), Duration::from_secs(5)),
+        "initial value never arrived"
+    );
+
+    // Change the PV's display metadata at runtime and post DBE_PROPERTY —
+    // the server-side equivalent of `caput PV.EGU` / `PV.PREC`. PyDM's
+    // pyepics monitor (DBE_VALUE|DBE_ALARM|DBE_PROPERTY) picks this up live
+    // via update_ctrl_vars; pre-fix sidm kept the connect-time metadata
+    // until a reconnect.
+    let mut snap = Snapshot::new(EpicsValue::Double(1.5), 0, 0, SystemTime::now());
+    snap.display = Some(DisplayInfo {
+        units: "um".into(),
+        precision: 5,
+        ..Default::default()
+    });
+    server_rt
+        .block_on(db.post_pv_property("sidm:test:prop", snap))
+        .expect("post DBE_PROPERTY for a simple PV");
+
+    assert!(
+        wait_for(
+            || ch.read(|s| s.units.as_deref() == Some("um") && s.precision == Some(5)),
+            Duration::from_secs(5)
+        ),
+        "metadata never refreshed after DBE_PROPERTY (units={:?}, precision={:?})",
+        ch.read(|s| s.units.clone()),
+        ch.read(|s| s.precision)
     );
 }
