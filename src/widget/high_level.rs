@@ -1715,8 +1715,14 @@ fn aligned_partial_profile(
 /// integer rectangle ([`aligned_partial_profile`], zero-padded out of image,
 /// plain mean/sum); otherwise it is a bilinear band ([`line_profile_band`])
 /// sampled with silx's `-0.5` plot-corner shift applied to both endpoints.
-/// Returns `(position, value)` pairs; the position axis is the profile-step
-/// index (the exact plot-axis coordinates/labels are a separate concern).
+///
+/// Returns `(position, value)` pairs. The position axis is silx's **projected
+/// plot-axis coordinate**, not arc distance (`core.py:529-563`): a row-aligned
+/// line runs over its column coordinates (`arange + startCol`), a column-aligned
+/// line over its row coordinates (`arange + startRow`), and a diagonal line over
+/// `linspace(x0, x1, len)` in X data coordinates. siplot's image geometry is
+/// identity (origin `(0, 0)`, scale `(1, 1)`), so `scale`/`origin` drop out.
+/// The computed profile title and axis labels remain a separate concern.
 pub fn free_line_profile(
     width: u32,
     height: u32,
@@ -1736,16 +1742,25 @@ pub fn free_line_profile(
     let aligned =
         (sr.trunc() as i64) == (er.trunc() as i64) || (sc.trunc() as i64) == (ec.trunc() as i64);
     if !aligned {
-        // General case: bilinear band with silx's -0.5 corner shift on both ends.
-        return line_profile_band(
+        // General case: order start <= end (silx `core.py:467-470`: by column,
+        // then by row) so the profile and its coordinates both run left-to-right,
+        // then sample a bilinear band with silx's -0.5 corner shift on both ends.
+        let (mut a, mut b) = ((sc, sr), (ec, er));
+        if a.0 > b.0 || (a.0 == b.0 && a.1 > b.1) {
+            std::mem::swap(&mut a, &mut b);
+        }
+        let (_arc, values) = line_profile_band(
             width,
             height,
             data,
-            (sc - 0.5, sr - 0.5),
-            (ec - 0.5, er - 0.5),
+            (a.0 - 0.5, a.1 - 0.5),
+            (b.0 - 0.5, b.1 - 0.5),
             linewidth,
             method,
-        );
+        )?;
+        // silx coords = linspace(x0, x1, len) in X data coords (`core.py:560`).
+        let x = linspace_inclusive(a.0, b.0, values.len());
+        return Ok((x, values));
     }
 
     // Truncate to integer pixel indices and order start <= end per component.
@@ -1755,7 +1770,10 @@ pub fn free_line_profile(
         std::mem::swap(&mut s, &mut e);
     }
     let (w, h) = (width as usize, height as usize);
-    let profile = if s.0 == e.0 {
+    // silx coords = arange(len) + startCoord in the profiled axis' data coords
+    // (`core.py:540-550`): the start column for a row-aligned line, the start row
+    // for a column-aligned line.
+    let (profile, start_coord) = if s.0 == e.0 {
         // Row aligned: the band spans `roi_width` rows around the shared row and
         // the profile runs along the columns.
         let row_range = (
@@ -1763,7 +1781,10 @@ pub fn free_line_profile(
             (s.0 as f64 + 0.5 + 0.5 * roi_width).trunc() as i64,
         );
         let col_range = (s.1, e.1 + 1);
-        aligned_partial_profile(w, h, data, row_range, col_range, 0, method)
+        (
+            aligned_partial_profile(w, h, data, row_range, col_range, 0, method),
+            s.1,
+        )
     } else {
         // Column aligned.
         let row_range = (s.0, e.0 + 1);
@@ -1771,10 +1792,28 @@ pub fn free_line_profile(
             (s.1 as f64 + 0.5 - 0.5 * roi_width).trunc() as i64,
             (s.1 as f64 + 0.5 + 0.5 * roi_width).trunc() as i64,
         );
-        aligned_partial_profile(w, h, data, row_range, col_range, 1, method)
+        (
+            aligned_partial_profile(w, h, data, row_range, col_range, 1, method),
+            s.0,
+        )
     };
-    let x = (0..profile.len()).map(|i| i as f64).collect();
+    let x = (0..profile.len())
+        .map(|i| (start_coord + i as i64) as f64)
+        .collect();
     Ok((x, profile))
+}
+
+/// `numpy.linspace(start, stop, n, endpoint=True)`: `n` evenly spaced samples
+/// including both endpoints (`[start]` for `n == 1`, empty for `n == 0`).
+fn linspace_inclusive(start: f64, stop: f64, n: usize) -> Vec<f64> {
+    match n {
+        0 => Vec::new(),
+        1 => vec![start],
+        _ => {
+            let step = (stop - start) / (n - 1) as f64;
+            (0..n).map(|i| start + step * i as f64).collect()
+        }
+    }
 }
 
 /// Extract a 1D profile within a rectangle by reducing along an axis.
@@ -14888,17 +14927,19 @@ mod tests {
 
     #[test]
     fn free_line_profile_general_case_applies_the_minus_half_shift() {
-        // R2-2: a non-axis-aligned free line samples with silx's -0.5 corner
-        // shift, so free_line_profile == line_profile_band with both endpoints
-        // shifted by -0.5. 3x3 gradient value = row*3 + col.
+        // R2-2: a non-axis-aligned free line's *values* come from a bilinear band
+        // sampled with silx's -0.5 corner shift, so free_line_profile's values
+        // equal line_profile_band with both endpoints shifted by -0.5. 3x3
+        // gradient value = row*3 + col.
         let data = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
         // (col, row) endpoints. int(col): int(0.7)=0 != int(2.4)=2; int(row):
         // int(1.2)=1 != int(2.3)=2 -> general (bilinear) case. Both endpoints
         // stay in bounds after the -0.5 shift, so no sample is NaN.
         let start = (0.7, 1.2);
         let end = (2.4, 2.3);
-        let free = free_line_profile(3, 3, &data, start, end, 1, ProfileMethod::Mean).unwrap();
-        let shifted = line_profile_band(
+        let (free_x, free_y) =
+            free_line_profile(3, 3, &data, start, end, 1, ProfileMethod::Mean).unwrap();
+        let (_shift_x, shift_y) = line_profile_band(
             3,
             3,
             &data,
@@ -14908,10 +14949,30 @@ mod tests {
             ProfileMethod::Mean,
         )
         .unwrap();
-        assert_eq!(free, shifted);
-        // And it must differ from the un-shifted band (the old, 0.5px-off path).
-        let unshifted = line_profile_band(3, 3, &data, start, end, 1, ProfileMethod::Mean).unwrap();
-        assert_ne!(free.1, unshifted.1);
+        assert_eq!(free_y, shift_y);
+        // And the values must differ from the un-shifted band (the old 0.5px-off
+        // path).
+        let (_u_x, unshifted_y) =
+            line_profile_band(3, 3, &data, start, end, 1, ProfileMethod::Mean).unwrap();
+        assert_ne!(free_y, unshifted_y);
+        // R2-6: the position axis is silx's linspace(x0, x1, len) in X data
+        // coordinates (start.col .. end.col), not arc distance.
+        assert_eq!(free_x, linspace_inclusive(start.0, end.0, free_y.len()));
+        assert_eq!(free_x.first(), Some(&0.7));
+        assert_eq!(free_x.last(), Some(&2.4));
+    }
+
+    #[test]
+    fn free_line_profile_general_case_orders_endpoints_left_to_right() {
+        // R2-6: silx orders the endpoints by column so both the profile and its
+        // coordinates run left-to-right regardless of drag direction; the
+        // reversed drag yields the same (x, y) as the forward one.
+        let data = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
+        let forward =
+            free_line_profile(3, 3, &data, (0.7, 1.2), (2.4, 2.3), 1, ProfileMethod::Mean).unwrap();
+        let reversed =
+            free_line_profile(3, 3, &data, (2.4, 2.3), (0.7, 1.2), 1, ProfileMethod::Mean).unwrap();
+        assert_eq!(forward, reversed);
     }
 
     #[test]
@@ -14950,6 +15011,27 @@ mod tests {
         let (_, y) =
             free_line_profile(3, 3, &data, (0.0, 1.0), (4.0, 1.0), 1, ProfileMethod::Mean).unwrap();
         assert_eq!(y, vec![10.0, 11.0, 12.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn free_line_profile_aligned_coords_offset_by_the_start_pixel() {
+        // R2-6: silx's aligned coords are `arange(len) + startCoord` in the
+        // profiled axis' data coords, not a zero-based index. 4x4 ramp value =
+        // row*10 + col.
+        let data = [
+            0.0, 1.0, 2.0, 3.0, //
+            10.0, 11.0, 12.0, 13.0, //
+            20.0, 21.0, 22.0, 23.0, //
+            30.0, 31.0, 32.0, 33.0,
+        ];
+        // Row-aligned, cols 1..3 on row 2 -> coords start at the start column (1).
+        let (rx, _) =
+            free_line_profile(4, 4, &data, (1.0, 2.0), (3.0, 2.0), 1, ProfileMethod::Mean).unwrap();
+        assert_eq!(rx, vec![1.0, 2.0, 3.0]);
+        // Column-aligned, rows 1..3 on col 2 -> coords start at the start row (1).
+        let (cx, _) =
+            free_line_profile(4, 4, &data, (2.0, 1.0), (2.0, 3.0), 1, ProfileMethod::Mean).unwrap();
+        assert_eq!(cx, vec![1.0, 2.0, 3.0]);
     }
 
     #[test]

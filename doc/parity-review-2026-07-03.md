@@ -513,6 +513,35 @@ Impact: switching the Profile3D toolbar to 2D silently reverts to a 1-px mean pr
 
 ### R2-6: Profile window plots value-vs-distance; silx plots against the projected plot axis with computed title/labels
 
+**PARTIALLY FIXED (Round 2 profile-subsystem cluster) — x-coordinate half:**
+`free_line_profile` (`high_level.rs`) now returns silx's projected plot-axis
+coordinates (`core.py:529-563`) instead of arc distance: a row-aligned line runs
+over its column coords (`arange + startCol`), a column-aligned line over its row
+coords (`arange + startRow`), and a diagonal line over `linspace(x0, x1, len)` in
+X data coords — with endpoints ordered left-to-right (silx `core.py:467-470`) so
+the profile reads the same regardless of drag direction. siplot's identity image
+geometry (origin `(0,0)`, scale `(1,1)`) collapses silx's `arange*scale+origin` to
+these. This closes the cited numeric divergence (a `(0,0)→(3,4)` diagonal now
+reads its X-span `0..3`, not distance `0..5`). Tests:
+`free_line_profile_general_case_applies_the_minus_half_shift` (x = linspace),
+`free_line_profile_general_case_orders_endpoints_left_to_right`,
+`free_line_profile_aligned_coords_offset_by_the_start_pixel`.
+
+**UNFIXED — title/labels half (sign-off batch):** silx also sets a computed
+window title (`profileName`, e.g. `"{ylabel} = {y0:g}; {xlabel} = [{x0:g},
+{x1:g}]"`, plus `"; width = %d"`) and relabels the profile axes from the source
+plot (`core.py:535-563`, `rois.py:313-323`). Porting this needs (a) a distinct
+`profileName`/`xLabel` format per ROI type (line ×3 sub-cases, hrange, vrange,
+cross, rect) and (b) threading the *source plot's* x/y axis labels through the
+profile pipeline (`profiles_for_roi` → `update_profile`/`ProfileSource` → the two
+call sites in `high_level.rs:10977` ImageView and `:13083` StackView). This is a
+cross-boundary change large enough to be its own change, and it carries a semantic
+question — what siplot's ImageView exposes as `{xlabel}`/`{ylabel}` (its Plot2D
+labels are currently unset in the profile context). Deferred for sign-off.
+Also unported: the scatter profile's `distance_value_curve`
+(`scatter_viz.rs:631-642`) still uses arc distance (silx scatter picks
+`points[:,0]`/`points[:,1]` by dominant span, `rois.py:801-808`).
+
 Severity: Medium
 
 Rust: `src/widget/high_level.rs:1557` — `line_profile_band` returns `(distance_along_line, value)` pairs, plotted as-is; the scatter path plots `distance_value_curve` (`src/core/scatter_viz.rs:631-642`, whose doc claims it is "the form silx `ScatterProfileToolBar` shows"); `src/widget/profile_window.rs:196` — static title `"Profile"`, no axis labels.
