@@ -18,7 +18,7 @@ use crate::core::backend::{
     ShapeSpec, TriangleSpec,
 };
 use crate::core::calibration::Calibration;
-use crate::core::colormap::{AutoscaleMode, Colormap, Normalization};
+use crate::core::colormap::{AutoscaleMode, Colormap, ColormapName, Normalization};
 use crate::core::items::{Baseline, LineStyle, ScalarMask, Symbol};
 use crate::core::marker::{Marker, MarkerConstraint, MarkerKind};
 use crate::core::plot::{DataMargins, DataRange, GraphGrid, Plot, PlotId};
@@ -3470,7 +3470,10 @@ impl PlotWidget {
             backend,
             item_records: Vec::new(),
             data_bounds: DataBounds::default(),
-            default_colormap: Colormap::viridis(0.0, 1.0),
+            // silx's plot default colormap is gray with linear normalization
+            // (PlotWidget.setDefaultColormap(None), PlotWidget.py:3056-3062;
+            // silx.config.DEFAULT_COLORMAP_NAME = "gray", _config.py:58).
+            default_colormap: Colormap::new(ColormapName::Gray, 0.0, 1.0),
             auto_reset_zoom: true,
             interaction_mode: PlotInteractionMode::Zoom,
             active_item: None,
@@ -6825,6 +6828,10 @@ impl PlotWidget {
         self.backend.plot().grid.minor()
     }
 
+    /// The colormap [`Self::add_image_default`] / [`Self::try_add_image_default`]
+    /// apply (silx `PlotWidget.getDefaultColormap`). Defaults to gray with
+    /// linear normalization, silx's plot default (PlotWidget.py:3056-3062,
+    /// `DEFAULT_COLORMAP_NAME = "gray"` in _config.py:58).
     pub fn default_colormap(&self) -> &Colormap {
         &self.default_colormap
     }
