@@ -341,10 +341,9 @@ const VIS_CHANNEL_KEYS: [(&str, &str); 4] = [
 /// Wire a MEDM `dynamic attribute` visibility rule for the placements in
 /// `[start..]`: emit a `calc://` gate channel (field + ctor) and tag each of this
 /// widget's placements with the boolean that hides it when the rule is false. A
-/// widget with no rule (or whose expression the `calc://` address cannot carry)
-/// is left ungated.
+/// widget with no rule (`vis="static"` or no channel) is left ungated.
 fn apply_dynamic_visibility(b: &mut Builder, widget: &MedmWidget, options: &Options, start: usize) {
-    let Some(gate_addr) = visibility_gate_address(b, widget, options) else {
+    let Some(gate_addr) = visibility_gate_address(widget, options) else {
         return;
     };
     let id = b.index();
@@ -376,15 +375,14 @@ fn apply_dynamic_visibility(b: &mut Builder, widget: &MedmWidget, options: &Opti
 }
 
 /// The `calc://` gate address for a widget's `dynamic attribute` visibility rule,
-/// or `None` when it has no rule (`vis="static"` or no `vis`/`calc`), no channel
-/// to evaluate, or an expression the `calc://` query cannot carry. The channels
-/// A–D bind `chan`/`chanB`/`chanC`/`chanD`; the expression combines the `vis`
-/// mode with the optional `calc` field and is translated MEDM-CALC → `evalexpr`.
-fn visibility_gate_address(
-    b: &mut Builder,
-    widget: &MedmWidget,
-    options: &Options,
-) -> Option<String> {
+/// or `None` when it has no rule (`vis="static"` or no `vis`/`calc`) or no channel
+/// to evaluate. The channels A–D bind `chan`/`chanB`/`chanC`/`chanD`; the
+/// expression is the ORIGINAL MEDM CALC text (from the `vis` mode / `calc`
+/// field), carried under sidm's `dialect=medm` so the runtime evaluates it with
+/// the EPICS calc engine — MEDM's own grammar and double-typed semantics
+/// (`medm/utils.c` `calcVisibility` → `calcPerform`), not a lossy translation
+/// into `evalexpr` syntax.
+fn visibility_gate_address(widget: &MedmWidget, options: &Options) -> Option<String> {
     let da = widget.attributes.get("dynamic attribute")?;
     let vis = da.get("vis").map(String::as_str).unwrap_or("if not zero");
     let calc = da.get("calc").map(String::as_str).filter(|c| !c.is_empty());
@@ -402,20 +400,11 @@ fn visibility_gate_address(
         return None; // a visibility rule with no channel cannot be evaluated
     }
 
-    let expr = translate_calc_to_evalexpr(&medm_visibility_expr(vis, calc));
-    if expr.contains('&') {
-        // The `calc://` query splits on `&`, so an expression with logical/bitwise
-        // AND cannot be transported. Leave the widget always-visible and say so
-        // rather than emit a silently-wrong gate.
-        b.warnings.push(format!(
-            "line {}: dynamic visibility expr {expr:?} contains '&' (logical/bitwise \
-             AND) which a calc:// address cannot carry; left always-visible",
-            widget.line
-        ));
-        return None;
-    }
-
-    let mut addr = format!("calc://adl2sidm_vis_{}?expr={expr}", widget.line);
+    let expr = percent_encode_calc(&medm_visibility_expr(vis, calc));
+    let mut addr = format!(
+        "calc://adl2sidm_vis_{}?dialect=medm&expr={expr}",
+        widget.line
+    );
     let mut update = Vec::new();
     for (name, child) in &vars {
         let _ = write!(addr, "&{name}={child}");
@@ -444,38 +433,14 @@ fn medm_visibility_expr(vis: &str, calc: Option<&str>) -> String {
     }
 }
 
-/// Translate a MEDM CALC expression to `evalexpr` syntax. Only two operators
-/// differ: `#` (not-equal) → `!=`, and `=` (equal) → `==`. MEDM's `&&`, `||`,
-/// `!`, the relational operators, and arithmetic already match `evalexpr`, and
-/// the channel refs `A`–`D` are bound directly as `evalexpr` variables.
-fn translate_calc_to_evalexpr(medm: &str) -> String {
-    replace_standalone_eq(&medm.replace('#', "!="))
-}
-
-/// Replace MEDM's `=` (equality) with `evalexpr`'s `==`, leaving the compound
-/// operators `>=`, `<=`, `!=`, `==` untouched.
-fn replace_standalone_eq(s: &str) -> String {
-    let chars: Vec<char> = s.chars().collect();
-    let mut out = String::with_capacity(s.len());
-    let mut i = 0;
-    while i < chars.len() {
-        if chars[i] == '=' {
-            if chars.get(i + 1) == Some(&'=') {
-                out.push_str("=="); // already `==` — copy whole, skip the pair
-                i += 2;
-                continue;
-            }
-            if matches!(out.chars().last(), Some('>' | '<' | '!')) {
-                out.push('='); // part of `>=`, `<=`, `!=`
-            } else {
-                out.push_str("==");
-            }
-        } else {
-            out.push(chars[i]);
-        }
-        i += 1;
-    }
-    out
+/// Percent-encode a MEDM CALC expression for the `calc://` query: only `%`
+/// (the escape byte itself) and `&` (the query separator) need encoding — the
+/// two bytes the raw query cannot carry. sidm's MEDM dialect percent-decodes
+/// the `expr` value on the other end; everything else (`#`, `=`, `?`, `:`,
+/// parentheses) rides through the query untouched, keeping the emitted address
+/// readable as the original MEDM expression.
+fn percent_encode_calc(expr: &str) -> String {
+    expr.replace('%', "%25").replace('&', "%26")
 }
 
 /// `text` — a static label (a fixed string, no channel). Drawn with a plain
@@ -7155,10 +7120,12 @@ composite {
     #[test]
     fn dynamic_calc_rule_wraps_the_placement_in_a_visibility_gate() {
         let g = calc();
-        // vis="calc" calc="A=3" -> evalexpr "A==3", channel A bound to the rule's
-        // chan, carried in a calc:// gate address.
+        // vis="calc" calc="A=3" -> the ORIGINAL MEDM expression under
+        // dialect=medm (R1-34), channel A bound to the rule's chan, carried in
+        // a calc:// gate address.
         assert!(
-            g.source.contains("expr=A==3&A=ca://DEV:sample&update=A"),
+            g.source
+                .contains("dialect=medm&expr=A=3&A=ca://DEV:sample&update=A"),
             "gate calc:// address missing or wrong:\n{}",
             g.source
         );
@@ -7232,9 +7199,11 @@ composite {
     #[test]
     fn composite_dynamic_rule_gates_the_frame_not_its_child() {
         let g = calc();
-        // vis="if zero" with no calc -> "A == 0", channel A = the composite's chan.
+        // vis="if zero" with no calc -> MEDM "A=0", channel A = the composite's
+        // chan.
         assert!(
-            g.source.contains("expr=A==0&A=ca://DEV:hide&update=A"),
+            g.source
+                .contains("dialect=medm&expr=A=0&A=ca://DEV:hide&update=A"),
             "composite gate address missing or wrong:\n{}",
             g.source
         );
@@ -7262,14 +7231,21 @@ composite {
     }
 
     #[test]
-    fn medm_calc_translates_to_evalexpr_operators() {
-        // `#` -> `!=`, standalone `=` -> `==`; the compound operators are kept.
-        assert_eq!(translate_calc_to_evalexpr("A=3"), "A==3");
-        assert_eq!(translate_calc_to_evalexpr("A#0"), "A!=0");
-        assert_eq!(translate_calc_to_evalexpr("A>=2"), "A>=2");
-        assert_eq!(translate_calc_to_evalexpr("A<=2"), "A<=2");
-        assert_eq!(translate_calc_to_evalexpr("A==3"), "A==3");
-        assert_eq!(translate_calc_to_evalexpr("A>1||B<2"), "A>1||B<2");
+    fn medm_calc_is_carried_verbatim_with_only_percent_and_amp_encoded() {
+        // The MEDM expression is NOT translated (dialect=medm evaluates the
+        // original grammar); only `%` and `&` — the bytes the calc:// query
+        // cannot carry — are percent-encoded for transport.
+        assert_eq!(percent_encode_calc("A=3"), "A=3");
+        assert_eq!(percent_encode_calc("A#0"), "A#0");
+        assert_eq!(
+            percent_encode_calc("A>2?SQRT(B):MIN(A,B)"),
+            "A>2?SQRT(B):MIN(A,B)"
+        );
+        assert_eq!(percent_encode_calc("A&&B"), "A%26%26B");
+        assert_eq!(percent_encode_calc("A&B"), "A%26B");
+        // `%` encodes first so an expression's own `%` never collides with the
+        // escape byte.
+        assert_eq!(percent_encode_calc("A%2&B"), "A%252%26B");
     }
 
     #[test]
@@ -7286,7 +7262,7 @@ composite {
     }
 
     #[test]
-    fn dynamic_visibility_with_logical_and_is_left_visible_with_a_warning() {
+    fn dynamic_visibility_with_logical_and_is_gated_via_percent_encoding() {
         let adl = r#"
 "color map" {
 	colors {
@@ -7312,12 +7288,17 @@ rectangle {
 }
 "#;
         let g = generate(&parse(adl), &Options::default());
-        // `A&&B` has a `&`, which a calc:// query splits on -> no gate, warned, and
-        // the rectangle is left always-visible (still emitted).
-        assert!(!g.source.contains("calc://adl2sidm_vis_"), "{}", g.source);
-        assert!(!g.source.contains("if gate"), "{}", g.source);
+        // `A&&B` transports as `A%26%26B` (R1-34) — previously this bailed out
+        // with a "contains '&'" warning and left the rectangle always-visible.
         assert!(
-            g.warnings.iter().any(|w| w.contains("contains '&'")),
+            g.source
+                .contains("dialect=medm&expr=A%26%26B&A=ca://X&B=ca://Y&update=A,B"),
+            "{}",
+            g.source
+        );
+        assert!(g.source.contains("if gate"), "{}", g.source);
+        assert!(
+            !g.warnings.iter().any(|w| w.contains("contains '&'")),
             "{:?}",
             g.warnings
         );
