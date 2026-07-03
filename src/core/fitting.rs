@@ -1779,14 +1779,25 @@ fn convolve_valid(y: &[f64], kernel: &[f64]) -> Vec<f64> {
 
 /// Shared step-edge seed used by [`estimate_stepup`] / [`estimate_stepdown`].
 ///
-/// silx convolves `y` with an edge-detecting kernel, then takes the dominant
-/// peak of that derivative as the step centre and width; the height is the data
-/// amplitude `max(y) - min(y)`. The derivative is *not* rescaled (silx's
-/// `y_deriv *= max(y)/max(y_deriv)` is a uniform positive scale that leaves the
-/// argmax and half-maximum crossings — hence centre and fwhm — unchanged).
-/// Multi-step search is out of scope: the single dominant edge is used, matching
-/// the peak estimators. The appended `background = min(y)`.
-fn estimate_step(x: &[f64], y: &[f64], kernel: &[f64]) -> Option<Vec<f64>> {
+/// silx convolves `y` with an edge-detecting kernel, rescales the derivative
+/// so its peak has the data's amplitude (`y_deriv *= max(y) / max(y_deriv)`
+/// when `max(y_deriv) > 0`, fittheories.py:1133-1134 / :1001-1002), then takes
+/// the dominant peak of that derivative as the step centre and width. The
+/// height rule differs per variant, and `use_deriv_height` selects it:
+///
+/// - `estimate_stepup` (fittheories.py:1150-1157) replaces the height with the
+///   fitted derivative-peak height whenever it exceeds the data amplitude
+///   `max(y) - min(y)` — after the rescale that fitted height is ≈ `max(y)`,
+///   which wins whenever `min(y) > 0`.
+/// - `estimate_stepdown` (fittheories.py:1019-1026) always keeps the data
+///   amplitude (its largest-peak loop writes `data_amplitude` back even when
+///   a larger derivative peak is found).
+///
+/// Multi-step search is out of scope: the single dominant edge is used,
+/// matching the peak estimators (Rust's [`estimate_height_position_fwhm`] is
+/// single-peak, so silx's largest-peak loop reduces to this one comparison).
+/// The appended `background = min(y)`.
+fn estimate_step(x: &[f64], y: &[f64], kernel: &[f64], use_deriv_height: bool) -> Option<Vec<f64>> {
     if x.len() != y.len() || x.len() < 3 {
         return None;
     }
@@ -1795,17 +1806,39 @@ fn estimate_step(x: &[f64], y: &[f64], kernel: &[f64]) -> Option<Vec<f64>> {
     let data_amplitude = max_y - bg;
 
     let cutoff = kernel.len() / 2;
-    let y_deriv = convolve_valid(y, kernel);
-    let (center, fwhm) = if y_deriv.len() >= 3 && x.len() > 2 * cutoff {
+    let mut y_deriv = convolve_valid(y, kernel);
+    // silx: make the derivative's peak have the same amplitude as the step
+    // (fittheories.py:1133-1134).
+    let max_deriv = y_deriv.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    if max_deriv > 0.0 {
+        let scale = max_y / max_deriv;
+        for v in &mut y_deriv {
+            *v *= scale;
+        }
+    }
+    let (height, center, fwhm) = if y_deriv.len() >= 3 && x.len() > 2 * cutoff {
         let x_slice = &x[cutoff..x.len() - cutoff];
         match estimate_height_position_fwhm(x_slice, &y_deriv) {
-            Some((_h, c, f, _b)) => (c, f),
-            None => step_fallback(x),
+            Some((h, c, f, _b)) => {
+                // Step-up only: the fitted derivative-peak height wins when it
+                // exceeds the data amplitude (fittheories.py:1150-1157).
+                let height = if use_deriv_height && h > data_amplitude {
+                    h
+                } else {
+                    data_amplitude
+                };
+                (height, c, f)
+            }
+            None => {
+                let (c, f) = step_fallback(x);
+                (data_amplitude, c, f)
+            }
         }
     } else {
-        step_fallback(x)
+        let (c, f) = step_fallback(x);
+        (data_amplitude, c, f)
     };
-    Some(vec![data_amplitude, center, fwhm, bg])
+    Some(vec![height, center, fwhm, bg])
 }
 
 /// silx no-peak fallback: centre at the middle of `x`, `fwhm = FwhmPoints * dx`
@@ -1818,22 +1851,28 @@ fn step_fallback(x: &[f64]) -> (f64, f64) {
 
 /// Seed for [`stepup_model`]: `[height, centroid, fwhm, background]`.
 ///
-/// Mirrors silx `estimate_stepup` (edge kernel `[0.25, 0.75, 0, -0.75, -0.25]`).
+/// Mirrors silx `estimate_stepup` (edge kernel `[0.25, 0.75, 0, -0.75, -0.25]`;
+/// the seeded height is the fitted derivative-peak height — ≈ `max(y)` after
+/// the rescale — whenever that exceeds `max(y) - min(y)`,
+/// fittheories.py:1150-1157).
 pub fn estimate_stepup(x: &[f64], y: &[f64]) -> Option<Vec<f64>> {
-    estimate_step(x, y, &[0.25, 0.75, 0.0, -0.75, -0.25])
+    estimate_step(x, y, &[0.25, 0.75, 0.0, -0.75, -0.25], true)
 }
 
 /// Seed for [`stepdown_model`]: `[height, centroid, fwhm, background]`.
 ///
-/// Mirrors silx `estimate_stepdown` (edge kernel `[-0.25, -0.75, 0, 0.75, 0.25]`).
+/// Mirrors silx `estimate_stepdown` (edge kernel `[-0.25, -0.75, 0, 0.75,
+/// 0.25]`; the seeded height is always the data amplitude `max(y) - min(y)`,
+/// fittheories.py:1019-1026).
 pub fn estimate_stepdown(x: &[f64], y: &[f64]) -> Option<Vec<f64>> {
-    estimate_step(x, y, &[-0.25, -0.75, 0.0, 0.75, 0.25])
+    estimate_step(x, y, &[-0.25, -0.75, 0.0, 0.75, 0.25], false)
 }
 
 /// Seed for [`atan_stepup_model`]: `[height, position, width, background]`.
 ///
-/// silx uses `estimate_stepup` for the arctan step (the same edge detection;
-/// the step fwhm seeds the arctan `width`).
+/// silx uses `estimate_stepup` for the arctan step (fittheories.py:1466 — the
+/// same edge detection and height rule; the step fwhm seeds the arctan
+/// `width`).
 pub fn estimate_atan_stepup(x: &[f64], y: &[f64]) -> Option<Vec<f64>> {
     estimate_stepup(x, y)
 }
@@ -3940,12 +3979,37 @@ mod tests {
 
     #[test]
     fn estimate_stepup_recovers_center_height_bg() {
+        // silx estimate_stepup (fittheories.py:1150-1157): on a positive
+        // baseline (min(y) = 3 > 0) the seeded height is the rescaled
+        // derivative-peak height ≈ max(y) = 11, not the amplitude
+        // max - min = 8 (which estimate_stepdown keeps).
         let xs = linspace(0.0, 100.0, 101);
         let ys = stepup_model(&xs, &[8.0, 40.0, 6.0, 3.0]);
         let s = estimate_stepup(&xs, &ys).unwrap();
-        assert!((s[0] - 8.0).abs() < 0.5, "height seed {}", s[0]);
+        assert!((s[0] - 11.0).abs() < 0.5, "height seed {}", s[0]);
         assert!((s[1] - 40.0).abs() < 3.0, "center seed {}", s[1]);
         assert!((s[3] - 3.0).abs() < 0.5, "bg seed {}", s[3]);
+    }
+
+    #[test]
+    fn estimate_stepup_zero_baseline_height_is_the_amplitude() {
+        // Boundary: with min(y) = 0 the rescaled derivative peak ≈ max(y)
+        // = amplitude, so the height seed stays ≈ 8 either way.
+        let xs = linspace(0.0, 100.0, 101);
+        let ys = stepup_model(&xs, &[8.0, 40.0, 6.0, 0.0]);
+        let s = estimate_stepup(&xs, &ys).unwrap();
+        assert!((s[0] - 8.0).abs() < 0.5, "height seed {}", s[0]);
+    }
+
+    #[test]
+    fn estimate_atan_stepup_inherits_the_stepup_height_rule() {
+        // silx's Atan theory estimates via estimate_stepup
+        // (fittheories.py:1466), so it seeds ≈ max(y) on a positive baseline
+        // too.
+        let xs = linspace(0.0, 100.0, 101);
+        let ys = stepup_model(&xs, &[8.0, 40.0, 6.0, 3.0]);
+        let s = estimate_atan_stepup(&xs, &ys).unwrap();
+        assert!((s[0] - 11.0).abs() < 0.5, "height seed {}", s[0]);
     }
 
     #[test]
