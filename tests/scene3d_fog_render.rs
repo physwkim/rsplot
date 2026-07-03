@@ -68,7 +68,7 @@ fn linear_fog_fades_far_geometry_toward_background() {
         shininess: 0.0,
     };
     let fogged =
-        snapshot_scene3d_with(&rs, 7, &cam, Color32::BLACK, SIZE, shading).expect("snapshot");
+        snapshot_scene3d_with(&rs, 7, &cam, Color32::BLACK, SIZE, shading, None).expect("snapshot");
     let (r1, g1, b1) = centre_pixel(&fogged);
     assert!(
         r1 < r0 / 2,
@@ -110,7 +110,7 @@ fn specular_term_activates_with_shininess() {
         shininess: 32.0,
     };
     let shiny =
-        snapshot_scene3d_with(&rs, 8, &cam, Color32::BLACK, SIZE, shading).expect("snapshot");
+        snapshot_scene3d_with(&rs, 8, &cam, Color32::BLACK, SIZE, shading, None).expect("snapshot");
     let (r1, g1, b1) = centre_pixel(&shiny);
     assert!(
         r1 > 200 && g1 > 200 && b1 > 200,

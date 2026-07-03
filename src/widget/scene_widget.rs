@@ -27,8 +27,8 @@ use crate::core::scene3d::mat4::Vec3;
 use crate::core::scene3d::pick::{picking_segment, segment_triangles_intersection};
 use crate::core::scene3d::plane::segment_plane_intersect;
 use crate::render::gpu_scene3d::{
-    Scene3dFog, Scene3dGeometry, Scene3dId, Scene3dShading, install_scene3d, paint_scene3d_with,
-    set_scene3d, snapshot_scene3d_with,
+    OVERVIEW_SIZE_PX, PointMarker, Scene3dFog, Scene3dGeometry, Scene3dId, Scene3dShading,
+    install_scene3d, paint_scene3d_with, set_scene3d, snapshot_scene3d_with,
 };
 
 /// Default scene background: silx `Plot3DWidget` clears to `(0.2, 0.2, 0.2, 1.0)`
@@ -44,6 +44,11 @@ const DEFAULT_TEXT_COLOR: Color32 = Color32::WHITE;
 /// Font size of the axes labels: silx `LabelledAxes` uses `Font(size=10)`
 /// (`scene/axes.py:48`).
 const AXES_FONT_SIZE: f32 = 10.0;
+/// XOR salt deriving the orientation indicator's companion [`Scene3dId`] from
+/// the widget's id (per-scene uniform buffers force the overview's slaved
+/// camera into a scene of its own). Collides with a user scene only if two
+/// widget ids differ by exactly this value.
+const OVERVIEW_ID_SALT: Scene3dId = 0x4F56_5256_4945_5750; // "OVRVIEWP"
 
 /// Fog mode of the scene — port of silx `Plot3DWidget.FogMode`
 /// (`Plot3DWidget.py:119-124`): either no fog or a linear fog fading the scene
@@ -77,6 +82,9 @@ pub struct SceneWidget {
     /// Phong shininess of the viewport light (silx `viewport.light.shininess`);
     /// 0 (no specular) for plain scenes, 32 in [`crate::ScalarFieldView`].
     light_shininess: f32,
+    /// Whether the corner orientation indicator (disc + RGB axes) is drawn;
+    /// on by default, as silx (`Plot3DWidget.py:165`).
+    orientation_indicator: bool,
     /// Data-item geometry (excludes the box/axes chrome, which is regenerated
     /// from `bounds` on every upload). Empty until [`SceneWidget::set_geometry`].
     content: Scene3dGeometry,
@@ -118,11 +126,15 @@ impl SceneWidget {
             background: DEFAULT_BACKGROUND,
             fog_mode: FogMode::None,
             light_shininess: 0.0,
+            orientation_indicator: true,
             content: Scene3dGeometry::new(),
             orbit: None,
             pan: None,
         };
         widget.upload(render_state);
+        // Upload the orientation indicator's companion scene once: its
+        // geometry is static, only its per-frame camera follows the widget's.
+        set_scene3d(render_state, widget.overview_id(), &overview_geometry());
         widget
     }
 
@@ -227,6 +239,25 @@ impl SceneWidget {
                 .then(|| Scene3dFog::linear(&self.camera, self.bounds, self.background)),
             shininess: self.light_shininess,
         }
+    }
+
+    /// Set whether to display the orientation indicator — the half-transparent
+    /// disc with the RGB axes in the top-right corner, its camera slaved to the
+    /// scene's. Port of silx `Plot3DWidget.setOrientationIndicatorVisible`
+    /// (`Plot3DWidget.py:325-336`); on by default (`:165`).
+    pub fn set_orientation_indicator_visible(&mut self, visible: bool) {
+        self.orientation_indicator = visible;
+    }
+
+    /// Whether the orientation indicator is displayed (silx
+    /// `Plot3DWidget.isOrientationIndicatorVisible`, `Plot3DWidget.py:320-323`).
+    pub fn is_orientation_indicator_visible(&self) -> bool {
+        self.orientation_indicator
+    }
+
+    /// The companion scene id holding the orientation indicator's geometry.
+    fn overview_id(&self) -> Scene3dId {
+        self.id ^ OVERVIEW_ID_SALT
     }
 
     /// The scene's centre of bounds (centre of rotation for orbit/pan).
@@ -472,6 +503,7 @@ impl SceneWidget {
             &self.camera,
             self.background,
             self.shading(),
+            self.orientation_indicator.then(|| self.overview_id()),
         );
         self.draw_axes_labels(ui, rect);
         response
@@ -490,6 +522,7 @@ impl SceneWidget {
             self.background,
             size_px,
             self.shading(),
+            self.orientation_indicator.then(|| self.overview_id()),
         )
     }
 
@@ -657,6 +690,28 @@ pub struct ScenePick {
     pub ndc_depth: f32,
     /// Which channel was hit.
     pub kind: ScenePickKind,
+}
+
+/// The orientation indicator's scene — port of silx `_OverviewViewport.__init__`
+/// (`Plot3DWidget.py:59-77`): a half-transparent white disc backdrop
+/// (`ColorPoints(0, 0, 0, color=(1., 1., 1., 0.5), size=100)` with the `'o'`
+/// marker, added first inside a depth-disabled group) and the RGB unit axes
+/// (`primitives.Axes()`, `primitives.py:842-870`: unit lines from the origin
+/// along +x red, +y green, +z blue). silx scales the whole scene by
+/// `transforms.Scale(2.5)` (`Plot3DWidget.py:64`); the scale is baked into the
+/// axis endpoints here (the screen-sized disc sprite is unaffected by it).
+fn overview_geometry() -> Scene3dGeometry {
+    let mut g = Scene3dGeometry::new();
+    g.add_point(
+        [0.0; 3],
+        Color32::from_rgba_unmultiplied(255, 255, 255, 128),
+        OVERVIEW_SIZE_PX as f32,
+        PointMarker::Circle,
+    );
+    g.add_line([0.0; 3], [2.5, 0.0, 0.0], Color32::from_rgb(255, 0, 0));
+    g.add_line([0.0; 3], [0.0, 2.5, 0.0], Color32::from_rgb(0, 255, 0));
+    g.add_line([0.0; 3], [0.0, 0.0, 2.5], Color32::from_rgb(0, 0, 255));
+    g
 }
 
 /// The seven predefined viewpoints in silx's menu order, each with its silx menu

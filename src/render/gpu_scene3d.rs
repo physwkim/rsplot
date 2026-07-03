@@ -1415,6 +1415,101 @@ impl Scene3dGpu {
             rp.draw(0..6, 0..self.point_count);
         }
     }
+
+    /// Encode the orientation indicator (`self` is the companion overview
+    /// scene: disc point sprite + RGB axis lines) into the
+    /// [`OVERVIEW_SIZE_PX`]² viewport at `origin` (top-left corner, framebuffer
+    /// pixels) of an already-rendered target — silx `_OverviewViewport`
+    /// (`Plot3DWidget.py:51-93`), which draws its scene into a second viewport
+    /// over the main one.
+    ///
+    /// Two sub-passes reproduce silx's depth handling: the disc backdrop is a
+    /// `GroupNoDepth(mask=True, notest=True)` (`Plot3DWidget.py:66-73`), i.e.
+    /// it neither tests nor writes depth, so the axes always draw over it.
+    /// Our point pipeline has depth fixed on, so instead the disc is drawn in
+    /// its own pass and the depth buffer is re-cleared before the axes pass —
+    /// same result: axes on top of the disc, disc on top of the main scene.
+    fn encode_overview(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        pipeline: &Scene3dPipeline,
+        color_view: &wgpu::TextureView,
+        depth_view: &wgpu::TextureView,
+        origin: [u32; 2],
+    ) {
+        // silx `_OverviewViewport` has `background=None`: the main image is
+        // kept (color LoadOp::Load), only depth is cleared.
+        fn begin_overview_pass<'e>(
+            encoder: &'e mut wgpu::CommandEncoder,
+            label: &'static str,
+            color_view: &wgpu::TextureView,
+            depth_view: &wgpu::TextureView,
+            origin: [u32; 2],
+        ) -> wgpu::RenderPass<'e> {
+            let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some(label),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: color_view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            rp.set_viewport(
+                origin[0] as f32,
+                origin[1] as f32,
+                OVERVIEW_SIZE_PX as f32,
+                OVERVIEW_SIZE_PX as f32,
+                0.0,
+                1.0,
+            );
+            rp.set_scissor_rect(origin[0], origin[1], OVERVIEW_SIZE_PX, OVERVIEW_SIZE_PX);
+            rp
+        }
+        // Pass 1: the half-transparent disc backdrop (point channel).
+        if let (Some(buf), true) = (&self.point_vbuf, self.point_count > 0) {
+            let mut rp = begin_overview_pass(
+                encoder,
+                "siplot scene3d overview disc pass",
+                color_view,
+                depth_view,
+                origin,
+            );
+            rp.set_pipeline(&pipeline.point_pipeline);
+            rp.set_bind_group(0, &self.point_bind_group, &[]);
+            rp.set_vertex_buffer(0, buf.slice(..));
+            rp.draw(0..6, 0..self.point_count);
+        }
+        // Pass 2: the RGB axes (line channel), depth re-cleared so they draw
+        // fully over the disc.
+        if let (Some(buf), true) = (&self.line_vbuf, self.line_count > 0) {
+            let mut rp = begin_overview_pass(
+                encoder,
+                "siplot scene3d overview axes pass",
+                color_view,
+                depth_view,
+                origin,
+            );
+            rp.set_pipeline(&pipeline.line_pipeline);
+            rp.set_bind_group(0, &self.scene_bind_group, &[]);
+            rp.set_vertex_buffer(0, buf.slice(..));
+            rp.draw(0..self.line_count, 0..1);
+        }
+    }
 }
 
 /// The geometric (flat) face normal of triangle `a, b, c`: the normalized cross
@@ -1675,7 +1770,7 @@ impl Scene3dResources {
 
     /// Size the offscreen target, write the MVP uniform, and encode the
     /// depth-tested offscreen pass for `frame.id` (creating per-scene state if
-    /// needed).
+    /// needed), followed by the orientation-indicator pass when requested.
     fn prepare_scene(
         &mut self,
         device: &wgpu::Device,
@@ -1684,15 +1779,21 @@ impl Scene3dResources {
         frame: &Scene3dFrame,
     ) {
         let Self { pipeline, scenes } = self;
-        let scene = scenes
+        scenes
             .entry(frame.id)
-            .or_insert_with(|| Scene3dGpu::new(device, pipeline));
-        scene.ensure_offscreen(device, pipeline, frame.size_px);
+            .or_insert_with(|| Scene3dGpu::new(device, pipeline))
+            .ensure_offscreen(device, pipeline, frame.size_px);
+        // Re-borrow shared so the overview scene can be read alongside.
+        let scene = &scenes[&frame.id];
         frame.write_uniforms(queue, scene);
         if let (Some(color_view), Some(depth_view)) =
             (scene.color_view.as_ref(), scene.depth_view.as_ref())
         {
             scene.encode_offscreen(encoder, pipeline, color_view, depth_view, frame.background);
+            if let Some((ov, ov_scene, origin)) = overview_pass(scenes, frame) {
+                ov.write_uniforms(queue, ov_scene);
+                ov_scene.encode_overview(encoder, pipeline, color_view, depth_view, origin);
+            }
         }
     }
 
@@ -1759,6 +1860,12 @@ impl Scene3dResources {
             &depth_view,
             frame.background,
         );
+        // The orientation indicator is part of the rendered image, so the
+        // snapshot draws it too (same pass as `prepare_scene`).
+        if let Some((ov, ov_scene, origin)) = overview_pass(scenes, frame) {
+            ov.write_uniforms(queue, ov_scene);
+            ov_scene.encode_overview(&mut encoder, pipeline, &color_view, &depth_view, origin);
+        }
 
         // Copy the target into a readback buffer with a padded row stride.
         let bpr = padded_bytes_per_row(w);
@@ -1801,6 +1908,25 @@ impl Scene3dResources {
         buffer.unmap();
         Some(rgba)
     }
+}
+
+/// Resolve `frame`'s orientation-indicator request into a drawable pass: the
+/// slaved-camera frame, the uploaded companion scene, and the viewport origin.
+/// `None` when no indicator was requested, its scene has no geometry yet, or
+/// the target is smaller than the indicator (silx pins the overview viewport
+/// at `origin = (width − 100, height − 100)` in GL bottom-left coordinates,
+/// `Plot3DWidget.py:387-388` — the top-right corner, which in wgpu's top-left
+/// framebuffer coordinates is `(width − 100, 0)`).
+fn overview_pass<'s>(
+    scenes: &'s HashMap<Scene3dId, Scene3dGpu>,
+    frame: &Scene3dFrame,
+) -> Option<(Scene3dOverviewFrame, &'s Scene3dGpu, [u32; 2])> {
+    let ov = frame.overview?;
+    if frame.size_px[0] < OVERVIEW_SIZE_PX || frame.size_px[1] < OVERVIEW_SIZE_PX {
+        return None;
+    }
+    let ov_scene = scenes.get(&ov.id)?;
+    Some((ov, ov_scene, [frame.size_px[0] - OVERVIEW_SIZE_PX, 0]))
 }
 
 /// Install the 3D scene GPU resources into `render_state` if not already present.
@@ -1920,6 +2046,7 @@ fn build_frame(
     background: Color32,
     size_px: [u32; 2],
     shading: Scene3dShading,
+    overview: Option<Scene3dId>,
 ) -> Scene3dFrame {
     let mut cam = *camera;
     cam.set_size((size_px[0] as f32, size_px[1] as f32));
@@ -1947,6 +2074,7 @@ fn build_frame(
         ],
         fog_color: [fog.color[0], fog.color[1], fog.color[2], 0.0],
         shininess: shading.shininess,
+        overview: overview.map(|ov_id| build_overview_frame(ov_id, &cam)),
     }
 }
 
@@ -1962,11 +2090,25 @@ pub fn paint_scene3d(
     camera: &Camera,
     background: Color32,
 ) {
-    paint_scene3d_with(ui, rect, id, camera, background, Scene3dShading::default());
+    paint_scene3d_with(
+        ui,
+        rect,
+        id,
+        camera,
+        background,
+        Scene3dShading::default(),
+        None,
+    );
 }
 
 /// [`paint_scene3d`] with explicit per-frame [`Scene3dShading`] (fog +
-/// shininess) — the full silx viewport model.
+/// shininess) and an optional orientation indicator — the full silx viewport
+/// model. When `overview` is `Some(ov_id)`, the scene uploaded under `ov_id`
+/// (see [`SceneWidget`](crate::widget::scene_widget::SceneWidget)'s disc +
+/// RGB axes) is rendered as a second pass into the top-right
+/// [`OVERVIEW_SIZE_PX`]² corner with a camera slaved to `camera`'s
+/// orientation (silx `_OverviewViewport`, `Plot3DWidget.py:51-93`); skipped
+/// when the target is smaller than the indicator.
 pub fn paint_scene3d_with(
     ui: &mut egui::Ui,
     rect: egui::Rect,
@@ -1974,11 +2116,12 @@ pub fn paint_scene3d_with(
     camera: &Camera,
     background: Color32,
     shading: Scene3dShading,
+    overview: Option<Scene3dId>,
 ) {
     let ppp = ui.ctx().pixels_per_point();
     let w = (rect.width() * ppp).round().max(1.0) as u32;
     let h = (rect.height() * ppp).round().max(1.0) as u32;
-    let frame = build_frame(id, camera, background, [w, h], shading);
+    let frame = build_frame(id, camera, background, [w, h], shading, overview);
     ui.painter().add(egui_wgpu::Callback::new_paint_callback(
         rect,
         Scene3dCallback { frame },
@@ -2012,11 +2155,14 @@ pub fn snapshot_scene3d(
         background,
         size_px,
         Scene3dShading::default(),
+        None,
     )
 }
 
 /// [`snapshot_scene3d`] with explicit per-frame [`Scene3dShading`] (fog +
-/// shininess), so a snapshot matches a widget rendering with the same options.
+/// shininess) and an optional orientation indicator (see
+/// [`paint_scene3d_with`]), so a snapshot matches a widget rendering with the
+/// same options — the indicator is part of the rendered image.
 pub fn snapshot_scene3d_with(
     render_state: &RenderState,
     id: Scene3dId,
@@ -2024,9 +2170,10 @@ pub fn snapshot_scene3d_with(
     background: Color32,
     size_px: (u32, u32),
     shading: Scene3dShading,
+    overview: Option<Scene3dId>,
 ) -> Option<Vec<u8>> {
     let (w, h) = (size_px.0.max(1), size_px.1.max(1));
-    let frame = build_frame(id, camera, background, [w, h], shading);
+    let frame = build_frame(id, camera, background, [w, h], shading, overview);
     let renderer = render_state.renderer.read();
     let res: &Scene3dResources = renderer.callback_resources.get()?;
     res.snapshot_scene(&render_state.device, &render_state.queue, &frame)
@@ -2056,42 +2203,137 @@ struct Scene3dFrame {
     fog_color: [f32; 4],
     /// Phong shininess for lit meshes (0 = no specular).
     shininess: f32,
+    /// The orientation indicator's second pass (silx `_OverviewViewport`);
+    /// `None` when hidden.
+    overview: Option<Scene3dOverviewFrame>,
 }
 
 impl Scene3dFrame {
     /// Write this frame's camera + shading uniforms into `scene`'s param
-    /// buffers — the single owner of the uniform layout, shared by the
-    /// on-screen (`prepare_scene`) and snapshot paths so they cannot drift.
+    /// buffers — shared by the on-screen (`prepare_scene`) and snapshot paths
+    /// so they cannot drift.
     fn write_uniforms(&self, queue: &wgpu::Queue, scene: &Scene3dGpu) {
-        let params = Scene3dParams {
-            mvp: self.mvp,
-            fog_info: self.fog_info,
-            fog_color: self.fog_color,
-            view_row_z: self.view_row_z,
-        };
-        queue.write_buffer(&scene.params_buf, 0, bytemuck::bytes_of(&params));
-        let point_params = Scene3dPointParams {
-            mvp: self.mvp,
-            fog_info: self.fog_info,
-            fog_color: self.fog_color,
-            view_row_z: self.view_row_z,
-            viewport: [self.size_px[0] as f32, self.size_px[1] as f32],
-            _pad: [0.0, 0.0],
-        };
-        queue.write_buffer(
-            &scene.point_params_buf,
-            0,
-            bytemuck::bytes_of(&point_params),
+        write_scene_uniforms(
+            queue,
+            scene,
+            self.mvp,
+            self.view,
+            self.view_row_z,
+            self.fog_info,
+            self.fog_color,
+            self.shininess,
+            [self.size_px[0] as f32, self.size_px[1] as f32],
         );
-        let mesh_params = Scene3dMeshParams {
-            mvp: self.mvp,
-            normal_mat: self.view,
-            fog_info: self.fog_info,
-            fog_color: self.fog_color,
-            light: [self.shininess, 0.0, 0.0, 0.0],
-        };
-        queue.write_buffer(&scene.mesh_params_buf, 0, bytemuck::bytes_of(&mesh_params));
     }
+}
+
+/// The orientation indicator's per-frame camera state (silx
+/// `_OverviewViewport`, `Plot3DWidget.py:51-93`): the companion scene to draw
+/// and the slaved camera's matrices, stamped into that scene's uniforms before
+/// the corner-viewport pass.
+#[derive(Clone, Copy)]
+struct Scene3dOverviewFrame {
+    id: Scene3dId,
+    mvp: [[f32; 4]; 4],
+    view: [[f32; 4]; 4],
+    view_row_z: [f32; 4],
+}
+
+impl Scene3dOverviewFrame {
+    /// Stamp the overview camera into the companion scene's uniforms: no fog,
+    /// no specular, and the point-sprite viewport is the overview square (so
+    /// the size-[`OVERVIEW_SIZE_PX`] disc fills it).
+    fn write_uniforms(&self, queue: &wgpu::Queue, scene: &Scene3dGpu) {
+        write_scene_uniforms(
+            queue,
+            scene,
+            self.mvp,
+            self.view,
+            self.view_row_z,
+            [0.0; 4],
+            [0.0; 4],
+            0.0,
+            [OVERVIEW_SIZE_PX as f32, OVERVIEW_SIZE_PX as f32],
+        );
+    }
+}
+
+/// Side of the orientation indicator's square corner viewport in physical
+/// pixels — silx `_OverviewViewport._SIZE` (`Plot3DWidget.py:57`).
+pub const OVERVIEW_SIZE_PX: u32 = 100;
+
+/// Build the orientation indicator's per-frame state from the tracked main
+/// camera — silx `_OverviewViewport._cameraChanged` (`Plot3DWidget.py:80-93`):
+/// the overview camera shares the main camera's orientation (direction, up)
+/// but sits at `−12 · direction`, looking at the origin of the companion
+/// scene (the disc + RGB axes), in a square [`OVERVIEW_SIZE_PX`] viewport.
+fn build_overview_frame(id: Scene3dId, main_camera: &Camera) -> Scene3dOverviewFrame {
+    let direction = main_camera.extrinsic.direction();
+    let up = main_camera.extrinsic.up();
+    let camera = Camera::new(
+        30.0,
+        1.0,
+        100.0,
+        (OVERVIEW_SIZE_PX as f32, OVERVIEW_SIZE_PX as f32),
+        direction * -12.0,
+        direction,
+        up,
+    );
+    let view_mat = camera.extrinsic.matrix();
+    Scene3dOverviewFrame {
+        id,
+        mvp: camera.matrix().to_gpu_clip_cols(),
+        view: view_mat.to_gpu_cols(),
+        view_row_z: view_mat.rows[2],
+    }
+}
+
+/// Write one scene's camera + shading uniforms into its three param buffers —
+/// the single owner of the uniform layout, shared by the main frame and the
+/// orientation-indicator pass.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "flat uniform fields; grouping them would just mirror Scene3dFrame"
+)]
+fn write_scene_uniforms(
+    queue: &wgpu::Queue,
+    scene: &Scene3dGpu,
+    mvp: [[f32; 4]; 4],
+    view: [[f32; 4]; 4],
+    view_row_z: [f32; 4],
+    fog_info: [f32; 4],
+    fog_color: [f32; 4],
+    shininess: f32,
+    viewport: [f32; 2],
+) {
+    let params = Scene3dParams {
+        mvp,
+        fog_info,
+        fog_color,
+        view_row_z,
+    };
+    queue.write_buffer(&scene.params_buf, 0, bytemuck::bytes_of(&params));
+    let point_params = Scene3dPointParams {
+        mvp,
+        fog_info,
+        fog_color,
+        view_row_z,
+        viewport,
+        _pad: [0.0, 0.0],
+    };
+    queue.write_buffer(
+        &scene.point_params_buf,
+        0,
+        bytemuck::bytes_of(&point_params),
+    );
+    let mesh_params = Scene3dMeshParams {
+        mvp,
+        normal_mat: view,
+        fog_info,
+        fog_color,
+        light: [shininess, 0.0, 0.0, 0.0],
+    };
+    queue.write_buffer(&scene.mesh_params_buf, 0, bytemuck::bytes_of(&mesh_params));
 }
 
 /// Lightweight per-frame paint callback (the heavy GPU state lives in
@@ -2367,5 +2609,48 @@ mod tests {
         let far = quad.vertices[2];
         assert!((far[0] - (-1.0)).abs() < 1e-5 && (far[1] - 2.0).abs() < 1e-5);
         assert_eq!(quad.interpolation, ImageInterpolation::Linear);
+    }
+
+    #[test]
+    fn overview_frame_slaves_the_camera_orientation() {
+        // silx `_OverviewViewport._cameraChanged` (Plot3DWidget.py:80-93): the
+        // overview camera copies the tracked camera's direction and up, posed
+        // at −12·direction, with its own 30° fovy, near 1, far 100 projection
+        // over the 100×100 viewport (`Plot3DWidget.py:59-62`).
+        let direction = Vec3::new(1.0, 2.0, -2.0) * (1.0 / 3.0); // unit
+        let main = Camera::new(
+            45.0,
+            0.5,
+            2000.0,
+            (800.0, 600.0),
+            Vec3::new(5.0, 4.0, 3.0),
+            direction,
+            Vec3::new(0.0, 1.0, 0.0),
+        );
+        let ov = build_overview_frame(7, &main);
+        assert_eq!(ov.id, 7);
+
+        // The frame's matrices are exactly those of the slaved camera: the
+        // main position and projection do not leak in.
+        let expected = Camera::new(
+            30.0,
+            1.0,
+            100.0,
+            (OVERVIEW_SIZE_PX as f32, OVERVIEW_SIZE_PX as f32),
+            main.extrinsic.direction() * -12.0,
+            main.extrinsic.direction(),
+            main.extrinsic.up(),
+        );
+        assert_eq!(ov.mvp, expected.matrix().to_gpu_clip_cols());
+        assert_eq!(ov.view, expected.extrinsic.matrix().to_gpu_cols());
+
+        // Semantics of that pose: the scene origin sits dead centre at
+        // camera-space depth 12, inside the [1, 100] frustum...
+        let origin_ndc = expected.matrix().transform_point(Vec3::ZERO, true);
+        assert!(origin_ndc.x.abs() < 1e-5 && origin_ndc.y.abs() < 1e-5);
+        assert!((-1.0..=1.0).contains(&origin_ndc.z));
+        // ...and the slaved up vector maps to screen-up (+y in NDC).
+        let up_ndc = expected.matrix().transform_point(main.extrinsic.up(), true);
+        assert!(up_ndc.y > 0.0 && up_ndc.x.abs() < 1e-5);
     }
 }
