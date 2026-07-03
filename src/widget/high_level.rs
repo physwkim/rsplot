@@ -8574,7 +8574,9 @@ impl CompareImages {
             height_b: 0,
             data_a: Vec::new(),
             data_b: Vec::new(),
-            colormap: Colormap::viridis(0.0, 1.0),
+            // Placeholder until `set_images` supplies one; silx's CompareImages
+            // starts from `Colormap()` = gray (R1-16 family default), not viridis.
+            colormap: Colormap::new(ColormapName::Gray, 0.0, 1.0),
             composite_handle: None,
             split: 0.5,
             mode: CompareMode::HalfHalf,

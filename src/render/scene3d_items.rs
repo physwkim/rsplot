@@ -102,7 +102,7 @@ impl Default for Scatter3D {
 }
 
 impl Scatter3D {
-    /// An empty scatter with silx defaults: the viridis colormap over `[0, 1]`,
+    /// An empty scatter with silx defaults: the gray colormap over `[0, 1]`,
     /// circle markers at [`DEFAULT_SCATTER3D_SIZE`].
     pub fn new() -> Self {
         Self {
@@ -110,7 +110,7 @@ impl Scatter3D {
             y: Vec::new(),
             z: Vec::new(),
             values: Vec::new(),
-            colormap: Colormap::new(ColormapName::Viridis, 0.0, 1.0),
+            colormap: Colormap::new(ColormapName::Gray, 0.0, 1.0),
             marker: PointMarker::Circle,
             size: DEFAULT_SCATTER3D_SIZE,
             transform: Item3DTransform::default(),
@@ -303,7 +303,7 @@ impl Default for Scatter2D {
 }
 
 impl Scatter2D {
-    /// An empty scatter with silx defaults: the viridis colormap over `[0, 1]`,
+    /// An empty scatter with silx defaults: the gray colormap over `[0, 1]`,
     /// circle markers at [`DEFAULT_SCATTER3D_SIZE`], POINTS visualization, flat
     /// (not height-map).
     pub fn new() -> Self {
@@ -311,7 +311,7 @@ impl Scatter2D {
             x: Vec::new(),
             y: Vec::new(),
             values: Vec::new(),
-            colormap: Colormap::new(ColormapName::Viridis, 0.0, 1.0),
+            colormap: Colormap::new(ColormapName::Gray, 0.0, 1.0),
             marker: PointMarker::Circle,
             size: DEFAULT_SCATTER3D_SIZE,
             line_width: DEFAULT_SCATTER2D_LINE_WIDTH,
@@ -819,7 +819,7 @@ impl Default for ColormapMesh3D {
 }
 
 impl ColormapMesh3D {
-    /// An empty colormap mesh with silx defaults: the viridis colormap over
+    /// An empty colormap mesh with silx defaults: the gray colormap over
     /// `[0, 1]`, `Triangles` mode.
     pub fn new() -> Self {
         Self {
@@ -828,7 +828,7 @@ impl ColormapMesh3D {
             normals: None,
             mode: MeshDrawMode::Triangles,
             indices: None,
-            colormap: Colormap::new(ColormapName::Viridis, 0.0, 1.0),
+            colormap: Colormap::new(ColormapName::Gray, 0.0, 1.0),
             transform: Item3DTransform::default(),
         }
     }
@@ -1493,14 +1493,14 @@ impl Default for ImageData3D {
 }
 
 impl ImageData3D {
-    /// An empty image with silx defaults: viridis over `[0, 1]`, origin `(0,0,0)`,
+    /// An empty image with silx defaults: gray over `[0, 1]`, origin `(0,0,0)`,
     /// unit pixel scale, nearest sampling.
     pub fn new() -> Self {
         Self {
             data: Vec::new(),
             width: 0,
             height: 0,
-            colormap: Colormap::new(ColormapName::Viridis, 0.0, 1.0),
+            colormap: Colormap::new(ColormapName::Gray, 0.0, 1.0),
             origin: [0.0, 0.0, 0.0],
             scale: [1.0, 1.0],
             interpolation: ImageInterpolation::Nearest,
@@ -1826,7 +1826,7 @@ impl Default for HeightMapData {
 }
 
 impl HeightMapData {
-    /// An empty height map with viridis over `[0, 1]`.
+    /// An empty height map with gray over `[0, 1]`.
     pub fn new() -> Self {
         Self {
             heights: Vec::new(),
@@ -1835,7 +1835,7 @@ impl HeightMapData {
             values: Vec::new(),
             v_width: 0,
             v_height: 0,
-            colormap: Colormap::new(ColormapName::Viridis, 0.0, 1.0),
+            colormap: Colormap::new(ColormapName::Gray, 0.0, 1.0),
             transform: Item3DTransform::default(),
         }
     }
@@ -2219,12 +2219,12 @@ impl Default for CutPlane {
 
 impl CutPlane {
     /// A hidden cut plane with silx defaults: normal `(0, 1, 0)` through the
-    /// origin, the viridis colormap over `[0, 1]`, linear interpolation, and a
+    /// origin, the gray colormap over `[0, 1]`, linear interpolation, and a
     /// visible white contour stroke.
     pub fn new() -> Self {
         Self {
             plane: Plane::new(Vec3::new(0.0, 0.0, 0.0), Vec3::new(0.0, 1.0, 0.0)),
-            colormap: Colormap::new(ColormapName::Viridis, 0.0, 1.0),
+            colormap: Colormap::new(ColormapName::Gray, 0.0, 1.0),
             interpolation: ImageInterpolation::Linear,
             resolution: DEFAULT_CUT_PLANE_RESOLUTION,
             visible: false,
