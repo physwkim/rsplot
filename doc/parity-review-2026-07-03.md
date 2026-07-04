@@ -898,6 +898,28 @@ Impact: every siplot plot renders a major grid before any user action; silx rend
 
 ### R2-19: Ruler disarm destroys the measurement; silx hides it and reshows it on re-arm
 
+**FIXED (tool-buttons cluster), structurally — ROI visibility is now the
+primitive silx actually has:** `ManagedRoi` gains `visible: bool` (default
+`true`) = silx `_RegionOfInterestBase.setVisible` (_roi_base.py:479-489),
+with a `PlotWidget::set_roi_visible` setter in the established `set_roi_*`
+family. A hidden ROI stays in the list but is neither drawn
+(`chrome::draw_rois` gate) nor grabbable/translatable
+(`interaction::roi_grab_at` gate — silx hides the backing items *and* their
+handles, :824). Ruler disarm now does `set_roi_visible(index, active)` in
+both directions (the silx `_callback` first line) and keeps `ruler_roi`;
+re-arm reshows the previous measurement; the misattributed "(silx deselect)"
+comment is gone. Because the hidden line now outlives disarm,
+`PlotWidget::remove_roi`/`clear_rois` keep `ruler_roi` consistent across
+list mutations (shift-down/clear — the index-based analog of silx's
+by-reference `_lastRoiCreated`, mirroring the `current_roi` fix-up in
+`Plot::remove_roi`). `visible` is transient in roi_io like `selected` (silx
+`toDict` omits both; doc notes added). Distinct, kept: ROI stats rows and
+the ROI tables list hidden ROIs (silx rows are registered by manager
+membership, not gated on `isVisible`). Tests: disarm keeps the hidden
+measurement + re-arm reshows it unchanged, tracking survives other-ROI
+removals / self-removal / clear, `roi_grab_at` skips hidden ROIs (body,
+handles, and all-hidden → None).
+
 Severity: Low
 
 Rust: `src/widget/high_level.rs:7313-7315` — disarm does `self.remove_roi(index)`; the doc comment (`:7300-7302`) attributes this to "(silx deselect)".

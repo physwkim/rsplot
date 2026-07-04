@@ -147,7 +147,7 @@ fn a_second_drag_replaces_the_ruler_line() {
 }
 
 #[test]
-fn disarming_removes_the_ruler_line_and_restores_the_mode() {
+fn disarming_hides_the_ruler_line_and_rearming_reshows_it() {
     let (app, mut harness) = harness();
     // The default mode is Zoom; arming saves it and must restore it on disarm.
     assert_eq!(app.borrow().interaction_mode(), PlotInteractionMode::Zoom);
@@ -155,18 +155,65 @@ fn disarming_removes_the_ruler_line_and_restores_the_mode() {
 
     drag(&mut harness, px(&app, 1.0, 1.0), px(&app, 4.0, 5.0));
     assert_eq!(app.borrow().rois().len(), 1);
+    let name = app.borrow().rois()[0].name.clone();
 
+    // silx RulerToolButton._callback: unchecking hides the last measurement
+    // (`_lastRoiCreated.setVisible(isChecked())`, RulerToolButton.py:118-122);
+    // it is NOT removed.
     app.borrow_mut().set_ruler_active(false);
     assert!(!app.borrow().ruler_active());
-    assert_eq!(app.borrow().ruler_roi(), None);
     assert_eq!(
         app.borrow().rois().len(),
-        0,
-        "disarming the ruler must remove the ruler line"
+        1,
+        "disarming must keep the measurement (hidden), not destroy it"
+    );
+    assert!(
+        !app.borrow().rois()[0].visible,
+        "the kept measurement must be hidden while disarmed"
+    );
+    assert_eq!(
+        app.borrow().ruler_roi(),
+        Some(0),
+        "the widget must keep tracking the hidden ruler line"
     );
     assert_eq!(
         app.borrow().interaction_mode(),
         PlotInteractionMode::Zoom,
         "disarming must restore the pre-ruler interaction mode"
     );
+
+    // Re-checking reshows the previous measurement, unchanged.
+    app.borrow_mut().set_ruler_active(true);
+    assert!(app.borrow().rois()[0].visible, "re-arming must reshow it");
+    assert_eq!(app.borrow().rois()[0].name, name);
+}
+
+#[test]
+fn ruler_tracking_survives_other_roi_removals() {
+    let (app, mut harness) = harness();
+    // An unrelated ROI sits at index 0, so the ruler line lands at index 1.
+    app.borrow_mut().add_roi(Roi::Rect {
+        x: (6.0, 8.0),
+        y: (6.0, 8.0),
+    });
+    app.borrow_mut().set_ruler_active(true);
+    drag(&mut harness, px(&app, 1.0, 1.0), px(&app, 4.0, 5.0));
+    assert_eq!(app.borrow().ruler_roi(), Some(1));
+
+    // Removing the ROI below shifts the ruler line down; the tracker follows
+    // (silx tracks _lastRoiCreated by reference, immune to list order).
+    app.borrow_mut().remove_roi(0);
+    assert_eq!(app.borrow().ruler_roi(), Some(0));
+    let roi = app.borrow().rois()[0].clone();
+    assert!(matches!(roi.roi, Roi::Line { .. }));
+
+    // Removing the ruler line itself clears the tracker; clearing all ROIs
+    // does too.
+    app.borrow_mut().remove_roi(0);
+    assert_eq!(app.borrow().ruler_roi(), None);
+
+    drag(&mut harness, px(&app, 0.0, 0.0), px(&app, 3.0, 0.0));
+    assert!(app.borrow().ruler_roi().is_some());
+    app.borrow_mut().clear_rois();
+    assert_eq!(app.borrow().ruler_roi(), None);
 }

@@ -1706,6 +1706,12 @@ pub fn roi_grab_at(
 ) -> Option<(usize, RoiGrab)> {
     let data = transform.pixel_to_data(cursor);
     for (i, managed) in rois.iter().enumerate().rev() {
+        // silx setVisible(False) hides the ROI's plot items and their handles
+        // (_roi_base.py:479-489, handle visibility at :824) — a hidden ROI is
+        // neither grabbable nor translatable.
+        if !managed.visible {
+            continue;
+        }
         let roi = &managed.roi;
         // ThreePointMode Arc: only the three control-point handles are grabbable
         // (not the polar handles). PolarMode and every other ROI use `edge_at`.
@@ -3439,6 +3445,38 @@ mod tests {
             roi_grab_at(&rois, &t, pos2(50.0, 50.0), 4.0),
             Some((1, RoiGrab::Translate))
         );
+    }
+
+    #[test]
+    fn roi_grab_at_skips_hidden_rois() {
+        let t = pick_transform();
+        // Same overlap as above, but the topmost rect is hidden (silx
+        // setVisible(False), _roi_base.py:479-489): neither its edges nor its
+        // body may grab, so the visible one underneath wins.
+        let mut rois = vec![
+            ManagedRoi::new(Roi::Rect {
+                x: (1.0, 9.0),
+                y: (1.0, 9.0),
+            }),
+            ManagedRoi::new(Roi::Rect {
+                x: (2.0, 8.0),
+                y: (2.0, 8.0),
+            }),
+        ];
+        rois[1].visible = false;
+        assert_eq!(
+            roi_grab_at(&rois, &t, pos2(50.0, 50.0), 4.0),
+            Some((0, RoiGrab::Translate))
+        );
+        // Near the hidden rect's left edge (data x=2 -> px 20): no edge grab.
+        assert_eq!(
+            roi_grab_at(&rois, &t, pos2(21.0, 50.0), 4.0),
+            Some((0, RoiGrab::Translate)),
+            "a hidden ROI's handles must not grab"
+        );
+        // Hide both: nothing grabs anywhere.
+        rois[0].visible = false;
+        assert_eq!(roi_grab_at(&rois, &t, pos2(50.0, 50.0), 4.0), None);
     }
 
     // --- Arc ThreePointMode vs PolarMode handle dispatch (rows 1180/1184) ---

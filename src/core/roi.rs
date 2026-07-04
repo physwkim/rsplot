@@ -1249,6 +1249,13 @@ pub struct ManagedRoi {
     pub gap_color: Option<Color32>,
     /// Whether the ROI's interior is filled (silx `setFill`, default `false`).
     pub fill: bool,
+    /// Whether the ROI is shown in the plot (silx
+    /// `_RegionOfInterestBase.setVisible`, `items/_roi_base.py:479-489`,
+    /// default `true`). A hidden ROI is neither drawn nor pickable/editable
+    /// (silx hides the backing plot items and their handles), but it stays in
+    /// the list — the ruler tool hides its measurement on disarm and reshows
+    /// it on re-arm.
+    pub visible: bool,
     /// Current handle-editing mode (silx `InteractionModeMixIn.__modeId`).
     /// Private so the invariant `interaction_mode ∈ roi.available_interaction_modes()`
     /// (or `None` for kinds without modes) holds by construction — read it with
@@ -1259,8 +1266,9 @@ pub struct ManagedRoi {
 
 impl ManagedRoi {
     /// Wrap `roi` with default metadata: no color override, empty name, not
-    /// selected, solid 1.0-width outline, no gap color, unfilled, and the ROI
-    /// kind's default interaction mode (silx defaults + `_initInteractionMode`).
+    /// selected, solid 1.0-width outline, no gap color, unfilled, visible, and
+    /// the ROI kind's default interaction mode (silx defaults +
+    /// `_initInteractionMode`).
     pub fn new(roi: Roi) -> Self {
         let interaction_mode = roi.default_interaction_mode();
         Self {
@@ -1272,6 +1280,7 @@ impl ManagedRoi {
             line_style: RoiLineStyle::default(),
             gap_color: None,
             fill: false,
+            visible: true,
             interaction_mode,
         }
     }

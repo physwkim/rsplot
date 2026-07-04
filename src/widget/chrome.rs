@@ -865,6 +865,11 @@ pub fn draw_rois(
     style: &Style,
 ) {
     for r in rois {
+        // silx setVisible(False) hides the ROI's backing plot items
+        // (_roi_base.py:479-489) — a hidden ROI is not drawn.
+        if !r.visible {
+            continue;
+        }
         let appearance = roi_appearance(r, default_color);
         draw_roi(painter, t, &r.roi, &appearance, style, r.interaction_mode());
     }

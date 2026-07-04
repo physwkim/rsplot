@@ -3677,7 +3677,9 @@ pub struct PlotWidget {
     /// as the line is (re)drawn.
     ruler_active: bool,
     /// Index of the live ruler line ROI in [`Plot::rois`], or `None` (no ruler
-    /// line drawn yet / ruler disarmed). One ruler line at a time — a new draw
+    /// line drawn yet). Survives disarm — the line is hidden, not removed
+    /// (silx `RulerToolButton._callback` `setVisible`), and reshown on re-arm.
+    /// One ruler line at a time — a new draw
     /// replaces the previous (silx single-measurement `RulerToolButton`).
     ruler_roi: Option<usize>,
     /// Interaction mode in effect before the ruler was armed, restored on disarm.
@@ -7701,6 +7703,8 @@ impl PlotWidget {
 
     pub fn clear_rois(&mut self) {
         self.backend.plot_mut().clear_rois();
+        // The ruler line (hidden or shown) is gone with everything else.
+        self.ruler_roi = None;
         self.events.push(PlotEvent::RoisCleared);
     }
 
@@ -7716,6 +7720,15 @@ impl PlotWidget {
         // silx emits sigRoiAboutToBeRemoved before the ROI leaves the list.
         self.events.push(PlotEvent::RoiAboutToBeRemoved { index });
         self.backend.plot_mut().remove_roi(index);
+        // Keep `ruler_roi` pointing at the same ROI across the removal (clear
+        // it when the ruler line itself is removed) — the index-based analog
+        // of silx tracking `_lastRoiCreated` by object reference; mirrors the
+        // current-ROI fix-up in `Plot::remove_roi`.
+        self.ruler_roi = match self.ruler_roi {
+            Some(r) if r == index => None,
+            Some(r) if r > index => Some(r - 1),
+            other => other,
+        };
     }
 
     /// Append a fully-specified [`ManagedRoi`] (geometry + appearance) and
@@ -7737,7 +7750,8 @@ impl PlotWidget {
     }
 
     /// The index of the live ruler line ROI in [`rois`](Self::rois), or `None`
-    /// when no ruler line has been drawn (or the ruler is disarmed).
+    /// when no ruler line has been drawn. The index survives disarm (the line
+    /// is hidden, not removed) so re-arming reshows the last measurement.
     pub fn ruler_roi(&self) -> Option<usize> {
         self.ruler_roi
     }
@@ -7749,8 +7763,11 @@ impl PlotWidget {
     /// remembering the prior mode; each completed drag draws a line ROI whose
     /// name is its measured length ([`RulerToolButton::distance_text`]), recomputed
     /// in [`show`](Self::show) — a new measurement replaces the previous ruler
-    /// line. Disarming removes the ruler line and restores the prior interaction
-    /// mode (silx deselect). A no-op if already in the requested state.
+    /// line. Disarming *hides* the ruler line and restores the prior interaction
+    /// mode; re-arming reshows the previous measurement (silx `_callback` starts
+    /// with `_lastRoiCreated.setVisible(isChecked())`,
+    /// `tools/RulerToolButton.py:118-122` — removal happens only when a new
+    /// measurement replaces it). A no-op if already in the requested state.
     ///
     /// [`RulerToolButton::distance_text`]: crate::widget::tool_buttons::RulerToolButton::distance_text
     pub fn set_ruler_active(&mut self, active: bool) {
@@ -7758,13 +7775,15 @@ impl PlotWidget {
             return;
         }
         self.ruler_active = active;
+        // silx: self._lastRoiCreated.setVisible(self.isChecked()) — both
+        // directions (RulerToolButton.py:120-122).
+        if let Some(index) = self.ruler_roi {
+            self.set_roi_visible(index, active);
+        }
         if active {
             self.ruler_prev_mode = Some(self.interaction_mode);
             self.set_interaction_mode(PlotInteractionMode::RoiCreate(RoiDrawKind::Line));
         } else {
-            if let Some(index) = self.ruler_roi.take() {
-                self.remove_roi(index);
-            }
             let restore = self
                 .ruler_prev_mode
                 .take()
@@ -7862,6 +7881,16 @@ impl PlotWidget {
     pub fn set_roi_fill(&mut self, index: usize, fill: bool) {
         if let Some(r) = self.backend.plot_mut().rois.get_mut(index) {
             r.fill = fill;
+        }
+    }
+
+    /// Show or hide the ROI at `index` (silx
+    /// `_RegionOfInterestBase.setVisible`, `items/_roi_base.py:479-489`). A
+    /// hidden ROI stays in [`rois`](Self::rois) but is neither drawn nor
+    /// pickable/editable. An out-of-range index is ignored.
+    pub fn set_roi_visible(&mut self, index: usize, visible: bool) {
+        if let Some(r) = self.backend.plot_mut().rois.get_mut(index) {
+            r.visible = visible;
         }
     }
 

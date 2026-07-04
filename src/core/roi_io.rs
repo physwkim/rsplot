@@ -25,9 +25,9 @@
 //! ```
 //!
 //! A record begins at each `roi <type>` line. The transient `selected`
-//! highlight is not persisted (silx's `toDict` likewise omits it); decoded ROIs
-//! are unselected. Unknown keys are ignored for forward compatibility (silx
-//! stashes them in `_extraInfo`).
+//! highlight and `visible` flag are not persisted (silx's `toDict` likewise
+//! omits both); decoded ROIs are unselected and visible. Unknown keys are
+//! ignored for forward compatibility (silx stashes them in `_extraInfo`).
 
 use egui::Color32;
 
@@ -71,7 +71,8 @@ impl std::error::Error for RoiIoError {}
 
 /// Serialize `rois` to the siplot ROI text format (silx `CurvesROIWidget.save`
 /// dict-dump). Geometry, name, per-ROI color, outline width/style, gap color,
-/// and fill are persisted; the transient `selected` highlight is not.
+/// and fill are persisted; the transient `selected` highlight and `visible`
+/// flag are not.
 #[must_use]
 pub fn encode_rois(rois: &[ManagedRoi]) -> String {
     let mut out = String::new();
