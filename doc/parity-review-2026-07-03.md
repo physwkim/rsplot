@@ -1429,6 +1429,22 @@ Impact: saturated/overflow pixels (`+inf`, routine in detector float data) rende
 
 ### R2-41: Explicit vmin/vmax invalid under the normalization is not repaired — silx falls back to per-side autoscale, siplot collapses the render
 
+**FIXED (colormap cluster, this session):** the dialog's autoscale-off path now
+ports silx `getColormapRange`'s per-side invalid-bound repair. `apply` resolves
+the effective range through `resolve_explicit_range`: a bound failing the
+normalizer's `is_valid_autoscale_value` (Log `≤ 0`, Sqrt `< 0`) is recomputed
+from the active image's data (via the newly shared `autoscale_from_plot`, used
+by both the autoscale and explicit paths), keeping the valid side and applying
+silx's ordering repairs — `vmin2 = min(fmin, vmax)`, `vmax2 = max(fmax, vmin2)`
+(the "handle max ≤ 0 for log" clamp). Both-valid short-circuits untouched. The
+per-side selection math is factored into the pure `repair_range` so it is tested
+without a GPU-backed `Plot2D`: valid-range-untouched, invalid-lower recovers +
+clamps to vmax, invalid-upper `max(fmax, vmin2)` clamp, both-invalid full
+autoscale, and Linear-never-repairs (5 boundary cases). Direct construction
+`Colormap::new(name, 0.0, max).with_normalization(Log)` without a data source is
+out of this fix's reach (no data to autoscale from at construction) and remains
+part of the gated autoscale-representability cluster (R2-1/R2-23).
+
 Severity: Medium
 
 Rust: `src/widget/colormap_dialog.rs:348-378` — with autoscale off, `apply` passes `self.vmin`/`self.vmax` straight into `build_colormap`; nothing checks the explicit range against the normalization domain. `Colormap::norm_bounds` (`src/core/colormap.rs:844-852`) then sees `log10(vmin ≤ 0)` non-finite and returns `(0, 0)`, mapping the whole image to the low color.

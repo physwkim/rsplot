@@ -351,36 +351,82 @@ impl ColormapDialog {
             .range(self.normalization, pixels, self.percentiles)
     }
 
+    /// The autoscale `(vmin, vmax)` for the active image — the single data source
+    /// shared by the autoscale path and the per-side invalid-bound repair (R2-41,
+    /// silx `getColormapRange`'s `normalizer.autoscale`). Autoscales from the raw
+    /// scalar pixels so every mode uses the data distribution — MinMax, Stddev3
+    /// (mean ± 3·std clamped to the data range), and Percentile (the dialog's
+    /// percentile pair) all via the shared `AutoscaleMode::range` (silx
+    /// ColormapDialog's setHistogram-fed autoscale, ColormapDialog.py:240-280).
+    /// Falls back to the aggregated image stats min/max (== MinMax) when the
+    /// active item has no retained scalar pixels (e.g. an RGBA image), and to
+    /// `[0, 1]` when there is no image at all.
+    fn autoscale_from_plot(&self, plot: &mut Plot2D) -> (f64, f64) {
+        if let Some(pixels) = plot.get_image_pixels_raw() {
+            self.autoscale_range(&pixels)
+        } else if let Some(&handle) = plot.get_all_images().first()
+            && let Some(stats) = plot.image_stats(handle)
+            && let Some(scalar) = &stats.scalar
+            && let (Some(smin), Some(smax)) = (scalar.min, scalar.max)
+        {
+            (smin, smax)
+        } else {
+            (0.0, 1.0)
+        }
+    }
+
+    /// The per-side repair math of silx `getColormapRange` (colors.py:723-750):
+    /// given the explicit bounds `(vmin, vmax)` and the data-driven autoscale
+    /// `(fmin, fmax)`, keep each bound that is valid under `norm` and replace each
+    /// invalid one, preserving `vmin <= vmax` (`vmin2 = min(fmin, vmax)` when only
+    /// vmin is invalid, `vmax2 = max(fmax, vmin2)` when vmax is invalid — the
+    /// latter is silx's "handle max <= 0 for log scale" clamp). Pure so the repair
+    /// is testable without a GPU-backed [`Plot2D`].
+    pub(crate) fn repair_range(
+        norm: Normalization,
+        vmin: f64,
+        vmax: f64,
+        fmin: f64,
+        fmax: f64,
+    ) -> (f64, f64) {
+        let vmin_valid = norm.is_valid_autoscale_value(vmin);
+        let vmax_valid = norm.is_valid_autoscale_value(vmax);
+        let vmin2 = if vmin_valid {
+            vmin
+        } else if vmax_valid {
+            fmin.min(vmax)
+        } else {
+            fmin
+        };
+        let vmax2 = if vmax_valid { vmax } else { fmax.max(vmin2) };
+        (vmin2, vmax2)
+    }
+
+    /// Resolve the effective `(vmin, vmax)` for an explicit (autoscale-off) range,
+    /// repairing a bound that is invalid under the current normalization — silx
+    /// `getColormapRange` (colors.py:711-750): a bound failing `is_valid` (e.g.
+    /// `vmin <= 0` under Log) is treated as autoscale *for that side only*, so an
+    /// invalid entry recovers to a valid data-driven bound instead of collapsing
+    /// the render (`cmap_one_over_range == 0` mapping everything to the low color).
+    /// Both-valid short-circuits without touching the data; otherwise the data
+    /// autoscale feeds [`Self::repair_range`].
+    fn resolve_explicit_range(&self, plot: &mut Plot2D) -> (f64, f64) {
+        if self.normalization.is_valid_autoscale_value(self.vmin)
+            && self.normalization.is_valid_autoscale_value(self.vmax)
+        {
+            return (self.vmin, self.vmax);
+        }
+        let (fmin, fmax) = self.autoscale_from_plot(plot);
+        Self::repair_range(self.normalization, self.vmin, self.vmax, fmin, fmax)
+    }
+
     /// Re-calculate and apply the colormap to the plot.
     pub fn apply(&self, plot: &mut Plot2D) {
-        let mut final_vmin = self.vmin;
-        let mut final_vmax = self.vmax;
-
-        if self.autoscale {
-            // Autoscale from the active image's raw scalar pixels so every mode
-            // uses the data distribution — MinMax, Stddev3 (mean ± 3·std clamped
-            // to the data range), and Percentile (the dialog's percentile pair)
-            // all via the shared AutoscaleMode::range (silx ColormapDialog's
-            // setHistogram-fed autoscale, ColormapDialog.py:240-280). Falls back
-            // to the aggregated image stats min/max (== MinMax) when the active
-            // item has no retained scalar pixels (e.g. an RGBA image), and to
-            // [0, 1] when there is no image at all.
-            if let Some(pixels) = plot.get_image_pixels_raw() {
-                let (vmin, vmax) = self.autoscale_range(&pixels);
-                final_vmin = vmin;
-                final_vmax = vmax;
-            } else if let Some(&handle) = plot.get_all_images().first()
-                && let Some(stats) = plot.image_stats(handle)
-                && let Some(scalar) = &stats.scalar
-                && let (Some(smin), Some(smax)) = (scalar.min, scalar.max)
-            {
-                final_vmin = smin;
-                final_vmax = smax;
-            } else {
-                final_vmin = 0.0;
-                final_vmax = 1.0;
-            }
-        }
+        let (final_vmin, final_vmax) = if self.autoscale {
+            self.autoscale_from_plot(plot)
+        } else {
+            self.resolve_explicit_range(plot)
+        };
 
         plot.set_default_colormap(self.build_colormap(final_vmin, final_vmax));
     }
@@ -670,6 +716,57 @@ mod tests {
 
         dialog.normalization = Normalization::Linear;
         assert_eq!(dialog.autoscale_range(&data), (0.0, 100.0));
+    }
+
+    #[test]
+    fn repair_range_keeps_a_valid_explicit_range_untouched() {
+        // R2-41: both bounds valid under Log (both > 0) → explicit range as-is,
+        // silx getColormapRange's early return (colors.py:723-724). The data
+        // autoscale (fmin, fmax) is ignored.
+        let (v0, v1) = ColormapDialog::repair_range(Normalization::Log, 2.0, 50.0, 0.1, 999.0);
+        assert_eq!((v0, v1), (2.0, 50.0));
+    }
+
+    #[test]
+    fn repair_range_recovers_invalid_lower_bound_from_data_per_side() {
+        // R2-41: vmin <= 0 is invalid under Log → that side becomes autoscale
+        // (fmin), the valid vmax is kept, and vmin2 = min(fmin, vmax) preserves
+        // ordering (silx colors.py:740-743).
+        let (v0, v1) = ColormapDialog::repair_range(Normalization::Log, 0.0, 50.0, 0.5, 999.0);
+        assert_eq!((v0, v1), (0.5, 50.0));
+
+        // fmin above the kept vmax clamps down to vmax so vmin2 <= vmax2.
+        let (v0, v1) = ColormapDialog::repair_range(Normalization::Log, -1.0, 10.0, 42.0, 999.0);
+        assert_eq!((v0, v1), (10.0, 10.0));
+    }
+
+    #[test]
+    fn repair_range_recovers_invalid_upper_bound_with_max_clamp() {
+        // R2-41: vmax invalid under Log → vmax2 = max(fmax, vmin2), silx's
+        // "handle max <= 0 for log scale" clamp so the upper bound never sinks
+        // below the (kept) lower bound (colors.py:745-748).
+        let (v0, v1) = ColormapDialog::repair_range(Normalization::Log, 5.0, 0.0, 0.1, 100.0);
+        assert_eq!((v0, v1), (5.0, 100.0));
+
+        // fmax below the kept vmin clamps up to vmin.
+        let (v0, v1) = ColormapDialog::repair_range(Normalization::Log, 20.0, -3.0, 0.1, 8.0);
+        assert_eq!((v0, v1), (20.0, 20.0));
+    }
+
+    #[test]
+    fn repair_range_both_invalid_falls_back_to_full_autoscale() {
+        // R2-41: both bounds invalid under Log → full data autoscale (fmin, fmax)
+        // with the max clamp (colors.py:740-748).
+        let (v0, v1) = ColormapDialog::repair_range(Normalization::Log, 0.0, -1.0, 0.5, 100.0);
+        assert_eq!((v0, v1), (0.5, 100.0));
+    }
+
+    #[test]
+    fn repair_range_linear_norm_never_repairs() {
+        // R2-41: Linear's is_valid is all-true, so even a zero/negative explicit
+        // range is left untouched (silx LinearNormalization.is_valid == True).
+        let (v0, v1) = ColormapDialog::repair_range(Normalization::Linear, -5.0, 0.0, 1.0, 2.0);
+        assert_eq!((v0, v1), (-5.0, 0.0));
     }
 
     // ── Histogram display (wave 6): data model ───────────────────────────────
