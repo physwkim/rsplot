@@ -886,6 +886,19 @@ Impact: identical on the all-Free path, divergent for every constrained fit — 
 
 ### R2-33: Non-finite samples abort the widget fit; silx filters them and fits the rest
 
+**FIXED (fit-stack cluster):** the widget's data selection is now one owner,
+`fit_ready_data(x, y, range)` — drops any pair with a non-finite member (silx
+`_finite_mask = isfinite(x) & isfinite(y)`, fitmanager.py:803-808) and applies
+the normalized inclusive fit range in the same pass. Both widget entry points
+route through it: `ranged_data` (all `perform_fit_choice` paths) delegates,
+and `perform_fit` now fits AND draws over the filtered samples (previously it
+passed raw `x_data`/`y_data`, which would also have misaligned the drawn curve
+against a filtered `y_fit`). The engines' non-finite rejection stays — silx
+`leastsq` itself raises via `asarray_chkfinite`; filtering is the manager
+layer's job. Boundary tests: `fit_ready_data_drops_each_non_finite_member`
+(either member non-finite ⇒ pair dropped), `fit_ready_data_all_non_finite_yields_empty`,
+`fit_ready_data_range_is_inclusive_normalized_and_composes_with_mask`.
+
 Severity: Medium
 
 Rust: `src/widget/fit_widget.rs:575-595` — `ranged_data` filters by x-range only; `leastsq`/`leastsq_constrained` then hard-error on any non-finite sample (`fitting.rs:463-464`, `:897-898`) and the widget renders no fit.

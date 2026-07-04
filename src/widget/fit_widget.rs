@@ -59,6 +59,37 @@ fn default_fit_range_of(x_data: &[f64]) -> (f64, f64) {
     }
 }
 
+/// Select the fit-ready `(x, y)` pairs: drop any pair with a non-finite
+/// member, and keep only in-range points when `range` is set (bounds
+/// normalized, inclusive). silx FitManager builds
+/// `_finite_mask = isfinite(x) & isfinite(y)` once (fitmanager.py:803-808)
+/// and every estimation and fit runs on the masked arrays (:434-436,
+/// :884-885) — a stray NaN sample never aborts the fit. The engines
+/// themselves still reject non-finite input, as silx `leastsq`'s
+/// `asarray_chkfinite` does; the filtering belongs to this manager layer.
+fn fit_ready_data(
+    x_data: &[f64],
+    y_data: &[f64],
+    range: Option<(f64, f64)>,
+) -> (Vec<f64>, Vec<f64>) {
+    let range = range.map(|(a, b)| if a <= b { (a, b) } else { (b, a) });
+    let mut xs = Vec::new();
+    let mut ys = Vec::new();
+    for (&xi, &yi) in x_data.iter().zip(y_data.iter()) {
+        if !(xi.is_finite() && yi.is_finite()) {
+            continue;
+        }
+        if let Some((lo, hi)) = range
+            && (xi < lo || xi > hi)
+        {
+            continue;
+        }
+        xs.push(xi);
+        ys.push(yi);
+    }
+    (xs, ys)
+}
+
 /// The background theories offered by the [`FitWidget`] background combo, in
 /// silx `bgtheories.THEORY` order, each paired with its silx display label.
 const BACKGROUND_CHOICES: [(Background, &str); 9] = [
@@ -570,28 +601,11 @@ impl FitWidget {
         self.plot.reset_zoom_to_data();
     }
 
-    /// Restrict the data to the configured fit range, if any. Returns owned
-    /// `(xs, ys)` of the in-range points (silx `FitWidget` xmin/xmax).
+    /// Restrict the data to the configured fit range, if any, keeping only
+    /// finite samples. Returns owned `(xs, ys)` of the fit-ready points (silx
+    /// `FitWidget` xmin/xmax plus FitManager's `_finite_mask`).
     fn ranged_data(&self) -> (Vec<f64>, Vec<f64>) {
-        match self.fit_range {
-            Some((xmin, xmax)) => {
-                let (lo, hi) = if xmin <= xmax {
-                    (xmin, xmax)
-                } else {
-                    (xmax, xmin)
-                };
-                let mut xs = Vec::new();
-                let mut ys = Vec::new();
-                for (&xi, &yi) in self.x_data.iter().zip(self.y_data.iter()) {
-                    if xi >= lo && xi <= hi {
-                        xs.push(xi);
-                        ys.push(yi);
-                    }
-                }
-                (xs, ys)
-            }
-            None => (self.x_data.clone(), self.y_data.clone()),
-        }
+        fit_ready_data(&self.x_data, &self.y_data, self.fit_range)
     }
 
     /// Perform the fit using the currently selected [`FitModelChoice`].
@@ -756,17 +770,19 @@ impl FitWidget {
         let functions: [&dyn FitFunction; 2] = [&LinearFit, &GaussianEstimateFit];
         let func = functions[self.selected_function_idx];
 
-        if let Some(result) = func.fit(&self.x_data, &self.y_data) {
-            let curve = CurveData::new(self.x_data.clone(), result.y_fit.clone(), Color32::RED);
+        // Fit and draw over the finite samples only (silx `_finite_mask`;
+        // this entry point has no range control, so `range` is None).
+        let (xs, ys) = fit_ready_data(&self.x_data, &self.y_data, None);
+        if let Some(result) = func.fit(&xs, &ys) {
+            let curve = CurveData::new(xs.clone(), result.y_fit.clone(), Color32::RED);
             if let Some(handle) = self.fit_handle {
                 self.plot.update_curve_data(handle, &curve);
             } else {
-                self.fit_handle = Some(self.plot.add_curve_with_legend(
-                    &self.x_data,
-                    &result.y_fit,
-                    Color32::RED,
-                    "Fit",
-                ));
+                self.fit_handle =
+                    Some(
+                        self.plot
+                            .add_curve_with_legend(&xs, &result.y_fit, Color32::RED, "Fit"),
+                    );
             }
             self.fit_result = Some(result);
         } else {
@@ -1037,6 +1053,36 @@ mod tests {
         // No finite sample -> the (0, 1) fallback.
         assert_eq!(default_fit_range_of(&[]), (0.0, 1.0));
         assert_eq!(default_fit_range_of(&[f64::NAN]), (0.0, 1.0));
+    }
+
+    #[test]
+    fn fit_ready_data_drops_each_non_finite_member() {
+        // R2-33: silx fits `data[_finite_mask]` (fitmanager.py:803-808) — a
+        // pair is dropped when EITHER member is non-finite, and every finite
+        // pair survives.
+        let xs = [1.0, 2.0, f64::NAN, 4.0, f64::INFINITY, 6.0];
+        let ys = [10.0, f64::NAN, 30.0, 40.0, 50.0, f64::NEG_INFINITY];
+        let (fx, fy) = fit_ready_data(&xs, &ys, None);
+        assert_eq!(fx, vec![1.0, 4.0]);
+        assert_eq!(fy, vec![10.0, 40.0]);
+    }
+
+    #[test]
+    fn fit_ready_data_all_non_finite_yields_empty() {
+        let (fx, fy) = fit_ready_data(&[f64::NAN, f64::INFINITY], &[1.0, 2.0], None);
+        assert!(fx.is_empty());
+        assert!(fy.is_empty());
+    }
+
+    #[test]
+    fn fit_ready_data_range_is_inclusive_normalized_and_composes_with_mask() {
+        let xs = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0];
+        let ys = [0.0, 10.0, f64::NAN, 30.0, 40.0, 50.0];
+        // Reversed bounds normalize; both endpoints inclusive; the in-range
+        // NaN pair (x=2) is still dropped.
+        let (fx, fy) = fit_ready_data(&xs, &ys, Some((4.0, 1.0)));
+        assert_eq!(fx, vec![1.0, 3.0, 4.0]);
+        assert_eq!(fy, vec![10.0, 30.0, 40.0]);
     }
 
     #[test]
