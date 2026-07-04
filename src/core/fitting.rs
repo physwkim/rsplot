@@ -2226,6 +2226,14 @@ impl IterativeFitResult {
         self.solver.std_errors()
     }
 
+    /// Per-parameter uncertainties propagated through the fit constraints —
+    /// what silx's FitWidget shows in its sigma column (fitmanager.py:904-909,
+    /// `infodict["uncertainties"]`). Identical to [`Self::std_errors`] for an
+    /// unconstrained fit; diverges under QUOTED/FIXED/FACTOR/DELTA/SUM.
+    pub fn uncertainties(&self) -> &[f64] {
+        &self.solver.uncertainties
+    }
+
     /// Reduced chi-square, if degrees of freedom were positive.
     pub fn reduced_chisq(&self) -> Option<f64> {
         self.solver.reduced_chisq

@@ -945,10 +945,15 @@ impl FitWidget {
 
                 // Show fit parameters if available. Iterative fits add a per
                 // parameter estimated error column and a reduced chi-square row
-                // (silx FitWidget results table).
+                // (silx FitWidget results table). The column shows the
+                // constraint-propagated uncertainties — silx displays
+                // `infodict["uncertainties"]` (fitmanager.py:904-909), not the
+                // raw covariance-diagonal errors.
                 if let Some(result) = &self.fit_result {
-                    let errors: Option<Vec<f64>> =
-                        self.iterative_result.as_ref().map(|ir| ir.std_errors());
+                    let errors: Option<Vec<f64>> = self
+                        .iterative_result
+                        .as_ref()
+                        .map(|ir| ir.uncertainties().to_vec());
                     ui.group(|ui| {
                         ui.heading("Fit Parameters");
                         egui::Grid::new("fit_params_grid")
@@ -1036,7 +1041,7 @@ mod tests {
 
     #[test]
     fn error_extraction_from_covariance_diagonal() {
-        // The results table errors come from sqrt(diag(covariance)).
+        // std_errors() is sqrt(diag(covariance)) — the unconstrained sigma.
         let res = LeastSqResult {
             parameters: vec![1.0, 2.0],
             covariance: vec![vec![9.0, 0.0], vec![0.0, 25.0]],
@@ -1054,6 +1059,34 @@ mod tests {
             format_param_value_error(res.parameters[0], errs[0]),
             "1.000000 ± 3.000000"
         );
+    }
+
+    #[test]
+    fn results_table_errors_use_constraint_propagated_uncertainties() {
+        // R2-32: silx's FitWidget sigma column shows infodict["uncertainties"]
+        // (fitmanager.py:904-909) — constraint-propagated — not the raw
+        // covariance-diagonal std_errors(). The two diverge for any constrained
+        // fit (e.g. a FIXED parameter shows its value, a FACTOR tie scales).
+        let ir = IterativeFitResult {
+            fit: FitResult {
+                y_fit: Vec::new(),
+                parameters: vec![1.0, 2.0],
+                param_names: vec!["a".to_string(), "b".to_string()],
+            },
+            solver: LeastSqResult {
+                parameters: vec![1.0, 2.0],
+                covariance: vec![vec![9.0, 0.0], vec![0.0, 25.0]],
+                // Diverges from sqrt(diag) = [3, 5]: b is FIXED, so its
+                // propagated uncertainty is the parameter value itself.
+                uncertainties: vec![3.0, 2.0],
+                chisq: 0.0,
+                reduced_chisq: Some(0.0),
+                niter: 1,
+                nfev: 1,
+            },
+        };
+        assert_eq!(ir.uncertainties(), &[3.0, 2.0]);
+        assert_ne!(ir.uncertainties(), ir.std_errors().as_slice());
     }
 
     #[test]

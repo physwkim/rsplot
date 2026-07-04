@@ -820,6 +820,15 @@ Impact: the reported uncertainty of any FACTOR-tied parameter is wrong by the fa
 
 ### R2-32: FitWidget error column shows unconstrained `std_errors()` instead of silx's constraint-propagated `uncertainties`
 
+**FIXED (fit-stack cluster):** the results table now reads the
+constraint-propagated `LeastSqResult.uncertainties` via a new
+`IterativeFitResult::uncertainties()` accessor (silx shows
+`infodict["uncertainties"]`, fitmanager.py:904-909). Identical on the all-Free
+path (unconstrained `leastsq` fills `uncertainties = std_errors`), silx-faithful
+under QUOTED/FIXED/FACTOR/DELTA/SUM — including the default Multi-Gaussian whose
+Positive constraints route through `leastsq_constrained`. Test:
+`results_table_errors_use_constraint_propagated_uncertainties`.
+
 Severity: Medium
 
 Rust: `src/widget/fit_widget.rs:950-951` — `self.iterative_result.as_ref().map(|ir| ir.std_errors())` (sqrt of covariance diagonal).
