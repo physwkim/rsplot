@@ -502,6 +502,18 @@ Impact: siplot's mask pipeline stores masked pixels as `f32::NAN`, so an h/v pro
 
 ### R2-4: Profile never recomputes outside an active drag — Width/Method edits and image-data changes are dead until the next drag
 
+**FIXED (profile cluster, commit d00ae1c):** `ProfileWindow` retains the
+`(image, ROI)` it extracted from (`ProfileSource`) and owns one `recompute()`;
+`set_line_width`/`set_method` recompute from it, `refresh_image` re-derives on a
+new image — wired into `ImageView` (high_level.rs:10634) and `StackView`'s
+per-frame dirty upload (high_level.rs:13717) — and the precomputed-curve path
+(`set_profile_curve`) clears the source so a later width/method edit never
+re-derives a stale image ROI over a scatter/stack profile. Width/Method edits
+and image/frame changes now update the profile without a fresh drag (silx
+`invalidateProfile` / recompute-on-DATA, manager.py:936-944, rois.py:238-257).
+Tests: width/method recompute; frame-scrub recompute; precomputed-curve clear.
+(Also recorded in the profile-subsystem cluster block below.)
+
 Severity: Medium
 
 Rust: the only `update_profile` call sites are inside `response.dragged()` blocks (`src/widget/high_level.rs:10796-10808`; StackView via `show_profile` from its drag handler); `ImageView::set_image` never touches `profile_window`; no profile ROI is retained after `drag_stopped`. The comment at `src/widget/profile_window.rs:341-343` — "the host re-drives from the active ROI each frame" — is false.
@@ -511,6 +523,17 @@ Reference: `silx/gui/plot/tools/profile/manager.py:936-944` — recompute on ite
 Impact: with the profile window open, changing the Width DragValue or Mean/Sum combo visibly does nothing, and replacing the image leaves a stale profile; silx updates instantly in all three cases. Structural cause: no profile ROI is retained, so no recompute trigger has anything to act on.
 
 ### R2-5: StackView 2D stack profile hardcodes width = 1 / Mean and nearest-neighbour line sampling — the 1D mode of the same tool honors Width/Method
+
+**FIXED (profile cluster, commit 09b8f40):** the `StackProfileDimension::TwoD`
+arm reads the shared line width / reduction method from the profile window
+(`profile_window.line_width()` / `.method()`, high_level.rs:13438-13439) — silx
+`Profile3DToolBar` uses one setting for the 1D and 2D profiles — instead of the
+hardcoded `1` / `Mean`, and its line profile is the bilinear band
+(`stack_line_profile` → `line_profile_band`) matching the 1D line, not
+per-frame nearest-neighbour. Ref silx rois.py:1096-1104 (stack ROIs pass
+`lineWidth`/`method` into the same `core.createProfile`). Tests: stack line
+profile varies with width/method; 2D profile equals a width-3 Sum extraction,
+not width-1 Mean. (Also recorded in the profile-subsystem cluster block below.)
 
 Severity: Medium
 
