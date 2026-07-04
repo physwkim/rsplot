@@ -1410,6 +1410,31 @@ Impact: on a time axis, one tick + label per end renders in the gutters beyond t
 
 ### R2-38: Linear nice-number tick layout diverges from silx (`/(nTicks)` vs `/(max_ticks−1)`, `<` vs `<=` thresholds, fixed 8/6 vs pixel-adaptive density)
 
+**PARTIALLY FIXED (axis-tick cluster, this session):** the two algorithm
+divergences are closed in `chrome.rs`:
+- Round thresholds now `<=` (silx `niceNumGeneric`'s `frac <= roundFrac` at
+  `1.5 / 3.0 / 7.0`), so a frac exactly on a boundary rounds to the lower nice
+  number instead of the coarser one.
+- `nice_ticks` divides the span by `n_ticks` (silx `vrange / nTicks`), not
+  `n_ticks − 1` (silx deviates from Heckbert here). The param is renamed
+  `n_ticks` to match. `nice_ticks(0, 100, 5)` now yields step 20 like silx.
+Tests: inclusive round boundaries (frac 1.5→1, 3.0→2, 7.0→5) and the `/nTicks`
+divisor example.
+
+**DEFERRED — needs sign-off:** the pixel-adaptive tick density
+(`niceNumbersAdaptative`, `nticks = max(2, round(1.3·dpr/dpi · nbPixels))`,
+`GLPlotFrame.py:414-425`). siplot keeps the deliberate fixed defaults 8 (X) /
+6 (Y). Porting the adaptive count reverses that design choice AND needs a
+screen-DPI source silx reads from Qt's `dotsPerInch` — egui exposes
+`pixels_per_point` (a device-pixel ratio) but no logical DPI, so the density
+constant would have to be pinned to silx's reference 92 dpi rather than the
+actual screen. Both are decisions for the user. **STRUCTURAL FOLLOW-UP:** the
+nice-number layout is duplicated four times — `chrome.rs` (this fix),
+`colorbar.rs` (already correct), `core/scene3d/axes.rs` (already correct, has a
+fuller `ticks()`), `core/dtime_ticks.rs` (`nice_num_generic`). Consolidating
+into one shared `ticklayout` module would remove the drift that produced this
+divergence, but touches three correct uncited modules → gated on sign-off.
+
 Severity: Medium
 
 Rust: `src/widget/chrome.rs:306-325` — `step = nice_num(range / (max_ticks - 1), true)` with round thresholds `frac < 1.5 / < 3.0 / < 7.0` (`:284-291`), deployed with fixed defaults 8 (X) / 6 (Y) (`:540/:547`).

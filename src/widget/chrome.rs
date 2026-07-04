@@ -272,8 +272,11 @@ pub fn layout(full: Rect, req: &ChromeRequest) -> ChromeLayout {
     }
 }
 
-/// "Nice" rounding of a span to {1, 2, 5} × 10ⁿ — the classic axis-tick
-/// heuristic (Heckbert, *Graphics Gems*).
+/// "Nice" rounding of a span to {1, 2, 5} × 10ⁿ — silx `ticklayout.niceNumGeneric`
+/// for the default fractions `[1, 2, 5, 10]` (`ticklayout.py:78-107`). The round
+/// thresholds compare with `<=` (silx `frac <= roundFrac`, roundFractions
+/// `(1.5, 3.0, 7.0, 10.0)`), so a value landing exactly on a boundary (frac 1.5 /
+/// 3.0 / 7.0) rounds to the *lower* nice number, not the coarser one.
 fn nice_num(range: f64, round: bool) -> f64 {
     if range <= 0.0 {
         return 1.0;
@@ -281,11 +284,11 @@ fn nice_num(range: f64, round: bool) -> f64 {
     let exp = range.log10().floor();
     let frac = range / 10f64.powf(exp);
     let nice = if round {
-        if frac < 1.5 {
+        if frac <= 1.5 {
             1.0
-        } else if frac < 3.0 {
+        } else if frac <= 3.0 {
             2.0
-        } else if frac < 7.0 {
+        } else if frac <= 7.0 {
             5.0
         } else {
             10.0
@@ -302,15 +305,19 @@ fn nice_num(range: f64, round: bool) -> f64 {
     nice * 10f64.powf(exp)
 }
 
-/// "Nice" tick values within `[min, max]` plus the step between them.
-pub fn nice_ticks(min: f64, max: f64, max_ticks: usize) -> (Vec<f64>, f64) {
+/// "Nice" tick values within `[min, max]` plus the step between them. `n_ticks`
+/// is silx's target tick count (`ticklayout.niceNumbers`' `nTicks`): the span is
+/// divided by `n_ticks` (silx `vrange / nTicks`), NOT by `n_ticks − 1` — silx
+/// deviates from Heckbert's classic `/(nTicks−1)` here, so matching it needs the
+/// bare `n_ticks` divisor.
+pub fn nice_ticks(min: f64, max: f64, n_ticks: usize) -> (Vec<f64>, f64) {
     // partial_cmp (not `max > min`) so NaN limits fall through to "no ticks".
     let ascending = matches!(max.partial_cmp(&min), Some(std::cmp::Ordering::Greater));
-    if !ascending || max_ticks < 2 {
+    if !ascending || n_ticks < 2 {
         return (Vec::new(), 1.0);
     }
     let range = nice_num(max - min, false);
-    let step = nice_num(range / (max_ticks - 1) as f64, true);
+    let step = nice_num(range / n_ticks as f64, true);
     let start = (min / step).floor() * step;
     let end = (max / step).ceil() * step;
     let n = ((end - start) / step).round() as i64;
@@ -1966,6 +1973,26 @@ mod tests {
     fn degenerate_or_inverted_range_yields_no_ticks() {
         assert!(nice_ticks(5.0, 5.0, 8).0.is_empty());
         assert!(nice_ticks(5.0, 1.0, 8).0.is_empty());
+    }
+
+    #[test]
+    fn nice_num_round_thresholds_are_inclusive_like_silx() {
+        // silx niceNumGeneric rounds with `frac <= roundFrac` (1.5, 3.0, 7.0):
+        // a frac exactly on a boundary takes the LOWER nice number (siplot's old
+        // strict `<` gave the coarser 2 / 5 / 10).
+        assert_eq!(nice_num(1.5, true), 1.0);
+        assert_eq!(nice_num(3.0, true), 2.0);
+        assert_eq!(nice_num(7.0, true), 5.0);
+        // Just above a boundary still rounds up to the next nice number.
+        assert_eq!(nice_num(1.5001, true), 2.0);
+    }
+
+    #[test]
+    fn nice_ticks_divides_span_by_n_ticks_like_silx() {
+        // silx niceNumbers divides by nTicks (not nTicks-1): [0, 100] with
+        // nTicks=5 → niceNum(100/5=20, round) = 20 (the finding's example).
+        let (_ticks, step) = nice_ticks(0.0, 100.0, 5);
+        assert_eq!(step, 20.0);
     }
 
     #[test]
