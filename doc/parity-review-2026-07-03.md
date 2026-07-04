@@ -754,6 +754,29 @@ Impact: scatter masking cannot reproduce silx's ellipse, line, or pencil selecti
 
 ### R2-13: Colorbar ticks outside `[vmin, vmax]` are clamped onto the bar ends — labels drawn at wrong value positions
 
+**FIXED (colorbar cluster):** tick placement now goes through a new
+`tick_frac` (colorbar.rs) — the silx `_TickBar._getRelativePosition` port
+(ColorBar.py:808-820): UNCLAMPED fraction under the colormap normalization,
+so nice-number `graphmin`/`graphmax` and log decades outside `[vmin, vmax]`
+extrapolate past the bar and are clipped by the widget viewport
+(`ui.painter_at(rect)`), never landing on the bar edge with a wrong label.
+The silx non-finite fallback is ported: a log tick at `v <= 0` or a gamma
+tick whose negative ratio powers to NaN positions at the `vmax` end
+(relative position 0.0, :818-819). `clamp_label_center` (a siplot nicety for
+in-range edge labels) now applies only when `frac ∈ [0, 1]` — out-of-range
+labels extrapolate with their tick line instead of being pulled back onto
+the edge. `Colormap::normalize` keeps its clamp: it is the shader mirror for
+color lookup, a different meaning by design (dual-meaning removed by giving
+the tick bar its own function, not by branching the shared one). Anchor
+audit of `\.normalize\(` consumers: chrome.rs:1873 (in-plot colorbar) is
+distinct — its generators (`nice_ticks`, `log_decade_ticks`) only emit
+in-range values (to a ±step·1e-6 tolerance), so the clamp is unreachable
+there; all remaining sites are color/LUT mapping where clamping is correct.
+Tests: `tick_frac_is_unclamped_outside_the_range` (plus shader-mirror
+still-clamps assertions), `tick_frac_log_decade_below_vmin_extrapolates`
+(the vmin=3 "1"-at-3's-position impact case),
+`tick_frac_non_finite_norm_lands_at_the_vmax_end` (log ≤ 0, gamma NaN).
+
 Severity: Medium
 
 Rust: `src/widget/colorbar.rs:260` — `paint_tick` places ticks via `self.colormap.normalize(v)`, and `Colormap::normalize` (`src/core/colormap.rs:866`) does `.clamp(0.0, 1.0)`; `paint_ticks_and_labels` applies no out-of-range filter.

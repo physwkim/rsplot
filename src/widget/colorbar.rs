@@ -257,7 +257,11 @@ impl ColorBarWidget {
         font: &FontId,
         fg: Color32,
     ) {
-        let frac = self.colormap.normalize(v);
+        // UNCLAMPED fraction (silx `_getRelativePosition`, ColorBar.py:808-820):
+        // an out-of-range tick extrapolates past the bar and is clipped by the
+        // widget viewport rather than landing on the bar edge with a wrong label.
+        let frac = tick_frac(&self.colormap, v);
+        let in_bar = (0.0..=1.0).contains(&frac);
         let line_width = if label.is_some() {
             LINE_WIDTH
         } else {
@@ -274,17 +278,24 @@ impl ColorBarWidget {
                     stroke,
                 );
                 if let Some(label) = label {
-                    // A tick landing at the bar edge (frac 0/1) would center its
-                    // label on the clip boundary and lose half the glyph; clamp
-                    // the text center into the bar span (chrome::clamp_label_center).
+                    // An in-range tick landing at the bar edge (frac 0/1) would
+                    // center its label on the clip boundary and lose half the
+                    // glyph; clamp the text center into the bar span
+                    // (chrome::clamp_label_center). An OUT-of-range tick must
+                    // NOT be pulled back in — its label extrapolates with the
+                    // line and clips away (silx viewport clipping).
                     let galley = painter.layout_no_wrap(label, font.clone(), fg);
                     let half_h = galley.size().y * 0.5;
-                    let cy = crate::widget::chrome::clamp_label_center(
-                        y,
-                        bar_rect.top(),
-                        bar_rect.bottom(),
-                        half_h,
-                    );
+                    let cy = if in_bar {
+                        crate::widget::chrome::clamp_label_center(
+                            y,
+                            bar_rect.top(),
+                            bar_rect.bottom(),
+                            half_h,
+                        )
+                    } else {
+                        y
+                    };
                     painter.galley(
                         pos2(bar_rect.right() + TICK_LABEL_GAP, cy - half_h),
                         galley,
@@ -302,15 +313,20 @@ impl ColorBarWidget {
                     stroke,
                 );
                 if let Some(label) = label {
-                    // Same edge-overhang guard on the horizontal (x) axis.
+                    // Same edge-overhang guard on the horizontal (x) axis,
+                    // same out-of-range exemption.
                     let galley = painter.layout_no_wrap(label, font.clone(), fg);
                     let half_w = galley.size().x * 0.5;
-                    let cx = crate::widget::chrome::clamp_label_center(
-                        x,
-                        bar_rect.left(),
-                        bar_rect.right(),
-                        half_w,
-                    );
+                    let cx = if in_bar {
+                        crate::widget::chrome::clamp_label_center(
+                            x,
+                            bar_rect.left(),
+                            bar_rect.right(),
+                            half_w,
+                        )
+                    } else {
+                        x
+                    };
                     painter.galley(
                         pos2(cx - half_w, bar_rect.bottom() + TICK_LABEL_GAP),
                         galley,
@@ -410,6 +426,33 @@ impl ColorBarWidget {
 /// silx `_TickBar._getOptimalNbTicks`: `max(2, round(density * length))`.
 fn optimal_nb_ticks(length: f64, density: f64) -> usize {
     (2.0_f64).max((density * length).round()) as usize
+}
+
+/// The UNCLAMPED bar fraction for a tick value — silx
+/// `_TickBar._getRelativePosition` (ColorBar.py:808-820), `1 - relativePos`
+/// in siplot's frac convention (0 at `vmin`, 1 at `vmax`).
+///
+/// Distinct by design from [`Colormap::normalize`], the shader mirror that
+/// clamps into `[0, 1]` for color lookup: a tick outside `[vmin, vmax]` (the
+/// nice-number `graphmin`/`graphmax`, or a log decade below `vmin`) must
+/// extrapolate past the bar and be clipped by the widget viewport, not land on
+/// the bar edge labeled with a value that is not the edge value.
+///
+/// Ported quirks: silx returns relative position `0.0` — the `vmax` end, frac
+/// `1.0` here — when the normalized value is non-finite (:818-819; a log tick
+/// at `v <= 0`, or a gamma tick below `vmin` whose negative ratio powers to
+/// NaN). A degenerate or log-invalid *range* has `one_over_range == 0`
+/// (`Colormap::norm_bounds`), collapsing every tick to frac `0` — silx has no
+/// defined behavior there (its arithmetic yields NaN heights), and
+/// `paint_ticks_and_labels` never reaches this path for `vmax <= vmin`.
+fn tick_frac(colormap: &Colormap, v: f64) -> f32 {
+    let (cmap_min, one_over_range) = colormap.norm_bounds();
+    let base = one_over_range * (colormap.normalization.transform(v) as f32 - cmap_min);
+    let frac = match colormap.normalization {
+        Normalization::Gamma => base.powf(colormap.gamma),
+        _ => base,
+    };
+    if frac.is_finite() { frac } else { 1.0 }
 }
 
 // --- Tick layout (pure) ------------------------------------------------------
@@ -685,6 +728,47 @@ fn trim_scientific(s: &str) -> String {
 mod tests {
     use super::*;
     use crate::core::colormap::Colormap;
+
+    // --- tick_frac (silx _TickBar._getRelativePosition) -------------------
+
+    #[test]
+    fn tick_frac_is_unclamped_outside_the_range() {
+        // silx `_getRelativePosition` does not clamp (ColorBar.py:808-820):
+        // graphmin below vmin extrapolates past the bar (negative frac) and
+        // graphmax above vmax past the far end (frac > 1) — unlike the
+        // shader-mirror Colormap::normalize, which clamps both.
+        let cm = Colormap::viridis(0.13, 0.87);
+        assert!(tick_frac(&cm, 0.0) < 0.0, "graphmin tick must extrapolate");
+        assert!(tick_frac(&cm, 1.0) > 1.0, "graphmax tick must extrapolate");
+        assert_eq!(cm.normalize(0.0), 0.0, "the shader mirror still clamps");
+        assert_eq!(cm.normalize(1.0), 1.0);
+        // In-range values agree with the shader mirror.
+        let mid = f64::from(cm.normalize(0.5));
+        assert!((f64::from(tick_frac(&cm, 0.5)) - mid).abs() < 1e-6);
+    }
+
+    #[test]
+    fn tick_frac_log_decade_below_vmin_extrapolates() {
+        // The R2-13 impact case: a log bar with vmin = 3 must NOT show the
+        // decade tick "1" at 3's position — it extrapolates below the bar.
+        let cm = Colormap::viridis(3.0, 300.0).with_normalization(Normalization::Log);
+        assert!(tick_frac(&cm, 1.0) < 0.0);
+        assert_eq!(cm.normalize(1.0), 0.0, "the shader mirror still clamps");
+    }
+
+    #[test]
+    fn tick_frac_non_finite_norm_lands_at_the_vmax_end() {
+        // silx returns relative position 0.0 — the vmax end — for a
+        // non-finite normalized value (ColorBar.py:818-819).
+        let log = Colormap::viridis(1.0, 100.0).with_normalization(Normalization::Log);
+        assert_eq!(tick_frac(&log, 0.0), 1.0); // log10(0) = -inf
+        assert_eq!(tick_frac(&log, -5.0), 1.0); // log10(neg) = NaN
+        // Gamma below vmin: negative ratio to a fractional power is NaN.
+        let gamma = Colormap::viridis(0.0, 1.0)
+            .with_normalization(Normalization::Gamma)
+            .with_gamma(0.5);
+        assert_eq!(tick_frac(&gamma, -1.0), 1.0);
+    }
 
     // --- numberOfDigits --------------------------------------------------
 
