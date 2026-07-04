@@ -1180,6 +1180,17 @@ Impact: on any MINOR/MAJOR/INVALID alarm, sidm draws a 2 px severity ring around
 
 ### R2-56: Fortran reading order reshapes to the wrong geometry — PyDM makes `width` the first (row) axis, sidm keeps `width` columns and transposes with the wrong stride
 
+**FIXED (R1-family recurrence batch):** `reshape_image`'s Fortran arm now
+implements PyDM's actual contract (image.py:108-109): `reshape((width, -1),
+order="F")` — `width` becomes the ROW axis, the displayed image is `width`
+rows × `len/width` columns with `M[r][c] = data[c·width + r]`, returned as
+`(cols, rows, row-major pixels)`. A non-divisible tail drops the partial
+COLUMN (documented deviation from numpy's raise). The locking test that
+encoded the divergent transpose is replaced by the PyDM golden
+(`reshape_fortran_makes_width_the_row_axis_like_pydm`, verified against
+numpy directly: len=6/width=3 → `[[d0,d3],[d1,d4],[d2,d5]]`) plus the
+partial-column boundary (`reshape_fortran_drops_a_trailing_partial_column`).
+
 Severity: Medium
 
 Rust: `sidm/src/widgets/image_view.rs:63-72` — Fortran branch produces a `height × width` image (same dims as C-like) with `p[r*width + c] = data[c*height + r]`, `height = len/width`.

@@ -26,8 +26,10 @@ pub enum ReadingOrder {
     /// `ReadingOrder.Clike`, the EPICS areaDetector default).
     #[default]
     CLike,
-    /// Column-major (Fortran order): element `(r, c)` is `data[c * height + r]`
-    /// (PyDM `ReadingOrder.Fortranlike`).
+    /// Column-major (Fortran order): PyDM reshapes to `(width, -1)` with
+    /// `order="F"` (image.py:108-109), so `width` becomes the ROW axis — the
+    /// image is `width` rows × `len/width` columns and element `(r, c)` is
+    /// `data[c * width + r]`, displayed row-major (image.py:210).
     Fortran,
 }
 
@@ -41,10 +43,17 @@ pub fn value_to_image(value: &PvValue) -> Option<Vec<f32>> {
     }
 }
 
-/// Reshape a flat array into row-major `width × height` pixels for
-/// [`ImageView::set_image`]. Returns `(width, height, pixels)`, or `None` when
-/// the width is zero or there is not even one full row (PyDM aborts the redraw
-/// when `width < 1`). A trailing partial row is dropped.
+/// Reshape a flat array into row-major pixels for [`ImageView::set_image`].
+/// Returns `(width, height, pixels)` of the DISPLAYED image, or `None` when
+/// the width is zero or there is not even one full row/column (PyDM aborts
+/// the redraw when `width < 1`).
+///
+/// PyDM's two orders shape differently (image.py:106-109): `Clike` is
+/// `reshape((-1, width), order="C")` — `len/width` rows × `width` columns —
+/// while `Fortranlike` is `reshape((width, -1), order="F")` — `width` rows ×
+/// `len/width` columns with `M[r][c] = data[c*width + r]`. numpy raises on a
+/// non-divisible length; here the trailing partial row (C) / column (Fortran)
+/// is dropped instead.
 pub fn reshape_image(
     data: &[f32],
     width: usize,
@@ -53,25 +62,27 @@ pub fn reshape_image(
     if width == 0 {
         return None;
     }
-    let height = data.len() / width;
-    if height == 0 {
+    // Second axis: rows for CLike, columns for Fortran.
+    let other = data.len() / width;
+    if other == 0 {
         return None;
     }
-    let count = width * height;
-    let pixels = match order {
-        ReadingOrder::CLike => data[..count].to_vec(),
+    let count = width * other;
+    match order {
+        ReadingOrder::CLike => Some((width as u32, other as u32, data[..count].to_vec())),
         ReadingOrder::Fortran => {
-            // Column-major fill: transpose into row-major for the GPU.
+            // Column-major fill with `width` as the row axis: the displayed
+            // image is `width` rows × `other` columns.
+            let (rows, cols) = (width, other);
             let mut p = vec![0.0f32; count];
-            for c in 0..width {
-                for r in 0..height {
-                    p[r * width + c] = data[c * height + r];
+            for (j, col) in data[..count].chunks_exact(rows).enumerate() {
+                for (i, &v) in col.iter().enumerate() {
+                    p[i * cols + j] = v;
                 }
             }
-            p
+            Some((cols as u32, rows as u32, p))
         }
-    };
-    Some((width as u32, height as u32, pixels))
+    }
 }
 
 /// Resolve the colormap value range: the data's min/max when `normalize`,
@@ -297,14 +308,24 @@ mod tests {
     }
 
     #[test]
-    fn reshape_fortran_transposes_into_row_major() {
-        // width 3, height 2; Fortran fill: (r,c) = data[c*height + r].
-        // data columns: col0=[0,1], col1=[2,3], col2=[4,5]
-        // row-major image: row0 = [0,2,4], row1 = [1,3,5].
+    fn reshape_fortran_makes_width_the_row_axis_like_pydm() {
+        // R2-56 golden from PyDM image.py:108-109 — reshape((width, -1),
+        // order="F") with len=6, width=3 is a 3-row × 2-column image
+        // [[d0,d3],[d1,d4],[d2,d5]], NOT a 2×3 transpose.
         let data = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0];
         let (w, h, px) = reshape_image(&data, 3, ReadingOrder::Fortran).expect("reshape");
-        assert_eq!((w, h), (3, 2));
-        assert_eq!(px, vec![0.0, 2.0, 4.0, 1.0, 3.0, 5.0]);
+        assert_eq!((w, h), (2, 3), "width is the ROW axis in Fortran order");
+        assert_eq!(px, vec![0.0, 3.0, 1.0, 4.0, 2.0, 5.0]);
+    }
+
+    #[test]
+    fn reshape_fortran_drops_a_trailing_partial_column() {
+        // 7 values, width 3 → two full 3-tall columns; the 7th value would
+        // start a third column and is dropped (numpy would raise instead).
+        let data = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let (w, h, px) = reshape_image(&data, 3, ReadingOrder::Fortran).expect("reshape");
+        assert_eq!((w, h), (2, 3));
+        assert_eq!(px, vec![0.0, 3.0, 1.0, 4.0, 2.0, 5.0]);
     }
 
     #[test]
