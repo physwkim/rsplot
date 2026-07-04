@@ -469,12 +469,13 @@ pub struct Plot {
     pub x_constraints: AxisConstraints,
     /// Pan/zoom constraints for the left Y axis (silx `getYAxis().setRangeConstraints`).
     pub y_constraints: AxisConstraints,
-    /// Maximum number of major ticks on the X axis.  `None` uses the default
-    /// (8).  The chrome calls `nice_ticks` with this value, so the actual count
-    /// may be slightly lower to keep round step sizes.
+    /// Maximum number of major ticks on the X axis.  `None` adapts the count to
+    /// the axis pixel size (silx `niceNumbersAdaptative`).  The chrome calls
+    /// `nice_ticks` with this value, so the actual count may be slightly lower to
+    /// keep round step sizes.
     pub x_max_ticks: Option<usize>,
-    /// Maximum number of major ticks on the left Y axis.  `None` uses the
-    /// default (6).
+    /// Maximum number of major ticks on the left Y axis.  `None` adapts the count
+    /// to the axis pixel size (silx `niceNumbersAdaptative`).
     pub y_max_ticks: Option<usize>,
     /// Limits-history stack mirroring silx `LimitsHistory`. Each entry is a
     /// full view snapshot `(x_min, x_max, y_min, y_max, y2)`. The widget pushes

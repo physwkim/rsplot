@@ -16,7 +16,7 @@ use crate::core::marker::{Marker, MarkerKind, TextAnchor};
 use crate::core::plot::{GraphGrid, TickMode};
 use crate::core::roi::{HandleKind, ManagedRoi, Roi, RoiInteractionMode};
 use crate::core::shape::{Line, Shape, ShapeKind, triangulate_simple_polygon};
-use crate::core::ticklayout::nice_num;
+use crate::core::ticklayout::{adaptive_n_ticks, nice_num};
 use crate::core::transform::{Axis, AxisSide, Scale, Transform, YAxis};
 use crate::core::triangles::Triangles;
 use crate::widget::interaction;
@@ -539,7 +539,8 @@ fn minor_ticks(axis: &Axis, major: &[(f64, String)]) -> Vec<f64> {
 /// Draw the frame, optional grid, ticks, and tick labels around the data area.
 ///
 /// `x_max_ticks` / `y_max_ticks` cap the number of major ticks on each axis.
-/// `None` falls back to the defaults (8 for X, 6 for Y).
+/// `None` adapts the count to the axis's pixel size (silx `niceNumbersAdaptative`,
+/// ~1.3 labels per inch) rather than a fixed default.
 pub fn draw_axes(
     painter: &Painter,
     t: &Transform,
@@ -593,20 +594,15 @@ pub fn draw_axes_with_x_tick_mode(
     let font = FontId::proportional(11.0);
     let tick_len = 4.0;
 
-    let xticks = axis_ticks_with_mode(
-        &t.x,
-        x_max_ticks.unwrap_or(8),
-        x_tick_mode,
-        x_time_zone,
-        x_time_offset,
-    );
-    let yticks = axis_ticks_with_mode(
-        &t.y,
-        y_max_ticks.unwrap_or(6),
-        TickMode::Numeric,
-        TimeZone::Utc,
-        0.0,
-    );
+    // With no explicit cap, the tick count adapts to each axis's physical pixel
+    // length (silx `niceNumbersAdaptative`, `GLPlotFrame.py:414-425`): 1.3 labels
+    // per inch. egui `Rect` extents are logical points, so scale by
+    // `pixels_per_point` to device pixels, matching silx's physical-pixel input.
+    let ppp = f64::from(painter.ctx().pixels_per_point());
+    let x_ticks_n = x_max_ticks.unwrap_or_else(|| adaptive_n_ticks(f64::from(area.width()) * ppp));
+    let y_ticks_n = y_max_ticks.unwrap_or_else(|| adaptive_n_ticks(f64::from(area.height()) * ppp));
+    let xticks = axis_ticks_with_mode(&t.x, x_ticks_n, x_tick_mode, x_time_zone, x_time_offset);
+    let yticks = axis_ticks_with_mode(&t.y, y_ticks_n, TickMode::Numeric, TimeZone::Utc, 0.0);
 
     if grid_mode.minor() {
         for xv in minor_ticks(&t.x, &xticks) {

@@ -1467,8 +1467,11 @@ Impact: on a time axis, one tick + label per end renders in the gutters beyond t
 
 ### R2-38: Linear nice-number tick layout diverges from silx (`/(nTicks)` vs `/(max_ticks−1)`, `<` vs `<=` thresholds, fixed 8/6 vs pixel-adaptive density)
 
-**PARTIALLY FIXED (axis-tick cluster, this session):** the two algorithm
-divergences are closed in `chrome.rs`:
+**FIXED — fully closed across this audit's fix rounds; the three parts below
+(algorithm divergences, structural consolidation, adaptive density) are all done.**
+
+**Part 1 — algorithm divergences (axis-tick cluster):** the two are closed in
+`chrome.rs`:
 - Round thresholds now `<=` (silx `niceNumGeneric`'s `frac <= roundFrac` at
   `1.5 / 3.0 / 7.0`), so a frac exactly on a boundary rounds to the lower nice
   number instead of the coarser one.
@@ -1478,7 +1481,7 @@ divergences are closed in `chrome.rs`:
 Tests: inclusive round boundaries (frac 1.5→1, 3.0→2, 7.0→5) and the `/nTicks`
 divisor example.
 
-**STRUCTURAL FOLLOW-UP — FIXED (consolidation, this session):** the nice-number
+**Part 2 — structural consolidation (FIXED):** the nice-number
 layout that was duplicated four times (`chrome.rs`, `colorbar.rs`,
 `core/scene3d/axes.rs`, `core/dtime_ticks.rs`) is now a single exact-silx port
 in `src/core/ticklayout.rs` (`number_of_digits`, `nice_num_generic`,
@@ -1492,14 +1495,31 @@ closes chrome/colorbar's latent `log10()`-vs-`ln/ln` divergence (silx
 `niceNumGeneric` uses `math.log(value, highest)`), now uniform. Tests centralised
 in the shared module; full siplot suite green (1702).
 
-**DEFERRED — needs sign-off (adaptive density only):** the pixel-adaptive tick
-count (`niceNumbersAdaptative`, `nticks = max(2, round(1.3·dpr/dpi · nbPixels))`,
-`GLPlotFrame.py:414-425`). siplot keeps the deliberate fixed defaults 8 (X) /
-6 (Y). Porting the adaptive count reverses that design choice AND needs a
-screen-DPI source silx reads from Qt's `dotsPerInch` — egui exposes
-`pixels_per_point` (a device-pixel ratio) but no logical DPI, so the density
-constant would have to be pinned to silx's reference 92 dpi rather than the
-actual screen. Both are decisions for the user; still open.
+**Part 3 — adaptive density (FIXED):** ported silx `niceNumbersAdaptative`
+(`ticklayout.py:174-192` + `GLPlotFrame.py:414-425`) as
+`core::ticklayout::adaptive_n_ticks(physical_len_px)`. Key simplification found in
+the reference: silx's `nbPixels = physical_len / devicePixelRatio` and
+`tickDensity = 1.3·devicePixelRatio / dpi` multiply to `1.3·physical_len / dpi`,
+so the **`devicePixelRatio` cancels** — the density is exactly 1.3 labels per inch
+and the only free input is the DPI. That removes the dpr ambiguity; the DPI is
+pinned to **92**, which is silx's *own* hardcoded fallback constant
+(`GLPlotFrame.py:197`, used whenever no screen is attached), not a fabricated
+value — egui exposes `pixels_per_point` (device-pixel ratio) but no DPI, so silx's
+fallback is the faithful choice. `draw_axes_with_x_tick_mode` now feeds each axis
+its physical pixel length (`Rect` logical extent × `pixels_per_point`) to
+`adaptive_n_ticks` **when `x/y_max_ticks` is `None`**; an explicit `Some(n)` cap
+(the `high_level` `set_x/y_tick_count` override) is still honoured — silx has no
+such override, but keeping it loses no capability. This reverses the former fixed
+8/6 defaults, which was the divergence this finding flagged (the audit's Impact:
+"density does not adapt to plot size"). `round_ties_even` matches Python
+`int(round(…))`. Tests: 1.3-per-92px density (92px→2, 920px→13, 600px→8), the
+`max(2, …)` floor (0/10px→2), and round-to-nearest (355px→5, 390px→6). The
+`x/y_max_ticks` doc comments (`chrome.rs`, `high_level.rs`, `plot.rs`) now describe
+the adaptive `None`. Distinct-and-skipped under the anchor audit: the 3D scene
+axes (`core/scene3d/axes.rs`, fixed `nice_numbers(…, 5)`) — silx plot3d uses
+non-adaptive `ticklayout.ticks(nbTicks=5)`, zero `niceNumbersAdaptative` hits under
+`plot3d/`, so the fixed count is faithful; and the inline colorbar
+(`chrome.rs`, fixed 6) — silx's colorbar has its own layout, not GLPlotFrame's.
 
 Severity: Medium
 

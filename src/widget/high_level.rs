@@ -7008,24 +7008,28 @@ impl PlotWidget {
     ///
     /// The chrome calls [`nice_ticks`](crate::widget::chrome::nice_ticks) with this
     /// cap, so the actual count may be lower to keep round step sizes.
-    /// Pass `None` to restore the default (8 ticks).
+    /// Pass `None` to let the count adapt to the axis pixel size (silx
+    /// `niceNumbersAdaptative`, ~1.3 labels per inch).
     pub fn set_x_tick_count(&mut self, n: Option<usize>) {
         self.backend.plot_mut().x_max_ticks = n;
     }
 
-    /// Return the current X tick-count cap, or `None` for the default (8).
+    /// Return the current X tick-count cap, or `None` when the count adapts to the
+    /// axis pixel size.
     pub fn x_tick_count(&self) -> Option<usize> {
         self.backend.plot().x_max_ticks
     }
 
     /// Set the maximum number of major ticks on the Y axis.
     ///
-    /// Pass `None` to restore the default (6 ticks).
+    /// Pass `None` to let the count adapt to the axis pixel size (silx
+    /// `niceNumbersAdaptative`, ~1.3 labels per inch).
     pub fn set_y_tick_count(&mut self, n: Option<usize>) {
         self.backend.plot_mut().y_max_ticks = n;
     }
 
-    /// Return the current Y tick-count cap, or `None` for the default (6).
+    /// Return the current Y tick-count cap, or `None` when the count adapts to the
+    /// axis pixel size.
     pub fn y_tick_count(&self) -> Option<usize> {
         self.backend.plot().y_max_ticks
     }

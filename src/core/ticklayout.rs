@@ -96,6 +96,35 @@ pub fn nice_numbers(vmin: f64, vmax: f64, n_ticks: usize) -> (f64, f64, f64, usi
     (graph_min, graph_max, spacing, nfrac)
 }
 
+/// silx tick label density: "1.3 labels per 92 pixels, i.e. 1.3 labels per inch
+/// on a 92 dpi screen" (silx `GLPlotFrame.py:418-420`).
+pub const TICK_LABELS_PER_INCH: f64 = 1.3;
+
+/// Reference screen DPI for [`adaptive_n_ticks`]. silx reads the widget's
+/// `dotsPerInch` from Qt but hardcodes **92** as the fallback when no screen is
+/// attached (`GLPlotFrame.py:197`). egui exposes a device-pixel ratio
+/// (`pixels_per_point`) but no logical/physical DPI, so the density is pinned to
+/// silx's own fallback constant rather than the actual screen.
+pub const REFERENCE_DPI: f64 = 92.0;
+
+/// silx `ticklayout.niceNumbersAdaptative` tick count (`ticklayout.py:174-192`
+/// deployed at `GLPlotFrame.py:414-425`): the number of ticks adapts to the
+/// axis's physical pixel length instead of a fixed count.
+///
+/// silx computes `nbPixels = physical_len / devicePixelRatio` (logical px) and
+/// `tickDensity = 1.3·devicePixelRatio / dpi`; their product is
+/// `1.3·physical_len / dpi`, so the `devicePixelRatio` cancels and the density is
+/// exactly 1.3 labels per inch. `physical_len_px` is therefore the axis length in
+/// device pixels (in egui: logical points × `pixels_per_point`). At least 2
+/// ticks, matching silx's `max(2, …)`.
+pub fn adaptive_n_ticks(physical_len_px: f64) -> usize {
+    // `round_ties_even` matches Python's `int(round(x))` (round half to even);
+    // realistic pixel lengths never land exactly on a half, but this keeps the
+    // rounding mode identical to silx rather than round-half-away-from-zero.
+    let nticks = (TICK_LABELS_PER_INCH * physical_len_px / REFERENCE_DPI).round_ties_even();
+    nticks.max(2.0) as usize
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -184,5 +213,33 @@ mod tests {
         assert_eq!(gmax, 1.0);
         assert!((spacing - 0.2).abs() < 1e-12);
         assert_eq!(nfrac, 1);
+    }
+
+    #[test]
+    fn adaptive_n_ticks_is_one_point_three_labels_per_92px() {
+        // silx `round(1.3 * physical_px / 92)`: one inch (92 px) -> round(1.3) = 1
+        // -> clamped to the floor of 2.
+        assert_eq!(adaptive_n_ticks(92.0), 2);
+        // Ten inches (920 px) -> round(13.0) = 13.
+        assert_eq!(adaptive_n_ticks(920.0), 13);
+        // 600 px -> round(1.3*600/92) = round(8.478) = 8 (the old fixed X default
+        // is what ~600 physical px happens to yield — now size-driven, not fixed).
+        assert_eq!(adaptive_n_ticks(600.0), 8);
+    }
+
+    #[test]
+    fn adaptive_n_ticks_floors_at_two() {
+        // silx `max(2, …)`: a zero-length or tiny axis still gets 2 ticks.
+        assert_eq!(adaptive_n_ticks(0.0), 2);
+        assert_eq!(adaptive_n_ticks(10.0), 2); // round(0.14) = 0 -> 2
+    }
+
+    #[test]
+    fn adaptive_n_ticks_rounds_to_nearest_like_silx() {
+        // silx uses `int(round(…))` (round half to even in Python, but these land
+        // clear of .5). 355 px -> 1.3*355/92 = 5.016 -> 5.
+        assert_eq!(adaptive_n_ticks(355.0), 5);
+        // 390 px -> 5.51 -> 6.
+        assert_eq!(adaptive_n_ticks(390.0), 6);
     }
 }
