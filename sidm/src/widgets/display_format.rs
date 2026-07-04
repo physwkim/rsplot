@@ -66,6 +66,45 @@ pub struct FormatSpec {
 ///
 /// `None` yields an empty string (see the module-level deviation note).
 pub fn format_value(value: Option<&PvValue>, state: &ChannelState, spec: FormatSpec) -> String {
+    format_value_impl(value, state, spec, EnumSubstitution::Label)
+}
+
+/// Like [`format_value`] but WITHOUT enum-label substitution — the display path
+/// for [`SidmLineEdit`](crate::widgets::SidmLineEdit).
+///
+/// PyDM's `PyDMLineEdit.set_display` (`line_edit.py:294-311`) runs only
+/// `parse_value_for_display` (whose Default path returns the value unchanged)
+/// then `format_string.format(...)`; unlike `PyDMLabel.value_changed`
+/// (`label.py:137-141`) it has **no** `enum_strings` branch. So an enum channel's
+/// integer index displays as its number (`"1"`, precision-formatted), not its
+/// label, and `send_value` parses the field back with `int(...)`
+/// ([`parse_enum`](super::line_edit) also accepts the numeric index, so the
+/// display/write pair round-trips).
+pub fn format_value_for_edit(
+    value: Option<&PvValue>,
+    state: &ChannelState,
+    spec: FormatSpec,
+) -> String {
+    format_value_impl(value, state, spec, EnumSubstitution::Numeric)
+}
+
+/// Whether an integer-like value with known `enum_strings` renders as its label
+/// (PyDM label widgets) or its numeric index (PyDM `PyDMLineEdit`). The one place
+/// the two toolkits' widget methods diverge on enum display.
+#[derive(Clone, Copy, PartialEq)]
+enum EnumSubstitution {
+    /// Substitute the enum label (PyDM `PyDMLabel.value_changed`).
+    Label,
+    /// Keep the numeric index (PyDM `PyDMLineEdit.set_display`).
+    Numeric,
+}
+
+fn format_value_impl(
+    value: Option<&PvValue>,
+    state: &ChannelState,
+    spec: FormatSpec,
+    enums: EnumSubstitution,
+) -> String {
     let Some(value) = value else {
         return String::new();
     };
@@ -82,22 +121,22 @@ pub fn format_value(value: Option<&PvValue>, state: &ChannelState, spec: FormatS
             // Only a byte waveform is decoded; a scalar under String renders as
             // Default (PyDM byte-decodes ndarrays only), and so do other arrays.
             PvValue::Bytes(bytes) => append_units(decode_char_waveform(bytes), units),
-            _ => format_default(value, state, precision, units),
+            _ => format_default(value, state, precision, units, enums),
         },
         DisplayFormat::Exponential => match value.as_f64() {
             Some(n) => append_units(python_exponential(n, precision), units),
-            None => format_default(value, state, precision, units),
+            None => format_default(value, state, precision, units, enums),
         },
         DisplayFormat::Hex => match numeric_floor_i64(value) {
             Some(n) => append_units(format_hex(n), units),
-            None => format_default(value, state, precision, units),
+            None => format_default(value, state, precision, units, enums),
         },
         DisplayFormat::Binary => match numeric_floor_i64(value) {
             Some(n) => append_units(format_binary(n), units),
-            None => format_default(value, state, precision, units),
+            None => format_default(value, state, precision, units, enums),
         },
         DisplayFormat::Default | DisplayFormat::Decimal => {
-            format_default(value, state, precision, units)
+            format_default(value, state, precision, units, enums)
         }
     }
 }
@@ -109,12 +148,16 @@ fn format_default(
     state: &ChannelState,
     precision: usize,
     units: Option<&str>,
+    enums: EnumSubstitution,
 ) -> String {
     // Enum substitution: an integer-like value with known enum strings renders
     // as its label, and the unit suffix is NOT appended (PyDM's enum branch
     // returns before the unit code). A float is never enum-substituted, matching
-    // Python's `isinstance(value, int)` gate.
-    if let Some(strings) = state.enum_strings.as_deref()
+    // Python's `isinstance(value, int)` gate. Skipped for the line edit
+    // (`EnumSubstitution::Numeric`), which shows the numeric index like
+    // `PyDMLineEdit.set_display`.
+    if enums == EnumSubstitution::Label
+        && let Some(strings) = state.enum_strings.as_deref()
         && let Some(index) = enum_index(value)
     {
         return enum_label_or_invalid(strings, index);
@@ -658,6 +701,49 @@ mod tests {
                 spec(DisplayFormat::Default, None, false)
             ),
             "On"
+        );
+    }
+
+    #[test]
+    fn edit_variant_shows_enum_index_not_label() {
+        // R2-60: PyDMLineEdit.set_display has no enum_strings branch, so the line
+        // edit shows the numeric index (precision-formatted) where the label
+        // shows "On". The write path (parse_enum) accepts that index, so the pair
+        // round-trips.
+        let st = state(None, None, Some(&["Off", "On"]));
+        // Label path substitutes.
+        assert_eq!(
+            fmt(
+                PvValue::Enum {
+                    index: 1,
+                    label: None
+                },
+                &st,
+                spec(DisplayFormat::Default, None, false)
+            ),
+            "On"
+        );
+        // Line-edit path keeps the index.
+        assert_eq!(
+            format_value_for_edit(
+                Some(&PvValue::Enum {
+                    index: 1,
+                    label: None
+                }),
+                &st,
+                spec(DisplayFormat::Default, None, false)
+            ),
+            "1"
+        );
+        // Int and Bool enum channels likewise show the number, with units and
+        // precision still applied (unlike the label branch, which returns early).
+        assert_eq!(
+            format_value_for_edit(
+                Some(&PvValue::Int(1)),
+                &state(Some(2), Some("V"), Some(&["Off", "On"])),
+                spec(DisplayFormat::Default, None, true)
+            ),
+            "1.00 V"
         );
     }
 

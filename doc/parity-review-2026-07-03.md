@@ -1907,6 +1907,26 @@ Impact: any PyDM-grammar calc address — `calc://x?expr=sin(A)*2`, `expr=A*pi`,
 
 ### R2-60: SidmLineEdit enum-substitutes its display text; PyDMLineEdit shows (and round-trips) the numeric value
 
+**FIXED (sidm cluster, this session):** the enum-label substitution in
+`format_default` was shared by `SidmLabel` (which should substitute, PyDM
+`label.py:137-141`) and `SidmLineEdit` (which should not, PyDM
+`line_edit.py:294-311`). Split the decision by entry point, mirroring PyDM's
+per-method structure: `format_value` (enum → label, unchanged callers) and a new
+`format_value_for_edit` (enum → numeric index), both delegating to a shared
+`format_value_impl` threaded with an `EnumSubstitution` enum; `format_default`
+skips the enum branch under `EnumSubstitution::Numeric`. `SidmLineEdit::current_text`
+now calls `format_value_for_edit`, so an enum PV shows `"1"` (precision- and
+unit-formatted, since the label branch's early-return no longer fires) instead of
+`"On"`. The write path is unaffected — `parse_enum` already accepts a numeric
+index (`line_edit.rs:269-270`) as well as a label, so the display/parse pair
+round-trips. Tests: the label path still shows `"On"`, the edit path shows `"1"`,
+and an Int enum channel with units/precision shows `"1.00 V"` (the label branch
+would have returned `"On"` before the unit code). Full sidm suite (389 tests)
+green.
+
+The sub-bar observations (a)–(e) are consolidator's-discretion adjacent gaps, not
+part of this finding; they remain open and unaddressed.
+
 Severity: Low
 
 Rust: `sidm/src/widgets/line_edit.rs:116-118` — `current_text` delegates to `format_value`, whose Default path substitutes the enum label for integer-like values (`display_format.rs:117-120`), so a line edit on an mbbo/bo shows `"On"`.

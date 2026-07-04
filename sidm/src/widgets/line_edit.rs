@@ -1,7 +1,9 @@
 //! `SidmLineEdit` — a writable text entry.
 //!
 //! Ports `pydm/widgets/line_edit.py`: a single-line text field that shows the
-//! channel value (formatted like [`SidmLabel`](crate::widgets::SidmLabel)) and, on Enter, parses the typed
+//! channel value (formatted like [`SidmLabel`](crate::widgets::SidmLabel), except an enum PV shows its
+//! numeric index rather than its label — PyDM's `PyDMLineEdit.set_display` has no
+//! `enum_strings` branch) and, on Enter, parses the typed
 //! text back into a [`PvValue`] and writes it. The parse is keyed on the current
 //! value's type (the PyDM `channeltype`) and the display format, mirroring
 //! `send_value`:
@@ -26,7 +28,7 @@ use siplot::egui;
 use crate::channel::{Channel, ChannelState, PvValue};
 use crate::engine::{Engine, EngineError};
 use crate::widgets::base::{BorderMode, ChannelBase, layout_justify};
-use crate::widgets::display_format::{DisplayFormat, FormatSpec, format_value};
+use crate::widgets::display_format::{DisplayFormat, FormatSpec, format_value_for_edit};
 use crate::widgets::label::TextAlign;
 
 /// A writable channel text entry (PyDM `PyDMLineEdit`).
@@ -113,8 +115,13 @@ impl SidmLineEdit {
     /// The text the field shows for `state`: the formatted value, or empty when
     /// no value has arrived. Unlike [`SidmLabel`](crate::widgets::SidmLabel), a line edit keeps showing the
     /// last value while disconnected (the field is merely disabled).
+    ///
+    /// Uses [`format_value_for_edit`], which does NOT enum-substitute: PyDM's
+    /// `PyDMLineEdit.set_display` shows an enum PV's numeric index (`"1"`), not
+    /// its label — unlike `SidmLabel`. The typed index round-trips back through
+    /// [`parse_enum`], which accepts the number.
     pub fn current_text(&self, state: &ChannelState) -> String {
-        format_value(state.value.as_ref(), state, self.format_spec())
+        format_value_for_edit(state.value.as_ref(), state, self.format_spec())
     }
 
     /// Render the field this frame. Returns the value written this frame (on a
