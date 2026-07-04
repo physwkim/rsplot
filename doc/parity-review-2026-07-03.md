@@ -803,6 +803,13 @@ Impact: hypermet tails are `erfc(w)·exp(z)` with `w = dx/(σ√2) + σ√2/(2·
 
 ### R2-31: `get_sigma_parameters` drops the CFACTOR multiplier
 
+**FIXED (fit-stack cluster):** the FACTOR arm of `get_sigma_parameters` now
+scales the reference sigma by the tie factor (`sigma_par[i] = factor *
+sigma_par[reference]`, silx leastsq.py:875-876); DELTA/SUM keep the unscaled
+copy (:877-880). Value expansion (fitting.rs `expand_parameters`) already applied
+the factor — only the sigma path had collapsed the three ties. Test:
+`factor_tied_sigma_scales_by_the_factor`.
+
 Severity: Medium
 
 Rust: `src/core/fitting.rs:334-341` — `Factor { reference, .. } | Delta {..} | Sum {..} => sigma_par[i] = sigma_par[reference]` — all three collapsed to an unscaled copy.

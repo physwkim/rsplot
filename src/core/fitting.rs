@@ -333,9 +333,14 @@ fn get_sigma_parameters(
     }
     for (i, c) in constraints.iter().enumerate() {
         match *c {
-            Constraint::Factor { reference, .. }
-            | Constraint::Delta { reference, .. }
-            | Constraint::Sum { reference, .. } => sigma_par[i] = sigma_par[reference],
+            // CFACTOR scales the reference sigma by the tie factor
+            // (leastsq.py:875-876); only CDELTA/CSUM copy it unscaled.
+            Constraint::Factor { reference, factor } => {
+                sigma_par[i] = factor * sigma_par[reference]
+            }
+            Constraint::Delta { reference, .. } | Constraint::Sum { reference, .. } => {
+                sigma_par[i] = sigma_par[reference]
+            }
             _ => {}
         }
     }
@@ -3461,6 +3466,35 @@ mod tests {
             (res.parameters[1] - 2.0 * res.parameters[0]).abs() < 1e-9,
             "tie broken"
         );
+    }
+
+    #[test]
+    fn factor_tied_sigma_scales_by_the_factor() {
+        // R2-31: silx CFACTOR scales the reference sigma by the tie factor
+        // (leastsq.py:875-876); CDELTA and CSUM copy it unscaled (:877-880).
+        let sigmas = get_sigma_parameters(
+            &[3.0, 0.0, 0.0, 0.0],
+            &[0.5],
+            &[
+                Constraint::Free,
+                Constraint::Factor {
+                    reference: 0,
+                    factor: 2.0,
+                },
+                Constraint::Delta {
+                    reference: 0,
+                    delta: 5.0,
+                },
+                Constraint::Sum {
+                    reference: 0,
+                    sum: 9.0,
+                },
+            ],
+        );
+        assert_eq!(sigmas[0], 0.5);
+        assert_eq!(sigmas[1], 1.0, "FACTOR sigma must be factor * reference");
+        assert_eq!(sigmas[2], 0.5, "DELTA sigma copies the reference unscaled");
+        assert_eq!(sigmas[3], 0.5, "SUM sigma copies the reference unscaled");
     }
 
     #[test]
