@@ -1514,6 +1514,7 @@ fn emit_cartesian_plot(b: &mut Builder, widget: &MedmWidget, options: &Options, 
     if adds.is_empty() {
         return; // no usable traces; warnings already recorded
     }
+    warn_unsupported_cartesian_keys(b, widget);
 
     let ty = if scatter {
         "SidmScatterPlot"
@@ -1543,6 +1544,74 @@ fn emit_cartesian_plot(b: &mut Builder, widget: &MedmWidget, options: &Options, 
         &with,
         &adds,
     );
+}
+
+/// Warn on the MEDM cartesian-plot runtime keys that have no sidm surface, so
+/// they are never silently dropped (medmCartesianPlot.c:2957-3070). sidm's plot
+/// is a live, full-array, auto-scaling line plot: no trigger/erase-PV wiring, no
+/// per-plot style switch (`line plot` is what it already draws), and no
+/// circular/stop point buffer. `line plot`/`line` and a numeric `count` are
+/// faithful and stay silent.
+fn warn_unsupported_cartesian_keys(b: &mut Builder, widget: &MedmWidget) {
+    let line = widget.line;
+    let a = &widget.assignments;
+
+    if let Some(t) = a.get("trigger").filter(|s| !s.is_empty()) {
+        b.warnings.push(format!(
+            "line {line}: cartesian plot trigger PV {t:?} not wired; sidm redraws on \
+             every channel update"
+        ));
+    }
+    if let Some(e) = a.get("erase").filter(|s| !s.is_empty()) {
+        let mode = a
+            .get("eraseMode")
+            .map(String::as_str)
+            .unwrap_or("if not zero");
+        b.warnings.push(format!(
+            "line {line}: cartesian plot erase PV {e:?} ({mode}) not wired; sidm has \
+             no plot-clear channel"
+        ));
+    }
+    // `count` (medmCartesianPlot.c:2957-2963) and `countPvName` (:3055-3060) both
+    // set the point count; a non-numeric value is a PV-driven buffer size sidm
+    // cannot honour (a numeric `count` is the scatter buffer, handled by caller).
+    if let Some(c) = a
+        .get("countPvName")
+        .or_else(|| a.get("count"))
+        .filter(|c| !c.is_empty() && c.parse::<usize>().is_err())
+    {
+        b.warnings.push(format!(
+            "line {line}: cartesian plot count PV {c:?} degrades to the default \
+             buffer; sidm has no PV-driven point count"
+        ));
+    }
+    if let Some(style) = a.get("style").map(String::as_str) {
+        let rendered = match style {
+            "point plot" | "point" => Some("point plot"),
+            "step" => Some("step"),
+            "fill under" | "fill-under" => Some("fill under"),
+            _ => None, // "line plot"/"line" is exactly what sidm draws
+        };
+        if let Some(name) = rendered {
+            b.warnings.push(format!(
+                "line {line}: cartesian plot style {name:?} rendered as a connected \
+                 line plot; sidm has no per-plot style switch"
+            ));
+        }
+    }
+    if let Some(mode) = a.get("erase_oldest").map(String::as_str) {
+        let behaviour = match mode {
+            "on" | "plot last n pts" => Some("circular (plot last n pts)"),
+            "off" | "plot n pts & stop" => Some("stop-at-n (plot n pts & stop)"),
+            _ => None,
+        };
+        if let Some(behaviour) = behaviour {
+            b.warnings.push(format!(
+                "line {line}: cartesian plot erase_oldest {behaviour} not reproduced; \
+                 sidm plots the full incoming array"
+            ));
+        }
+    }
 }
 
 /// Plot-styling builders shared by `strip chart` and `cartesian plot`: the
@@ -6783,6 +6852,95 @@ composite {
             !g.source.contains("with_buffer_size"),
             "count must not map to a waveform buffer:\n{}",
             g.source
+        );
+    }
+
+    #[test]
+    fn cartesian_plot_warns_on_unsupported_runtime_keys() {
+        // R2-68: the runtime keys with no sidm surface must warn, never silently
+        // drop. `line plot` + numeric count are faithful and stay silent.
+        let adl = r#"
+"color map" {
+	colors {
+		ffffff,
+		ff0000,
+	}
+}
+"cartesian plot" {
+	object {
+		x=0
+		y=0
+		width=300
+		height=150
+	}
+	trigger="TRIG:PV"
+	erase="ERASE:PV"
+	eraseMode="if zero"
+	countPvName="NPTS:REC"
+	style="point plot"
+	erase_oldest="plot last n pts"
+	trace[0] {
+		ydata="DEV:Y"
+		data_clr=1
+	}
+}
+"#;
+        let g = generate(&parse(adl), &Options::default());
+        let has = |needle: &str| g.warnings.iter().any(|w| w.contains(needle));
+        assert!(
+            has("trigger PV \"TRIG:PV\""),
+            "no trigger warning: {:?}",
+            g.warnings
+        );
+        assert!(
+            has("erase PV \"ERASE:PV\"") && has("if zero"),
+            "no erase warning: {:?}",
+            g.warnings
+        );
+        assert!(
+            has("count PV \"NPTS:REC\""),
+            "no count-PV warning: {:?}",
+            g.warnings
+        );
+        assert!(
+            has("style \"point plot\""),
+            "no style warning: {:?}",
+            g.warnings
+        );
+        assert!(
+            has("erase_oldest circular"),
+            "no erase_oldest warning: {:?}",
+            g.warnings
+        );
+
+        // Faithful case: a line plot with a numeric count warns for none of these.
+        let plain = r#"
+"color map" {
+	colors {
+		ffffff,
+		ff0000,
+	}
+}
+"cartesian plot" {
+	object {
+		x=0
+		y=0
+		width=300
+		height=150
+	}
+	count=500
+	style="line plot"
+	trace[0] {
+		ydata="DEV:Y"
+		data_clr=1
+	}
+}
+"#;
+        let g2 = generate(&parse(plain), &Options::default());
+        assert!(
+            !g2.warnings.iter().any(|w| w.contains("cartesian plot")),
+            "line plot + numeric count must not warn: {:?}",
+            g2.warnings
         );
     }
 

@@ -1294,6 +1294,18 @@ Impact: operator screens that rely on a text entry / menu / message button turni
 
 ### R2-68: Cartesian plot runtime surface silently dropped — `trigger`, `erase`, `eraseMode`, `countPvName`, `style`, `erase_oldest`
 
+**FIXED (silent-drop cluster):** `warn_unsupported_cartesian_keys` now warns for
+each runtime key with no sidm surface (verified against MEDM's parse,
+medmCartesianPlot.c:2957-3070): `trigger` (redraw gating), `erase`+`eraseMode`
+(plot-clear PV), a non-numeric `count`/`countPvName` (PV-driven buffer size),
+`style` when `point plot`/`step`/`fill under` (rendered as a connected line), and
+`erase_oldest` circular/stop-at-n buffering. sidm's plot is a live, full-array,
+auto-scaling line plot, so `line plot`/`line` and a numeric `count` (the scatter
+buffer, already handled) are faithful and stay silent. Behaviour is unchanged —
+these keys were and remain unimplemented; the fix is that the drop is no longer
+silent, matching every other unsupported-feature path in the emitter. Test:
+`cartesian_plot_warns_on_unsupported_runtime_keys`.
+
 Severity: Low
 
 Rust: `adl2sidm/src/codegen.rs:1425-1535` — `emit_cartesian_plot` reads only `count` (numeric, scatter-buffer only), the traces, plotcom, and x/y1/y2 axis blocks; none of the six keys above is read anywhere in `codegen.rs`, and no warning is emitted for any of them (a non-numeric `count` — the PV-name form — also silently disappears through `parse::<usize>().ok()`).
