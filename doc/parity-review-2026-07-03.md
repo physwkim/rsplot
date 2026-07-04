@@ -763,6 +763,26 @@ Every finding independently re-verified at the cited lines on both trees; the ro
 
 ### R2-27: FitManager's fit path uses central differences (`left_derivative=True`); the Rust engine is forward-only
 
+**FIXED (fit-stack cluster):** both engines take a `left_derivative: bool`
+(silx's keyword, positional): `false` = forward `(f(p+δ) − f(p))/δ`, `true` =
+central `(f(p+δ) − f(p−δ))/(2δ)` per leastsq.py:725-733. In the constrained
+engine both perturbed vectors pass through the full constraint expansion and
+the `derivfactor` scaling, and the final covariance pass inherits the mode
+(leastsq.py:496). Callers routed per silx: `IterativeFit::fit_full`,
+`fit_multi_gaussian`, and `fit_peak_from` (the FitManager.runfit equivalents)
+pass `true` (fitmanager.py:897); the `estimate_multi_gaussian` 4-iteration
+refine keeps the forward default (fittheories.py:411-419). Converged fits
+barely discriminate the modes (goldens differ ~1.8e-8, below cross-impl
+summation noise), so the tests assert the semantics directly by recording the
+parameter vectors the model receives:
+`central_jacobian_probes_both_sides_and_forward_does_not` (−δ probe present in
+central, absent in forward, per parameter),
+`central_jacobian_expands_constraints_on_the_minus_probe` (Factor-tied p1
+arrives as `2·(p0−δ)` on the minus probe), and
+`central_jacobian_tracks_silx_central_trajectory` (silx left_derivative=True
+golden: niter 5 exact, params [0.15626324076563153, 1.6095323213968356] at
+1e-6).
+
 Severity: Medium
 
 Rust: `src/core/fitting.rs:521-535` (unconstrained) and `:794-812` (constrained) — the Jacobian is always the forward difference `(f(p+δ) − f(p))/δ`; no central-difference mode exists in either engine or any caller.

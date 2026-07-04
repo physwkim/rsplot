@@ -434,13 +434,21 @@ pub const DEFAULT_FIT_SENSITIVITY: f64 = 2.5;
 /// used as weight (`weight = 1/sigma^2`); when `None`, every weight is 1, as in
 /// silx (`sigma = numpy.ones(...)`).
 ///
-/// Faithful to silx `leastsq` (unconstrained path): forward numerical
-/// derivatives with step `delta[i] = (p[i] + (p[i]==0)) * sqrt(epsfcn)`,
+/// Faithful to silx `leastsq` (unconstrained path): numerical derivatives with
+/// step `delta[i] = (p[i] + (p[i]==0)) * sqrt(epsfcn)`,
 /// `epsfcn = f64::EPSILON`, accept-if-chi-square-decreases with `flambda`
 /// damping (start 0.001, `*10` on rejection up to 1000, `/10` on acceptance),
 /// and the two-stop convergence test (`lastdeltachi < deltachi` or
 /// `absdeltachi < sqrt(epsfcn)`), with the silx rule that the first iteration
 /// always proceeds regardless of those limits.
+///
+/// `left_derivative` selects the Jacobian mode, mirroring silx's keyword
+/// (leastsq.py:725-733): `false` is the forward difference
+/// `(f(p+δ) − f(p))/δ` (silx default, used by the estimation micro-fits);
+/// `true` is the central difference `(f(p+δ) − f(p−δ))/(2δ)` that every
+/// FitManager/FitWidget fit uses (fitmanager.py:897).
+// Positional mirror of the silx keyword API, same as `leastsq_constrained`.
+#[allow(clippy::too_many_arguments)]
 pub fn leastsq<F>(
     model: F,
     xdata: &[f64],
@@ -449,6 +457,7 @@ pub fn leastsq<F>(
     sigma: Option<&[f64]>,
     max_iter: usize,
     deltachi: f64,
+    left_derivative: bool,
 ) -> Result<LeastSqResult, FitError>
 where
     F: Fn(&[f64], &[f64]) -> Vec<f64>,
@@ -523,7 +532,9 @@ where
             .iter()
             .map(|&p| (p + if p == 0.0 { 1.0 } else { 0.0 }) * sqrt_epsfcn)
             .collect();
-        // Forward numerical derivatives deriv[i][j] = (f(p+delta_i) - f0)/delta_i.
+        // Numerical derivatives: forward (f(p+δ) − f0)/δ, or central
+        // (f(p+δ) − f(p−δ))/(2δ) under `left_derivative` (silx
+        // leastsq.py:725-733).
         let mut deriv: Vec<Vec<f64>> = Vec::with_capacity(n_param);
         for i in 0..n_param {
             let mut pwork = fittedpar.clone();
@@ -531,11 +542,20 @@ where
             let f1 = model(xdata, &pwork);
             nfev += 1;
             let di = delta[i];
-            let row: Vec<f64> = f1
-                .iter()
-                .zip(yfit0.iter())
-                .map(|(&a, &b)| (a - b) / di)
-                .collect();
+            let row: Vec<f64> = if left_derivative {
+                pwork[i] = fittedpar[i] - delta[i];
+                let f2 = model(xdata, &pwork);
+                nfev += 1;
+                f1.iter()
+                    .zip(f2.iter())
+                    .map(|(&a, &b)| (a - b) / (2.0 * di))
+                    .collect()
+            } else {
+                f1.iter()
+                    .zip(yfit0.iter())
+                    .map(|(&a, &b)| (a - b) / di)
+                    .collect()
+            };
             deriv.push(row);
         }
         // deltay = y - yfit ; help0 = weight * deltay
@@ -718,8 +738,9 @@ struct CabOut {
 
 /// One constrained curvature/gradient evaluation (silx `chisq_alpha_beta` with
 /// a non-None `constraints`). Builds the free-parameter set, the numerical
-/// forward-difference Jacobian scaled by each parameter's `derivfactor`, and the
-/// normal-equation matrices restricted to the free parameters.
+/// Jacobian (forward, or central under `left_derivative`) scaled by each
+/// parameter's `derivfactor`, and the normal-equation matrices restricted to
+/// the free parameters.
 #[allow(clippy::too_many_arguments)]
 fn chisq_alpha_beta_constrained<F>(
     model: &F,
@@ -730,6 +751,7 @@ fn chisq_alpha_beta_constrained<F>(
     constraints: &[Constraint],
     sqrt_epsfcn: f64,
     last_evaluation: Option<&[f64]>,
+    left_derivative: bool,
     nfev: &mut usize,
 ) -> CabOut
 where
@@ -801,8 +823,10 @@ where
         }
     };
 
-    // Numerical forward derivatives for each free parameter, scaled by
-    // derivfactor (CQUOTED `B·cos`, else 1).
+    // Numerical derivatives for each free parameter — forward against the base
+    // evaluation, or central under `left_derivative` (both perturbed vectors
+    // constraint-expanded, silx leastsq.py:726-731) — scaled by derivfactor
+    // (CQUOTED `B·cos`, else 1).
     let mut deriv: Vec<Vec<f64>> = Vec::with_capacity(n_free);
     for i in 0..n_free {
         let fi = free_index[i];
@@ -812,11 +836,21 @@ where
         *nfev += 1;
         let di = delta[i];
         let df = derivfactor[i];
-        let row: Vec<f64> = f1
-            .iter()
-            .zip(yfit.iter())
-            .map(|(&a, &b)| (a - b) / di * df)
-            .collect();
+        let row: Vec<f64> = if left_derivative {
+            pwork[fi] = fitparam[i] - delta[i];
+            let newpar = take(&get_parameters(&pwork, constraints), &noigno);
+            let f2 = model(xdata, &newpar);
+            *nfev += 1;
+            f1.iter()
+                .zip(f2.iter())
+                .map(|(&a, &b)| (a - b) / (2.0 * di) * df)
+                .collect()
+        } else {
+            f1.iter()
+                .zip(yfit.iter())
+                .map(|(&a, &b)| (a - b) / di * df)
+                .collect()
+        };
         deriv.push(row);
         pwork[fi] = fitparam[i]; // restore
     }
@@ -874,8 +908,10 @@ where
 /// that the covariance is recomputed at the final parameters (silx's second
 /// `chisq_alpha_beta` pass).
 ///
-/// The non-finite check, weighting, LM damping and convergence test match
-/// [`leastsq`]; only the per-step parameter handling differs.
+/// The non-finite check, weighting, LM damping, convergence test and the
+/// `left_derivative` Jacobian-mode flag match [`leastsq`]; only the per-step
+/// parameter handling differs. In central mode both perturbed vectors pass
+/// through the full constraint expansion, as in silx (leastsq.py:726-731).
 #[allow(clippy::too_many_arguments)]
 pub fn leastsq_constrained<F>(
     model: F,
@@ -886,6 +922,7 @@ pub fn leastsq_constrained<F>(
     sigma: Option<&[f64]>,
     max_iter: usize,
     deltachi: f64,
+    left_derivative: bool,
 ) -> Result<LeastSqResult, FitError>
 where
     F: Fn(&[f64], &[f64]) -> Vec<f64>,
@@ -991,6 +1028,7 @@ where
             constraints,
             sqrt_epsfcn,
             last_evaluation.as_deref(),
+            left_derivative,
             &mut nfev,
         );
         let chisq0 = cab.chisq;
@@ -1109,6 +1147,8 @@ where
         &new_constraints,
         sqrt_epsfcn,
         last_evaluation.as_deref(),
+        // The covariance pass inherits the Jacobian mode (silx leastsq.py:496).
+        left_derivative,
         &mut nfev,
     );
     let mut covariance = vec![vec![0.0_f64; n_param]; n_param];
@@ -2466,6 +2506,9 @@ impl IterativeFit {
             None,
             self.max_iter,
             self.deltachi,
+            // Widget-path fits use the central-difference Jacobian, as every
+            // FitManager.runfit does (fitmanager.py:897, left_derivative=True).
+            true,
         )
         .ok()?;
         let y_fit = self.model.eval(x, &solver.parameters);
@@ -2659,6 +2702,8 @@ pub fn estimate_multi_gaussian(
     }
 
     // Quick 4-iteration refine (silx max_iter=4); fall back to the raw seeds.
+    // Forward Jacobian: the estimation micro-fit calls leastsq with silx's
+    // default derivative mode (fittheories.py:411-419), unlike the runfit path.
     let fittedpar = leastsq_constrained(
         multi_gaussian_model,
         x,
@@ -2668,6 +2713,7 @@ pub fn estimate_multi_gaussian(
         None,
         4,
         DEFAULT_DELTACHI,
+        false,
     )
     .map(|r| r.parameters)
     .unwrap_or(param);
@@ -2710,6 +2756,9 @@ pub fn fit_multi_gaussian(
         None,
         max_iter,
         deltachi,
+        // FitManager.runfit path: central-difference Jacobian
+        // (fitmanager.py:897, left_derivative=True).
+        true,
     )
     .ok()
 }
@@ -2777,6 +2826,9 @@ pub fn fit_peak_from(
         None,
         max_iter,
         deltachi,
+        // FitWidget parameter-table fits run through FitManager.runfit:
+        // central-difference Jacobian (fitmanager.py:897).
+        true,
     )
     .ok()?;
     let y_fit = model.eval(x, &solver.parameters);
@@ -2935,7 +2987,17 @@ mod tests {
                 .collect::<Vec<_>>()
         };
 
-        let r8 = leastsq(expo, &xs, &ys, &[1.0, 3.0], None, 8, DEFAULT_DELTACHI).unwrap();
+        let r8 = leastsq(
+            expo,
+            &xs,
+            &ys,
+            &[1.0, 3.0],
+            None,
+            8,
+            DEFAULT_DELTACHI,
+            false,
+        )
+        .unwrap();
         assert_eq!(r8.niter, 5, "rejected-λ attempts must consume the budget");
         // Parameters match silx to summation-order noise (numpy accumulates
         // chisq/alpha/beta pairwise, Rust sequentially; ~1e-7 relative after
@@ -2952,13 +3014,168 @@ mod tests {
         );
 
         // With budget to spare the same fit converges on silx's schedule.
-        let r100 = leastsq(expo, &xs, &ys, &[1.0, 3.0], None, 100, DEFAULT_DELTACHI).unwrap();
+        let r100 = leastsq(
+            expo,
+            &xs,
+            &ys,
+            &[1.0, 3.0],
+            None,
+            100,
+            DEFAULT_DELTACHI,
+            false,
+        )
+        .unwrap();
         assert_eq!(
             r100.niter, 15,
             "converged trajectory length must match silx"
         );
         assert!((r100.parameters[0] - 1.0).abs() < 1e-6);
         assert!((r100.parameters[1] - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn central_jacobian_probes_both_sides_and_forward_does_not() {
+        // R2-27: `left_derivative` must switch the Jacobian from forward
+        // (f(p+δ) − f(p))/δ to central (f(p+δ) − f(p−δ))/(2δ), silx
+        // leastsq.py:725-733. Converged fits barely discriminate the modes
+        // (both Jacobians are accurate to O(δ) on smooth models), so assert
+        // the semantic directly: record every parameter vector the model
+        // receives and check for the −δ probe. p0 = 1.0 ⇒
+        // δ = (p + (p==0))·sqrt(ε) = sqrt(ε), and the probe values are the
+        // exact f64 expressions the engine computes, so `==` is valid.
+        use std::cell::RefCell;
+        let calls: RefCell<Vec<Vec<f64>>> = RefCell::new(Vec::new());
+        let model = |x: &[f64], p: &[f64]| {
+            calls.borrow_mut().push(p.to_vec());
+            x.iter().map(|&xi| p[0] * xi + p[1]).collect::<Vec<_>>()
+        };
+        let xs = linspace(-5.0, 5.0, 21);
+        let ys: Vec<f64> = xs.iter().map(|&x| 2.5 * x - 1.0).collect();
+        let d = f64::EPSILON.sqrt();
+
+        leastsq(
+            model,
+            &xs,
+            &ys,
+            &[1.0, 1.0],
+            None,
+            1,
+            DEFAULT_DELTACHI,
+            false,
+        )
+        .unwrap();
+        let fwd = calls.borrow().clone();
+        assert!(
+            fwd.iter().any(|p| p[0] == 1.0 + d),
+            "forward mode probes +δ"
+        );
+        assert!(
+            !fwd.iter().any(|p| p[0] == 1.0 - d || p[1] == 1.0 - d),
+            "forward mode must not probe −δ"
+        );
+
+        calls.borrow_mut().clear();
+        leastsq(
+            model,
+            &xs,
+            &ys,
+            &[1.0, 1.0],
+            None,
+            1,
+            DEFAULT_DELTACHI,
+            true,
+        )
+        .unwrap();
+        let cen = calls.borrow().clone();
+        assert!(
+            cen.iter().any(|p| p[0] == 1.0 + d),
+            "central mode probes +δ for parameter 0"
+        );
+        assert!(
+            cen.iter().any(|p| p[0] == 1.0 - d),
+            "central mode probes −δ for parameter 0"
+        );
+        assert!(
+            cen.iter().any(|p| p[1] == 1.0 - d),
+            "central mode probes −δ for every parameter"
+        );
+    }
+
+    #[test]
+    fn central_jacobian_tracks_silx_central_trajectory() {
+        // R2-27 golden from silx leastsq run directly with
+        // left_derivative=True on the R2-28 fixture (model a·exp(b·x),
+        // y = exp(x), x = linspace(0, 3, 16), p0 = [1, 3], max_iter=5):
+        // niter 5, params [0.15626324076563153, 1.6095323213968356]. The
+        // attempt accounting must be identical to forward mode; parameters
+        // match to summation-order noise (~1e-7, see the budget test).
+        let xs = linspace(0.0, 3.0, 16);
+        let ys: Vec<f64> = xs.iter().map(|&x| x.exp()).collect();
+        let expo = |x: &[f64], p: &[f64]| {
+            x.iter()
+                .map(|&xi| p[0] * (p[1] * xi).exp())
+                .collect::<Vec<_>>()
+        };
+        let r5 = leastsq(expo, &xs, &ys, &[1.0, 3.0], None, 5, DEFAULT_DELTACHI, true).unwrap();
+        assert_eq!(r5.niter, 5);
+        assert!(
+            (r5.parameters[0] - 0.156_263_240_765_631_53).abs() < 1e-6,
+            "a {}",
+            r5.parameters[0]
+        );
+        assert!(
+            (r5.parameters[1] - 1.609_532_321_396_835_6).abs() < 1e-6,
+            "b {}",
+            r5.parameters[1]
+        );
+    }
+
+    #[test]
+    fn central_jacobian_expands_constraints_on_the_minus_probe() {
+        // R2-27, constrained engine: in central mode BOTH perturbed vectors
+        // pass through the `_get_parameters` constraint expansion before the
+        // model call (silx leastsq.py:726-731). With p1 Factor-tied to p0,
+        // the −δ probe must arrive as [1−δ, 2·(1−δ)], not with a stale p1.
+        use std::cell::RefCell;
+        let calls: RefCell<Vec<Vec<f64>>> = RefCell::new(Vec::new());
+        let model = |x: &[f64], p: &[f64]| {
+            calls.borrow_mut().push(p.to_vec());
+            x.iter().map(|&xi| p[0] * xi + p[1]).collect::<Vec<_>>()
+        };
+        let xs = linspace(-5.0, 5.0, 21);
+        let ys: Vec<f64> = xs.iter().map(|&x| 2.5 * x + 5.0).collect();
+        let cons = [
+            Constraint::Free,
+            Constraint::Factor {
+                reference: 0,
+                factor: 2.0,
+            },
+        ];
+        let d = f64::EPSILON.sqrt();
+
+        leastsq_constrained(
+            model,
+            &xs,
+            &ys,
+            &[1.0, 2.0],
+            &cons,
+            None,
+            1,
+            DEFAULT_DELTACHI,
+            true,
+        )
+        .unwrap();
+        let cen = calls.borrow().clone();
+        assert!(
+            cen.iter()
+                .any(|p| p[0] == 1.0 + d && p[1] == 2.0 * (1.0 + d)),
+            "+δ probe arrives constraint-expanded"
+        );
+        assert!(
+            cen.iter()
+                .any(|p| p[0] == 1.0 - d && p[1] == 2.0 * (1.0 - d)),
+            "−δ probe arrives constraint-expanded"
+        );
     }
 
     #[test]
@@ -2976,6 +3193,7 @@ mod tests {
             None,
             DEFAULT_MAX_ITER,
             DEFAULT_DELTACHI,
+            false,
         )
         .unwrap();
         assert!(
@@ -3462,6 +3680,7 @@ mod tests {
             None,
             10,
             DEFAULT_DELTACHI,
+            false,
         );
         assert_eq!(r.unwrap_err(), FitError::LengthMismatch);
     }
@@ -3476,6 +3695,7 @@ mod tests {
             None,
             10,
             DEFAULT_DELTACHI,
+            false,
         );
         assert_eq!(r.unwrap_err(), FitError::NonFinite);
     }
@@ -3515,6 +3735,7 @@ mod tests {
             None,
             DEFAULT_MAX_ITER,
             DEFAULT_DELTACHI,
+            false,
         )
         .unwrap();
         let plain = leastsq(
@@ -3525,6 +3746,7 @@ mod tests {
             None,
             DEFAULT_MAX_ITER,
             DEFAULT_DELTACHI,
+            false,
         )
         .unwrap();
         assert!((free.parameters[0] - plain.parameters[0]).abs() < 1e-6);
@@ -3547,6 +3769,7 @@ mod tests {
             None,
             DEFAULT_MAX_ITER,
             DEFAULT_DELTACHI,
+            false,
         )
         .unwrap();
         assert_eq!(res.parameters[1], -1.0, "fixed b must not move");
@@ -3570,6 +3793,7 @@ mod tests {
             None,
             DEFAULT_MAX_ITER,
             DEFAULT_DELTACHI,
+            false,
         )
         .unwrap();
         // silx: fixed parameter gets covariance diag = value^2 and uncertainty = value.
@@ -3592,6 +3816,7 @@ mod tests {
             None,
             DEFAULT_MAX_ITER,
             DEFAULT_DELTACHI,
+            false,
         )
         .unwrap();
         assert!(
@@ -3615,6 +3840,7 @@ mod tests {
             None,
             DEFAULT_MAX_ITER,
             DEFAULT_DELTACHI,
+            false,
         )
         .unwrap();
         assert!(
@@ -3638,6 +3864,7 @@ mod tests {
             None,
             DEFAULT_MAX_ITER,
             DEFAULT_DELTACHI,
+            false,
         )
         .unwrap();
         assert!(
@@ -3661,6 +3888,7 @@ mod tests {
             None,
             DEFAULT_MAX_ITER,
             DEFAULT_DELTACHI,
+            false,
         )
         .unwrap();
         assert!(
@@ -3690,6 +3918,7 @@ mod tests {
             None,
             DEFAULT_MAX_ITER,
             DEFAULT_DELTACHI,
+            false,
         )
         .unwrap();
         assert!(
@@ -3757,6 +3986,7 @@ mod tests {
             None,
             DEFAULT_MAX_ITER,
             DEFAULT_DELTACHI,
+            false,
         )
         .unwrap();
         assert!(
@@ -3790,6 +4020,7 @@ mod tests {
             None,
             DEFAULT_MAX_ITER,
             DEFAULT_DELTACHI,
+            false,
         )
         .unwrap();
         assert!(
@@ -3809,8 +4040,18 @@ mod tests {
         let ys = vec![1.0; 5];
         // constraints length mismatch.
         assert_eq!(
-            leastsq_constrained(constant, &xs, &ys, &[1.0], &[], None, 10, DEFAULT_DELTACHI)
-                .unwrap_err(),
+            leastsq_constrained(
+                constant,
+                &xs,
+                &ys,
+                &[1.0],
+                &[],
+                None,
+                10,
+                DEFAULT_DELTACHI,
+                false
+            )
+            .unwrap_err(),
             FitError::BadConstraintReference
         );
         // equal Quoted bounds (B == 0).
@@ -3824,6 +4065,7 @@ mod tests {
                 None,
                 10,
                 DEFAULT_DELTACHI,
+                false,
             )
             .unwrap_err(),
             FitError::InvalidConstraint
@@ -3845,6 +4087,7 @@ mod tests {
                 None,
                 10,
                 DEFAULT_DELTACHI,
+                false,
             )
             .unwrap_err(),
             FitError::BadConstraintReference
@@ -3860,6 +4103,7 @@ mod tests {
                 None,
                 10,
                 DEFAULT_DELTACHI,
+                false,
             )
             .unwrap_err(),
             FitError::NoFreeParameters
