@@ -750,6 +750,17 @@ Impact: exported CSV loses the axis labels and any error-bar data. The reduced s
 
 ### R2-22: Mask pencil anchors cells with `floor()`; silx (and siplot's own rect converter) truncate with `int()`
 
+**FIXED (mask-tools cluster):** the pencil sample now converts through a
+`pencil_cell(data_x, data_y)` seam using `as i64` truncation toward zero
+(silx `int(col), int(row)`, MaskToolsWidget.py:858), consistent with
+`rect_params_to_cells`. Anchor audit of `floor() as i64` cell conversions:
+`profile_at_cursor` (high_level.rs) is distinct — silx ImageView gates
+`x >= origin` before `int()` (ImageView.py:599-601), so floor+reject and
+gate+int agree on every input; the bilinear resampler's `floor` is on
+coordinates already clamped to `[0, dim−1]` (positive domain, matches silx
+c_funct). Test: `pencil_cell_truncates_toward_zero_like_silx_int`
+(interior, −0.5 → edge cell 0, −1.5 → −1, rect-converter consistency).
+
 Severity: Low
 
 Rust: `src/widget/mask_tools.rs:826` — `paint_pencil_point(data_y.floor() as i64, data_x.floor() as i64, ...)`; the same file's `rect_params_to_cells` (`:1992-1999`) deliberately uses `as i64` truncation with a "silx int(), not floor" test note.

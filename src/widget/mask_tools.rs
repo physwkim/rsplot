@@ -841,7 +841,8 @@ impl MaskToolsWidget {
                 let ctrl = plot_response.response.ctx.input(|i| i.modifiers.command);
                 Self::effective_do_mask(self.active_tool == MaskTool::Pencil, ctrl)
             });
-            self.paint_pencil_point(data_y.floor() as i64, data_x.floor() as i64, do_mask);
+            let (row, col) = pencil_cell(data_x, data_y);
+            self.paint_pencil_point(row, col, do_mask);
         }
 
         if finished {
@@ -2016,6 +2017,17 @@ pub(crate) fn rect_params_to_cells(
     (y as i64, x as i64, height.abs() as i64, width.abs() as i64)
 }
 
+/// Convert a pencil sample's data coordinates to the mask array cell
+/// `(row, col)`, mirroring silx `MaskToolsWidget._plotDrawEvent`'s pencil
+/// branch (`MaskToolsWidget.py:857-858`) with origin 0 / scale 1
+/// (data == cell): `col, row = int(col), int(row)` — truncation toward zero,
+/// like [`rect_params_to_cells`], NOT `floor()`. The two differ on negative
+/// fractional coordinates: a stroke within one pixel outside the top/left
+/// image edge anchors at 0 (edge cell) in silx, not at −1.
+pub(crate) fn pencil_cell(data_x: f64, data_y: f64) -> (i64, i64) {
+    (data_y as i64, data_x as i64)
+}
+
 /// Convert a finished ellipse draw to mask array parameters
 /// `(crow, ccol, radius_r, radius_c)`, mirroring silx
 /// `MaskToolsWidget._plotDrawEvent`'s ellipse branch
@@ -2278,6 +2290,17 @@ pub fn line_coords(row0: i64, col0: i64, row1: i64, col1: i64, width: i64) -> (V
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pencil_cell_truncates_toward_zero_like_silx_int() {
+        // R2-22: silx `int(col), int(row)` (MaskToolsWidget.py:858). A stroke
+        // just outside the top/left edge anchors at the edge cell 0, not −1.
+        assert_eq!(pencil_cell(2.7, 3.9), (3, 2));
+        assert_eq!(pencil_cell(-0.5, -0.5), (0, 0));
+        assert_eq!(pencil_cell(-1.5, 0.5), (0, -1));
+        // Consistent with the port's own rectangle converter.
+        assert_eq!(rect_params_to_cells(-0.5, -0.5, 1.0, 1.0).0, 0);
+    }
 
     #[test]
     fn overlay_color_adapts_to_the_image_colormap() {
