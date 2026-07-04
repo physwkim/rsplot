@@ -670,57 +670,21 @@ fn arange(start: f64, stop: f64, step: f64) -> Vec<f64> {
 /// silx `ColorScaleBar._updateMinMax` end-label format: `%.7g` when the value is
 /// 0 or `0 <= log10(abs(v)) < 7`, else `%.2e`. Shared with
 /// [`crate::widget::histogram_colorbar`] for its end/handle value labels.
+///
+/// The `%.7g` branch routes through the single `%g` owner,
+/// [`crate::widget::stats_widget::format_significant`], so the fixed-vs-
+/// exponential decision is made on the post-rounding exponent (R2-25): a value
+/// that carries up across a decade inside the `< 7` gate (`9999999.9`) formats
+/// like silx `"%.7g"` (`1e+07`), not `10000000`.
 pub(crate) fn format_end_label(v: f64) -> String {
     if v == 0.0 {
-        return format_g(0.0, 7);
+        return crate::widget::stats_widget::format_significant(0.0, 7);
     }
     let log = v.abs().log10();
     if (0.0..7.0).contains(&log) {
-        format_g(v, 7)
+        crate::widget::stats_widget::format_significant(v, 7)
     } else {
         format!("{v:.2e}")
-    }
-}
-
-/// Approximate C `%.<prec>g`: the shorter of fixed and scientific with `prec`
-/// significant digits, trailing zeros trimmed. Rust has no `%g`, so this
-/// reproduces the printf rule (use scientific when the decimal exponent is
-/// `< -4` or `>= prec`).
-fn format_g(v: f64, precision: usize) -> String {
-    if v == 0.0 {
-        return "0".to_string();
-    }
-    let prec = precision.max(1);
-    let exp = v.abs().log10().floor() as i32;
-    if exp < -4 || exp >= prec as i32 {
-        // Scientific with (prec - 1) fractional digits, then trim.
-        let s = format!("{v:.*e}", prec - 1);
-        trim_scientific(&s)
-    } else {
-        // Fixed with (prec - 1 - exp) fractional digits, then trim.
-        let frac = (prec as i32 - 1 - exp).max(0) as usize;
-        let s = format!("{v:.frac$}");
-        trim_fixed(&s)
-    }
-}
-
-/// Trim trailing zeros (and a dangling decimal point) from a fixed-point string.
-fn trim_fixed(s: &str) -> String {
-    if !s.contains('.') {
-        return s.to_string();
-    }
-    let t = s.trim_end_matches('0');
-    t.trim_end_matches('.').to_string()
-}
-
-/// Trim trailing zeros from the mantissa of a scientific string `m e exp`.
-fn trim_scientific(s: &str) -> String {
-    match s.split_once('e') {
-        Some((mantissa, exp)) => {
-            let m = trim_fixed(mantissa);
-            format!("{m}e{exp}")
-        }
-        None => s.to_string(),
     }
 }
 
@@ -987,12 +951,17 @@ mod tests {
     }
 
     #[test]
-    fn format_g_matches_printf_rule_at_boundaries() {
-        // exp >= prec -> scientific; exp in [-4, prec) -> fixed.
-        assert_eq!(format_g(0.0, 7), "0");
-        assert_eq!(format_g(1.0, 7), "1");
-        assert_eq!(format_g(0.001, 7), "0.001"); // exp -3 >= -4 -> fixed
-        assert_eq!(format_g(1234.5, 7), "1234.5");
+    fn end_label_gate_delegates_in_range_to_g_else_scientific() {
+        // `0 <= log10(abs) < 7` -> `%.7g` (via format_significant); else `%.2e`.
+        assert_eq!(format_end_label(0.0), "0");
+        assert_eq!(format_end_label(1.0), "1");
+        assert_eq!(format_end_label(1234.5), "1234.5");
+        // log10(0.001) = -3 is below the gate -> the `%.2e` branch.
+        assert_eq!(format_end_label(0.001), "1.00e-3");
+        // R2-25: 9999999.9 is inside the `< 7` gate (log10 ≈ 6.9999999) but
+        // its `%.7g` rounds up across the decade to 1e7 -> silx `"%.7g"` gives
+        // "1e+07", not "10000000" (the pre-rounding-exponent bug).
+        assert_eq!(format_end_label(9999999.9), "1e+07");
     }
 
     // --- optimal_nb_ticks ------------------------------------------------

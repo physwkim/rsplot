@@ -346,11 +346,21 @@ pub fn format_significant(value: f64, digits: usize) -> String {
         return "0".to_owned();
     }
     let digits = digits.clamp(1, 17);
-    let exp = value.abs().log10().floor() as i32;
+    // C `%g` decides fixed-vs-exponential from the exponent the value has
+    // AFTER rounding to `digits` significant figures, not from the raw value's
+    // exponent (`log10().floor()`). Round once via `%e` — which normalizes the
+    // mantissa to `[1, 10)` and rounds — and read the exponent back, so a value
+    // that carries up across a decade (`9999999.9` → `1e+07`, `9.9999999e-05` →
+    // `0.0001`) is classified on its rounded form. (silx `"%.7g"`,
+    // PositionInfo.py:315.)
+    let sci = format!("{:.*e}", digits - 1, value);
+    let exp: i32 = sci
+        .split_once('e')
+        .and_then(|(_, e)| e.parse().ok())
+        .unwrap_or(0);
     // %g switches to exponential when exp < -4 or exp >= precision.
     if exp < -4 || exp >= digits as i32 {
-        let s = format!("{:.*e}", digits.saturating_sub(1), value);
-        trim_exponential(&s)
+        trim_exponential(&sci)
     } else {
         // Number of fractional digits to reach `digits` significant figures.
         let frac = (digits as i32 - 1 - exp).max(0) as usize;
@@ -464,6 +474,23 @@ mod tests {
     fn format_significant_digits_clamped() {
         // digits=0 clamps to 1.
         assert_eq!(format_significant(9.0, 0), "9");
+    }
+
+    #[test]
+    fn format_significant_decides_notation_after_rounding() {
+        // R2-25: C `%g` picks fixed-vs-exponential from the exponent AFTER
+        // rounding to `digits` sig figs, not the raw value's exponent.
+        // (Cross-checked: python3 -c "print('%.7g' % v)".)
+        //
+        // 9999999.9: raw exp 6 (< 7 -> would wrongly pick fixed -> "10000000"),
+        // but rounds up to 1e7 -> exp 7 -> exponential -> "1e+07".
+        assert_eq!(format_significant(9999999.9, 7), "1e+07");
+        // 9.9999999e-05: raw exp -5 (< -4 -> would wrongly pick exponential ->
+        // "1e-04"), but rounds to 1.000000e-04 -> exp -4 -> fixed -> "0.0001".
+        assert_eq!(format_significant(9.9999999e-05, 7), "0.0001");
+        // A value that does NOT cross a decade is unaffected.
+        assert_eq!(format_significant(1234567.0, 7), "1234567");
+        assert_eq!(format_significant(0.0001234567, 7), "0.0001234567");
     }
 
     #[test]

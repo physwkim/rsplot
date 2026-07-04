@@ -1049,6 +1049,26 @@ Impact: silx-legal gamma values outside [0.1, 10] are unreachable; with negative
 
 ### R2-25: `%.7g` stand-in picks fixed-vs-exponential from the pre-rounding exponent; C/Python `%g` decides after rounding
 
+**FIXED (formatting cluster), structurally — one `%g` owner:** the anchor
+`v.abs().log10().floor()` used for a `%g` notation decision had **two**
+independent implementations with the same defect — `stats_widget::
+format_significant` (cited; the `%g` owner behind `format_g7` → PositionInfo
+`format_value` and the stats table) and a duplicate `colorbar::format_g`
+(with its own `trim_fixed`/`trim_scientific`, and a latent bug: it kept
+Rust's raw `e7` exponent instead of C's `e+07`). Fix: `format_significant`
+now formats once via `%e` (which rounds to `digits` sig figs and normalizes
+the mantissa) and reads the exponent **back** from that string, so a value
+carrying up across a decade is classified on its rounded form —
+`9999999.9 → "1e+07"` (was `"10000000"`), `9.9999999e-05 → "0.0001"` (was
+`"1e-04"`), both matching `python3 "%.7g"`. `colorbar::format_g` and its two
+trim helpers are deleted; `format_end_label`'s `%.7g` branch now routes
+through `format_significant`, so its own `< 7`-gate boundary (`9999999.9`,
+`log10 ≈ 6.9999999`) now matches silx `"%.7g"` → `"1e+07"`. The `%.2e`
+out-of-gate branch keeps Rust's raw exponent (cosmetic, recorded in the
+Examined/excluded list — unchanged). Tests: decade-crossing cases in both
+directions plus non-crossing controls in `format_significant`; the
+`format_end_label` gate + R2-25 boundary in colorbar. Full suite 1639 green.
+
 Severity: Low
 
 Rust: `src/widget/stats_widget.rs:327-331` — `exp = value.abs().log10().floor()`; `if exp < -4 || exp >= digits` — computed on the raw value (used by `format_g7` → PositionInfo `format_value` and the stats table).
