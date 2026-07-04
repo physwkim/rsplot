@@ -484,13 +484,25 @@ impl SceneWidget {
         // depth so the pixel under the mouse stays invariant (silx CameraWheel
         // mode "position", interaction.py:329-341); a miss anchors at the far
         // plane, as silx's depth-buffer read does.
-        let scroll = ui.input(|i| i.smooth_scroll_delta.y);
-        if scroll != 0.0
-            && let Some(p) = response.hover_pos()
-        {
+        //
+        // silx applies a FIXED ±0.2 step once per wheel EVENT, magnitude-
+        // independent (one Qt `wheelEvent` → one `handleEvent("wheel", …)`,
+        // Plot3DWidget.py:407-416 → interaction.py:340-341), so this reads the
+        // raw `MouseWheel` events, not the frame's `smooth_scroll_delta` —
+        // egui's sum-conserving smoothing dribbles one notch over N frames,
+        // and a per-frame trigger would fire the full step N times (0.8^N per
+        // notch, frame-rate-dependent). Same per-notch family as the 2D
+        // calibration (R1-8), but the exponential composition trick does not
+        // apply here because silx's 3D step does not scale with the angle.
+        if let Some(p) = response.hover_pos() {
+            let steps = ui.input(|i| wheel_zoom_steps(&i.events));
             let ndc = window_to_ndc(to_local(p), size_px);
-            let ndc_z = self.pick(ndc).map_or(1.0, |hit| hit.ndc_depth);
-            self.camera.zoom_at(ndc, ndc_z, scroll > 0.0);
+            for zoom_in in steps {
+                // Re-pick per step: each zoom moves the camera, and silx
+                // re-reads the depth buffer on every event.
+                let ndc_z = self.pick(ndc).map_or(1.0, |hit| hit.ndc_depth);
+                self.camera.zoom_at(ndc, ndc_z, zoom_in);
+            }
         }
 
         // Keep the scene within the depth frustum after any interaction.
@@ -714,6 +726,22 @@ fn overview_geometry() -> Scene3dGeometry {
     g
 }
 
+/// One 3D zoom trigger per raw `MouseWheel` event this frame, in delivery
+/// order: `true` = zoom in (scroll up). silx's `_zoomToPosition` applies its
+/// fixed 0.2 step exactly once per wheel event regardless of the wheel angle
+/// (interaction.py:340-341), so the trigger count must equal the EVENT count —
+/// never the number of frames egui's scroll smoothing spreads a notch over.
+/// Horizontal-only wheel events (`delta.y == 0`) produce no trigger.
+fn wheel_zoom_steps(events: &[egui::Event]) -> Vec<bool> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            egui::Event::MouseWheel { delta, .. } if delta.y != 0.0 => Some(delta.y > 0.0),
+            _ => None,
+        })
+        .collect()
+}
+
 /// The seven predefined viewpoints in silx's menu order, each with its silx menu
 /// label and tooltip (`actions/viewpoint.py`).
 const VIEWPOINT_PRESETS: [(CameraFace, &str, &str); 7] = [
@@ -744,4 +772,66 @@ pub fn viewpoint_menu(ui: &mut Ui, scene: &mut SceneWidget) -> Option<CameraFace
     .response
     .on_hover_text("Reset the viewpoint to a defined position");
     chosen
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egui::{Event, Modifiers, MouseWheelUnit, TouchPhase, Vec2};
+
+    fn wheel(unit: MouseWheelUnit, x: f32, y: f32) -> Event {
+        Event::MouseWheel {
+            unit,
+            delta: Vec2::new(x, y),
+            // Momentum phases are deliberately NOT filtered: Qt delivers
+            // momentum as more wheelEvents and silx steps on each.
+            phase: TouchPhase::Move,
+            modifiers: Modifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn one_wheel_event_is_one_step_regardless_of_magnitude() {
+        // R2-48: silx's step is fixed per EVENT (interaction.py:340-341) — a
+        // one-line notch and a three-line notch are each ONE trigger.
+        assert_eq!(
+            wheel_zoom_steps(&[wheel(MouseWheelUnit::Line, 0.0, 1.0)]),
+            vec![true]
+        );
+        assert_eq!(
+            wheel_zoom_steps(&[wheel(MouseWheelUnit::Line, 0.0, -3.0)]),
+            vec![false]
+        );
+        assert_eq!(
+            wheel_zoom_steps(&[wheel(MouseWheelUnit::Point, 0.0, 2.5)]),
+            vec![true]
+        );
+    }
+
+    #[test]
+    fn smoothing_frames_without_events_fire_nothing() {
+        // egui dribbles smooth_scroll_delta over frames AFTER the event's
+        // frame; those frames have no MouseWheel event and must not re-fire
+        // the fixed step (the per-frame 0.8^N collapse this finding cites).
+        assert_eq!(wheel_zoom_steps(&[]), Vec::<bool>::new());
+        assert_eq!(wheel_zoom_steps(&[Event::PointerGone]), Vec::<bool>::new());
+    }
+
+    #[test]
+    fn multiple_events_step_once_each_in_delivery_order() {
+        let events = [
+            wheel(MouseWheelUnit::Point, 0.0, 4.0),
+            wheel(MouseWheelUnit::Point, 0.0, -2.0),
+            wheel(MouseWheelUnit::Point, 0.0, 1.0),
+        ];
+        assert_eq!(wheel_zoom_steps(&events), vec![true, false, true]);
+    }
+
+    #[test]
+    fn horizontal_only_wheel_events_do_not_zoom() {
+        assert_eq!(
+            wheel_zoom_steps(&[wheel(MouseWheelUnit::Line, 2.0, 0.0)]),
+            Vec::<bool>::new()
+        );
+    }
 }

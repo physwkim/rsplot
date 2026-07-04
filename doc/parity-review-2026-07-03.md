@@ -1093,6 +1093,21 @@ Impact: a semi-transparent iso-surface renders fully opaque in siplot — the ou
 
 ### R2-48: 3D wheel zoom applies silx's fixed 0.2 step once per *frame* of smoothed scroll, not once per wheel *event*
 
+**FIXED (R1-family recurrence batch):** the 3D zoom trigger now reads the raw
+`MouseWheel` events (`wheel_zoom_steps`, pure seam in `scene_widget.rs`)
+instead of the frame's `smooth_scroll_delta` — one silx-fixed ±0.2 step per
+wheel EVENT in delivery order, magnitude-independent (Plot3DWidget.py:407-416
+→ interaction.py:340-341), with a re-pick of the anchor depth per step (silx
+re-reads the depth buffer on every event). Frames over which egui's
+sum-conserving smoothing dribbles a notch deliver no events → no extra steps;
+the frame-rate-dependent `0.8^N`-per-notch collapse is gone. Momentum-phase
+events are deliberately not filtered (Qt delivers momentum as more
+wheelEvents and silx steps on each). Boundary tests:
+`one_wheel_event_is_one_step_regardless_of_magnitude` (1-line vs 3-line notch
+both = one step), `smoothing_frames_without_events_fire_nothing`,
+`multiple_events_step_once_each_in_delivery_order`,
+`horizontal_only_wheel_events_do_not_zoom`.
+
 Severity: Medium
 
 Rust: `src/widget/scene_widget.rs:487-494` — `let scroll = ui.input(|i| i.smooth_scroll_delta.y); if scroll != 0.0 … self.camera.zoom_at(ndc, ndc_z, scroll > 0.0)`; `src/core/scene3d/camera.rs:484-486` — every `zoom_at` call moves the camera by the fixed `step = ±0.2` of the distance to the anchor, ignoring delta magnitude.
