@@ -1796,6 +1796,8 @@ Reference: `silx/gui/plot3d/scene/viewport.py:221-223` — viewport camera creat
 
 Impact: a fresh `SceneWidget`/`ScalarFieldView` opens on the (-1,-1,-1) diagonal where silx opens face-on down -Z; the code comment's "as silx" attribution is wrong (same mis-attribution class as cleared R1-24, which covered colour constants only). Needs either a revert to Front or a recorded deliberate-deviation entry.
 
+**FIXED (this session):** `SceneWidget::new` now `reset(CameraFace::Front)` (was `Side`), matching silx's face-on -Z default camera; the misleading "silx side viewpoint" comments were corrected. 'Side' remains a viewpoint-action preset. Test `fresh_scene_opens_on_the_front_view_like_silx`.
+
 #### Verified clean (agent's sweep, no finding)
 
 camera fit math (`resetCamera` sin/min-fov/depth-extent, orthographic branch, `adjustCameraDepthExtent` 0.95/1.05/zextent-1000) vs camera.py:283-324/viewport.py:385-410; OrbitDrag/PanDrag vs arcball CameraSelectRotate.drag/CameraSelectPan (interaction.py:149-261) incl. π/minsize angle + y-inversion; iso auto-level re-resolve on data change; set_level clears auto; decreasing-level ordering; (min, min_positive, max) finite range; scatter defaults (symbol 'o', size 6.0); NaN → transparent-white; image interpolation default nearest; SFV centerScene-once, setScale/setTranslation re-centering, shininess 32. Not reported because recorded: hue-composite complex modes, ClipPlane, _model/ParamTreeView, Spheres, per-fragment 3D-texture slice, height-map resample quirk, cut-plane 1px stroke, snapshot-less labels.

@@ -65,6 +65,23 @@ fn viewpoint_presets_orient_camera_along_expected_axis() {
 }
 
 #[test]
+fn fresh_scene_opens_on_the_front_view_like_silx() {
+    // silx's viewport camera opens face-on down -Z (viewport.py:221-223,
+    // camera.py:50): eye on the +Z side, not the (1,1,1) 'side' three-quarter.
+    let rs = create_render_state(default_wgpu_setup());
+    let mut scene = SceneWidget::new(&rs, 7);
+    scene.set_bounds(&rs, UNIT);
+    let center = scene.center();
+
+    let offset = (scene.camera().extrinsic.position() - center).normalized();
+    let alignment = offset.dot(expected_offset(CameraFace::Front));
+    assert!(
+        alignment > 0.999,
+        "default view should be Front (eye +Z), got offset {offset:?} (dot={alignment})"
+    );
+}
+
+#[test]
 fn rotate_scene_orbits_around_the_center_preserving_radius() {
     let rs = create_render_state(default_wgpu_setup());
     let mut scene = SceneWidget::new(&rs, 1);

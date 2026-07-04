@@ -97,7 +97,7 @@ pub struct SceneWidget {
 impl SceneWidget {
     /// Create a scene widget bound to `id`, installing the 3D GPU resources into
     /// `render_state` if needed. Starts with a unit-box scene framed from the
-    /// silx "side" viewpoint.
+    /// silx front viewpoint (down the -Z axis).
     pub fn new(render_state: &RenderState, id: Scene3dId) -> Self {
         install_scene3d(render_state);
 
@@ -111,8 +111,11 @@ impl SceneWidget {
             Vec3::new(0.0, 0.0, -1.0),
             Vec3::new(0.0, 1.0, 0.0),
         );
-        // Default to the silx "side" three-quarter view, then frame the bounds.
-        camera.extrinsic.reset(CameraFace::Side);
+        // silx's viewport camera opens face-on down -Z: `direction=(0, 0, -1)`,
+        // `position=(0, 0, 12)` (viewport.py:221-223, camera.py:50); the only
+        // startup adjustment is `centerScene()`. 'side' is a viewpoint-action
+        // preset, not the default. Frame the front view.
+        camera.extrinsic.reset(CameraFace::Front);
         camera.reset_camera(bounds);
         camera.adjust_depth_extent(bounds);
 
