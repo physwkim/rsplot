@@ -25,12 +25,19 @@
 //! an addressing artefact of the GPU kernel rather than a semantic difference,
 //! so siplot's `sx`/`sy`/`rotation` read out in the natural image-axis order.
 
-use lowe_sift::{GrayImage, Sift, estimate_affine_from_pairs, match_features};
+use lowe_sift::{Feature, GrayImage, Sift, estimate_affine_from_pairs};
 
-/// Lowe distance-ratio threshold for descriptor matching. The 0.8 value is the
-/// one recommended in Lowe's paper; silx `MatchPlan` applies an equivalent
-/// nearest-neighbour ratio gate.
-pub const MATCH_RATIO_THRESHOLD: f32 = 0.8;
+/// silx `MatchPlan`'s descriptor ratio value: `MatchRatio = 0.73`
+/// (`param.py:78`), NOT the 0.8 from Lowe's paper. silx's matcher works on L1
+/// descriptor distances and its ratio gate is intentionally tighter.
+pub const MATCH_RATIO: f32 = 0.73;
+
+/// The Lowe distance-ratio threshold silx compares against — `MatchRatio²`
+/// (`0.73² = 0.5329`), applied to the **L1** nearest/second-nearest ratio
+/// (`match.py:199`, `matching_cpu.cl:113`: "0.73*0.73 for L1 distance"). The old
+/// 0.8 value gated the *L2* ratio (Lowe's paper), accepting substantially looser
+/// matches than silx.
+pub const MATCH_RATIO_THRESHOLD: f32 = MATCH_RATIO * MATCH_RATIO;
 
 /// The affine transform applied to image B to align it to image A, decomposed
 /// into translation, per-axis scale, and rotation — silx
@@ -187,6 +194,43 @@ fn warp_affine(
     out
 }
 
+/// Match descriptor set `a` against `b` with silx `MatchPlan`'s L1
+/// nearest-neighbour ratio test (`matching_cpu.cl` `matching` kernel): for each
+/// query descriptor, scan every train descriptor tracking the nearest (`dist1`)
+/// and second-nearest (`dist2`) **L1** distances, and accept the nearest when
+/// `dist2 != 0 && dist1 / dist2 < ratio`. Returns `(query_index, train_index)`
+/// pairs. silx computes L1 over uint8 descriptors; lowe-sift's are a global
+/// rescaling of the same gradient histogram, and that scale cancels in the
+/// `dist1 / dist2` ratio, so the gate matches silx up to the detector's own
+/// descriptor differences (whereas `lowe_sift::match_features` gates the L2
+/// ratio at a different value).
+fn match_features_l1(a: &[Feature], b: &[Feature], ratio: f32) -> Vec<(usize, usize)> {
+    let mut pairs = Vec::new();
+    for (qi, fa) in a.iter().enumerate() {
+        let da = fa.descriptor.as_slice();
+        // MAXFLOAT seeds like the kernel: a lone train descriptor leaves dist2 at
+        // the seed, so dist1 / dist2 ≈ 0 accepts it (matching silx's MAXFLOAT).
+        let mut dist1 = f32::MAX;
+        let mut dist2 = f32::MAX;
+        let mut best = 0usize;
+        for (ti, fb) in b.iter().enumerate() {
+            let db = fb.descriptor.as_slice();
+            let dist: f32 = da.iter().zip(db.iter()).map(|(x, y)| (x - y).abs()).sum();
+            if dist < dist1 {
+                dist2 = dist1;
+                dist1 = dist;
+                best = ti;
+            } else if dist < dist2 {
+                dist2 = dist;
+            }
+        }
+        if dist2 != 0.0 && dist1 / dist2 < ratio {
+            pairs.push((qi, best));
+        }
+    }
+    pairs
+}
+
 /// Register image B onto image A by SIFT keypoint matching + affine warp,
 /// mirroring silx `CompareImages.__createSiftData`.
 ///
@@ -223,16 +267,16 @@ pub fn sift_auto_align(
     let feats_b = sift.detect_and_compute(&gray_b);
 
     // query = A, train = B → each match carries an A index and a B index.
-    let raw = match_features(&feats_a, &feats_b, MATCH_RATIO_THRESHOLD);
+    let raw = match_features_l1(&feats_a, &feats_b, MATCH_RATIO_THRESHOLD);
     if raw.len() < 3 {
         return None;
     }
 
     let mut matches = Vec::with_capacity(raw.len());
     let mut pairs = Vec::with_capacity(raw.len());
-    for m in &raw {
-        let fa = feats_a.get(m.query_index)?;
-        let fb = feats_b.get(m.train_index)?;
+    for &(qi, ti) in &raw {
+        let fa = feats_a.get(qi)?;
+        let fb = feats_b.get(ti)?;
         matches.push(MatchedKeypoint {
             ax: fa.keypoint.x,
             ay: fa.keypoint.y,
@@ -269,6 +313,73 @@ pub fn sift_auto_align(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lowe_sift::{Descriptor, Keypoint};
+
+    /// A [`Feature`] with the given 128-d descriptor and a placeholder keypoint —
+    /// `match_features_l1` only reads the descriptor.
+    fn feature(descriptor: [f32; 128]) -> Feature {
+        Feature {
+            keypoint: Keypoint {
+                x: 0.0,
+                y: 0.0,
+                scale: 1.0,
+                size: 2.0,
+                angle: 0.0,
+                response: 1.0,
+                octave: 0,
+                layer: 0,
+            },
+            descriptor: Descriptor::new(descriptor),
+        }
+    }
+
+    /// A descriptor that is `value` at `index` and 0 elsewhere, so its L1 distance
+    /// to the all-zero descriptor is exactly `value`.
+    fn one_hot(index: usize, value: f32) -> [f32; 128] {
+        let mut d = [0.0f32; 128];
+        d[index] = value;
+        d
+    }
+
+    #[test]
+    fn match_features_l1_accepts_when_ratio_below_threshold() {
+        // Query at the origin; nearest train at L1 0.5, second-nearest at L1 1.0.
+        // ratio 0.5 < 0.5329 → accept, pointing at the nearest (train index 0).
+        let q = vec![feature([0.0; 128])];
+        let train = vec![feature(one_hot(0, 0.5)), feature(one_hot(0, 1.0))];
+        let pairs = match_features_l1(&q, &train, MATCH_RATIO_THRESHOLD);
+        assert_eq!(pairs, vec![(0, 0)]);
+    }
+
+    #[test]
+    fn match_features_l1_rejects_when_ratio_at_or_above_threshold() {
+        // ratio 0.6 / 1.0 = 0.6 > 0.5329 → ambiguous match, rejected (the old L2
+        // gate at 0.8 would have accepted it).
+        let q = vec![feature([0.0; 128])];
+        let train = vec![feature(one_hot(0, 0.6)), feature(one_hot(0, 1.0))];
+        assert!(match_features_l1(&q, &train, MATCH_RATIO_THRESHOLD).is_empty());
+    }
+
+    #[test]
+    fn match_features_l1_rejects_when_second_neighbour_is_zero_distance() {
+        // Two identical train descriptors at distance 0 → dist2 == 0; silx's
+        // `dist2 != 0` guard rejects rather than dividing by zero.
+        let q = vec![feature([0.0; 128])];
+        let train = vec![feature([0.0; 128]), feature([0.0; 128])];
+        assert!(match_features_l1(&q, &train, MATCH_RATIO_THRESHOLD).is_empty());
+    }
+
+    #[test]
+    fn match_features_l1_single_train_descriptor_is_accepted() {
+        // A lone train descriptor leaves dist2 at the MAXFLOAT seed, so
+        // dist1 / dist2 ≈ 0 accepts it (matching silx's MAXFLOAT-seeded kernel).
+        let q = vec![feature([0.0; 128])];
+        let train = vec![feature(one_hot(0, 3.0))];
+        assert_eq!(
+            match_features_l1(&q, &train, MATCH_RATIO_THRESHOLD),
+            vec![(0, 0)]
+        );
+    }
 
     #[test]
     fn normalize01_maps_min_to_zero_max_to_one() {

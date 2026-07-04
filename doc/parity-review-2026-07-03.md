@@ -1341,6 +1341,21 @@ Impact: reset-zoom/autoscale clips error-bar whiskers extending past the data ex
 
 ### R2-35: SIFT match-ratio gate 0.8 (L2) vs silx 0.73² = 0.5329 (L1); the in-code "equivalent" claim is false
 
+**FIXED (SIFT cluster, this session):** the matcher no longer delegates to
+`lowe_sift::match_features` (which gates the *L2* ratio at 0.8). A new
+`match_features_l1` ports silx's `matching_cpu.cl` `matching` kernel verbatim:
+for each query descriptor it tracks the nearest (`dist1`) and second-nearest
+(`dist2`) **L1** distances and accepts the nearest when `dist2 != 0 && dist1 /
+dist2 < ratio`, with the threshold now `MATCH_RATIO² = 0.73² = 0.5329`
+(`MATCH_RATIO = 0.73`, silx `param.py:78`; the squared gate is `match.py:199`).
+lowe-sift's f32 descriptors are a global rescaling of silx's uint8 gradient
+histograms and that scale cancels in the `dist1/dist2` ratio, so the gate matches
+silx up to the detector's own descriptor differences (already an accepted
+detector-level divergence). MAXFLOAT-seeded `dist1`/`dist2` mirror the kernel so
+a lone train descriptor is accepted. Tests: accept below 0.5329, reject at/above,
+`dist2 == 0` guard, single-descriptor accept — plus the full-pipeline translation
+recovery still passes under the tighter gate.
+
 Severity: Medium
 
 Rust: `src/core/sift_align.rs:30-33` — `MATCH_RATIO_THRESHOLD: f32 = 0.8` with the comment "silx `MatchPlan` applies an equivalent nearest-neighbour ratio gate"; `lowe-sift` gates the L2 ratio at that value.
