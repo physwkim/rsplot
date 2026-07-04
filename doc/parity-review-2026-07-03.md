@@ -840,6 +840,23 @@ Impact: nice-number layouts routinely emit `graphmin < vmin` (e.g. vmin = 0.13 �
 
 ### R2-14: ColormapDialog cannot autoscale one bound only — silx has per-bound "Auto scale" (`Colormap` supports `vmin=None` with fixed `vmax`)
 
+**FIXED (this session):** the single `autoscale: bool` gating both bounds is
+replaced by per-bound `vmin_auto` / `vmax_auto` (silx `_BoundaryWidget`, one
+toggle per bound). The dialog now renders a separate "Auto" checkbox + manual
+`DragValue` for each bound (the value disabled while that bound autoscales), and
+the autoscale mode/percentiles drive whichever bound(s) are auto. Range
+resolution is unified into one per-bound rule (`resolve_range` → pure
+`resolve_bounds`): a bound is data-driven when the user set it to autoscale **or**
+when a pinned value is invalid under the normalization (silx `getColormapRange`
+per-side repair), otherwise the pinned value is kept — so "pin vmax, let vmin
+track" (and its inverse) resolves correctly, replacing the former
+all-or-nothing autoscale/explicit split. The colormap model half was already
+delivered by R2-46 (`Colormap::vmin_auto`/`vmax_auto`); `build_colormap` now
+stamps those flags onto the applied colormap and `with_colormap` reads them, so
+the per-bound auto state round-trips. Per-boundary tests: both-auto /
+pin-vmax-track-vmin / pin-vmin-track-vmax / both-pinned / pinned-invalid-repair
+under Log / flags-round-trip. Full siplot suite 1700 green.
+
 Severity: Medium
 
 Rust: `src/widget/colormap_dialog.rs:13,250-262` — a single `autoscale: bool` checkbox gates both bounds (auto → both DragValues replaced; off → both manual); siplot's `Colormap` carries plain `f64` bounds with no half-auto representation.

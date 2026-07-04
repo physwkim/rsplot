@@ -10,7 +10,13 @@ pub struct ColormapDialog {
     pub normalization: Normalization,
     pub vmin: f64,
     pub vmax: f64,
-    pub autoscale: bool,
+    /// Whether the lower bound autoscales to the data (silx `_BoundaryWidget`'s
+    /// per-bound "Auto scale" toggle, `Colormap(vmin=None, …)`). Independent of
+    /// [`Self::vmax_auto`], so "pin vmax, let vmin track" is representable.
+    pub vmin_auto: bool,
+    /// Whether the upper bound autoscales to the data (silx per-bound "Auto
+    /// scale", `Colormap(vmax=None)`).
+    pub vmax_auto: bool,
 
     /// How autoscale derives the range from the image data (silx
     /// `Colormap.setAutoscaleMode`).
@@ -59,7 +65,8 @@ impl Default for ColormapDialog {
             normalization: Normalization::Linear,
             vmin: 0.0,
             vmax: 1.0,
-            autoscale: true,
+            vmin_auto: true,
+            vmax_auto: true,
             autoscale_mode: AutoscaleMode::MinMax,
             percentiles: DEFAULT_PERCENTILES,
             gamma: 2.0,
@@ -113,6 +120,8 @@ impl ColormapDialog {
     pub fn with_colormap(mut self, cmap: &Colormap) -> Self {
         self.vmin = cmap.vmin;
         self.vmax = cmap.vmax;
+        self.vmin_auto = cmap.vmin_auto;
+        self.vmax_auto = cmap.vmax_auto;
         self.normalization = cmap.normalization;
         self.gamma = cmap.gamma;
         self.nan_color = cmap.nan_color;
@@ -254,13 +263,48 @@ impl ColormapDialog {
 
                 ui.separator();
 
-                let prev_auto = self.autoscale;
-                ui.checkbox(&mut self.autoscale, "Autoscale");
-                if self.autoscale != prev_auto {
-                    changed = true;
-                }
+                // Per-bound "Auto scale" (silx `_BoundaryWidget`, one per bound):
+                // each bound has its own toggle and a manual DragValue that is
+                // disabled while that bound autoscales. This makes "pin vmax, let
+                // vmin track the data" (and its inverse) representable.
+                ui.horizontal(|ui| {
+                    let prev = self.vmin_auto;
+                    ui.checkbox(&mut self.vmin_auto, "Auto");
+                    if self.vmin_auto != prev {
+                        changed = true;
+                    }
+                    let prev_vmin = self.vmin;
+                    ui.add_enabled(
+                        !self.vmin_auto,
+                        egui::DragValue::new(&mut self.vmin)
+                            .prefix("Min: ")
+                            .speed(0.1),
+                    );
+                    if !self.vmin_auto && self.vmin != prev_vmin {
+                        changed = true;
+                    }
+                });
+                ui.horizontal(|ui| {
+                    let prev = self.vmax_auto;
+                    ui.checkbox(&mut self.vmax_auto, "Auto");
+                    if self.vmax_auto != prev {
+                        changed = true;
+                    }
+                    let prev_vmax = self.vmax;
+                    ui.add_enabled(
+                        !self.vmax_auto,
+                        egui::DragValue::new(&mut self.vmax)
+                            .prefix("Max: ")
+                            .speed(0.1),
+                    );
+                    if !self.vmax_auto && self.vmax != prev_vmax {
+                        changed = true;
+                    }
+                });
 
-                if self.autoscale {
+                // The autoscale mode/percentiles drive whichever bound(s)
+                // autoscale (silx `Colormap.setAutoscaleMode`).
+                if self.vmin_auto || self.vmax_auto {
                     ui.horizontal(|ui| {
                         ui.label("Mode:");
                         let prev_mode = self.autoscale_mode;
@@ -300,25 +344,6 @@ impl ColormapDialog {
                                 changed = true;
                             }
                         });
-                    }
-
-                    ui.add_enabled(false, egui::DragValue::new(&mut self.vmin).prefix("Min: "));
-                    ui.add_enabled(false, egui::DragValue::new(&mut self.vmax).prefix("Max: "));
-                } else {
-                    let prev_vmin = self.vmin;
-                    let prev_vmax = self.vmax;
-                    ui.add(
-                        egui::DragValue::new(&mut self.vmin)
-                            .prefix("Min: ")
-                            .speed(0.1),
-                    );
-                    ui.add(
-                        egui::DragValue::new(&mut self.vmax)
-                            .prefix("Max: ")
-                            .speed(0.1),
-                    );
-                    if self.vmin != prev_vmin || self.vmax != prev_vmax {
-                        changed = true;
                     }
                 }
 
@@ -402,45 +427,62 @@ impl ColormapDialog {
         (vmin2, vmax2)
     }
 
-    /// Resolve the effective `(vmin, vmax)` for an explicit (autoscale-off) range,
-    /// repairing a bound that is invalid under the current normalization — silx
-    /// `getColormapRange` (colors.py:711-750): a bound failing `is_valid` (e.g.
-    /// `vmin <= 0` under Log) is treated as autoscale *for that side only*, so an
-    /// invalid entry recovers to a valid data-driven bound instead of collapsing
-    /// the render (`cmap_one_over_range == 0` mapping everything to the low color).
-    /// Both-valid short-circuits without touching the data; otherwise the data
-    /// autoscale feeds [`Self::repair_range`].
-    fn resolve_explicit_range(&self, plot: &mut Plot2D) -> (f64, f64) {
-        if self.normalization.is_valid_autoscale_value(self.vmin)
-            && self.normalization.is_valid_autoscale_value(self.vmax)
-        {
+    /// Resolve the effective `(vmin, vmax)` per bound — silx `getColormapRange`
+    /// (colors.py:711-750). A bound is data-driven when the user set it to
+    /// autoscale ([`Self::vmin_auto`] / [`Self::vmax_auto`], silx `vmin/vmax is
+    /// None`) OR when its pinned value is invalid under the current normalization
+    /// (e.g. `vmin <= 0` under Log — silx repairs *that side only* rather than
+    /// collapsing the render, where `cmap_one_over_range == 0` maps everything to
+    /// the low color). A pinned, valid bound is kept. This one uniform per-bound
+    /// rule replaces the former all-or-nothing autoscale/explicit split, so
+    /// "pin vmax, let vmin track" resolves correctly. The data range is fetched
+    /// once and only when some bound needs it; an explicitly-auto bound takes the
+    /// data value directly, a pinned bound goes through [`Self::repair_range`]
+    /// (which keeps a valid one and repairs an invalid one against the data).
+    fn resolve_range(&self, plot: &mut Plot2D) -> (f64, f64) {
+        let norm = self.normalization;
+        let vmin_needs_data = self.vmin_auto || !norm.is_valid_autoscale_value(self.vmin);
+        let vmax_needs_data = self.vmax_auto || !norm.is_valid_autoscale_value(self.vmax);
+        if !vmin_needs_data && !vmax_needs_data {
             return (self.vmin, self.vmax);
         }
         let (fmin, fmax) = self.autoscale_from_plot(plot);
-        Self::repair_range(self.normalization, self.vmin, self.vmax, fmin, fmax)
+        self.resolve_bounds(fmin, fmax)
+    }
+
+    /// The per-bound resolution given the data-driven fallback `(fmin, fmax)`:
+    /// an autoscaling bound takes the data value, a pinned bound is kept, and
+    /// [`Self::repair_range`] recovers any pinned-but-invalid bound against the
+    /// data. Pure (the GPU-touching data fetch lives in [`Self::resolve_range`]),
+    /// so the mixed pin/auto combinations are unit-testable.
+    fn resolve_bounds(&self, fmin: f64, fmax: f64) -> (f64, f64) {
+        let vmin = if self.vmin_auto { fmin } else { self.vmin };
+        let vmax = if self.vmax_auto { fmax } else { self.vmax };
+        Self::repair_range(self.normalization, vmin, vmax, fmin, fmax)
     }
 
     /// Re-calculate and apply the colormap to the plot.
     pub fn apply(&self, plot: &mut Plot2D) {
-        let (final_vmin, final_vmax) = if self.autoscale {
-            self.autoscale_from_plot(plot)
-        } else {
-            self.resolve_explicit_range(plot)
-        };
-
+        let (final_vmin, final_vmax) = self.resolve_range(plot);
         plot.set_default_colormap(self.build_colormap(final_vmin, final_vmax));
     }
 
     /// Build the [`Colormap`] for the dialog's current settings over
-    /// `[vmin, vmax]`, carrying the chosen name, normalization, gamma, and NaN
-    /// color (silx `Colormap` with `setNaNColor`). Pure so the colormap wiring
-    /// is testable without a GPU-backed [`Plot2D`]; [`Self::apply`] computes the
-    /// effective range and delegates here.
+    /// `[vmin, vmax]`, carrying the chosen name, normalization, gamma, NaN color
+    /// (silx `Colormap` with `setNaNColor`), and the per-bound autoscale flags so
+    /// the applied colormap round-trips through [`Self::with_colormap`] and can
+    /// re-track data downstream (silx `Colormap(vmin=None, …)`). The concrete
+    /// `[vmin, vmax]` is the range resolved this apply. Pure so the colormap
+    /// wiring is testable without a GPU-backed [`Plot2D`]; [`Self::apply`]
+    /// computes the effective range and delegates here.
     fn build_colormap(&self, vmin: f64, vmax: f64) -> Colormap {
-        Colormap::new(self.name, vmin, vmax)
+        let mut cmap = Colormap::new(self.name, vmin, vmax)
             .with_normalization(self.normalization)
             .with_gamma(self.gamma)
-            .with_nan_color(self.nan_color)
+            .with_nan_color(self.nan_color);
+        cmap.vmin_auto = self.vmin_auto;
+        cmap.vmax_auto = self.vmax_auto;
+        cmap
     }
 
     /// Draw the data-distribution histogram (silx ColormapDialog histogram
@@ -643,7 +685,8 @@ mod tests {
         // The (low, high) DragValues are bound directly to `self.percentiles`;
         // editing them stores and returns the values verbatim.
         let mut dialog = ColormapDialog::new();
-        dialog.autoscale = true;
+        dialog.vmin_auto = true;
+        dialog.vmax_auto = true;
         dialog.autoscale_mode = AutoscaleMode::Percentile;
         dialog.percentiles = (2.5, 97.5);
         assert_eq!(dialog.percentiles, (2.5, 97.5));
@@ -670,7 +713,8 @@ mod tests {
         // back to MinMax (which is what the aggregated-stats path produced).
         let data: Vec<f64> = (0..100).map(|i| i as f64).collect(); // 0..=99
         let mut dialog = ColormapDialog::new();
-        dialog.autoscale = true;
+        dialog.vmin_auto = true;
+        dialog.vmax_auto = true;
 
         dialog.autoscale_mode = AutoscaleMode::MinMax;
         let minmax = dialog.autoscale_range(&data);
@@ -708,7 +752,8 @@ mod tests {
         // a vmin of 0 that collapses the log mapping.
         let data = [0.0, 0.0, 0.5, 100.0];
         let mut dialog = ColormapDialog::new();
-        dialog.autoscale = true;
+        dialog.vmin_auto = true;
+        dialog.vmax_auto = true;
         dialog.autoscale_mode = AutoscaleMode::MinMax;
 
         dialog.normalization = Normalization::Log;
@@ -716,6 +761,83 @@ mod tests {
 
         dialog.normalization = Normalization::Linear;
         assert_eq!(dialog.autoscale_range(&data), (0.0, 100.0));
+    }
+
+    // ── R2-14: per-bound autoscale (silx `_BoundaryWidget`) ──────────────────
+
+    #[test]
+    fn dialog_defaults_to_both_bounds_auto() {
+        let dialog = ColormapDialog::new();
+        assert!(dialog.vmin_auto);
+        assert!(dialog.vmax_auto);
+    }
+
+    #[test]
+    fn resolve_bounds_both_auto_takes_the_data_range() {
+        let mut dialog = ColormapDialog::new();
+        dialog.vmin_auto = true;
+        dialog.vmax_auto = true;
+        assert_eq!(dialog.resolve_bounds(3.0, 90.0), (3.0, 90.0));
+    }
+
+    #[test]
+    fn resolve_bounds_pins_vmax_and_tracks_vmin() {
+        // The silx workflow the finding names: pin vmax, let vmin autoscale.
+        let mut dialog = ColormapDialog::new();
+        dialog.vmin_auto = true;
+        dialog.vmax_auto = false;
+        dialog.vmax = 100.0;
+        // Auto vmin follows the data min; pinned vmax stays.
+        assert_eq!(dialog.resolve_bounds(3.0, 90.0), (3.0, 100.0));
+    }
+
+    #[test]
+    fn resolve_bounds_pins_vmin_and_tracks_vmax() {
+        // The inverse: pin vmin, let vmax autoscale.
+        let mut dialog = ColormapDialog::new();
+        dialog.vmin_auto = false;
+        dialog.vmin = -5.0;
+        dialog.vmax_auto = true;
+        assert_eq!(dialog.resolve_bounds(3.0, 90.0), (-5.0, 90.0));
+    }
+
+    #[test]
+    fn resolve_bounds_both_pinned_ignores_the_data() {
+        let mut dialog = ColormapDialog::new();
+        dialog.vmin_auto = false;
+        dialog.vmax_auto = false;
+        dialog.vmin = 10.0;
+        dialog.vmax = 20.0;
+        assert_eq!(dialog.resolve_bounds(-1000.0, 1000.0), (10.0, 20.0));
+    }
+
+    #[test]
+    fn resolve_bounds_repairs_a_pinned_invalid_bound_under_log() {
+        // A pinned vmin <= 0 is invalid under Log → repaired to the data-driven
+        // fmin per side, while the pinned vmax is kept (silx getColormapRange).
+        let mut dialog = ColormapDialog::new();
+        dialog.normalization = Normalization::Log;
+        dialog.vmin_auto = false;
+        dialog.vmin = 0.0;
+        dialog.vmax_auto = false;
+        dialog.vmax = 50.0;
+        assert_eq!(dialog.resolve_bounds(0.5, 999.0), (0.5, 50.0));
+    }
+
+    #[test]
+    fn build_colormap_carries_the_per_bound_auto_flags() {
+        // The applied colormap records which bounds autoscale so the state
+        // round-trips through with_colormap and can re-track data downstream.
+        let mut dialog = ColormapDialog::new();
+        dialog.vmin_auto = true;
+        dialog.vmax_auto = false;
+        let cmap = dialog.build_colormap(3.0, 100.0);
+        assert!(cmap.vmin_auto);
+        assert!(!cmap.vmax_auto);
+        // Round-trip: loading it back restores the flags.
+        let restored = ColormapDialog::new().with_colormap(&cmap);
+        assert!(restored.vmin_auto);
+        assert!(!restored.vmax_auto);
     }
 
     #[test]
