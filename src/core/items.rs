@@ -462,26 +462,35 @@ pub enum ErrorBars {
 /// `_filterNegativeValues` (`items/core.py:1585-1596`, `numpy.clip(v, 0, None)`;
 /// numpy `clip` leaves `NaN` untouched). `v < 0.0` is `false` for `NaN`, so a
 /// `NaN` magnitude passes through.
-fn clip_negative_error(v: f32) -> f32 {
+fn clip_negative_error(v: f64) -> f64 {
     if v < 0.0 { 0.0 } else { v }
 }
 
 impl ErrorBars {
-    /// The `(lower, upper)` error magnitudes at point `i`, with negative
+    /// The `(lower, upper)` error magnitudes at point `i` in `f64`, with negative
     /// magnitudes clipped to `0` (silx `_filterNegativeValues`,
     /// `items/core.py:1585-1596`: `numpy.clip(error, 0, None)` is applied
     /// unconditionally to both error arrays, feeding the draw path *and*
     /// `__minMaxDataWithError` bounds). A `NaN` magnitude is preserved (numpy
     /// `clip` leaves `NaN`), so a caller wanting silx's "NaN error ⇒ no error on
     /// that side" (`__minMaxDataWithError`, `:1642-1655`) must map `NaN` to the
-    /// bare data value itself.
-    pub(crate) fn bounds(&self, i: usize) -> (f32, f32) {
+    /// bare data value itself. This `f64` result is the source of truth; the GPU
+    /// [`bounds`](Self::bounds) casts it to `f32`.
+    pub(crate) fn magnitudes(&self, i: usize) -> (f64, f64) {
         let (lower, upper) = match self {
-            ErrorBars::Symmetric(e) => (*e as f32, *e as f32),
-            ErrorBars::PerPoint(es) => (es[i] as f32, es[i] as f32),
-            ErrorBars::Asymmetric { lower, upper } => (lower[i] as f32, upper[i] as f32),
+            ErrorBars::Symmetric(e) => (*e, *e),
+            ErrorBars::PerPoint(es) => (es[i], es[i]),
+            ErrorBars::Asymmetric { lower, upper } => (lower[i], upper[i]),
         };
         (clip_negative_error(lower), clip_negative_error(upper))
+    }
+
+    /// The `(lower, upper)` error magnitudes at point `i` as `f32` for the GPU
+    /// error-bar geometry. Delegates to [`magnitudes`](Self::magnitudes) (the
+    /// clip/NaN owner) and casts.
+    pub(crate) fn bounds(&self, i: usize) -> (f32, f32) {
+        let (lower, upper) = self.magnitudes(i);
+        (lower as f32, upper as f32)
     }
 
     /// Panic if a per-point/asymmetric array does not match the vertex count.

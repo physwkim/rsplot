@@ -1319,6 +1319,18 @@ Impact: a curve containing a single NaN (routine in beamline data) fits normally
 
 ### R2-34: Curve data range excludes error bars
 
+**FIXED (error-bar cluster, this session):** `curve_spec_bounds` now widens the
+X and Y extents by the error bars via `error_adjusted_bounds`, a port of silx
+`Curve.__minMaxDataWithError` (`items/core.py:1631-1657`): min = `min(vᵢ −
+lowerᵢ)`, max = `max(vᵢ + upperᵢ)` over the finite results, a `NaN` error
+magnitude contributing the bare `vᵢ` on that side (`dataMinusError[isNanError] =
+data`). Magnitudes come from the new `ErrorBars::magnitudes` f64 accessor (the
+clip/NaN owner shared with the GPU `bounds`, R2-44), so negative errors are
+already clipped to 0 and never widen the range inward. No error ⇒ falls back to
+`finite_bounds`. reset-zoom/autoscale now fits the whiskers like silx. Tests:
+no-error fallback; symmetric + asymmetric widening; NaN-error bare value;
+negative-error clip.
+
 Severity: Medium
 
 Rust: `src/widget/high_level.rs:1923-1929` — `curve_spec_bounds` uses `finite_bounds(spec.x)`/`finite_bounds(spec.y)` only; `x_error`/`y_error` never reach the bounds.

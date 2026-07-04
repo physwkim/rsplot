@@ -19,7 +19,7 @@ use crate::core::backend::{
 };
 use crate::core::calibration::Calibration;
 use crate::core::colormap::{AutoscaleMode, Colormap, ColormapName, Normalization};
-use crate::core::items::{Baseline, LineStyle, ScalarMask, Symbol};
+use crate::core::items::{Baseline, ErrorBars, LineStyle, ScalarMask, Symbol};
 use crate::core::marker::{Marker, MarkerConstraint, MarkerKind};
 use crate::core::plot::{DataMargins, DataRange, GraphGrid, Plot, PlotId};
 use crate::core::roi::{ManagedRoi, Roi, RoiInteractionMode, RoiLineStyle};
@@ -2145,9 +2145,41 @@ fn image_bounds(image: &ImageSpec<'_>) -> Option<(Bounds1D, Bounds1D)> {
     Some((Bounds1D::new(x0, x1)?, Bounds1D::new(y0, y1)?))
 }
 
+/// The `(min, max)` extent of `values` widened by `error`, matching silx
+/// `Curve.__minMaxDataWithError` (`items/core.py:1631-1657`): the min is
+/// `min(vᵢ − lowerᵢ)` and the max is `max(vᵢ + upperᵢ)` over the finite results.
+/// A `NaN` error magnitude contributes the bare `vᵢ` on that side (silx
+/// `dataMinusError[isNanError] = data[isNanError]`); error magnitudes are the
+/// clipped-non-negative [`ErrorBars::magnitudes`]. Falls back to
+/// [`finite_bounds`] when there is no error. `None` when no finite endpoint
+/// survives (empty data, all-NaN, or non-finite on both sides).
+fn error_adjusted_bounds(values: &[f64], error: Option<&ErrorBars>) -> Option<Bounds1D> {
+    let Some(error) = error else {
+        return finite_bounds(values);
+    };
+    let mut min_ = f64::INFINITY;
+    let mut max_ = f64::NEG_INFINITY;
+    for (i, &v) in values.iter().enumerate() {
+        let (lower, upper) = error.magnitudes(i);
+        // NaN error ⇒ the point contributes its bare value on that side.
+        let low = if lower.is_nan() { v } else { v - lower };
+        if low.is_finite() {
+            min_ = min_.min(low);
+        }
+        let high = if upper.is_nan() { v } else { v + upper };
+        if high.is_finite() {
+            max_ = max_.max(high);
+        }
+    }
+    Bounds1D::new(min_, max_)
+}
+
 fn curve_spec_bounds(spec: &CurveSpec<'_>) -> DataBounds {
     let mut bounds = DataBounds::default();
-    if let (Some(x), Some(y)) = (finite_bounds(spec.x), finite_bounds(spec.y)) {
+    if let (Some(x), Some(y)) = (
+        error_adjusted_bounds(spec.x, spec.x_error.as_ref()),
+        error_adjusted_bounds(spec.y, spec.y_error.as_ref()),
+    ) {
         bounds.include(x, y, spec.y_axis);
     }
     bounds
@@ -14857,6 +14889,59 @@ mod tests {
     fn finite_bounds_ignores_non_finite_values() {
         let bounds = finite_bounds(&[f64::NAN, 2.0, -1.0, f64::INFINITY]).unwrap();
         assert_eq!((bounds.min, bounds.max), (-1.0, 2.0));
+    }
+
+    #[test]
+    fn error_adjusted_bounds_none_falls_back_to_finite_bounds() {
+        // No error ⇒ identical to finite_bounds (silx: error None → min_max).
+        let v = [1.0, 5.0, 3.0];
+        let b = error_adjusted_bounds(&v, None).unwrap();
+        assert_eq!((b.min, b.max), (1.0, 5.0));
+    }
+
+    #[test]
+    fn error_adjusted_bounds_widens_by_lower_and_upper() {
+        // silx __minMaxDataWithError: min = min(v - lower), max = max(v + upper).
+        let v = [1.0, 5.0, 3.0];
+        let err = ErrorBars::Symmetric(0.5);
+        let b = error_adjusted_bounds(&v, Some(&err)).unwrap();
+        // min = 1 - 0.5 = 0.5; max = 5 + 0.5 = 5.5.
+        assert_eq!((b.min, b.max), (0.5, 5.5));
+
+        // Asymmetric: lower widens the min, upper the max, independently.
+        let err = ErrorBars::Asymmetric {
+            lower: vec![2.0, 0.0, 0.0],
+            upper: vec![0.0, 1.0, 0.0],
+        };
+        let b = error_adjusted_bounds(&v, Some(&err)).unwrap();
+        // min = min(1-2, 5-0, 3-0) = -1; max = max(1+0, 5+1, 3+0) = 6.
+        assert_eq!((b.min, b.max), (-1.0, 6.0));
+    }
+
+    #[test]
+    fn error_adjusted_bounds_nan_error_contributes_bare_value() {
+        // silx: dataMinusError[isNanError] = data — a NaN error magnitude leaves
+        // the point at its bare value on that side, so it still bounds the range.
+        let v = [1.0, 5.0];
+        let err = ErrorBars::Asymmetric {
+            lower: vec![f64::NAN, 0.0],
+            upper: vec![0.0, f64::NAN],
+        };
+        let b = error_adjusted_bounds(&v, Some(&err)).unwrap();
+        // min side: point 0 lower is NaN → bare 1.0; point 1 → 5-0=5. min = 1.
+        // max side: point 0 → 1+0=1; point 1 upper NaN → bare 5. max = 5.
+        assert_eq!((b.min, b.max), (1.0, 5.0));
+    }
+
+    #[test]
+    fn error_adjusted_bounds_negative_error_is_clipped() {
+        // Negative magnitudes clip to 0 (R2-44 / silx _filterNegativeValues), so a
+        // negative error never widens the range inward.
+        let v = [2.0, 4.0];
+        let err = ErrorBars::Symmetric(-1.0);
+        let b = error_adjusted_bounds(&v, Some(&err)).unwrap();
+        // Clipped to 0: min = 2, max = 4 (no widening, no inversion).
+        assert_eq!((b.min, b.max), (2.0, 4.0));
     }
 
     #[test]
