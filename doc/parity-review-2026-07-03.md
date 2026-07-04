@@ -1171,6 +1171,20 @@ Impact: the extremely common alarm-coloured shape/text pattern — `"dynamic att
 
 ### R2-62: Strip chart time span — `milli-second` units unscaled (1000× too long), and the omitted-default `period` falls to sidm's 5 s instead of MEDM's 60 s
 
+**FIXED (MEDM absent-key-default cluster):** `strip_chart_span` (`codegen.rs`) now
+scales `milli-second`/`milli second` by ×0.001 (`medmStripChart.c:586`), drops the
+fabricated `"hour"` unit (not a MEDM unit), and defaults an absent `period`/`units`
+to MEDM's stock 60-second window (`SC_DEFAULT_PERIOD 60.0`, `SC_DEFAULT_UNITS
+SECONDS`) instead of returning `None` (which left sidm's 5 s). It always emits
+`.with_time_span`. Pre-2.1 `delay` (consulted only when `period` is absent, as in
+MEDM) is now converted via MEDM's units factor (`0.060`/`60`/`3600` × delay,
+`:2140-2160`) with a converter warning that the `linear_scale` nice-rounding is
+approximated — closing the silent drop. Test:
+`strip_chart_span_scales_units_defaults_and_legacy_delay`.
+
+Residual (documented): the exact `linear_scale` nice-number rounding for `delay`
+is approximated, not ported (rare pre-2.1 format; warned).
+
 Severity: Medium
 
 Rust: `adl2sidm/src/codegen.rs:1618-1626` — `strip_chart_span` scales `period` by `Some("minute") => 60.0, Some("hour") => 3600.0, _ => 1.0` and returns `None` when `period` is absent (no `.with_time_span`, so the sidm default applies: `sidm/src/widgets/time_plot.rs:60` `DEFAULT_TIME_SPAN: f64 = 5.0`). The legacy `delay` key is never read (no hit in `codegen.rs`).

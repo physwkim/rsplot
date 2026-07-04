@@ -1393,8 +1393,10 @@ fn emit_strip_chart(b: &mut Builder, widget: &MedmWidget, options: &Options, z: 
     }
 
     let mut with = Vec::new();
-    if let Some(span) = strip_chart_span(widget) {
-        with.push(format!(".with_time_span({})", float_lit(span)));
+    let (span, span_warning) = strip_chart_span(widget);
+    with.push(format!(".with_time_span({})", float_lit(span)));
+    if let Some(w) = span_warning {
+        b.warnings.push(w);
     }
     // plotcom styling (title/labels/colours); a strip chart has no axis blocks.
     with.extend(plot_style_builders(b, widget, false));
@@ -1620,18 +1622,56 @@ fn user_axis_range(widget: &MedmWidget, block: &str) -> Option<(f64, f64)> {
     Some((range("minRange", 0.0), range("maxRange", 1.0)))
 }
 
-/// The strip chart's displayed time span in seconds: `period` scaled by `units`
-/// (`"minute"` → 60, `"hour"` → 3600, `"second"`/absent → 1), or `None` when no
-/// `period` is given. This converts MEDM's unit-tagged period to sidm's
-/// seconds-based `with_time_span`, where adl2pydm passes `period` through raw.
-fn strip_chart_span(widget: &MedmWidget) -> Option<f64> {
-    let period = widget.assignments.get("period")?.parse::<f64>().ok()?;
-    let scale = match widget.assignments.get("units").map(String::as_str) {
+/// The strip chart's displayed time span in seconds, plus an optional converter
+/// warning. MEDM's span is `period` scaled by `units` to seconds — the only
+/// units are `milli-second`/`milli second` (×0.001), `second` (×1), `minute`
+/// (×60) (`medmStripChart.c:586-598`); `"hour"` is not a MEDM unit. `period`
+/// and `units` both default to MEDM's stock values when the key is absent
+/// (`SC_DEFAULT_PERIOD 60.0`, `SC_DEFAULT_UNITS SECONDS`, `:39-40`, omitted at
+/// those defaults, `:2211`), so a strip chart with no `period` is a 60-second
+/// window, not sidm's 5 s. Pre-2.1 files instead carry `delay`, which MEDM
+/// converts to a period via a units factor (`-0.060`/`-60`/`-3600` × delay,
+/// `:2140-2160`) and a `linear_scale` nice-rounding; the factor is ported here
+/// and the nice-rounding is approximated (warned). adl2pydm passes `period`
+/// through raw (unscaled) — MEDM C is the contract.
+fn strip_chart_span(widget: &MedmWidget) -> (f64, Option<String>) {
+    let unit = widget.assignments.get("units").map(String::as_str);
+    let period_scale = match unit {
+        Some("milli-second") | Some("milli second") => 0.001,
         Some("minute") => 60.0,
-        Some("hour") => 3600.0,
-        _ => 1.0,
+        _ => 1.0, // second (SC_DEFAULT_UNITS) or absent
     };
-    Some(period * scale)
+    if let Some(period) = widget
+        .assignments
+        .get("period")
+        .and_then(|p| p.parse::<f64>().ok())
+    {
+        return (period * period_scale, None);
+    }
+    // Pre-2.1 `delay` (only consulted when `period` is absent, as in MEDM).
+    if let Some(delay) = widget
+        .assignments
+        .get("delay")
+        .and_then(|d| d.parse::<f64>().ok())
+        .filter(|&d| d > 0.0)
+    {
+        let delay_factor = match unit {
+            Some("milli-second") | Some("milli second") => 0.060,
+            Some("minute") => 3600.0,
+            _ => 60.0,
+        };
+        return (
+            delay * delay_factor,
+            Some(format!(
+                "line {}: legacy strip-chart `delay={delay}` converted to a \
+                 {}-second span; MEDM's linear_scale nice-rounding is approximated",
+                widget.line,
+                delay * delay_factor
+            )),
+        );
+    }
+    // Absent period and delay: MEDM's stock 60-second window.
+    (60.0, None)
 }
 
 /// `Color32::from_rgb(...)` for a trace/pen record's resolved `color` (the
@@ -6430,6 +6470,40 @@ composite {
         assert!(g.source.contains(
             "add_channel(&engine, \"ca://DEV:H2\", Color32::from_rgb(0, 255, 0), \"DEV:H2\")"
         ));
+    }
+
+    #[test]
+    fn strip_chart_span_scales_units_defaults_and_legacy_delay() {
+        // R2-62: span = period * unit-scale in seconds; units and period both
+        // default to MEDM's stock values when absent; pre-2.1 `delay` converts.
+        let span = |pairs: &[(&str, &str)]| {
+            let assignments: BTreeMap<String, String> = pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+            strip_chart_span(&MedmWidget {
+                assignments,
+                line: 1,
+                ..MedmWidget::default()
+            })
+        };
+        // milli-second is a real MEDM unit (×0.001) — a 500 ms window, not 500 s.
+        assert_eq!(span(&[("period", "500"), ("units", "milli-second")]).0, 0.5);
+        assert_eq!(span(&[("period", "500"), ("units", "milli second")]).0, 0.5);
+        // minute ×60, second/absent ×1.
+        assert_eq!(span(&[("period", "2"), ("units", "minute")]).0, 120.0);
+        assert_eq!(span(&[("period", "30"), ("units", "second")]).0, 30.0);
+        assert_eq!(span(&[("period", "30")]).0, 30.0);
+        // Absent period: MEDM's stock 60-second window (not sidm's 5 s default).
+        assert_eq!(span(&[]).0, 60.0);
+        assert_eq!(span(&[("units", "minute")]).0, 60.0);
+        // Legacy `delay` (period absent): delay × unit factor, with a warning.
+        let (delay_span, warn) = span(&[("delay", "1"), ("units", "second")]);
+        assert_eq!(delay_span, 60.0);
+        assert!(warn.is_some_and(|w| w.contains("delay=1")));
+        assert_eq!(span(&[("delay", "2"), ("units", "minute")]).0, 7200.0);
+        // period wins over a stray delay (MEDM consults delay only when absent).
+        assert_eq!(span(&[("period", "10"), ("delay", "5")]).0, 10.0);
     }
 
     #[test]
