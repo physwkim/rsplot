@@ -2864,13 +2864,34 @@ fn direction_orientation(
     }
 }
 
-/// Decimals for a wheel-switch `format`: `"integer"` -> 0, `"w.d"` -> `d`,
-/// anything else -> `None` (the caller warns).
+/// Decimals for a wheel-switch `format`. MEDM stores the value raw and hands it
+/// to the Xc `WheelSwitch` widget, whose documented form is a printf spec
+/// `xxx%[flags]w.pf` (default `"% 6.2f"`): it finds `%`, requires an `f`
+/// conversion after it, skips flags, reads `w.p`, and clamps `p` to `[0, w-1]`
+/// (`WheelSwitch.c:1347-1391`). A width-only printf (`% 6f`) means 0 decimals.
+/// `"integer"` -> 0 and a bare `w.d` (no `%`/`f`) are `adl2pydm` conveniences seen
+/// in converted files. `None` (the caller warns) when no decimals are recoverable.
 fn wheel_decimals(fmt: &str) -> Option<i32> {
     if fmt == "integer" {
         return Some(0);
     }
-    fmt.split_once('.')?.1.parse::<i32>().ok()
+    match fmt.find('%') {
+        Some(pct) => {
+            let after = &fmt[pct + 1..];
+            let fpos = after.find('f')?; // no `f` conversion -> not a valid spec
+            let spec = after[..fpos].trim_start_matches([' ', '+', '#', '0', '-']);
+            let Some((width, prec)) = spec.split_once('.') else {
+                return Some(0); // width-only, e.g. `% 6f`
+            };
+            let prec: i32 = prec.trim().parse().ok()?;
+            match width.trim().parse::<i32>() {
+                Ok(w) if w >= 1 => Some(prec.clamp(0, w - 1)),
+                _ => Some(prec.max(0)),
+            }
+        }
+        // adl2pydm's bare `w.d` convenience (no `%`/`f`), e.g. `format="6.2"`.
+        None => fmt.split_once('.')?.1.parse::<i32>().ok(),
+    }
 }
 
 /// A Rust `f64` literal for `v`, always carrying a decimal point or exponent so
@@ -5305,6 +5326,23 @@ byte {
         assert!(g.source.contains("SidmSpinbox::new(&engine, \"ca://WHL\")"));
         // format="6.2" -> 2 decimals.
         assert!(g.source.contains(".with_precision(2)"));
+    }
+
+    #[test]
+    fn wheel_decimals_reads_medm_printf_and_bare_forms() {
+        // R2-69: MEDM's real wheel-switch format is a printf spec handed to the Xc
+        // widget; the decimals are the `.p` field, clamped to [0, width-1].
+        assert_eq!(wheel_decimals("% 6.2f"), Some(2)); // MEDM DEFAULT_FORMAT
+        assert_eq!(wheel_decimals("%6.2f"), Some(2)); // no flags
+        assert_eq!(wheel_decimals("% 8.0f"), Some(0)); // explicit 0 decimals
+        assert_eq!(wheel_decimals("% 6f"), Some(0)); // width-only -> 0
+        assert_eq!(wheel_decimals("% 3.9f"), Some(2)); // p clamped to width-1
+        // adl2pydm conveniences still work.
+        assert_eq!(wheel_decimals("6.2"), Some(2)); // bare w.d
+        assert_eq!(wheel_decimals("integer"), Some(0));
+        // Genuinely unparseable -> None (caller warns, never silent).
+        assert_eq!(wheel_decimals("% 6d"), None); // no `f` conversion
+        assert_eq!(wheel_decimals("garbage"), None);
     }
 
     #[test]

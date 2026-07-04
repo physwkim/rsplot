@@ -1285,6 +1285,14 @@ Impact: a triggered cartesian plot converts to one that redraws on every wavefor
 
 ### R2-69: Wheel-switch `format` only parsed in adl2pydm's `w.d` form — MEDM's documented printf form (`"% 6.2f"`) falls back to channel precision
 
+**FIXED (silent-drop cluster):** `wheel_decimals` now parses MEDM's real printf
+spec the way the Xc `WheelSwitch` widget does (`WheelSwitch.c:1347-1391`): find
+`%`, require an `f` conversion after it, skip flags (`+`/` `/`#`/`0`/`-`), read
+`w.p`, and clamp `p` to `[0, w-1]`; a width-only printf (`% 6f`) yields 0 decimals.
+The bare `w.d` (`format="6.2"`) and `"integer"` conveniences still resolve, and a
+truly unparseable value (`"% 6d"`, no `f`) still returns `None` so the caller warns
+rather than silently dropping. Test: `wheel_decimals_reads_medm_printf_and_bare_forms`.
+
 Severity: Low
 
 Rust: `adl2sidm/src/codegen.rs:2762-2767` — `wheel_decimals` handles `"integer"` and `w.d` (`fmt.split_once('.')?.1.parse::<i32>()`); for a printf-style value the fraction part is `"2f"`, the parse fails, and the emitter warns "precision left to channel" (`:740-747`).
