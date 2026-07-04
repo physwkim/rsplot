@@ -1284,6 +1284,21 @@ Impact: a `.adl` carrying a leftover `precDefault=3` with channel-sourced precis
 
 ### R2-67: `clrmod="alarm"` silently ignored on every controller — MEDM alarm-colours text entry, message button, menu, choice button, valuator, and wheel switch
 
+**PARTIALLY FIXED (silent-drop cluster) — warn half closed:** all six controller
+emitters (`emit_text_entry`, `emit_message_button`, `emit_menu`,
+`emit_choice_button`, `emit_valuator`, `emit_wheel_switch`) now call
+`warn_controller_alarm_clrmod`, so `clrmod="alarm"` on a control is warned instead
+of silently dropped — symmetric with the monitor widgets, which wire it via
+`alarm_content_builder`. Test:
+`clrmod_alarm_on_a_controller_warns_since_sidm_has_no_surface`.
+
+**UNFIXED (sign-off-gated) — alarm wiring:** sidm exposes
+`with_alarm_sensitive_content` only on `SidmLabel`/`SidmByteIndicator`/
+`SidmScaleIndicator`/`SidmDrawing`, not on `SidmLineEdit`/`SidmPushButton`/
+`SidmEnumComboBox`/`SidmEnumButton`/`SidmSlider`/`SidmSpinbox`. Actually
+alarm-colouring the controls (MEDM medmTextEntry.c:418-424 et al.) needs a
+cross-crate sidm builder on those widgets — deferred to the sign-off batch.
+
 Severity: Medium
 
 Rust: `adl2sidm/src/codegen.rs` — `alarm_content_builder` (`:2582-2588`) is applied only to text update (`:500`), byte (`:836`), and scale indicators (`:879`); the controller emitters — text entry `:520-546`, message button `:550-583`, menu `:586-607`, choice button `:612-665`, valuator `:671-721`, wheel switch `:725-770` — never read `clrmod` and emit **no warning** when it is `"alarm"`. (Root cause partly cross-crate: sidm exposes `with_alarm_sensitive_content` only on `SidmByteIndicator`/`SidmDrawing`/`SidmLabel`/`SidmScaleIndicator`.)

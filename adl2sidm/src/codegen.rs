@@ -530,6 +530,7 @@ fn emit_text_entry(b: &mut Builder, widget: &MedmWidget, options: &Options, z: Z
     let Some((geom, addr)) = resolve_channel(b, widget, options) else {
         return;
     };
+    warn_controller_alarm_clrmod(b, widget, "text entry");
     let new_call = format!("SidmLineEdit::new(&engine, {})", medm_str(b, &addr));
     let mut builders: Vec<String> = precision_default_builder(widget).into_iter().collect();
     builders.extend(string_format_builder(b, widget, &addr));
@@ -560,6 +561,7 @@ fn emit_message_button(b: &mut Builder, widget: &MedmWidget, options: &Options, 
     let Some((geom, addr)) = resolve_channel(b, widget, options) else {
         return;
     };
+    warn_controller_alarm_clrmod(b, widget, "message button");
     let label = widget.title.clone().unwrap_or_default();
     let press = widget
         .assignments
@@ -596,6 +598,7 @@ fn emit_menu(b: &mut Builder, widget: &MedmWidget, options: &Options, z: ZLayer)
     let Some((geom, addr)) = resolve_channel(b, widget, options) else {
         return;
     };
+    warn_controller_alarm_clrmod(b, widget, "menu");
     let new_call = format!("SidmEnumComboBox::new(&engine, {})", medm_str(b, &addr));
     push_channel_widget(
         b,
@@ -622,6 +625,7 @@ fn emit_choice_button(b: &mut Builder, widget: &MedmWidget, options: &Options, z
     let Some((geom, addr)) = resolve_channel(b, widget, options) else {
         return;
     };
+    warn_controller_alarm_clrmod(b, widget, "choice button");
     let new_call = format!("SidmEnumButton::new(&engine, {})", medm_str(b, &addr));
     let mut builders = Vec::new();
     let stacking = widget
@@ -681,6 +685,7 @@ fn emit_valuator(b: &mut Builder, widget: &MedmWidget, options: &Options, z: ZLa
     let Some((geom, addr)) = resolve_channel(b, widget, options) else {
         return;
     };
+    warn_controller_alarm_clrmod(b, widget, "valuator");
     let new_call = format!("SidmSlider::new(&engine, {})", medm_str(b, &addr));
     let mut builders = Vec::new();
     if let Some((lo, hi)) = user_defined_limits(b, widget) {
@@ -735,6 +740,7 @@ fn emit_wheel_switch(b: &mut Builder, widget: &MedmWidget, options: &Options, z:
     let Some((geom, addr)) = resolve_channel(b, widget, options) else {
         return;
     };
+    warn_controller_alarm_clrmod(b, widget, "wheel switch");
     let new_call = format!("SidmSpinbox::new(&engine, {})", medm_str(b, &addr));
     let mut builders = Vec::new();
     if let Some((lo, hi)) = user_defined_limits(b, widget) {
@@ -2749,6 +2755,25 @@ fn alarm_content_builder(widget: &MedmWidget) -> Option<String> {
     })
 }
 
+/// Warn when a CONTROLLER carries `clrmod="alarm"`. MEDM alarm-colours the
+/// control's foreground by severity at runtime (medmTextEntry.c:418-424,
+/// medmMessageButton.c:348, medmMenu.c:540, medmChoiceButtons.c:375,
+/// medmValuator.c:892-895, medmWheelSwitch.c:390), but sidm exposes
+/// `with_alarm_sensitive_content` only on the MONITOR widgets (`SidmLabel`,
+/// `SidmByteIndicator`, `SidmScaleIndicator`, `SidmDrawing`) — not on
+/// `SidmLineEdit`/`SidmPushButton`/`SidmEnumComboBox`/`SidmEnumButton`/
+/// `SidmSlider`/`SidmSpinbox`. Wiring it needs a cross-crate sidm builder on those
+/// controls (sign-off-gated); until then the drop is warned, not silent.
+fn warn_controller_alarm_clrmod(b: &mut Builder, widget: &MedmWidget, kind: &str) {
+    if widget.assignments.get("clrmod").map(String::as_str) == Some("alarm") {
+        b.warnings.push(format!(
+            "line {}: {kind} clrmod=\"alarm\" not wired; sidm has no alarm-sensitive \
+             colour on this control",
+            widget.line
+        ));
+    }
+}
+
 /// The MEDM `dynamic attribute` colour MODE (`clr`: `static`/`alarm`/`discrete`),
 /// or `None` when the widget has no dynamic attribute or no `clr` key there. This
 /// is the colour-rule mode string and is DISTINCT from the integer `clr`/`bclr`
@@ -4506,6 +4531,68 @@ rectangle {
         // Both PVs are still emitted (the static one just keeps its default).
         assert!(g.source.contains("ca://$(P)alarmPV"));
         assert!(g.source.contains("ca://$(P)staticPV"));
+    }
+
+    #[test]
+    fn clrmod_alarm_on_a_controller_warns_since_sidm_has_no_surface() {
+        // R2-67: controllers have no sidm alarm-sensitive builder, so clrmod="alarm"
+        // on one must warn (not silently drop) and must not emit the monitor builder.
+        let adl = r#"
+"color map" {
+	colors {
+		ffffff,
+		000000,
+	}
+}
+"text entry" {
+	object {
+		x=0
+		y=0
+		width=80
+		height=18
+	}
+	control {
+		chan="$(P)set"
+		clr=0
+	}
+	clrmod="alarm"
+}
+valuator {
+	object {
+		x=0
+		y=30
+		width=120
+		height=20
+	}
+	control {
+		chan="$(P)lvl"
+		clr=0
+	}
+	clrmod="alarm"
+}
+"#;
+        let g = generate(&parse(adl), &Options::default());
+        // No controller gets the monitor-only alarm builder.
+        assert!(
+            !g.source.contains(".with_alarm_sensitive_content(true)"),
+            "controllers have no alarm-sensitive surface:\n{}",
+            g.source
+        );
+        // Both controllers warn, named by kind.
+        assert!(
+            g.warnings
+                .iter()
+                .any(|w| w.contains("text entry clrmod=\"alarm\"")),
+            "text entry alarm clrmod must warn: {:?}",
+            g.warnings
+        );
+        assert!(
+            g.warnings
+                .iter()
+                .any(|w| w.contains("valuator clrmod=\"alarm\"")),
+            "valuator alarm clrmod must warn: {:?}",
+            g.warnings
+        );
     }
 
     #[test]
