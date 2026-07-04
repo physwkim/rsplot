@@ -16,6 +16,7 @@ use crate::core::marker::{Marker, MarkerKind, TextAnchor};
 use crate::core::plot::{GraphGrid, TickMode};
 use crate::core::roi::{HandleKind, ManagedRoi, Roi, RoiInteractionMode};
 use crate::core::shape::{Line, Shape, ShapeKind, triangulate_simple_polygon};
+use crate::core::ticklayout::nice_num;
 use crate::core::transform::{Axis, AxisSide, Scale, Transform, YAxis};
 use crate::core::triangles::Triangles;
 use crate::widget::interaction;
@@ -270,39 +271,6 @@ pub fn layout(full: Rect, req: &ChromeRequest) -> ChromeLayout {
         colorbar,
         extra,
     }
-}
-
-/// "Nice" rounding of a span to {1, 2, 5} × 10ⁿ — silx `ticklayout.niceNumGeneric`
-/// for the default fractions `[1, 2, 5, 10]` (`ticklayout.py:78-107`). The round
-/// thresholds compare with `<=` (silx `frac <= roundFrac`, roundFractions
-/// `(1.5, 3.0, 7.0, 10.0)`), so a value landing exactly on a boundary (frac 1.5 /
-/// 3.0 / 7.0) rounds to the *lower* nice number, not the coarser one.
-fn nice_num(range: f64, round: bool) -> f64 {
-    if range <= 0.0 {
-        return 1.0;
-    }
-    let exp = range.log10().floor();
-    let frac = range / 10f64.powf(exp);
-    let nice = if round {
-        if frac <= 1.5 {
-            1.0
-        } else if frac <= 3.0 {
-            2.0
-        } else if frac <= 7.0 {
-            5.0
-        } else {
-            10.0
-        }
-    } else if frac <= 1.0 {
-        1.0
-    } else if frac <= 2.0 {
-        2.0
-    } else if frac <= 5.0 {
-        5.0
-    } else {
-        10.0
-    };
-    nice * 10f64.powf(exp)
 }
 
 /// "Nice" tick values within `[min, max]` plus the step between them. `n_ticks`
@@ -2047,18 +2015,6 @@ mod tests {
     fn degenerate_or_inverted_range_yields_no_ticks() {
         assert!(nice_ticks(5.0, 5.0, 8).0.is_empty());
         assert!(nice_ticks(5.0, 1.0, 8).0.is_empty());
-    }
-
-    #[test]
-    fn nice_num_round_thresholds_are_inclusive_like_silx() {
-        // silx niceNumGeneric rounds with `frac <= roundFrac` (1.5, 3.0, 7.0):
-        // a frac exactly on a boundary takes the LOWER nice number (siplot's old
-        // strict `<` gave the coarser 2 / 5 / 10).
-        assert_eq!(nice_num(1.5, true), 1.0);
-        assert_eq!(nice_num(3.0, true), 2.0);
-        assert_eq!(nice_num(7.0, true), 5.0);
-        // Just above a boundary still rounds up to the next nice number.
-        assert_eq!(nice_num(1.5001, true), 2.0);
     }
 
     #[test]

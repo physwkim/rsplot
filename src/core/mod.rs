@@ -22,5 +22,6 @@ pub mod scene3d;
 pub mod shape;
 pub mod sift_align;
 pub mod stats;
+pub mod ticklayout;
 pub mod transform;
 pub mod triangles;

@@ -30,6 +30,8 @@
 //!
 //! [`format_tick`] mirrors `bestFormatString` + `strftime` for a single tick.
 
+use crate::core::ticklayout::nice_num_generic;
+
 // Constants mirror silx dtime_ticklayout.py:49-54.
 const MICROSECONDS_PER_SECOND: f64 = 1_000_000.0;
 const SECONDS_PER_MINUTE: f64 = 60.0;
@@ -429,43 +431,13 @@ impl DateTime {
     }
 }
 
-/// The generic nice-number rounding (silx `ticklayout.niceNumGeneric`).
-///
-/// `nice_fractions` is the unit's allowed step list; its last element is the
-/// base of the logarithm. When `is_round` is set, each comparison threshold
-/// (except the last) is the average of adjacent nice fractions, so values round
-/// to the nearer step instead of always rounding up.
-fn nice_num_generic(value: f64, nice_fractions: &[f64], is_round: bool) -> f64 {
-    if value == 0.0 {
-        return value;
-    }
-
-    // roundFractions: average with the next element when rounding; last stays.
-    let mut round_fractions: Vec<f64> = nice_fractions.to_vec();
-    if is_round {
-        for i in 0..round_fractions.len().saturating_sub(1) {
-            round_fractions[i] = (nice_fractions[i] + nice_fractions[i + 1]) / 2.0;
-        }
-    }
-
-    let highest = *nice_fractions.last().expect("nice_fractions is non-empty");
-    let value = value.abs();
-    let expvalue = (value.ln() / highest.ln()).floor();
-    let frac = value / highest.powf(expvalue);
-
-    for (nice_frac, round_frac) in nice_fractions.iter().zip(round_fractions.iter()) {
-        if frac <= *round_frac {
-            return nice_frac * highest.powf(expvalue);
-        }
-    }
-    // silx asserts unreachable here; clamp to the largest nice fraction.
-    highest * highest.powf(expvalue)
-}
-
 /// Nice value for a date element (silx `niceDateTimeElement`). For years and
 /// months the result is at least 1 and integral (no fractional year/month).
+/// The per-unit step list is passed as custom `nice_fractions` to the shared
+/// [`nice_num_generic`], whose non-default branch averages adjacent fractions
+/// for the round table.
 fn nice_date_time_element(value: f64, unit: DtUnit, is_round: bool) -> f64 {
-    let elem = nice_num_generic(value, unit.nice_values(), is_round);
+    let elem = nice_num_generic(value, Some(unit.nice_values()), is_round);
     if unit == DtUnit::Years || unit == DtUnit::Months {
         (elem as i64).max(1) as f64
     } else {
@@ -920,13 +892,13 @@ mod tests {
     #[test]
     fn nice_num_generic_matches_default_fractions() {
         // With default-style fractions [1,2,5,10] and isRound=false, frac<=1 -> 1.
-        let v = nice_num_generic(1.0, &[1.0, 2.0, 5.0, 10.0], false);
+        let v = nice_num_generic(1.0, Some(&[1.0, 2.0, 5.0, 10.0]), false);
         assert!(close(v, 1.0, 1e-12), "v={v}");
         // 7 rounds up to 10 (frac 7 > 5).
-        let v = nice_num_generic(7.0, &[1.0, 2.0, 5.0, 10.0], false);
+        let v = nice_num_generic(7.0, Some(&[1.0, 2.0, 5.0, 10.0]), false);
         assert!(close(v, 10.0, 1e-12), "v={v}");
         // 3 with isRound: thresholds become [1.5, 3.5, 7.5, 10]; 3 <= 3.5 -> 2.
-        let v = nice_num_generic(3.0, &[1.0, 2.0, 5.0, 10.0], true);
+        let v = nice_num_generic(3.0, Some(&[1.0, 2.0, 5.0, 10.0]), true);
         assert!(close(v, 2.0, 1e-12), "v={v}");
     }
 

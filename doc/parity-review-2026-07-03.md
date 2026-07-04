@@ -1478,19 +1478,28 @@ divergences are closed in `chrome.rs`:
 Tests: inclusive round boundaries (frac 1.5→1, 3.0→2, 7.0→5) and the `/nTicks`
 divisor example.
 
-**DEFERRED — needs sign-off:** the pixel-adaptive tick density
-(`niceNumbersAdaptative`, `nticks = max(2, round(1.3·dpr/dpi · nbPixels))`,
+**STRUCTURAL FOLLOW-UP — FIXED (consolidation, this session):** the nice-number
+layout that was duplicated four times (`chrome.rs`, `colorbar.rs`,
+`core/scene3d/axes.rs`, `core/dtime_ticks.rs`) is now a single exact-silx port
+in `src/core/ticklayout.rs` (`number_of_digits`, `nice_num_generic`,
+`nice_num`, `nice_numbers`). All four modules delegate to it and keep only their
+own tick *generation* (chrome's tolerance loop, axes' `_frange`, colorbar's
+`nice_numbers_for_log10`, dtime's per-unit element logic). The `Option<&[f64]>`
+`nice_fractions` argument reproduces silx's `niceFractions is None` branch
+exactly: `None` uses the hardcoded default round table `(1.5, 3.0, 7.0, 10.0)`,
+`Some(list)` averages adjacent fractions (the datetime per-unit path). This also
+closes chrome/colorbar's latent `log10()`-vs-`ln/ln` divergence (silx
+`niceNumGeneric` uses `math.log(value, highest)`), now uniform. Tests centralised
+in the shared module; full siplot suite green (1702).
+
+**DEFERRED — needs sign-off (adaptive density only):** the pixel-adaptive tick
+count (`niceNumbersAdaptative`, `nticks = max(2, round(1.3·dpr/dpi · nbPixels))`,
 `GLPlotFrame.py:414-425`). siplot keeps the deliberate fixed defaults 8 (X) /
 6 (Y). Porting the adaptive count reverses that design choice AND needs a
 screen-DPI source silx reads from Qt's `dotsPerInch` — egui exposes
 `pixels_per_point` (a device-pixel ratio) but no logical DPI, so the density
 constant would have to be pinned to silx's reference 92 dpi rather than the
-actual screen. Both are decisions for the user. **STRUCTURAL FOLLOW-UP:** the
-nice-number layout is duplicated four times — `chrome.rs` (this fix),
-`colorbar.rs` (already correct), `core/scene3d/axes.rs` (already correct, has a
-fuller `ticks()`), `core/dtime_ticks.rs` (`nice_num_generic`). Consolidating
-into one shared `ticklayout` module would remove the drift that produced this
-divergence, but touches three correct uncited modules → gated on sign-off.
+actual screen. Both are decisions for the user; still open.
 
 Severity: Medium
 

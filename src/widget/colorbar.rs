@@ -25,6 +25,7 @@
 use egui::{Align2, Color32, FontId, Rect, Sense, Stroke, Vec2, pos2};
 
 use crate::core::colormap::{Colormap, Normalization};
+use crate::core::ticklayout::{nice_numbers, number_of_digits};
 
 /// Orientation of the gradient bar (silx `ColorBar` is orientation-agnostic;
 /// `ColorScaleBar`/`_TickBar` lay out vertically, the horizontal form mirrors
@@ -560,50 +561,10 @@ fn guess_format(ticks: &[f64], nfrac: usize) -> TickFormat {
 }
 
 // --- ticklayout.py ports (pure) ----------------------------------------------
-
-/// silx `ticklayout.numberOfDigits`: fractional digits for a tick spacing,
-/// `max(0, -floor(log10(spacing)))`.
-fn number_of_digits(tick_spacing: f64) -> usize {
-    let nfrac = -(tick_spacing.log10().floor());
-    if nfrac < 0.0 { 0 } else { nfrac as usize }
-}
-
-/// silx `ticklayout.niceNumGeneric` for the default fractions `[1, 2, 5, 10]`
-/// (the only call path used by `niceNumbers`): round `value` to a nice multiple
-/// of a power of ten.
-fn nice_num(value: f64, is_round: bool) -> f64 {
-    if value == 0.0 {
-        return value;
-    }
-    // highest = 10, expvalue = floor(log10(value)), frac = value / 10^expvalue.
-    let expvalue = value.log10().floor();
-    let frac = value / 10f64.powf(expvalue);
-    // niceFractions = [1, 2, 5, 10]; roundFractions = [1.5, 3, 7, 10] if round.
-    let nice_fractions = [1.0, 2.0, 5.0, 10.0];
-    let round_fractions = if is_round {
-        [1.5, 3.0, 7.0, 10.0]
-    } else {
-        nice_fractions
-    };
-    for (nice_frac, round_frac) in nice_fractions.iter().zip(round_fractions.iter()) {
-        if frac <= *round_frac {
-            return nice_frac * 10f64.powf(expvalue);
-        }
-    }
-    // silx asserts unreachable; frac <= 10 always matches the last fraction.
-    nice_fractions[3] * 10f64.powf(expvalue)
-}
-
-/// silx `ticklayout.niceNumbers`: returns `(graphmin, graphmax, spacing,
-/// nfrac)` for the linear nice-number layout.
-fn nice_numbers(vmin: f64, vmax: f64, nticks: usize) -> (f64, f64, f64, usize) {
-    let vrange = nice_num(vmax - vmin, false);
-    let spacing = nice_num(vrange / nticks as f64, true);
-    let graphmin = (vmin / spacing).floor() * spacing;
-    let graphmax = (vmax / spacing).ceil() * spacing;
-    let nfrac = number_of_digits(spacing);
-    (graphmin, graphmax, spacing, nfrac)
-}
+//
+// The linear nice-number core (`number_of_digits`, `nice_num`, `nice_numbers`)
+// lives in `crate::core::ticklayout`; only the log10 decade layout below is
+// colorbar-specific.
 
 /// silx `ticklayout.niceNumbersForLog10`: integer decade layout `(low, high,
 /// spacing, nfrac)` in log10 space.
@@ -734,66 +695,9 @@ mod tests {
         assert_eq!(tick_frac(&gamma, -1.0), 1.0);
     }
 
-    // --- numberOfDigits --------------------------------------------------
-
-    #[test]
-    fn number_of_digits_matches_silx() {
-        // -floor(log10(spacing)), clamped at 0.
-        assert_eq!(number_of_digits(1.0), 0); // log10(1) = 0
-        assert_eq!(number_of_digits(0.1), 1); // -floor(-1) = 1
-        assert_eq!(number_of_digits(0.01), 2);
-        assert_eq!(number_of_digits(10.0), 0); // -floor(1) = -1 -> 0
-        assert_eq!(number_of_digits(0.5), 1); // -floor(-0.30) = 1
-    }
-
-    // --- niceNum ---------------------------------------------------------
-
-    #[test]
-    fn nice_num_zero_is_zero() {
-        assert_eq!(nice_num(0.0, false), 0.0);
-        assert_eq!(nice_num(0.0, true), 0.0);
-    }
-
-    #[test]
-    fn nice_num_round_thresholds() {
-        // frac thresholds for is_round: <1.5 ->1, <3 ->2, <7 ->5, else 10.
-        assert_eq!(nice_num(1.4, true), 1.0);
-        assert_eq!(nice_num(2.9, true), 2.0);
-        assert_eq!(nice_num(6.9, true), 5.0);
-        assert_eq!(nice_num(8.0, true), 10.0);
-    }
-
-    #[test]
-    fn nice_num_floor_thresholds() {
-        // frac thresholds for !is_round: <=1 ->1, <=2 ->2, <=5 ->5, else 10.
-        assert_eq!(nice_num(1.0, false), 1.0);
-        assert_eq!(nice_num(2.0, false), 2.0);
-        assert_eq!(nice_num(5.0, false), 5.0);
-        assert_eq!(nice_num(6.0, false), 10.0);
-    }
-
-    // --- niceNumbers -----------------------------------------------------
-
-    #[test]
-    fn nice_numbers_simple_decade() {
-        // [0, 10], 5 ticks: range nice = 10, spacing nice(2, round) = 2,
-        // graphmin 0, graphmax 10, nfrac 0.
-        let (gmin, gmax, spacing, nfrac) = nice_numbers(0.0, 10.0, 5);
-        assert_eq!(gmin, 0.0);
-        assert_eq!(gmax, 10.0);
-        assert_eq!(spacing, 2.0);
-        assert_eq!(nfrac, 0);
-    }
-
-    #[test]
-    fn nice_numbers_fractional_spacing_sets_nfrac() {
-        // [0, 1], 5 ticks: range 1, spacing nice(0.2, round) = 0.2, nfrac 1.
-        let (gmin, gmax, spacing, nfrac) = nice_numbers(0.0, 1.0, 5);
-        assert_eq!(gmin, 0.0);
-        assert_eq!(gmax, 1.0);
-        assert!((spacing - 0.2).abs() < 1e-12);
-        assert_eq!(nfrac, 1);
-    }
+    // The linear `number_of_digits` / `nice_num` / `nice_numbers` core is
+    // tested in `crate::core::ticklayout`; only the log10 decade layout below
+    // is colorbar-specific.
 
     // --- niceNumbersForLog10 --------------------------------------------
 

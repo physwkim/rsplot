@@ -2,58 +2,17 @@
 //! (axis name labels, dashed tick lines, tick value labels around the bounding
 //! box) plus the tick layout it uses from `silx.gui.plot._utils.ticklayout`.
 //!
-//! The tick layout is a **fresh port** of `ticklayout.py` (`numberOfDigits`,
-//! `niceNumGeneric`, `niceNumbers`, `ticks`): `crate::core::colorbar` holds a
-//! private copy of the same nice-numbers algorithm, but that file is owned by
-//! the 2D plot side, so the duplication here is deliberate.
+//! The tick layout (`numberOfDigits`, `niceNumbers`) is shared with the 2D plot
+//! chrome/colorbar and the datetime ticks through [`crate::core::ticklayout`]
+//! (R2-38 consolidation); this module keeps only its own `ticks` generation
+//! (the `_frange` accumulation and single-tick fallback).
 //!
 //! Everything in this module is pure geometry/label math, unit-tested headless;
 //! the [`crate::SceneWidget`] draws the segments through the GPU line channel
 //! and the labels as egui overlay text.
 
 use crate::core::scene3d::mat4::Vec3;
-
-/// Number of fractional digits for tick labels of `tick_spacing` — port of
-/// `ticklayout.numberOfDigits` (`ticklayout.py:36-46`).
-fn number_of_digits(tick_spacing: f64) -> usize {
-    let nfrac = -tick_spacing.log10().floor();
-    if nfrac < 0.0 { 0 } else { nfrac as usize }
-}
-
-/// Port of `ticklayout.niceNumGeneric` with the default fractions
-/// (`ticklayout.py:78-110`): rounds `value` to a "nice" 1/2/5/10 × 10ᵏ.
-fn nice_num(value: f64, is_round: bool) -> f64 {
-    if value == 0.0 {
-        return value;
-    }
-    const NICE_FRACTIONS: [f64; 4] = [1.0, 2.0, 5.0, 10.0];
-    let round_fractions: [f64; 4] = if is_round {
-        [1.5, 3.0, 7.0, 10.0]
-    } else {
-        NICE_FRACTIONS
-    };
-    // Python `math.log(value, 10)` is ln(value)/ln(10); mirror it exactly.
-    let expvalue = (value.ln() / std::f64::consts::LN_10).floor();
-    let frac = value / 10f64.powf(expvalue);
-    for (nice, round) in NICE_FRACTIONS.into_iter().zip(round_fractions) {
-        if frac <= round {
-            return nice * 10f64.powf(expvalue);
-        }
-    }
-    // Unreachable: frac ≤ 10 always (silx asserts the same).
-    10f64.powf(expvalue + 1.0)
-}
-
-/// Port of `ticklayout.niceNumbers` (`ticklayout.py:112-132`, Heckbert's nice
-/// numbers): returns `(graph_min, graph_max, spacing, n_frac)`.
-fn nice_numbers(vmin: f64, vmax: f64, n_ticks: usize) -> (f64, f64, f64, usize) {
-    let vrange = nice_num(vmax - vmin, false);
-    let spacing = nice_num(vrange / n_ticks as f64, true);
-    let graph_min = (vmin / spacing).floor() * spacing;
-    let graph_max = (vmax / spacing).ceil() * spacing;
-    let nfrac = number_of_digits(spacing);
-    (graph_min, graph_max, spacing, nfrac)
-}
+use crate::core::ticklayout::{nice_numbers, number_of_digits};
 
 /// One tick label. Python formats with `%g` when `nfrac == 0` and `%.{nfrac}f`
 /// otherwise; Rust's plain `{}` matches `%g` for these values except that very
