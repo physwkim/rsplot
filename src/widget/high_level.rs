@@ -2274,9 +2274,8 @@ fn point_colors(values: &[f64], colormap: &Colormap, alpha: Option<&[f64]>) -> V
     let mut colors: Vec<Color32> = values
         .iter()
         .map(|&v| {
-            let t = colormap.normalize(v);
-            let idx = (t * 255.0).clamp(0.0, 255.0) as usize;
-            let [r, g, b, a] = colormap.lut[idx];
+            // silx int(ratio·256) LUT binning via the shared owner (R2-42).
+            let [r, g, b, a] = colormap.lut[colormap.lut_index(v)];
             Color32::from_rgba_unmultiplied(r, g, b, a)
         })
         .collect();
@@ -9996,11 +9995,7 @@ impl DerefMut for CompareImages {
 /// Apply a colormap to scalar pixel data and return RGBA bytes.
 fn colormap_to_rgba(_width: u32, data: &[f32], colormap: &Colormap) -> Vec<[u8; 4]> {
     data.iter()
-        .map(|&v| {
-            let t = colormap.normalize(v as f64);
-            let idx = (t * 255.0).clamp(0.0, 255.0) as usize;
-            colormap.lut[idx]
-        })
+        .map(|&v| colormap.lut[colormap.lut_index(v as f64)])
         .collect()
 }
 
@@ -10018,7 +10013,10 @@ fn red_blue_gray_composite(
     colormap: &Colormap,
     neg: bool,
 ) -> Vec<[u8; 4]> {
-    let byte = |v: f32| (colormap.normalize(v as f64) * 255.0).clamp(0.0, 255.0) as u8;
+    // silx CompareImages composes from `silx.math.colormap.normalize`, whose
+    // grayscale intensity is exactly `int(ratio·256)` capped at 255 — the same
+    // LUT index (R2-42), so reuse the shared owner rather than `ratio·255`.
+    let byte = |v: f32| colormap.lut_index(v as f64) as u8;
     data_a
         .iter()
         .zip(data_b.iter())
@@ -14495,7 +14493,8 @@ mod tests {
         let cm = Colormap::viridis(0.0, 1.0);
         let data_a = vec![0.0f32, 1.0];
         let data_b = vec![1.0f32, 0.0];
-        let byte = |v: f32| (cm.normalize(v as f64) * 255.0).clamp(0.0, 255.0) as u8;
+        // silx int(ratio·256) intensity, same as the impl's shared LUT owner.
+        let byte = |v: f32| cm.lut_index(v as f64) as u8;
         let (a0, b0) = (byte(0.0), byte(1.0));
         let (a1, b1) = (byte(1.0), byte(0.0));
 
@@ -15937,11 +15936,10 @@ mod tests {
     }
 
     /// The exact color the [`point_colors`] LUT lookup produces for `v` under
-    /// [`ramp_colormap`], reproducing the index math
-    /// `idx = (normalize(v) * 255).clamp(0, 255)`.
+    /// [`ramp_colormap`], reproducing the shared index math
+    /// `lut_index = min(int(normalize(v) * 256), 255)` (R2-42).
     fn ramp_color_at(cmap: &Colormap, v: f64) -> Color32 {
-        let idx = (cmap.normalize(v) * 255.0).clamp(0.0, 255.0) as usize;
-        let [r, g, b, a] = cmap.lut[idx];
+        let [r, g, b, a] = cmap.lut[cmap.lut_index(v)];
         Color32::from_rgba_unmultiplied(r, g, b, a)
     }
 

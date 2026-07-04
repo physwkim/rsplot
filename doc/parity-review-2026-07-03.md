@@ -1439,6 +1439,26 @@ Impact: switching the dialog to Log with an explicit `Min: 0` (the default lower
 
 ### R2-42: LUT lookup quantization — GPU samples the LUT with linear filtering (silx: GL_NEAREST) and the CPU bins by ×255 (silx: ×256)
 
+**FIXED (colormap cluster, this session):** both halves closed.
+- GPU: the 256×1 LUT now samples with a NEAREST sampler (silx GL_NEAREST,
+  `GLPlotImage.py:338-347`), so displayed colors snap to LUT entries instead of
+  interpolating (registered discrete LUTs stay discrete). The old `lut_sampler`
+  was Linear and *also* served the direct-RGBA path's bilinear interpolation
+  (gpu_image.rs:881), so it was split: `lut_sampler` (NEAREST, LUT lookup) and a
+  new `linear_sampler` (LINEAR, RGBA interpolation) — flipping one no longer
+  regresses the other. With ClampToEdge the shader texel is
+  `min(floor(coord·256), 255)`.
+- CPU: new single owner `Colormap::lut_index` = `min(int(ratio·256), 255)` (silx
+  `_colormap.pyx:345-376`, `nb_colors=256`), replacing the four `int(ratio·255)`
+  sites — `color_at`, `point_colors`, `colormap_to_rgba`, and the CompareImages
+  `red_blue_gray_composite` intensity (silx composes from
+  `silx.math.colormap.normalize`, itself `int(ratio·256)`). GPU and CPU now agree
+  with each other and silx (ratio 0.5 → 128, was 127). The `Subtract` A−B diff
+  channel (`diff·255`, high_level.rs:9678/9680) is a signed-difference→channel
+  scaling, not a `normalize`→LUT binning → distinct, skipped. Tests: `lut_index`
+  256-binning capped at 255; color_at midpoint 128; composite/point-colors mirror
+  the shared owner.
+
 Severity: Low
 
 Rust: `src/render/gpu_image.rs:544-547` — the LUT sampler is `FilterMode::Linear` (min and mag) and `image.wgsl` uses `textureSample(lut_tex, lut_samp, vec2(value, 0.5))`, so displayed colors are interpolated *between* LUT entries; `src/core/colormap.rs:884` (and `src/widget/high_level.rs:9477/:13880/:15120`) — CPU index is `trunc(ratio·255)`.

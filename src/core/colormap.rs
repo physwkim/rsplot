@@ -927,25 +927,35 @@ impl Colormap {
         }
     }
 
+    /// The 256-entry LUT index for `v` under this colormap's normalization — silx
+    /// `_colormap.pyx:345-376`: `int(ratio · nb_colors)` capped at `nb_colors − 1`
+    /// (`nb_colors == 256`), NOT `ratio · 255`. [`normalize`](Self::normalize)
+    /// clamps the ratio to `[0, 1]`, so `ratio == 1.0` (and the `+inf`-clamped
+    /// top) yields `256`, which the cap pulls back to the last entry; a `NaN`
+    /// ratio (a degenerate range mapped over `±inf`) casts to `0` under Rust's
+    /// saturating float→int, landing on the low color like silx's degenerate
+    /// fallback. The single owner of the value→index quantization shared by
+    /// [`color_at`](Self::color_at) and the CPU image/scatter colorizers, kept
+    /// identical to the GL path's NEAREST LUT sampler (`GLPlotImage.py:338-347`);
+    /// `ratio · 255` (the old rule) put roughly half of all values one entry away
+    /// from silx.
+    pub(crate) fn lut_index(&self, v: f64) -> usize {
+        ((self.normalize(v) * 256.0) as usize).min(self.lut.len() - 1)
+    }
+
     /// Map a data value to its straight-alpha `[r, g, b, a]` color under this
     /// colormap — the CPU mirror of the image shader's LUT lookup, the single
     /// value→color entry point for items that colour their geometry on the CPU
     /// (e.g. 3D scatter). Only `NaN` yields [`nan_color`](Self::nan_color) (silx
     /// `_colormap.pyx:362-376` / `GLPlotImage.py:202-206`: `nancolor` is used
     /// solely for `isnan`); `±inf` survive normalization and clamp into the LUT
-    /// ends (`+inf` → top color, `-inf` → bottom), matching the GL path. A finite
-    /// value is normalised (see [`normalize`](Self::normalize)) and looked up in
-    /// the 256-entry [`lut`](Self::lut).
+    /// ends (`+inf` → top color, `-inf` → bottom), matching the GL path. The index
+    /// is [`lut_index`](Self::lut_index) (silx's `int(ratio · 256)` binning).
     pub fn color_at(&self, v: f64) -> [u8; 4] {
         if v.is_nan() {
             return self.nan_color;
         }
-        // normalize clamps the ratio to [0, 1], so ±inf resolve to 1.0 / 0.0.
-        // For a degenerate colormap range (one_over_range == 0) `0 * inf` is NaN;
-        // Rust's saturating `NaN as usize` is 0, so an infinite sample lands on
-        // the low color there, matching silx's degenerate-range fallback.
-        let idx = (self.normalize(v) * 255.0).clamp(0.0, 255.0) as usize;
-        self.lut[idx]
+        self.lut[self.lut_index(v)]
     }
 
     /// The `(vmin, vmax)` autoscale range over `data` for `mode` under *this
@@ -1895,8 +1905,8 @@ mod tests {
         // Endpoints hit the first/last LUT entries; the midpoint the middle.
         assert_eq!(cmap.color_at(0.0), cmap.lut[0]);
         assert_eq!(cmap.color_at(4.0), cmap.lut[255]);
-        // Midpoint: normalize(2.0)=0.5 → 0.5*255=127.5 → index 127 (truncated).
-        assert_eq!(cmap.color_at(2.0), cmap.lut[127]);
+        // Midpoint: normalize(2.0)=0.5 → int(0.5*256)=128 (R2-42 silx binning).
+        assert_eq!(cmap.color_at(2.0), cmap.lut[128]);
         // Out-of-range values clamp to the endpoints (normalize clamps to [0, 1]).
         assert_eq!(cmap.color_at(-10.0), cmap.lut[0]);
         assert_eq!(cmap.color_at(10.0), cmap.lut[255]);
@@ -1905,6 +1915,22 @@ mod tests {
         assert_eq!(cmap.color_at(f64::NAN), [1, 2, 3, 4]);
         assert_eq!(cmap.color_at(f64::INFINITY), cmap.lut[255]);
         assert_eq!(cmap.color_at(f64::NEG_INFINITY), cmap.lut[0]);
+    }
+
+    #[test]
+    fn lut_index_uses_silx_256_binning_capped_at_255() {
+        // silx _colormap.pyx: int(ratio * nb_colors) capped at nb_colors-1,
+        // nb_colors=256. Over [0, 4]: ratio 0 → 0, 0.5 → int(128)=128 (NOT the
+        // old ×255's 127), 1.0 → int(256)=256 capped to 255.
+        let cmap = Colormap::new(ColormapName::Viridis, 0.0, 4.0);
+        assert_eq!(cmap.lut_index(0.0), 0);
+        assert_eq!(cmap.lut_index(2.0), 128);
+        assert_eq!(cmap.lut_index(4.0), 255);
+        // Out-of-range clamps: below → 0, above → 255 (normalize clamps ratio).
+        assert_eq!(cmap.lut_index(-1.0), 0);
+        assert_eq!(cmap.lut_index(10.0), 255);
+        // A value just under vmax stays within [0, 255].
+        assert!(cmap.lut_index(3.999) <= 255);
     }
 
     #[test]

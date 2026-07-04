@@ -344,7 +344,15 @@ pub struct ImagePipeline {
     bind_group_layout: wgpu::BindGroupLayout,
     rgba_bind_group_layout: wgpu::BindGroupLayout,
     data_sampler: wgpu::Sampler,
+    /// NEAREST sampler for the 256-entry colormap LUT lookup (silx GL_NEAREST,
+    /// `GLPlotImage.py:338-347`): the LUT holds discrete registered colors, so
+    /// sampling must snap to the nearest texel, not interpolate between entries.
     lut_sampler: wgpu::Sampler,
+    /// LINEAR sampler for the *direct RGBA* image path's bilinear interpolation
+    /// (`Rgba8UnormSrgb` is hardware-filterable). Kept separate from
+    /// [`Self::lut_sampler`] so making the LUT lookup NEAREST does not turn RGBA
+    /// linear interpolation into nearest.
+    linear_sampler: wgpu::Sampler,
     /// A 1×1 `R32Float` texture of value `1.0`, bound at scalar binding 5 for
     /// images without a per-pixel alpha map so the bind group stays valid; the
     /// shader never samples it (its `has_alpha_map` flag is 0).
@@ -541,8 +549,19 @@ impl ImagePipeline {
             min_filter: wgpu::FilterMode::Nearest,
             ..Default::default()
         });
+        // NEAREST for the LUT lookup (silx GL_NEAREST, GLPlotImage.py:338-347):
+        // the 256-entry LUT is a discrete palette, so the shader snaps to the
+        // nearest texel — `min(floor(coord·256), 255)` with ClampToEdge — instead
+        // of blending between entries. Matches the CPU `Colormap::lut_index`.
         let lut_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("siplot image lut sampler"),
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+        // LINEAR sampler for the direct-RGBA image path's bilinear interpolation.
+        let linear_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("siplot image linear sampler"),
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
@@ -575,6 +594,7 @@ impl ImagePipeline {
             rgba_bind_group_layout,
             data_sampler,
             lut_sampler,
+            linear_sampler,
             dummy_alpha_view,
         }
     }
@@ -878,7 +898,7 @@ impl GpuImage {
                 // and no extra wgpu feature). Nearest reuses the data sampler.
                 let rgba_sampler = match image.interpolation {
                     InterpolationMode::Nearest => &pipeline.data_sampler,
-                    InterpolationMode::Linear => &pipeline.lut_sampler,
+                    InterpolationMode::Linear => &pipeline.linear_sampler,
                 };
                 let tiles = tile_bounds(image.width, image.height, max_dim)
                     .into_iter()
