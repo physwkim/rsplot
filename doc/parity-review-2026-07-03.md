@@ -1366,6 +1366,17 @@ Impact: siplot accepts substantially looser matches than silx, so the pair set f
 
 ### R2-36: SIFT alignment's `< 18` matches shift-only fallback missing — affine fitted from as few as 3 pairs
 
+**FIXED (SIFT cluster, this session):** `sift_auto_align` now ports silx's
+fewer-than-3-points-per-DOF fallback. The empty-match guard is now `raw.is_empty()`
+(silx returns None only for `len_match == 0`); with `raw.len() <
+AFFINE_MIN_MATCHES` (`3 * 6 = 18`) it registers via the new `shift_only_transform`
+— an identity linear part plus the median keypoint translation `(median(bx − ax),
+median(by − ay))` — instead of least-squares-fitting a 6-parameter affine to a
+handful of noisy pairs. The affine fit runs only at ≥ 18 matches. `median`
+implements `numpy.median` (odd → middle, even → mean of the two middle). Tests:
+`median` odd/even/single/empty boundaries and `shift_only_transform` returns
+identity + `(median dx, median dy)` unaffected by an outlier delta.
+
 Severity: Medium
 
 Rust: `src/core/sift_align.rs:227-229` — `if raw.len() < 3 { return None; }`, else always least-squares-fits the full 6-parameter affine.

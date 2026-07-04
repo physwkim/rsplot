@@ -39,6 +39,11 @@ pub const MATCH_RATIO: f32 = 0.73;
 /// matches than silx.
 pub const MATCH_RATIO_THRESHOLD: f32 = MATCH_RATIO * MATCH_RATIO;
 
+/// Minimum matched keypoints for silx to fit the 6-DOF affine — 3 points per
+/// degree of freedom (`alignment.py:309`: `len_match < 3 * 6`). Below this, silx
+/// falls back to a shift-only median translation.
+const AFFINE_MIN_MATCHES: usize = 3 * 6;
+
 /// The affine transform applied to image B to align it to image A, decomposed
 /// into translation, per-axis scale, and rotation — silx
 /// `CompareImages.AffineTransformation` (built by `__toAffineTransformation`).
@@ -231,6 +236,37 @@ fn match_features_l1(a: &[Feature], b: &[Feature], ratio: f32) -> Vec<(usize, us
     pairs
 }
 
+/// `numpy.median` of `values`: the middle element for odd length, the mean of
+/// the two middle elements for even length. Sorts `values` in place; returns
+/// `0.0` for an empty slice (callers pass a non-empty match set).
+fn median(values: &mut [f64]) -> f64 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let n = values.len();
+    if n % 2 == 1 {
+        values[n / 2]
+    } else {
+        (values[n / 2 - 1] + values[n / 2]) / 2.0
+    }
+}
+
+/// The shift-only registration silx falls back to when there are too few matches
+/// to fit an affine (`alignment.py:311-319`): an identity linear part with the
+/// median keypoint translation `(median(bx − ax), median(by − ay))`. Robust to
+/// the outliers a 3–17-pair least-squares fit would chase into spurious
+/// scale/rotation. (silx computes the median in `(y, x)` for its GPU kernel;
+/// siplot stays in image `(x, y)` end to end, per this module's convention.)
+fn shift_only_transform(matches: &[MatchedKeypoint]) -> ([[f64; 2]; 2], (f64, f64)) {
+    let mut dxs: Vec<f64> = matches.iter().map(|m| (m.bx - m.ax) as f64).collect();
+    let mut dys: Vec<f64> = matches.iter().map(|m| (m.by - m.ay) as f64).collect();
+    (
+        [[1.0, 0.0], [0.0, 1.0]],
+        (median(&mut dxs), median(&mut dys)),
+    )
+}
+
 /// Register image B onto image A by SIFT keypoint matching + affine warp,
 /// mirroring silx `CompareImages.__createSiftData`.
 ///
@@ -239,8 +275,11 @@ fn match_features_l1(a: &[Feature], b: &[Feature], ratio: f32) -> Vec<(usize, us
 /// — silx pads to the max shape before SIFT — then SIFT-aligned there.
 ///
 /// Returns `None` when registration is not possible: an empty/degenerate image,
-/// fewer than three matched keypoints (silx falls back to the default alignment
-/// mode), or a singular least-squares system.
+/// no matched keypoints (silx's `len_match == 0` early return), or a singular
+/// least-squares system. With 1–17 matches it returns a shift-only alignment
+/// (identity linear part + median translation), matching silx's
+/// fewer-than-3-points-per-DOF fallback; the affine is fitted only at ≥ 18
+/// matches.
 pub fn sift_auto_align(
     a: &[f32],
     wa: usize,
@@ -266,9 +305,10 @@ pub fn sift_auto_align(
     let feats_a = sift.detect_and_compute(&gray_a);
     let feats_b = sift.detect_and_compute(&gray_b);
 
-    // query = A, train = B → each match carries an A index and a B index.
+    // query = A, train = B → each match carries an A index and a B index. silx
+    // returns None only for an empty match set (`len_match == 0`).
     let raw = match_features_l1(&feats_a, &feats_b, MATCH_RATIO_THRESHOLD);
-    if raw.len() < 3 {
+    if raw.is_empty() {
         return None;
     }
 
@@ -291,12 +331,22 @@ pub fn sift_auto_align(
         ));
     }
 
-    let affine = estimate_affine_from_pairs(&pairs).ok()?;
-    let matrix = [
-        [affine.m11 as f64, affine.m12 as f64],
-        [affine.m21 as f64, affine.m22 as f64],
-    ];
-    let offset = (affine.tx as f64, affine.ty as f64);
+    // silx needs 3 point-correspondences per affine DOF; with fewer matches it
+    // registers by a robust median translation (identity linear part) rather
+    // than fitting scale/rotation to a handful of noisy pairs
+    // (`alignment.py:309-319`). The affine least-squares runs only at ≥ 18.
+    let (matrix, offset) = if raw.len() < AFFINE_MIN_MATCHES {
+        shift_only_transform(&matches)
+    } else {
+        let affine = estimate_affine_from_pairs(&pairs).ok()?;
+        (
+            [
+                [affine.m11 as f64, affine.m12 as f64],
+                [affine.m21 as f64, affine.m22 as f64],
+            ],
+            (affine.tx as f64, affine.ty as f64),
+        )
+    };
     let aligned = warp_affine(&b_pad, cw, ch, matrix, offset);
 
     Some(SiftAlignment {
@@ -379,6 +429,47 @@ mod tests {
             match_features_l1(&q, &train, MATCH_RATIO_THRESHOLD),
             vec![(0, 0)]
         );
+    }
+
+    #[test]
+    fn median_odd_length_is_the_middle_element() {
+        let mut v = vec![3.0, 1.0, 2.0];
+        assert_eq!(median(&mut v), 2.0);
+    }
+
+    #[test]
+    fn median_even_length_averages_the_two_middle() {
+        // numpy.median([1, 2, 3, 4]) = (2 + 3) / 2 = 2.5.
+        let mut v = vec![4.0, 1.0, 3.0, 2.0];
+        assert_eq!(median(&mut v), 2.5);
+    }
+
+    #[test]
+    fn median_single_and_empty() {
+        assert_eq!(median(&mut [7.0]), 7.0);
+        assert_eq!(median(&mut []), 0.0);
+    }
+
+    #[test]
+    fn shift_only_transform_is_identity_plus_median_translation() {
+        // Three pairs with x-deltas {2, 4, 3} and y-deltas {-1, -1, 5}: the
+        // shift-only fallback is identity linear part + (median dx, median dy) =
+        // (3, -1), independent of the outlier y-delta 5 that a fit would chase.
+        let m = |ax, ay, bx, by| MatchedKeypoint {
+            ax,
+            ay,
+            bx,
+            by,
+            scale: 1.0,
+        };
+        let matches = [
+            m(0.0, 0.0, 2.0, -1.0),
+            m(10.0, 10.0, 14.0, 9.0),
+            m(5.0, 5.0, 8.0, 10.0),
+        ];
+        let (matrix, offset) = shift_only_transform(&matches);
+        assert_eq!(matrix, [[1.0, 0.0], [0.0, 1.0]]);
+        assert_eq!(offset, (3.0, -1.0));
     }
 
     #[test]
