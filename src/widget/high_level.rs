@@ -591,6 +591,27 @@ fn expected_image_len(width: u32, height: u32) -> usize {
     (width as usize).saturating_mul(height as usize)
 }
 
+/// Whether two retained payloads are scalar images with bit-identical pixel
+/// buffers (`to_bits` comparison so NaN pixels compare equal to themselves).
+/// Used by `set_retained_data` to tell a colormap/alpha-only re-upload (same
+/// pixels — keeps the median-filter original capture) from an actual data
+/// replacement (R2-7).
+fn image_pixels_bit_equal(a: Option<&RetainedItemData>, b: Option<&RetainedItemData>) -> bool {
+    match (a, b) {
+        (
+            Some(RetainedItemData::Image { data: da, .. }),
+            Some(RetainedItemData::Image { data: db, .. }),
+        ) => {
+            da.len() == db.len()
+                && da
+                    .iter()
+                    .zip(db.iter())
+                    .all(|(x, y)| x.to_bits() == y.to_bits())
+        }
+        _ => false,
+    }
+}
+
 /// Round a kernel dimension up to the nearest odd value (>= 1), matching the
 /// silx odd-kernel requirement (`MedianFilterDialog` spinbox min 1, step 2).
 fn force_odd(n: usize) -> usize {
@@ -3661,6 +3682,15 @@ pub struct PlotWidget {
     ruler_roi: Option<usize>,
     /// Interaction mode in effect before the ruler was armed, restored on disarm.
     ruler_prev_mode: Option<PlotInteractionMode>,
+    /// The median-filter actions' captured pre-filter image: silx
+    /// `MedianFilterDialog` keeps `_originalImage` and refilters IT on every
+    /// kernel change, so repeated Apply never compounds (medfilt.py:83-102).
+    /// One slot, keyed by handle — the analog of silx capturing on
+    /// `sigActiveImageChanged`. Invalidated by [`Self::set_retained_data`]
+    /// when the item's pixel data actually changes (colormap/alpha-only
+    /// re-uploads keep it); [`Self::apply_median_filter_kernel`] restores it
+    /// after its own replace (silx's disconnect/reconnect around `addImage`).
+    median_filter_original: Option<(ItemHandle, Vec<f64>)>,
 }
 
 impl PlotWidget {
@@ -3697,6 +3727,7 @@ impl PlotWidget {
             ruler_active: false,
             ruler_roi: None,
             ruler_prev_mode: None,
+            median_filter_original: None,
         }
     }
 
@@ -4216,6 +4247,23 @@ impl PlotWidget {
     /// curve/image spec entry points right after the record is created/updated,
     /// so live stats/fit consumers can read the active item's data.
     fn set_retained_data(&mut self, handle: ItemHandle, data: Option<RetainedItemData>) {
+        // Median-filter original invalidation (R2-7): drop the capture when
+        // this item's PIXEL data actually changes — the pixel-level analog of
+        // silx `MedianFilterDialog` recapturing on `sigActiveImageChanged`
+        // (medfilt.py:83-102). Colormap/alpha/geometry-only re-uploads carry
+        // the same pixels and keep the capture (silx colormap edits don't
+        // re-add the image, so its `_originalImage` survives them).
+        // `apply_median_filter_kernel` restores the capture after its own
+        // replace, mirroring silx's signal disconnect/reconnect.
+        let invalidate = match &self.median_filter_original {
+            Some((captured, _)) if *captured == handle => {
+                !image_pixels_bit_equal(self.retained_data(handle), data.as_ref())
+            }
+            _ => false,
+        };
+        if invalidate {
+            self.median_filter_original = None;
+        }
         if let Some(record) = self.item_record_mut(handle) {
             record.data = data;
         }
@@ -4977,6 +5025,15 @@ impl PlotWidget {
         let removed = self.backend.remove(handle);
         if removed {
             self.item_records.retain(|record| record.handle != handle);
+            // Drop a median-filter original captured for the removed item
+            // (handles are never reused; this only frees the buffer early).
+            if self
+                .median_filter_original
+                .as_ref()
+                .is_some_and(|(h, _)| *h == handle)
+            {
+                self.median_filter_original = None;
+            }
             if let Some(kind) = kind {
                 self.events.push(PlotEvent::ItemRemoved { handle, kind });
             }
@@ -4996,6 +5053,7 @@ impl PlotWidget {
             .collect();
         self.backend.clear_items();
         self.item_records.clear();
+        self.median_filter_original = None;
         for (handle, kind) in removed {
             self.events.push(PlotEvent::ItemRemoved { handle, kind });
         }
@@ -7364,8 +7422,20 @@ impl PlotWidget {
             _ => return false,
         };
 
+        // silx `MedianFilterDialog` captures `_originalImage` and refilters
+        // THAT on every kernel change (medfilt.py:83-102) — Apply at width 3
+        // then 5 shows medfilt5(orig), never medfilt5(medfilt3(orig)). The
+        // capture survives our own replace below (restored after, the analog
+        // of silx's sigActiveImageChanged disconnect/reconnect) and is
+        // dropped by `set_retained_data` when anything else changes the
+        // item's pixels.
+        let original = match &self.median_filter_original {
+            Some((h, orig)) if *h == handle => orig.clone(),
+            _ => data,
+        };
+
         let filtered = crate::widget::actions::analysis::median_filter_2d(
-            &data,
+            &original,
             width,
             height,
             kernel_h,
@@ -7377,6 +7447,9 @@ impl PlotWidget {
         let mut spec = ImageSpec::scalar(width as u32, height as u32, &pixels, colormap);
         attrs.apply(&mut spec);
         self.update_image_spec(handle, spec);
+        // Restore the capture cleared by our own pixel replace (silx
+        // reconnects the signal after its `addImage`).
+        self.median_filter_original = Some((handle, original));
         true
     }
 

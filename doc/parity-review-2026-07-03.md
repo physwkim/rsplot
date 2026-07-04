@@ -552,6 +552,24 @@ Impact: numerically different x values in the profile window — a (0,0)→(3,4)
 
 ### R2-7: Median filter compounds on repeated Apply — silx always refilters the retained original image
 
+**FIXED (stats/actions cluster):** `PlotWidget` now carries a single-slot
+`median_filter_original: Option<(ItemHandle, Vec<f64>)>` — the analog of silx
+`MedianFilterDialog._originalImage` (medfilt.py:83-102).
+`apply_median_filter_kernel` captures on first Apply, always filters the
+capture, and restores it after its own replace (silx's
+sigActiveImageChanged disconnect/reconnect around `addImage`). Invalidation
+is owned by the retained-data choke point: `set_retained_data` drops the
+capture only when the item's PIXEL data changes bit-wise
+(`image_pixels_bit_equal`, `to_bits` so NaN-bearing images compare equal to
+themselves) — colormap/alpha/geometry-only re-uploads (autoscale, level
+edits) keep it, matching silx where colormap edits never re-add the image.
+`remove`/`clear` free the capture (handles are monotonic, never reused).
+Tests (`tests/median_filter_original.rs`, headless GPU):
+`repeated_apply_refilters_the_original_not_the_result` (3→5→3, with a
+sanity assert that compounding would differ),
+`colormap_only_reupload_keeps_the_capture` (autoscale between Applies),
+`replacing_the_pixels_recaptures` (update_image_spec with new data).
+
 Severity: Medium
 
 Rust: `src/widget/high_level.rs:7075-7106` — `apply_median_filter_kernel` reads the **current** retained pixels, filters, then `update_image_spec(handle, spec)`; `update_image_spec` (`:4446-4449`) calls `set_retained_data(handle, data)` with the *filtered* pixels, so the next Apply filters the already-filtered image.
