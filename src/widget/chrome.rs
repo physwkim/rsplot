@@ -394,14 +394,23 @@ fn axis_ticks_with_mode(
         } else {
             (axis.max, axis.min)
         };
-        let (ticks, spacing, unit) = dtime_ticks::calc_ticks_tz(
-            lo + time_offset,
-            hi + time_offset,
-            TIME_SERIES_NUM_TICKS,
-            tz,
-        );
-        let labels = dtime_ticks::format_ticks_tz(&ticks, spacing, unit, tz);
-        return ticks
+        let (lo_epoch, hi_epoch) = (lo + time_offset, hi + time_offset);
+        let (ticks, spacing, unit) =
+            dtime_ticks::calc_ticks_tz(lo_epoch, hi_epoch, TIME_SERIES_NUM_TICKS, tz);
+        // `calc_ticks_tz` brackets one tick beyond each end (`include_first_beyond`
+        // in `date_range`), so cull to the visible epoch window before formatting:
+        // otherwise a bracket tick + label (and, with grid on, a grid line) paints
+        // in the frame gutter, and the µs zero-strip in `format_ticks_tz` spans the
+        // out-of-range labels. Mirrors silx `GLPlotFrame.py:460-462`
+        // (`visibleDatetimes = (dt for dt in tickDateTimes if dtMin <= dt <= dtMax)`,
+        // then `formatDatetimes` over the visible set). The numeric path already
+        // culls inside `nice_ticks`.
+        let visible: Vec<f64> = ticks
+            .into_iter()
+            .filter(|&epoch| epoch >= lo_epoch && epoch <= hi_epoch)
+            .collect();
+        let labels = dtime_ticks::format_ticks_tz(&visible, spacing, unit, tz);
+        return visible
             .into_iter()
             .map(|epoch| epoch - time_offset)
             .zip(labels)
@@ -2073,9 +2082,47 @@ mod tests {
             assert_eq!(parts.len(), 3, "label {label:?} not Y-M-D");
             assert_eq!(parts[0], "2021", "year wrong in {label:?}");
         }
-        // The positions bracket the range (calc_ticks brackets [min, max]).
-        assert!(ticks.first().unwrap().0 <= min + 1e-6);
-        assert!(ticks.last().unwrap().0 >= max - 1e-6);
+        // Every tick lies within [min, max]: the bracket ticks calc_ticks emits
+        // one beyond each end are culled (R2-37, silx visibleDatetimes filter).
+        // This window is day-aligned so the endpoints coincide with min/max.
+        for (pos, _) in &ticks {
+            assert!(
+                *pos >= min - 1e-6 && *pos <= max + 1e-6,
+                "tick {pos} outside [{min}, {max}]"
+            );
+        }
+        assert!((ticks.first().unwrap().0 - min).abs() <= 1e-6);
+        assert!((ticks.last().unwrap().0 - max).abs() <= 1e-6);
+    }
+
+    #[test]
+    fn axis_ticks_time_series_culls_bracket_ticks_outside_range() {
+        // A window whose ends fall BETWEEN day boundaries: 2021-01-04 12:00 ..
+        // 2021-01-10 12:00 UTC. calc_ticks brackets one day-tick beyond each end
+        // (01-04 and 01-11), which R2-37 must cull so no tick paints in the gutter.
+        let min = crate::core::dtime_ticks::DateTime::from_civil(2021, 1, 4, 12, 0, 0, 0)
+            .to_epoch_seconds();
+        let max = crate::core::dtime_ticks::DateTime::from_civil(2021, 1, 10, 12, 0, 0, 0)
+            .to_epoch_seconds();
+        let axis = Axis {
+            min,
+            max,
+            scale: Scale::Linear,
+            inverted: false,
+        };
+        let ticks = axis_ticks_with_mode(&axis, 8, TickMode::TimeSeries, TimeZone::Utc, 0.0);
+        assert!(!ticks.is_empty(), "time-series ticks empty");
+        for (pos, label) in &ticks {
+            assert!(
+                *pos >= min && *pos <= max,
+                "bracket tick {label:?} at {pos} not culled to [{min}, {max}]"
+            );
+        }
+        // The first in-range day boundary is 01-05, the last is 01-10 (01-04 and
+        // 01-11 are the culled brackets).
+        let first_day = crate::core::dtime_ticks::DateTime::from_civil(2021, 1, 5, 0, 0, 0, 0)
+            .to_epoch_seconds();
+        assert!((ticks.first().unwrap().0 - first_day).abs() <= 1e-6);
     }
 
     #[test]

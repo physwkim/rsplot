@@ -1361,6 +1361,19 @@ Impact: for 3–17 matches silx returns a robust median translation; siplot fits
 
 ### R2-37: TimeSeries bracket ticks drawn outside the axis range — silx culls them
 
+**FIXED (axis-tick cluster, this session):** the `axis_ticks_with_mode`
+TimeSeries arm now culls ticks to the visible epoch window `[lo, hi]` before
+formatting — `calc_ticks_tz` brackets one tick beyond each end
+(`include_first_beyond` in `date_range`), and those are filtered out, so no tick
++ label (or, with grid on, grid line) paints in the frame gutter and the µs
+zero-strip in `format_ticks_tz` spans only the visible ticks. Mirrors silx
+`GLPlotFrame.py:460-462` (`visibleDatetimes = (dt … if dtMin <= dt <= dtMax)`
+then `formatDatetimes` over the visible set); the numeric `nice_ticks` path
+already culled (chrome.rs:320), so only TimeSeries leaked. Log/minor paths are
+within-range by construction (distinct; log coarsening is R2-39). Tests:
+non-aligned window culls the 01-04/01-11 brackets; day-aligned window keeps the
+coincident endpoints.
+
 Severity: Medium
 
 Rust: `src/widget/chrome.rs:397-408` — the TimeSeries arm returns `calc_ticks_tz` output unfiltered (the port deliberately brackets via `include_first_beyond`, dtime_ticks.rs:566-584); the grid/tick/label loops (`chrome.rs:566-573`, `:584-597`) iterate all ticks with no `min ≤ v ≤ max` filter on an unclipped painter. The numeric path filters inside `nice_ticks` (`:320`), so only TimeSeries leaks.
