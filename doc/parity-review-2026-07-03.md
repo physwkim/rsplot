@@ -1147,6 +1147,20 @@ alarm palette hexes + dashed-disconnected border; display_format.rs numeric/hex/
 
 ### R2-61: Absent `vis` in a dynamic attribute is treated as "if not zero" — MEDM's default is V_STATIC and MEDM never writes the default
 
+**FIXED (MEDM absent-key-default cluster):** `visibility_gate_address`
+(`codegen.rs:387`) now resolves an absent `vis` to `"static"` (MEDM's V_STATIC
+default), which the existing `if vis == "static" { return None }` maps to no gate —
+so a dynamic attribute with a channel but no `vis` (the common `clr="alarm"` +
+`chan=…SEVR` alarm-recolour pattern) is always visible, matching MEDM
+(`dynamicAttributeInit` → V_STATIC, `writeDlDynamicAttribute` omits `vis` at
+V_STATIC, `calcVisibility case V_STATIC: return True`). Corrected the misleading
+"(the MEDM default)" comment on the `A#0` expr fallback. Anchor audit of the
+`.get(<key>).unwrap_or("<literal>")` family confirmed the other four sites
+(`stacking→"row"`, `fill`/`style→"solid"`, `direction→"right"`) fabricate MEDM's
+*actual* defaults (ROW / F_SOLID / SOLID / RIGHT) and are correct. No test locked
+the wrong default (the gate fixtures — `sample.adl:162`, the CALC fixture — all use
+explicit `vis`). Test: `absent_vis_defaults_to_static_not_if_not_zero`.
+
 Severity: High
 
 Rust: `adl2sidm/src/codegen.rs:387` — `let vis = da.get("vis").map(String::as_str).unwrap_or("if not zero");` inside `visibility_gate_address` (`:385-414`); only a literal `vis="static"` returns `None`, so any `"dynamic attribute"` block that carries a channel but no `vis` key gets a `calc://…expr=A#0` gate, and the gate condition (`:365-367`) hides the widget when the channel reads 0.0 — and also while it is disconnected.

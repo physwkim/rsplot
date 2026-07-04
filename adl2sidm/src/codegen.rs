@@ -384,7 +384,15 @@ fn apply_dynamic_visibility(b: &mut Builder, widget: &MedmWidget, options: &Opti
 /// into `evalexpr` syntax.
 fn visibility_gate_address(widget: &MedmWidget, options: &Options) -> Option<String> {
     let da = widget.attributes.get("dynamic attribute")?;
-    let vis = da.get("vis").map(String::as_str).unwrap_or("if not zero");
+    // MEDM's `vis` default is V_STATIC (always visible): `dynamicAttributeInit`
+    // sets `vis = V_STATIC` (medm/medmCommon.c:805) and `writeDlDynamicAttribute`
+    // omits the key when `vis == V_STATIC` (:1518), so a block with a channel but
+    // no `vis` is a stock static-visibility object MEDM always draws
+    // (`calcVisibility case V_STATIC: return True`, utils.c:4472). Defaulting an
+    // absent `vis` to a gating mode fabricates a rule MEDM has none of and hides
+    // the widget whenever the channel reads 0 (the common `clr="alarm"` +
+    // `chan=…SEVR`, no `vis` pattern) — so absent `vis` resolves to `static`.
+    let vis = da.get("vis").map(String::as_str).unwrap_or("static");
     let calc = da.get("calc").map(String::as_str).filter(|c| !c.is_empty());
     if vis == "static" {
         return None; // always visible — no gate
@@ -428,7 +436,8 @@ fn medm_visibility_expr(vis: &str, calc: Option<&str>) -> String {
         ("calc", Some(expr)) => expr.to_string(),
         ("calc", None) => "A".to_string(),
         ("if zero", _) => "A=0".to_string(),
-        // "if not zero" (the MEDM default) and any unknown mode.
+        // "if not zero" (MEDM's IF_NOT_ZERO test) and any unknown mode. Absent
+        // `vis` never reaches here — it resolves to `static` (no gate) upstream.
         (_, _) => "A#0".to_string(),
     }
 }
@@ -7770,6 +7779,72 @@ composite {
         assert!(
             g.source
                 .contains("SidmDrawing::new(&engine, \"ca://DEV:always\", DrawingShape::Ellipse)"),
+            "{}",
+            g.source
+        );
+    }
+
+    #[test]
+    fn absent_vis_defaults_to_static_not_if_not_zero() {
+        // R2-61: MEDM omits `vis` at its V_STATIC default (always visible), so a
+        // dynamic attribute with a channel but no `vis` — the ubiquitous
+        // `clr="alarm"` + `chan=…SEVR` alarm-recolour pattern — must NOT be gated.
+        // The old default fabricated "if not zero", hiding the widget whenever the
+        // channel read 0 (NO_ALARM) and while disconnected.
+        let adl = r#"
+"color map" {
+	colors {
+		ffffff,
+		ff0000,
+	}
+}
+rectangle {
+	object {
+		x=0
+		y=0
+		width=40
+		height=40
+	}
+	"basic attribute" {
+		clr=1
+		fill="solid"
+	}
+	"dynamic attribute" {
+		clr="alarm"
+		chan="$(P)status.SEVR"
+	}
+}
+"#;
+        let g = generate(&parse(adl), &Options::default());
+        // No visibility gate is wired (no calc:// vis address, no `if gate`).
+        assert!(
+            !g.source.contains("adl2sidm_vis_"),
+            "absent vis must not fabricate a visibility gate:\n{}",
+            g.source
+        );
+        assert!(
+            !g.source.contains("if gate"),
+            "absent vis must not wrap place() in a visibility conditional:\n{}",
+            g.source
+        );
+        // …and no visibility warning is emitted (there is no rule to wire).
+        assert!(
+            !g.warnings
+                .iter()
+                .any(|w| w.contains("dynamic visibility wired")),
+            "absent vis must not warn about a wired rule: {:?}",
+            g.warnings
+        );
+        // The shape still binds its channel and recolours by severity (the alarm
+        // rule is unaffected — only the fabricated visibility rule is gone).
+        assert!(
+            g.source.contains("ca://$(P)status.SEVR")
+                && g.source.contains("DrawingShape::Rectangle"),
+            "shape must still bind its channel:\n{}",
+            g.source
+        );
+        assert!(
+            g.source.contains(".with_alarm_sensitive_content(true)"),
             "{}",
             g.source
         );
