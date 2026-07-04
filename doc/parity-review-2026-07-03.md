@@ -1419,6 +1419,18 @@ Impact: the Snip background curve diverges from silx over the right-edge region;
 
 ### R2-44: Negative error values are not clipped to 0 before drawing
 
+**FIXED (error-bar cluster, this session):** `ErrorBars::bounds(i)` — the single
+accessor the draw path (`build_errorbar_segments`, gpu_curve.rs:921/929) *and*
+the R2-34 data-bounds path both consume — now clips negative error magnitudes to
+`0` via `clip_negative_error` (silx `_filterNegativeValues`,
+`items/core.py:1585-1596`, `numpy.clip(v, 0, None)` applied unconditionally to
+both error arrays). `NaN` and `+inf` pass through (numpy `clip` leaves them),
+matching silx. Structural placement at the shared accessor closes the family:
+every current and future error consumer gets non-negative magnitudes, so a
+negative entry now draws a suppressed whisker, not an inverted one. Tests:
+`error_bounds_clip_negative_magnitudes_to_zero`,
+`error_bounds_preserve_nan_and_inf`.
+
 Severity: Low
 
 Rust: `src/render/gpu_curve.rs:906-937` — `build_errorbar_segments` uses raw `(lo, hi)` from `ErrorBars::bounds`; no negative-clip exists.

@@ -458,14 +458,30 @@ pub enum ErrorBars {
     Asymmetric { lower: Vec<f64>, upper: Vec<f64> },
 }
 
+/// Clip a negative error magnitude to `0`, preserving `NaN` and `+inf` — silx
+/// `_filterNegativeValues` (`items/core.py:1585-1596`, `numpy.clip(v, 0, None)`;
+/// numpy `clip` leaves `NaN` untouched). `v < 0.0` is `false` for `NaN`, so a
+/// `NaN` magnitude passes through.
+fn clip_negative_error(v: f32) -> f32 {
+    if v < 0.0 { 0.0 } else { v }
+}
+
 impl ErrorBars {
-    /// The `(lower, upper)` error magnitudes at point `i`.
+    /// The `(lower, upper)` error magnitudes at point `i`, with negative
+    /// magnitudes clipped to `0` (silx `_filterNegativeValues`,
+    /// `items/core.py:1585-1596`: `numpy.clip(error, 0, None)` is applied
+    /// unconditionally to both error arrays, feeding the draw path *and*
+    /// `__minMaxDataWithError` bounds). A `NaN` magnitude is preserved (numpy
+    /// `clip` leaves `NaN`), so a caller wanting silx's "NaN error ⇒ no error on
+    /// that side" (`__minMaxDataWithError`, `:1642-1655`) must map `NaN` to the
+    /// bare data value itself.
     pub(crate) fn bounds(&self, i: usize) -> (f32, f32) {
-        match self {
+        let (lower, upper) = match self {
             ErrorBars::Symmetric(e) => (*e as f32, *e as f32),
             ErrorBars::PerPoint(es) => (es[i] as f32, es[i] as f32),
             ErrorBars::Asymmetric { lower, upper } => (lower[i] as f32, upper[i] as f32),
-        }
+        };
+        (clip_negative_error(lower), clip_negative_error(upper))
     }
 
     /// Panic if a per-point/asymmetric array does not match the vertex count.
@@ -498,6 +514,35 @@ impl ErrorBars {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn error_bounds_clip_negative_magnitudes_to_zero() {
+        // silx `_filterNegativeValues` clips error < 0 to 0 (numpy.clip(v, 0, None)).
+        assert_eq!(ErrorBars::Symmetric(-0.5).bounds(0), (0.0, 0.0));
+        assert_eq!(ErrorBars::PerPoint(vec![-0.1, 0.3]).bounds(0), (0.0, 0.0));
+        assert_eq!(ErrorBars::PerPoint(vec![-0.1, 0.3]).bounds(1), (0.3, 0.3));
+        // Asymmetric: only the negative side is clipped; the other passes through.
+        assert_eq!(
+            ErrorBars::Asymmetric {
+                lower: vec![-2.0],
+                upper: vec![4.0],
+            }
+            .bounds(0),
+            (0.0, 4.0)
+        );
+    }
+
+    #[test]
+    fn error_bounds_preserve_nan_and_inf() {
+        // numpy.clip leaves NaN as NaN and +inf as +inf.
+        let (lo, hi) = ErrorBars::Asymmetric {
+            lower: vec![f64::NAN],
+            upper: vec![f64::INFINITY],
+        }
+        .bounds(0);
+        assert!(lo.is_nan());
+        assert_eq!(hi, f32::INFINITY);
+    }
 
     #[test]
     fn draws_line_false_only_for_none() {
