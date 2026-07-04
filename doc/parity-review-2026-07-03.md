@@ -1819,6 +1819,44 @@ Impact: egui's sum-conserving smoothing spreads one discrete notch over N frames
 
 ### R2-49: `ComplexField3D` per-child complex modes missing — no own-mode cut plane, no colormapped `ComplexIsosurface`
 
+**FIXED (this session):** ported both silx per-child complex-mode branches with a
+hybrid ownership split that keeps existing behaviour intact.
+
+- **Own-mode cut plane** (silx `ComplexCutPlane`, a `ComplexMixIn`):
+  `ComplexField3D` gains `cut_plane_mode: Option<ComplexMode>` with
+  `cut_plane_mode()` / `set_cut_plane_mode()`. When set to a mode *different* from
+  the field mode, `append_to` slices that mode's projection AND re-ranges an
+  autoscale slice colormap to it — silx `_syncDataWithParent` uses both
+  `getData(mode)` and `getDataRange(mode)`. `None`, or the field's own mode,
+  falls back to the inner field's slice unchanged.
+- **Colormapped iso-surface** (silx `ComplexIsosurface` mode ≠ NONE): a new
+  `ComplexIsosurface { iso, color_mode, colormap }` type, owned in
+  `ComplexField3D::colormapped_isosurfaces`. Its geometry is extracted from the
+  **field mode** at the iso's level; each vertex is coloured by trilinearly
+  sampling the iso's **own** colour mode (`sample_field_value` = silx `interp3d`)
+  and mapping through the iso's `Colormap`, with alpha forced to the iso's alpha
+  (silx `mesh.alpha = color[3]`), emitted through `add_mesh_triangle_rgba`.
+  `add_colormapped_isosurface` / `colormapped_isosurfaces[_mut]` /
+  `remove_colormapped_isosurface` / `clear_colormapped_isosurfaces` manage them;
+  `set_complex_mode` clears them alongside the solid iso-surfaces (silx clears all
+  iso-surfaces on a mode change); `reproject` re-resolves each iso's auto level
+  (field-mode geometry) and autoscale colormap (own colour-mode range) on every
+  data/mode change.
+
+Solid iso-surfaces (silx colour mode NONE) stay plain `Isosurface`s on the inner
+field — the example's `field_mut().add_auto_isosurface(...)` path is unchanged, so
+no `Isosurface` colour-variant churn was needed. `ScalarField3D::append_raw` was
+refactored into shared free helpers (`append_solid_isosurfaces`,
+`append_colormapped_isosurface`, `append_cut_plane`, plus the zyx→xyz triangle
+transforms) that both field types reuse, so no rendering logic is duplicated
+(the full existing `ScalarField3D` suite still passes). `ComplexIsosurface` is
+re-exported from `lib.rs`. Tests (per invariant boundary): colormap tracks its
+own colour mode's range vs a pinned range surviving; re-resolve on a data change;
+`set_complex_mode` clears colormapped isos; `cut_plane_mode` default-`None`
+round-trip; a colormapped surface emits lit triangles with more than one colour;
+the own-mode cut plane reslices+reranges vs same-mode falling back to the field
+slice.
+
 Severity: Medium
 
 Rust: `src/render/scene3d_items.rs:2877-2884, 3041-3051` — `ComplexField3D` stores a single `mode: ComplexMode` and projects **one** real field into the inner `ScalarField3D`; the cut plane and every iso-surface can only display that projection, and `Isosurface` (`:2104-2109`) has only a solid `Color32` — no colormapped-surface variant. Module doc (`:2869-2875`) and roadmap P2.3b record only the two amplitude-phase *hue composites* as unported.

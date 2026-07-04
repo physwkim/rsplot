@@ -2865,74 +2865,164 @@ impl ScalarField3D {
         });
     }
 
-    /// Build the raw (voxel-frame) geometry — see [`Self::append_to`].
+    /// Build the raw (voxel-frame) geometry — see [`Self::append_to`]. The
+    /// iso-surface and cut-plane emission is factored into free helpers so
+    /// [`ComplexField3D`] can reuse them with per-child mode projections.
     fn append_raw(&self, geometry: &mut Scene3dGeometry) {
-        let mut order: Vec<usize> = (0..self.isosurfaces.len()).collect();
-        order.sort_by(|&a, &b| {
-            self.isosurfaces[b]
-                .level
-                .total_cmp(&self.isosurfaces[a].level)
-        });
-        for i in order {
-            let iso = &self.isosurfaces[i];
-            if !iso.level.is_finite() {
-                continue;
-            }
-            let Some((vertices, normals, indices)) = marching_cubes_isosurface(
-                &self.data,
-                self.depth,
-                self.height,
-                self.width,
-                iso.level,
-                true,
-            ) else {
-                continue;
-            };
-            // zyx → xyz swap + 0.5 cell-centre offset (silx _isogroup transform).
-            for tri in indices.chunks_exact(3) {
-                let p = [0usize, 1, 2].map(|k| {
-                    let v = vertices[tri[k] as usize];
-                    [v[2] + 0.5, v[1] + 0.5, v[0] + 0.5]
-                });
-                let n = [0usize, 1, 2].map(|k| {
-                    let nm = normals[tri[k] as usize];
-                    [nm[2], nm[1], nm[0]]
-                });
-                geometry.add_mesh_triangle(p, iso.color, n);
-            }
+        append_solid_isosurfaces(
+            geometry,
+            &self.data,
+            self.depth,
+            self.height,
+            self.width,
+            &self.isosurfaces,
+        );
+        append_cut_plane(
+            geometry,
+            &self.data,
+            self.depth,
+            self.height,
+            self.width,
+            &self.cut_plane,
+            self.raw_bounds(),
+        );
+    }
+}
+
+/// Map a marching-cubes triangle to world-space vertex positions: each zyx voxel
+/// vertex becomes xyz with the 0.5 cell-centre offset (silx `_isogroup`
+/// transform).
+fn iso_triangle_positions(vertices: &[[f32; 3]], tri: &[u32]) -> [[f32; 3]; 3] {
+    [0usize, 1, 2].map(|k| {
+        let v = vertices[tri[k] as usize];
+        [v[2] + 0.5, v[1] + 0.5, v[0] + 0.5]
+    })
+}
+
+/// Map a marching-cubes triangle's per-vertex normals from zyx to xyz.
+fn iso_triangle_normals(normals: &[[f32; 3]], tri: &[u32]) -> [[f32; 3]; 3] {
+    [0usize, 1, 2].map(|k| {
+        let nm = normals[tri[k] as usize];
+        [nm[2], nm[1], nm[0]]
+    })
+}
+
+/// Emit solid iso-surfaces of a `(depth, height, width)` field to `geometry`,
+/// geometry sampled from `data`. Surfaces are drawn from highest level to lowest
+/// (silx `_updateIsosurfaces` sorts by `-level`); a non-finite level or an empty
+/// surface is skipped. Shared by [`ScalarField3D`] and [`ComplexField3D`] (silx
+/// extracts every surface from the parent-mode field).
+fn append_solid_isosurfaces(
+    geometry: &mut Scene3dGeometry,
+    data: &[f32],
+    depth: usize,
+    height: usize,
+    width: usize,
+    isosurfaces: &[Isosurface],
+) {
+    let mut order: Vec<usize> = (0..isosurfaces.len()).collect();
+    order.sort_by(|&a, &b| isosurfaces[b].level.total_cmp(&isosurfaces[a].level));
+    for i in order {
+        let iso = &isosurfaces[i];
+        if !iso.level.is_finite() {
+            continue;
         }
-        // The cut plane (when visible): a colormapped slice of the volume.
-        if self.cut_plane.visible {
-            if let Some(mesh) = build_cut_plane_mesh(
-                &self.data,
-                self.depth,
-                self.height,
-                self.width,
-                &self.cut_plane,
-            ) {
-                geometry.add_textured_mesh(mesh);
-            }
-            // Border stroke: the plane/box intersection contour as a closed
-            // line loop (silx PlaneInGroup.contourVertices,
-            // primitives.py:1082-1101 `boxPlaneIntersect` over the parent data
-            // bounds → `Lines(contourVertices, mode="loop")` :1126). The stroke
-            // is white by default, silx width 2.0 — drawn 1px here like the
-            // rest of the line chrome, the box wireframe included. Raw bounds:
-            // the contour is built in the voxel frame like the slice itself.
-            if self.cut_plane.stroke_visible
-                && let Some(bounds) = self.raw_bounds()
-            {
-                let contour = box_plane_intersect(
-                    bounds,
-                    self.cut_plane.plane.normal(),
-                    self.cut_plane.plane.point(),
-                );
-                if contour.len() >= 3 {
-                    for (i, &a) in contour.iter().enumerate() {
-                        let b = contour[(i + 1) % contour.len()];
-                        geometry.add_line(a.to_array(), b.to_array(), self.cut_plane.stroke_color);
-                    }
-                }
+        let Some((vertices, normals, indices)) =
+            marching_cubes_isosurface(data, depth, height, width, iso.level, true)
+        else {
+            continue;
+        };
+        for tri in indices.chunks_exact(3) {
+            let p = iso_triangle_positions(&vertices, tri);
+            let n = iso_triangle_normals(&normals, tri);
+            geometry.add_mesh_triangle(p, iso.color, n);
+        }
+    }
+}
+
+/// Emit one colormapped iso-surface (silx `ComplexIsosurface` with a colour mode
+/// ≠ NONE): the surface geometry is extracted from `geom_data` (the field mode)
+/// at `iso`'s level, then each vertex is coloured by trilinearly sampling
+/// `color_data` (the iso's own colour mode) and mapping through `iso`'s colormap,
+/// with alpha forced to the iso's alpha (silx `mesh.alpha = color[3]`).
+/// `geom_data` and `color_data` share the `(depth, height, width)` grid `dims`.
+fn append_colormapped_isosurface(
+    geometry: &mut Scene3dGeometry,
+    geom_data: &[f32],
+    color_data: &[f32],
+    dims: (usize, usize, usize),
+    iso: &ComplexIsosurface,
+) {
+    let level = iso.level();
+    if !level.is_finite() {
+        return;
+    }
+    let (depth, height, width) = dims;
+    let Some((vertices, normals, indices)) =
+        marching_cubes_isosurface(geom_data, depth, height, width, level, true)
+    else {
+        return;
+    };
+    let (colormap, alpha) = (iso.colormap(), iso.alpha());
+    for tri in indices.chunks_exact(3) {
+        let p = iso_triangle_positions(&vertices, tri);
+        let n = iso_triangle_normals(&normals, tri);
+        let rgba = [0usize, 1, 2].map(|k| {
+            // The colour value is sampled at the surface vertex's voxel location
+            // (silx `interp3d(values, vertices, method="linear")`); the world
+            // point is the same 0.5-offset xyz used for the geometry.
+            let v = vertices[tri[k] as usize];
+            let world = Vec3::new(v[2] + 0.5, v[1] + 0.5, v[0] + 0.5);
+            let value = sample_field_value(
+                color_data,
+                depth,
+                height,
+                width,
+                world,
+                ImageInterpolation::Linear,
+            ) as f64;
+            let [r, g, b, _a] = colormap.color_at(value);
+            egui::Rgba::from(Color32::from_rgba_unmultiplied(r, g, b, alpha)).to_array()
+        });
+        geometry.add_mesh_triangle_rgba(p, rgba, n);
+    }
+}
+
+/// Emit the cut-plane slice (a colormapped textured mesh) and its border stroke
+/// for `cut_plane`, sampling the slice from `data`. `raw_bounds` is the field's
+/// voxel-frame bounding box, used for the plane/box intersection contour. Shared
+/// by [`ScalarField3D`] and [`ComplexField3D`], which passes a different mode's
+/// projection as `data` when the cut plane carries its own complex mode (silx
+/// `ComplexCutPlane._syncDataWithParent`).
+fn append_cut_plane(
+    geometry: &mut Scene3dGeometry,
+    data: &[f32],
+    depth: usize,
+    height: usize,
+    width: usize,
+    cut_plane: &CutPlane,
+    raw_bounds: Option<(Vec3, Vec3)>,
+) {
+    if !cut_plane.visible {
+        return;
+    }
+    if let Some(mesh) = build_cut_plane_mesh(data, depth, height, width, cut_plane) {
+        geometry.add_textured_mesh(mesh);
+    }
+    // Border stroke: the plane/box intersection contour as a closed line loop
+    // (silx PlaneInGroup.contourVertices, primitives.py:1082-1101
+    // `boxPlaneIntersect` over the parent data bounds → `Lines(mode="loop")`).
+    // Drawn 1px like the rest of the line chrome; the contour is built in the
+    // voxel frame like the slice itself.
+    if cut_plane.stroke_visible
+        && let Some(bounds) = raw_bounds
+    {
+        let contour =
+            box_plane_intersect(bounds, cut_plane.plane.normal(), cut_plane.plane.point());
+        if contour.len() >= 3 {
+            for (i, &a) in contour.iter().enumerate() {
+                let b = contour[(i + 1) % contour.len()];
+                geometry.add_line(a.to_array(), b.to_array(), cut_plane.stroke_color);
             }
         }
     }
@@ -2971,6 +3061,129 @@ fn compute_data_range(data: &[f32]) -> Option<(f32, f32, f32)> {
     Some((min, min_pos, max))
 }
 
+/// One colormapped iso-surface of a [`ComplexField3D`]: the surface geometry is
+/// extracted from the field's own [`ComplexMode`] (like a solid [`Isosurface`]),
+/// but the surface is *coloured* by a second, independent mode's values through a
+/// [`Colormap`].
+///
+/// Port of silx `plot3d.items.volume.ComplexIsosurface` with a colour mode ≠
+/// `NONE` (`volume.py:711-801`): `_syncDataWithParent` takes the surface from
+/// `parent.getData(mode=parent.getComplexMode())` and the colours from
+/// `parent.getData(mode=self.getComplexMode())`, building a
+/// `primitives.ColormapMesh3D` whose `alpha` is the iso colour's alpha channel.
+/// The classic "iso-surface of amplitude coloured by phase". A solid
+/// iso-surface (silx colour mode `NONE`) stays a plain [`Isosurface`] on the
+/// field; this type is only the colormapped variant.
+#[derive(Clone, Debug)]
+pub struct ComplexIsosurface {
+    /// Carries the iso level / auto-level; its colour's **alpha** channel is the
+    /// surface alpha (silx `mesh.alpha = self._color[3]`), the RGB is unused.
+    iso: Isosurface,
+    /// The mode whose values colour the surface (silx `self.getComplexMode()`).
+    color_mode: ComplexMode,
+    /// The colormap applied to `color_mode`'s values.
+    colormap: Colormap,
+}
+
+impl ComplexIsosurface {
+    /// A fixed-level colormapped iso-surface. `color`'s alpha is the surface
+    /// translucency (silx `mesh.alpha`); its RGB is ignored — the colormap
+    /// supplies colour.
+    pub fn new(level: f32, color_mode: ComplexMode, colormap: Colormap, color: Color32) -> Self {
+        Self {
+            iso: Isosurface::new(level, color),
+            color_mode,
+            colormap,
+        }
+    }
+
+    /// An auto-level colormapped iso-surface: the level is recomputed by
+    /// `auto(data)` against the field's own-mode projection on each data change
+    /// (silx `setAutoLevelFunction`).
+    pub fn new_auto(
+        auto: fn(&[f32]) -> f32,
+        color_mode: ComplexMode,
+        colormap: Colormap,
+        color: Color32,
+    ) -> Self {
+        Self {
+            iso: Isosurface::new_auto(auto, color),
+            color_mode,
+            colormap,
+        }
+    }
+
+    /// The resolved iso-level (NaN before an auto level is computed).
+    pub fn level(&self) -> f32 {
+        self.iso.level()
+    }
+
+    /// Set a fixed iso-level, clearing any auto-level function (silx `setLevel`).
+    pub fn set_level(&mut self, level: f32) {
+        self.iso.set_level(level);
+    }
+
+    /// Set the auto-level function (silx `setAutoLevelFunction`).
+    pub fn set_auto_level(&mut self, auto: fn(&[f32]) -> f32) {
+        self.iso.set_auto_level(auto);
+    }
+
+    /// True when the level is computed by an auto-level function.
+    pub fn is_auto_level(&self) -> bool {
+        self.iso.is_auto_level()
+    }
+
+    /// The colour mode used to colour the surface.
+    pub fn color_mode(&self) -> ComplexMode {
+        self.color_mode
+    }
+
+    /// Set the colour mode (silx `setComplexMode`).
+    pub fn set_color_mode(&mut self, mode: ComplexMode) {
+        self.color_mode = mode;
+    }
+
+    /// The surface alpha (silx `self._color[3]`).
+    pub fn alpha(&self) -> u8 {
+        self.iso.color().a()
+    }
+
+    /// Set the surface alpha (silx `setColor` alpha channel).
+    pub fn set_alpha(&mut self, alpha: u8) {
+        let c = self.iso.color();
+        self.iso
+            .set_color(Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), alpha));
+    }
+
+    /// Read-only access to the colormap.
+    pub fn colormap(&self) -> &Colormap {
+        &self.colormap
+    }
+
+    /// Mutable access to the colormap.
+    pub fn colormap_mut(&mut self) -> &mut Colormap {
+        &mut self.colormap
+    }
+
+    /// Set the colormap (silx `ColormapMixIn.setColormap`).
+    pub fn set_colormap(&mut self, colormap: Colormap) {
+        self.colormap = colormap;
+    }
+
+    /// Re-resolve against the parent field: the auto level against `geom_data`
+    /// (the field's own-mode projection, which the surface is extracted from) and
+    /// an autoscale colormap against `color_data` (the colour mode's projection,
+    /// silx `_setColormappedData` → `_syncSceneColormap`). Fixed levels and
+    /// pinned colormaps are left unchanged.
+    fn resolve(&mut self, geom_data: &[f32], color_data: &[f32]) {
+        self.iso.resolve(geom_data);
+        let values: Vec<f64> = color_data.iter().map(|&v| f64::from(v)).collect();
+        self.colormap = self
+            .colormap
+            .resolved(DEFAULT_COLORMAP_AUTOSCALE_MODE, &values);
+    }
+}
+
 /// A 3D complex field on a regular grid, visualised by projecting each sample to
 /// a real scalar (the [`ComplexMode`]) and then reusing the [`ScalarField3D`]
 /// machinery — marching-cubes iso-surfaces and the colormapped cut plane.
@@ -2979,9 +3192,19 @@ fn compute_data_range(data: &[f32]) -> Option<(f32, f32, f32)> {
 /// the `(depth, height, width)` complex field as parallel real/imaginary arrays
 /// (`zyx`, `width` contiguous) and an inner `ScalarField3D` carrying the current
 /// projection. [`set_complex_mode`](Self::set_complex_mode) reprojects and, as in
-/// silx, clears the iso-surfaces (their levels were tied to the old mode's
-/// range); the cut plane persists across a mode change. Iso-surface and cut-plane
-/// management is reached through [`field`](Self::field) / [`field_mut`](Self::field_mut).
+/// silx, clears every iso-surface (their levels were tied to the old mode's
+/// range); the cut plane persists across a mode change. Solid iso-surfaces and
+/// the cut plane's geometry/colormap are reached through
+/// [`field`](Self::field) / [`field_mut`](Self::field_mut).
+///
+/// Per-child complex modes (silx `ComplexCutPlane` / `ComplexIsosurface`, both
+/// `ComplexMixIn`s) let a child show a *different* mode than the field:
+/// [`set_cut_plane_mode`](Self::set_cut_plane_mode) slices e.g. PHASE through an
+/// ABSOLUTE volume, and [`add_colormapped_isosurface`](Self::add_colormapped_isosurface)
+/// extracts a surface from the field mode but colours it by another mode's values
+/// through a [`Colormap`] (the classic "iso-surface of amplitude coloured by
+/// phase"). Solid iso-surfaces (silx colour mode NONE) stay plain [`Isosurface`]s
+/// on the inner field; colormapped ones are [`ComplexIsosurface`]s owned here.
 ///
 /// The mode is the shared silx `ComplexMode` ([`crate::core::complex`]); the six
 /// scalar modes (`Absolute`, `Phase`, `Real`, `Imaginary`, `SquareAmplitude`,
@@ -2998,6 +3221,14 @@ pub struct ComplexField3D {
     height: usize,
     width: usize,
     mode: ComplexMode,
+    /// The cut plane's own complex mode (silx `ComplexCutPlane`, a `ComplexMixIn`):
+    /// `None` follows the field's `mode`, `Some(m)` slices `m`'s projection so the
+    /// slice can show e.g. PHASE while the iso-surfaces sit on ABSOLUTE.
+    cut_plane_mode: Option<ComplexMode>,
+    /// Colormapped iso-surfaces (silx `ComplexIsosurface` with colour mode ≠
+    /// NONE): geometry from the field's `mode`, colour from each surface's own
+    /// mode. Solid iso-surfaces live on the inner `field` (colour mode NONE).
+    colormapped_isosurfaces: Vec<ComplexIsosurface>,
     field: ScalarField3D,
 }
 
@@ -3018,6 +3249,8 @@ impl ComplexField3D {
             depth: 0,
             height: 0,
             width: 0,
+            cut_plane_mode: None,
+            colormapped_isosurfaces: Vec::new(),
             field: ScalarField3D::new(),
         }
     }
@@ -3072,15 +3305,16 @@ impl ComplexField3D {
     }
 
     /// Set the complex visualisation mode (silx `setComplexMode`). Changing it
-    /// clears the iso-surfaces (their levels were tied to the previous mode's
-    /// value range) and reprojects the field; the cut plane is kept. A no-op when
-    /// the mode is unchanged.
+    /// clears every iso-surface — solid and colormapped (their levels were tied
+    /// to the previous mode's value range) — and reprojects the field; the cut
+    /// plane is kept. A no-op when the mode is unchanged.
     pub fn set_complex_mode(&mut self, mode: ComplexMode) {
         if mode == self.mode {
             return;
         }
         self.mode = mode;
         self.field.clear_isosurfaces();
+        self.colormapped_isosurfaces.clear();
         self.reproject();
     }
 
@@ -3123,11 +3357,64 @@ impl ComplexField3D {
         &self.field
     }
 
-    /// Mutable access to the inner scalar field — add/remove iso-surfaces, set the
-    /// cut plane. The field data itself is owned here and refreshed on
+    /// Mutable access to the inner scalar field — add/remove *solid* iso-surfaces
+    /// (silx colour mode NONE), set the cut plane's geometry/colormap/stroke. The
+    /// field data itself is owned here and refreshed on
     /// `set_data`/`set_complex_mode`; do not call its `set_data` directly.
+    /// Colormapped iso-surfaces and the cut plane's own complex mode are managed
+    /// through this type's own methods, not the inner field.
     pub fn field_mut(&mut self) -> &mut ScalarField3D {
         &mut self.field
+    }
+
+    /// The cut plane's own complex mode (silx `ComplexCutPlane.getComplexMode`):
+    /// `None` follows the field's mode, `Some(m)` slices `m`'s projection.
+    pub fn cut_plane_mode(&self) -> Option<ComplexMode> {
+        self.cut_plane_mode
+    }
+
+    /// Give the cut plane its own complex mode (silx `ComplexCutPlane.setComplexMode`)
+    /// so it can show a different projection than the iso-surfaces — e.g. a PHASE
+    /// slice through an ABSOLUTE iso-surface. `None` (the default) makes the slice
+    /// follow the field's own mode.
+    pub fn set_cut_plane_mode(&mut self, mode: Option<ComplexMode>) {
+        self.cut_plane_mode = mode;
+    }
+
+    /// Add a colormapped iso-surface (silx `ComplexIsosurface` with colour mode ≠
+    /// NONE); returns its index. The surface geometry is taken from the field's
+    /// own mode; the colour from `iso`'s mode. The auto-level and an autoscale
+    /// colormap are resolved immediately against the current data.
+    pub fn add_colormapped_isosurface(&mut self, mut iso: ComplexIsosurface) -> usize {
+        if !self.re.is_empty() {
+            let color_data = self.projected_data(iso.color_mode).unwrap_or_default();
+            iso.resolve(self.field.data(), &color_data);
+        }
+        self.colormapped_isosurfaces.push(iso);
+        self.colormapped_isosurfaces.len() - 1
+    }
+
+    /// The colormapped iso-surfaces (silx colour mode ≠ NONE).
+    pub fn colormapped_isosurfaces(&self) -> &[ComplexIsosurface] {
+        &self.colormapped_isosurfaces
+    }
+
+    /// Mutable access to a colormapped iso-surface by index, or `None` when out of
+    /// range. Level/colormap edits take effect on the next data change or append.
+    pub fn colormapped_isosurface_mut(&mut self, index: usize) -> Option<&mut ComplexIsosurface> {
+        self.colormapped_isosurfaces.get_mut(index)
+    }
+
+    /// Remove a colormapped iso-surface by index (a no-op when out of range).
+    pub fn remove_colormapped_isosurface(&mut self, index: usize) {
+        if index < self.colormapped_isosurfaces.len() {
+            self.colormapped_isosurfaces.remove(index);
+        }
+    }
+
+    /// Remove every colormapped iso-surface.
+    pub fn clear_colormapped_isosurfaces(&mut self) {
+        self.colormapped_isosurfaces.clear();
     }
 
     /// The volume bounding box through the item's transform, or `None` when no
@@ -3136,10 +3423,89 @@ impl ComplexField3D {
         self.field.bounds()
     }
 
-    /// Append the projected field's iso-surfaces and cut plane to `geometry`
-    /// (delegates to the inner [`ScalarField3D`]).
+    /// Append the field's geometry to `geometry`: solid iso-surfaces (from the
+    /// field's own mode), colormapped iso-surfaces (geometry from the field mode,
+    /// colour from each surface's own mode), then the cut plane (sliced from its
+    /// own mode when set, otherwise the field mode). The iso-surface geometry and
+    /// cut-plane slice are built through the same free helpers as
+    /// [`ScalarField3D::append_to`], with the per-child mode projections silx's
+    /// `ComplexCutPlane`/`ComplexIsosurface` supply.
     pub fn append_to(&self, geometry: &mut Scene3dGeometry) {
-        self.field.append_to(geometry);
+        if self.field.data().is_empty() {
+            return;
+        }
+        append_with_transform(
+            self.field.transform(),
+            self.field.raw_bounds(),
+            geometry,
+            |g| self.append_raw(g),
+        );
+    }
+
+    /// Build the raw (voxel-frame) geometry — see [`Self::append_to`].
+    fn append_raw(&self, geometry: &mut Scene3dGeometry) {
+        let (depth, height, width) = (self.depth, self.height, self.width);
+        // Solid iso-surfaces (silx colour mode NONE), geometry from the field's
+        // own-mode projection held by the inner field.
+        append_solid_isosurfaces(
+            geometry,
+            self.field.data(),
+            depth,
+            height,
+            width,
+            &self.field.isosurfaces,
+        );
+        // Colormapped iso-surfaces: geometry from the field mode, colour from each
+        // surface's own mode (silx `ComplexIsosurface._updateScenePrimitive`).
+        for iso in &self.colormapped_isosurfaces {
+            let Some(color_data) = self.projected_data(iso.color_mode) else {
+                continue;
+            };
+            append_colormapped_isosurface(
+                geometry,
+                self.field.data(),
+                &color_data,
+                (depth, height, width),
+                iso,
+            );
+        }
+        // The cut plane. With its own mode set (silx `ComplexCutPlane`), it slices
+        // that mode's projection AND takes that mode's data range
+        // (`_syncDataWithParent`: `getData(mode)` + `getDataRange(mode)`), so an
+        // autoscale slice colormap re-ranges to the override mode's data. When no
+        // own mode is set (or it equals the field mode) the inner field's slice
+        // and colormap are used directly.
+        match self.cut_plane_mode {
+            Some(mode) if mode != self.mode => {
+                if let Some(data) = self.projected_data(mode) {
+                    let mut cut_plane = self.field.cut_plane().clone();
+                    let values: Vec<f64> = data.iter().map(|&v| f64::from(v)).collect();
+                    *cut_plane.colormap_mut() = self
+                        .field
+                        .cut_plane()
+                        .colormap()
+                        .resolved(DEFAULT_COLORMAP_AUTOSCALE_MODE, &values);
+                    append_cut_plane(
+                        geometry,
+                        &data,
+                        depth,
+                        height,
+                        width,
+                        &cut_plane,
+                        self.field.raw_bounds(),
+                    );
+                }
+            }
+            _ => append_cut_plane(
+                geometry,
+                self.field.data(),
+                depth,
+                height,
+                width,
+                self.field.cut_plane(),
+                self.field.raw_bounds(),
+            ),
+        }
     }
 
     /// The item's transform stack (silx `DataItem3D` transforms,
@@ -3155,7 +3521,10 @@ impl ComplexField3D {
         self.field.transform_mut()
     }
 
-    /// Push the current mode's projection into the inner scalar field.
+    /// Push the current mode's projection into the inner scalar field, then
+    /// re-resolve every colormapped iso-surface: its auto level against the
+    /// field-mode geometry and an autoscale colormap against its own colour
+    /// mode's projection (silx `ComplexIsosurface._syncDataWithParent`).
     fn reproject(&mut self) {
         let data: Vec<f32> = self
             .re
@@ -3165,6 +3534,11 @@ impl ComplexField3D {
             .collect();
         self.field
             .set_data(&data, self.depth, self.height, self.width);
+        for i in 0..self.colormapped_isosurfaces.len() {
+            let color_mode = self.colormapped_isosurfaces[i].color_mode;
+            let color_data = self.projected_data(color_mode).unwrap_or_default();
+            self.colormapped_isosurfaces[i].resolve(&data, &color_data);
+        }
     }
 }
 
@@ -4509,6 +4883,170 @@ mod tests {
         assert!(
             cf.field().cut_plane().is_visible(),
             "the cut plane survives a mode change (only iso-surfaces are cleared)"
+        );
+    }
+
+    /// A 3×3×3 complex field with `re = z` and `im = x`, so the projections have
+    /// distinct spatial structure and ranges: `Real = z ∈ [0, 2]`,
+    /// `Imaginary = x ∈ [0, 2]`, `Absolute = sqrt(z² + x²) ∈ [0, √8]`.
+    fn ramp_complex_3() -> (Vec<f32>, Vec<f32>) {
+        let (d, h, w) = (3usize, 3usize, 3usize);
+        let mut re = vec![0.0f32; d * h * w];
+        let mut im = vec![0.0f32; d * h * w];
+        for z in 0..d {
+            for y in 0..h {
+                for x in 0..w {
+                    re[(z * h + y) * w + x] = z as f32;
+                    im[(z * h + y) * w + x] = x as f32;
+                }
+            }
+        }
+        (re, im)
+    }
+
+    #[test]
+    fn colormapped_iso_colormap_tracks_its_own_colour_mode() {
+        // R2-49: an iso-surface's geometry is the field mode (Absolute), but its
+        // colour comes from its own mode. An autoscale colormap must range over
+        // the COLOUR mode's data (Real, 0..2), not the field mode (Absolute).
+        let (re, im) = ramp_complex_3();
+        let mut cf = ComplexField3D::new().with_data(&re, &im, 3, 3, 3);
+        let i = cf.add_colormapped_isosurface(ComplexIsosurface::new(
+            1.5,
+            ComplexMode::Real,
+            Colormap::autoscale(ColormapName::Viridis),
+            Color32::from_rgba_unmultiplied(0, 0, 0, 128),
+        ));
+        let cm = cf.colormapped_isosurfaces()[i].colormap();
+        assert_eq!((cm.vmin, cm.vmax), (0.0, 2.0));
+    }
+
+    #[test]
+    fn colormapped_iso_colormap_re_resolves_on_data_change() {
+        // Added before data (unresolved), then resolved by the first set_data and
+        // re-resolved when data changes (silx `_syncDataWithParent` on reproject).
+        let mut cf = ComplexField3D::new();
+        cf.add_colormapped_isosurface(ComplexIsosurface::new(
+            1.5,
+            ComplexMode::Real,
+            Colormap::autoscale(ColormapName::Viridis),
+            Color32::from_rgba_unmultiplied(0, 0, 0, 128),
+        ));
+        let (re, im) = ramp_complex_3();
+        cf.set_data(&re, &im, 3, 3, 3);
+        assert_eq!(
+            {
+                let cm = cf.colormapped_isosurfaces()[0].colormap();
+                (cm.vmin, cm.vmax)
+            },
+            (0.0, 2.0)
+        );
+        // Double every Real value (re *= 2) → Real range 0..4.
+        let re2: Vec<f32> = re.iter().map(|&v| v * 2.0).collect();
+        cf.set_data(&re2, &im, 3, 3, 3);
+        let cm = cf.colormapped_isosurfaces()[0].colormap();
+        assert_eq!((cm.vmin, cm.vmax), (0.0, 4.0));
+    }
+
+    #[test]
+    fn colormapped_iso_pinned_colormap_survives_data() {
+        // A pinned range is not touched by autoscale on set_data.
+        let (re, im) = ramp_complex_3();
+        let mut cf = ComplexField3D::new().with_data(&re, &im, 3, 3, 3);
+        cf.add_colormapped_isosurface(ComplexIsosurface::new(
+            1.5,
+            ComplexMode::Real,
+            Colormap::new(ColormapName::Viridis, -10.0, 10.0),
+            Color32::from_rgba_unmultiplied(0, 0, 0, 128),
+        ));
+        let cm = cf.colormapped_isosurfaces()[0].colormap();
+        assert_eq!((cm.vmin, cm.vmax), (-10.0, 10.0));
+    }
+
+    #[test]
+    fn set_complex_mode_clears_colormapped_isosurfaces() {
+        // silx clears every iso-surface on a mode change — colormapped included.
+        let (re, im) = ramp_complex_3();
+        let mut cf = ComplexField3D::new().with_data(&re, &im, 3, 3, 3);
+        cf.add_colormapped_isosurface(ComplexIsosurface::new(
+            1.5,
+            ComplexMode::Real,
+            Colormap::autoscale(ColormapName::Viridis),
+            Color32::from_rgba_unmultiplied(0, 0, 0, 128),
+        ));
+        assert_eq!(cf.colormapped_isosurfaces().len(), 1);
+        cf.set_complex_mode(ComplexMode::Real);
+        assert!(cf.colormapped_isosurfaces().is_empty());
+    }
+
+    #[test]
+    fn cut_plane_mode_defaults_to_none_and_round_trips() {
+        let mut cf = ComplexField3D::new();
+        assert_eq!(cf.cut_plane_mode(), None);
+        cf.set_cut_plane_mode(Some(ComplexMode::Phase));
+        assert_eq!(cf.cut_plane_mode(), Some(ComplexMode::Phase));
+        cf.set_cut_plane_mode(None);
+        assert_eq!(cf.cut_plane_mode(), None);
+    }
+
+    #[test]
+    fn colormapped_iso_emits_a_lit_mesh_coloured_by_its_mode() {
+        // The surface (Absolute crosses 1.5) is emitted as lit triangles whose
+        // colours vary with the colour mode (Imaginary = x) along the surface.
+        let (re, im) = ramp_complex_3();
+        let mut cf = ComplexField3D::new().with_data(&re, &im, 3, 3, 3);
+        cf.add_colormapped_isosurface(ComplexIsosurface::new(
+            1.5,
+            ComplexMode::Imaginary,
+            Colormap::autoscale(ColormapName::Viridis),
+            Color32::from_rgba_unmultiplied(0, 0, 0, 128),
+        ));
+        let mut g = Scene3dGeometry::new();
+        cf.append_to(&mut g);
+        assert!(
+            !g.meshes.is_empty(),
+            "colormapped iso-surface emits lit mesh triangles"
+        );
+        let colours: std::collections::HashSet<[u32; 4]> =
+            g.meshes.iter().map(|v| v.color.map(f32::to_bits)).collect();
+        assert!(
+            colours.len() > 1,
+            "a colormapped surface is not a single solid colour"
+        );
+    }
+
+    #[test]
+    fn cut_plane_with_its_own_mode_reslices_and_reranges() {
+        // R2-49 branch 1: the cut plane can show a different projection than the
+        // iso-surfaces. Overriding its mode changes the sliced texture; the same
+        // mode as the field falls back to the field slice.
+        let (re, im) = ramp_complex_3();
+        let mut cf = ComplexField3D::new().with_data(&re, &im, 3, 3, 3);
+        cf.field_mut().cut_plane_mut().set_visible(true);
+        cf.field_mut()
+            .cut_plane_mut()
+            .set_point(Vec3::new(0.0, 1.5, 0.0));
+
+        let mut g_default = Scene3dGeometry::new();
+        cf.append_to(&mut g_default);
+        assert_eq!(g_default.textured_meshes.len(), 1, "field-mode slice");
+
+        cf.set_cut_plane_mode(Some(ComplexMode::Real));
+        let mut g_real = Scene3dGeometry::new();
+        cf.append_to(&mut g_real);
+        assert_eq!(g_real.textured_meshes.len(), 1);
+        assert_ne!(
+            g_default.textured_meshes[0].pixels, g_real.textured_meshes[0].pixels,
+            "own-mode slice differs from the field-mode slice"
+        );
+
+        // Own mode == field mode (Absolute) short-circuits to the field slice.
+        cf.set_cut_plane_mode(Some(ComplexMode::Absolute));
+        let mut g_same = Scene3dGeometry::new();
+        cf.append_to(&mut g_same);
+        assert_eq!(
+            g_same.textured_meshes[0].pixels, g_default.textured_meshes[0].pixels,
+            "own mode equal to the field mode uses the field slice"
         );
     }
 }
