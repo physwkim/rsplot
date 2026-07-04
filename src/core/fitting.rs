@@ -1439,37 +1439,218 @@ pub fn split_pseudo_voigt2_model(x: &[f64], params: &[f64]) -> Vec<f64> {
 // complete `leastsq` target; silx keeps the baseline in a separate background
 // theory.
 //
-// `erf`/`erfc` are not in Rust's std. They are approximated with
-// Abramowitz & Stegun 7.1.26 (`|error| <= 1.5e-7`). silx calls the C library
-// `erf`/`erfc` at full double precision; the difference is far below fit noise
-// but is documented here rather than hidden.
+// `erf`/`erfc` are not in Rust's std. silx calls the C library `erf`/`erfc`
+// at full double precision (funs.c; the `_WIN32` `myerfc` fallback is the
+// lower-precision NR form). The hypermet tails are `erfc(w)·exp(z)` products
+// where `erfc(w)` can be 1e-16 and far below, so `erfc` needs RELATIVE
+// accuracy into the deep tail — `1 - erf(x)` collapses to exactly 0 for
+// `x >= ~5.9`, zeroing the tails and their LM gradients. The `sunpro_erf`
+// module below vendors the fdlibm implementation (via rust-lang/libm 0.2.16,
+// the musl port of FreeBSD msun `s_erf.c`) — the same code behind the libm
+// `erf`/`erfc` silx links — accurate to <1 ulp over the full range, exact at
+// `erf(0) = 0` / `erfc(0) = 1`, with `erfc` underflowing only past x ≈ 27.2
+// exactly as libm does.
 // ---------------------------------------------------------------------------
 
-/// Gaussian error function via Abramowitz & Stegun 7.1.26 (`|error| <= 1.5e-7`).
-/// Exact at `x == 0` (returns `0`) and odd-symmetric, so the step models hit
-/// their half-height exactly at the centre.
-fn erf(x: f64) -> f64 {
-    if x == 0.0 {
-        return 0.0;
+/// fdlibm `erf`/`erfc`, vendored verbatim from rust-lang/libm 0.2.16
+/// `src/math/erf.rs` (the musl port of FreeBSD msun `s_erf.c`), with the
+/// crate-internal float helpers inlined (`get_high_word`, `with_set_low_word`)
+/// and `exp`/`fabs` mapped to `f64::exp`/`f64::abs`.
+///
+/// > ====================================================
+/// > Copyright (C) 1993 by Sun Microsystems, Inc. All rights reserved.
+/// >
+/// > Developed at SunPro, a Sun Microsystems, Inc. business.
+/// > Permission to use, copy, modify, and distribute this
+/// > software is freely granted, provided that this notice
+/// > is preserved.
+/// > ====================================================
+// The fdlibm decimal constants carry more digits than f64 resolves; they are
+// kept verbatim from the reference (trimming them invites transcription
+// error), so the excessive-precision lint is expected here.
+#[allow(clippy::excessive_precision)]
+mod sunpro_erf {
+    const ERX: f64 = 8.45062911510467529297e-01;
+    // Coefficients for approximation to erf on [0, 0.84375].
+    const EFX8: f64 = 1.02703333676410069053e+00;
+    const PP0: f64 = 1.28379167095512558561e-01;
+    const PP1: f64 = -3.25042107247001499370e-01;
+    const PP2: f64 = -2.84817495755985104766e-02;
+    const PP3: f64 = -5.77027029648944159157e-03;
+    const PP4: f64 = -2.37630166566501626084e-05;
+    const QQ1: f64 = 3.97917223959155352819e-01;
+    const QQ2: f64 = 6.50222499887672944485e-02;
+    const QQ3: f64 = 5.08130628187576562776e-03;
+    const QQ4: f64 = 1.32494738004321644526e-04;
+    const QQ5: f64 = -3.96022827877536812320e-06;
+    // Coefficients for approximation to erf in [0.84375, 1.25].
+    const PA0: f64 = -2.36211856075265944077e-03;
+    const PA1: f64 = 4.14856118683748331666e-01;
+    const PA2: f64 = -3.72207876035701323847e-01;
+    const PA3: f64 = 3.18346619901161753674e-01;
+    const PA4: f64 = -1.10894694282396677476e-01;
+    const PA5: f64 = 3.54783043256182359371e-02;
+    const PA6: f64 = -2.16637559486879084300e-03;
+    const QA1: f64 = 1.06420880400844228286e-01;
+    const QA2: f64 = 5.40397917702171048937e-01;
+    const QA3: f64 = 7.18286544141962662868e-02;
+    const QA4: f64 = 1.26171219808761642112e-01;
+    const QA5: f64 = 1.36370839120290507362e-02;
+    const QA6: f64 = 1.19844998467991074170e-02;
+    // Coefficients for approximation to erfc in [1.25, 1/0.35].
+    const RA0: f64 = -9.86494403484714822705e-03;
+    const RA1: f64 = -6.93858572707181764372e-01;
+    const RA2: f64 = -1.05586262253232909814e+01;
+    const RA3: f64 = -6.23753324503260060396e+01;
+    const RA4: f64 = -1.62396669462573470355e+02;
+    const RA5: f64 = -1.84605092906711035994e+02;
+    const RA6: f64 = -8.12874355063065934246e+01;
+    const RA7: f64 = -9.81432934416914548592e+00;
+    const SA1: f64 = 1.96512716674392571292e+01;
+    const SA2: f64 = 1.37657754143519042600e+02;
+    const SA3: f64 = 4.34565877475229228821e+02;
+    const SA4: f64 = 6.45387271733267880336e+02;
+    const SA5: f64 = 4.29008140027567833386e+02;
+    const SA6: f64 = 1.08635005541779435134e+02;
+    const SA7: f64 = 6.57024977031928170135e+00;
+    const SA8: f64 = -6.04244152148580987438e-02;
+    // Coefficients for approximation to erfc in [1/0.35, 28].
+    const RB0: f64 = -9.86494292470009928597e-03;
+    const RB1: f64 = -7.99283237680523006574e-01;
+    const RB2: f64 = -1.77579549177547519889e+01;
+    const RB3: f64 = -1.60636384855821916062e+02;
+    const RB4: f64 = -6.37566443368389627722e+02;
+    const RB5: f64 = -1.02509513161107724954e+03;
+    const RB6: f64 = -4.83519191608651397019e+02;
+    const SB1: f64 = 3.03380607434824582924e+01;
+    const SB2: f64 = 3.25792512996573918826e+02;
+    const SB3: f64 = 1.53672958608443695994e+03;
+    const SB4: f64 = 3.19985821950859553908e+03;
+    const SB5: f64 = 2.55305040643316442583e+03;
+    const SB6: f64 = 4.74528541206955367215e+02;
+    const SB7: f64 = -2.24409524465858183362e+01;
+
+    /// Top 32 bits of the IEEE-754 representation (libm `get_high_word`).
+    fn get_high_word(x: f64) -> u32 {
+        (x.to_bits() >> 32) as u32
     }
-    let sign = if x < 0.0 { -1.0 } else { 1.0 };
-    let x = x.abs();
-    // A&S 7.1.26 coefficients.
-    const A1: f64 = 0.254829592;
-    const A2: f64 = -0.284496736;
-    const A3: f64 = 1.421413741;
-    const A4: f64 = -1.453152027;
-    const A5: f64 = 1.061405429;
-    const P: f64 = 0.3275911;
-    let t = 1.0 / (1.0 + P * x);
-    let poly = ((((A5 * t + A4) * t + A3) * t + A2) * t + A1) * t;
-    sign * (1.0 - poly * (-x * x).exp())
+
+    /// `x` with its low 32 mantissa bits cleared (libm `with_set_low_word(x, 0)`).
+    fn clear_low_word(x: f64) -> f64 {
+        f64::from_bits(x.to_bits() & 0xffff_ffff_0000_0000)
+    }
+
+    fn erfc1(x: f64) -> f64 {
+        let s = x.abs() - 1.0;
+        let p = PA0 + s * (PA1 + s * (PA2 + s * (PA3 + s * (PA4 + s * (PA5 + s * PA6)))));
+        let q = 1.0 + s * (QA1 + s * (QA2 + s * (QA3 + s * (QA4 + s * (QA5 + s * QA6)))));
+        1.0 - ERX - p / q
+    }
+
+    fn erfc2(ix: u32, mut x: f64) -> f64 {
+        if ix < 0x3ff40000 {
+            /* |x| < 1.25 */
+            return erfc1(x);
+        }
+        x = x.abs();
+        let s = 1.0 / (x * x);
+        let (r, big_s) = if ix < 0x4006db6d {
+            /* |x| < 1/.35 ~ 2.85714 */
+            (
+                RA0 + s
+                    * (RA1 + s * (RA2 + s * (RA3 + s * (RA4 + s * (RA5 + s * (RA6 + s * RA7)))))),
+                1.0 + s
+                    * (SA1
+                        + s * (SA2
+                            + s * (SA3 + s * (SA4 + s * (SA5 + s * (SA6 + s * (SA7 + s * SA8))))))),
+            )
+        } else {
+            /* |x| > 1/.35 */
+            (
+                RB0 + s * (RB1 + s * (RB2 + s * (RB3 + s * (RB4 + s * (RB5 + s * RB6))))),
+                1.0 + s
+                    * (SB1 + s * (SB2 + s * (SB3 + s * (SB4 + s * (SB5 + s * (SB6 + s * SB7)))))),
+            )
+        };
+        let z = clear_low_word(x);
+        (-z * z - 0.5625).exp() * ((z - x) * (z + x) + r / big_s).exp() / x
+    }
+
+    /// Error function, `< 1` ulp over the full range.
+    pub fn erf(x: f64) -> f64 {
+        let mut ix = get_high_word(x);
+        let sign = (ix >> 31) as usize;
+        ix &= 0x7fffffff;
+        if ix >= 0x7ff00000 {
+            /* erf(nan)=nan, erf(+-inf)=+-1 */
+            return 1.0 - 2.0 * (sign as f64) + 1.0 / x;
+        }
+        if ix < 0x3feb0000 {
+            /* |x| < 0.84375 */
+            if ix < 0x3e300000 {
+                /* |x| < 2**-28: avoid underflow */
+                return 0.125 * (8.0 * x + EFX8 * x);
+            }
+            let z = x * x;
+            let r = PP0 + z * (PP1 + z * (PP2 + z * (PP3 + z * PP4)));
+            let s = 1.0 + z * (QQ1 + z * (QQ2 + z * (QQ3 + z * (QQ4 + z * QQ5))));
+            let y = r / s;
+            return x + x * y;
+        }
+        let y = if ix < 0x40180000 {
+            /* 0.84375 <= |x| < 6 */
+            1.0 - erfc2(ix, x)
+        } else {
+            let x1p_1022 = f64::from_bits(0x0010000000000000);
+            1.0 - x1p_1022
+        };
+        if sign != 0 { -y } else { y }
+    }
+
+    /// Complementary error function, computed directly (not `1 - erf(x)`) so
+    /// large arguments keep relative precision instead of cancelling to 0.
+    pub fn erfc(x: f64) -> f64 {
+        let mut ix = get_high_word(x);
+        let sign = (ix >> 31) as usize;
+        ix &= 0x7fffffff;
+        if ix >= 0x7ff00000 {
+            /* erfc(nan)=nan, erfc(+-inf)=0,2 */
+            return 2.0 * (sign as f64) + 1.0 / x;
+        }
+        if ix < 0x3feb0000 {
+            /* |x| < 0.84375 */
+            if ix < 0x3c700000 {
+                /* |x| < 2**-56 */
+                return 1.0 - x;
+            }
+            let z = x * x;
+            let r = PP0 + z * (PP1 + z * (PP2 + z * (PP3 + z * PP4)));
+            let s = 1.0 + z * (QQ1 + z * (QQ2 + z * (QQ3 + z * (QQ4 + z * QQ5))));
+            let y = r / s;
+            if sign != 0 || ix < 0x3fd00000 {
+                /* x < 1/4 */
+                return 1.0 - (x + x * y);
+            }
+            return 0.5 - (x - 0.5 + x * y);
+        }
+        if ix < 0x403c0000 {
+            /* 0.84375 <= |x| < 28 */
+            if sign != 0 {
+                return 2.0 - erfc2(ix, x);
+            } else {
+                return erfc2(ix, x);
+            }
+        }
+        let x1p_1022 = f64::from_bits(0x0010000000000000);
+        if sign != 0 {
+            2.0 - x1p_1022
+        } else {
+            x1p_1022 * x1p_1022
+        }
+    }
 }
 
-/// Complementary error function, `1 - erf(x)`.
-fn erfc(x: f64) -> f64 {
-    1.0 - erf(x)
-}
+use sunpro_erf::{erf, erfc};
 
 /// The C `sum_step*` edge scale: `denom = fwhm * sqrt(2) / (2*sqrt(2*LOG2))`,
 /// i.e. `sigma * sqrt(2)`. The erf argument is `(x - centre) / denom`.
@@ -3953,10 +4134,47 @@ mod tests {
     }
 
     #[test]
-    fn erfc_is_one_minus_erf() {
+    fn erfc_keeps_relative_precision_into_the_far_tail() {
+        // R2-30: `1 - erf(x)` collapses to exactly 0 for x >= ~5.9; the
+        // vendored fdlibm `erfc` computes the tail directly, keeping <1 ulp
+        // relative accuracy like the libm `erfc` silx links. References are
+        // libm values (Python `math.erfc`).
+        for &(x, reference) in &[
+            (0.5, 0.479_500_122_186_953_5),
+            (2.0, 4.677_734_981_047_264_5e-3),
+            (5.0, 1.537_459_794_428_035e-12),
+            (6.0, 2.151_973_671_249_891_3e-17),
+            (10.0, 2.088_487_583_762_544_6e-45),
+            (15.0, 7.212_994_172_451_208e-100),
+            (26.0, 5.663_192_408_856_143e-296),
+        ] {
+            let rel = (erfc(x) - reference) / reference;
+            assert!(rel.abs() < 1e-13, "erfc({x}) rel err {rel:e}");
+        }
+        // Exact anchor points and the negative branch.
+        assert_eq!(erfc(0.0), 1.0);
+        assert!((erfc(-2.0) - (2.0 - erfc(2.0))).abs() < 1e-15);
+        assert!((erfc(-10.0) - 2.0).abs() < 1e-12);
+        // erfc = 1 - erf to rounding error where both are O(1).
         for &x in &[-2.0, -0.3, 0.0, 0.7, 1.5] {
             assert!((erfc(x) - (1.0 - erf(x))).abs() < 1e-15);
         }
+    }
+
+    #[test]
+    fn hypermet_tail_survives_the_large_erfc_argument_regime() {
+        // R2-30 end-to-end: sigma=5, st_slope=0.7, dx=+5 puts the short-tail
+        // erfc argument at w = 5.7578… — where `1 - erf` was exactly 0, zeroing
+        // the tail (and its LM gradient). Reference computed with libm erfc:
+        // gauss 4.839414490382867 + tail 4.183776300786361.
+        let fwhm = 11.774_100_225_154_747; // sigma = 5.0
+        let params = [100.0, 50.0, fwhm, 1.0, 0.7, 0.0, 0.0, 0.0, 0.0];
+        let y = hypermet_model(&[55.0], &params)[0];
+        let reference = 9.023_190_791_169_228;
+        assert!(
+            ((y - reference) / reference).abs() < 1e-9,
+            "hypermet tail regime: {y} vs {reference}"
+        );
     }
 
     #[test]

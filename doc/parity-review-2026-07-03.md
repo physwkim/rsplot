@@ -793,6 +793,21 @@ Impact: on any data with a baseline, silx seeds baseline-corrected heights and r
 
 ### R2-30: `erfc = 1 − erf` collapses to exactly 0 for arguments ≳ 5.9 — hypermet tail terms zeroed where silx keeps relative precision
 
+**FIXED (fit-stack cluster):** replaced BOTH approximations (A&S 7.1.26 `erf`
+and the derived `erfc = 1 − erf`) with the fdlibm implementation, vendored
+verbatim from rust-lang/libm 0.2.16 `src/math/erf.rs` (the musl port of FreeBSD
+msun `s_erf.c`, SunPro notice preserved; local registry copy, no new
+dependency). This is the same code behind the libm `erf`/`erfc` silx links on
+non-Windows: <1 ulp over the full range, `erfc` relative-accurate into the deep
+tail (underflow only past x ≈ 27.2), `erf(0) = 0` / `erfc(0) = 1` exact — so the
+step/slit centre-exactness and slit-symmetry tests pass unmodified, unlike the
+NR `myerfc` form (silx's `_WIN32` fallback, 1.2e-7 wobble), which was evaluated
+first and rejected for breaking those three exactness properties. Audit case
+verified: σ=5, slope=0.7, dx=+5 (w=5.7578, formerly erfc→exact 0) now matches
+the libm-computed hypermet reference to <1e-9 relative. Tests:
+`erfc_keeps_relative_precision_into_the_far_tail`,
+`hypermet_tail_survives_the_large_erfc_argument_regime`.
+
 Severity: Medium
 
 Rust: `src/core/fitting.rs:1446-1467` — `erf` is A&S 7.1.26 (absolute error ≤ 1.5e-7) and `erfc(x) = 1.0 - erf(x)`; consumed by the hypermet st/lt/step terms at `:1603/:1609/:1614` and the step/slit models at `:1488/:1506/:1530`.
