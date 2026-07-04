@@ -83,6 +83,21 @@ pub fn phase_colormap() -> Colormap {
     }
 }
 
+/// The colormap a scalar [`ComplexMode`] displays through: the fixed `hsv`
+/// phase colormap for [`ComplexMode::Phase`], else `base` resolved per bound
+/// against `scalar` — silx shares one `ColormapMixIn` colormap across the
+/// non-phase scalar modes and fills only its unpinned bounds from the data
+/// (`getColormapRange`). An auto default tracks the data; a user-pinned range
+/// survives. Pure (no GPU), so the range derivation is unit-testable.
+fn scalar_mode_colormap(mode: ComplexMode, base: &Colormap, scalar: &[f32]) -> Colormap {
+    if mode == ComplexMode::Phase {
+        phase_colormap()
+    } else {
+        let data: Vec<f64> = scalar.iter().map(|&v| f64::from(v)).collect();
+        base.resolved(AutoscaleMode::MinMax, &data)
+    }
+}
+
 /// Build the `AMPLITUDE_PHASE` RGBA composite for row-major complex `data`.
 ///
 /// Hue is the phase `atan2(im, re)` mapped from `[-pi, pi]` to `[0, 1]`,
@@ -231,10 +246,12 @@ pub struct ComplexImageView {
     /// The base colormap shared by every non-phase scalar mode (ABSOLUTE /
     /// REAL / IMAGINARY / SQUARE_AMPLITUDE), matching silx's single
     /// `ColormapMixIn` colormap object reused across those modes. Its
-    /// name/normalization/gamma persist across mode and data changes; the value
-    /// range is re-derived from each scalar image (silx's `vmin`/`vmax = None`
-    /// autoscale). [`ComplexMode::Phase`] ignores this and uses the fixed hsv
-    /// phase colormap.
+    /// name/normalization/gamma persist across mode and data changes. Its range
+    /// follows silx `getColormapRange` per bound: an *auto* bound (the default
+    /// `Colormap::autoscale`, silx `vmin`/`vmax = None`) re-derives from each
+    /// scalar image, while a bound the user pinned via [`Self::set_colormap`] is
+    /// kept. [`ComplexMode::Phase`] ignores this and uses the fixed hsv phase
+    /// colormap.
     colormap: Colormap,
     /// Displayed max amplitude for [`ComplexMode::Log10AmplitudePhase`] (silx
     /// `smax`): `None` autoscales to the data max.
@@ -258,9 +275,9 @@ impl ComplexImageView {
             height: 0,
             data: Vec::new(),
             mode: ComplexMode::Absolute,
-            // silx's scalar-mode default colormap is the plot default (gray),
-            // autoscaled per image; the stored range is a placeholder.
-            colormap: Colormap::new(ColormapName::Gray, 0.0, 1.0),
+            // silx's scalar-mode default colormap is the plot default: gray
+            // with autoscale (vmin/vmax = None), re-ranged per image.
+            colormap: Colormap::autoscale(ColormapName::Gray),
             // silx default amplitude range: autoscale max, 2 log10 decades.
             max_amplitude: None,
             delta: DEFAULT_AMPLITUDE_DELTA,
@@ -459,18 +476,11 @@ impl ComplexImageView {
         }
     }
 
-    /// The colormap for a scalar mode: the fixed `hsv` phase colormap for
-    /// [`ComplexMode::Phase`], or the persistent base colormap ([`Self::colormap`],
-    /// gray by default) autoscaled to this image for every other scalar mode
-    /// (silx: phase uses the fixed `[-pi, pi]` hsv colormap, the rest share one
-    /// autoscaling `ColormapMixIn` colormap object).
+    /// The colormap for the current scalar mode against `scalar` — delegates to
+    /// the pure [`scalar_mode_colormap`] with this view's mode and persistent
+    /// base colormap.
     fn scalar_colormap(&self, scalar: &[f32]) -> Colormap {
-        if self.mode == ComplexMode::Phase {
-            phase_colormap()
-        } else {
-            let data: Vec<f64> = scalar.iter().map(|&v| v as f64).collect();
-            self.colormap.autoscaled(AutoscaleMode::MinMax, &data)
-        }
+        scalar_mode_colormap(self.mode, &self.colormap, scalar)
     }
 
     /// The base colormap shared by the non-phase scalar modes (silx
@@ -480,11 +490,14 @@ impl ComplexImageView {
     }
 
     /// Set the base colormap for the non-phase scalar modes (silx
-    /// `setColormap`). Only the name / normalization / gamma / NaN color are
-    /// honored — the value range is re-derived from each scalar image (silx's
-    /// `vmin`/`vmax = None` autoscale), and the setting persists across mode
-    /// switches. [`ComplexMode::Phase`] is unaffected (it uses the fixed hsv
-    /// phase colormap).
+    /// `setColormap`); the setting persists across mode switches. The
+    /// name / normalization / gamma / NaN color are always honored. Each *auto*
+    /// bound (silx `vmin`/`vmax = None`) re-derives from each scalar image; a
+    /// bound pinned on `colormap` is kept across data and mode changes (silx
+    /// `getColormapRange`). Pass a [`Colormap::autoscale`] for the silx-default
+    /// tracking behavior, or a pinned `Colormap::new`/`viridis` to fix the
+    /// range. [`ComplexMode::Phase`] is unaffected (it uses the fixed hsv phase
+    /// colormap).
     pub fn set_colormap(&mut self, colormap: Colormap) {
         self.colormap = colormap;
         self.dirty = true;
@@ -813,6 +826,38 @@ mod tests {
         let cm = phase_colormap();
         assert_eq!(cm.vmin, -std::f64::consts::PI);
         assert_eq!(cm.vmax, std::f64::consts::PI);
+    }
+
+    #[test]
+    fn scalar_mode_default_colormap_tracks_the_image() {
+        // The persistent default (gray autoscale) re-ranges to each scalar
+        // image (silx ColormapMixIn vmin/vmax = None).
+        let base = Colormap::autoscale(ColormapName::Gray);
+        let cm = scalar_mode_colormap(ComplexMode::Absolute, &base, &[2.0, 8.0, 5.0]);
+        assert_eq!((cm.vmin, cm.vmax), (2.0, 8.0));
+        assert!(cm.is_autoscale(), "flags preserved for the next rebuild");
+    }
+
+    #[test]
+    fn scalar_mode_pinned_colormap_survives_data_change() {
+        // A user who pins vmin/vmax via set_colormap keeps that range across
+        // data changes — silx getColormapRange fills only the None bounds.
+        let base = Colormap::new(ColormapName::Viridis, 0.0, 100.0);
+        let cm = scalar_mode_colormap(ComplexMode::Real, &base, &[3.0, 7.0]);
+        assert_eq!((cm.vmin, cm.vmax), (0.0, 100.0));
+        // A different image does not move the pinned range either.
+        let cm2 = scalar_mode_colormap(ComplexMode::Real, &base, &[-50.0, 900.0]);
+        assert_eq!((cm2.vmin, cm2.vmax), (0.0, 100.0));
+    }
+
+    #[test]
+    fn scalar_mode_phase_ignores_the_base_colormap() {
+        // Phase always uses the fixed [-pi, pi] hsv colormap regardless of base.
+        let base = Colormap::new(ColormapName::Viridis, 0.0, 1.0);
+        let cm = scalar_mode_colormap(ComplexMode::Phase, &base, &[100.0, 200.0]);
+        assert_eq!(cm.vmin, -std::f64::consts::PI);
+        assert_eq!(cm.vmax, std::f64::consts::PI);
+        assert_eq!(cm.lut, phase_colormap().lut);
     }
 
     #[test]

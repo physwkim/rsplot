@@ -1063,6 +1063,23 @@ Impact: differs for negative fractional coordinates — pencil strokes within on
 
 ### R2-23: ComplexImageView rebuilds a fresh autoscaled viridis per data/mode change — silx binds one persistent default-gray colormap shared across scalar modes, publicly settable per mode
 
+**FIXED (structural fix + resolved-primitive refinement):**
+
+- *Persistent shared colormap + public surface* — `3bde59a`: replaced the
+  per-rebuild fresh viridis with a persistent `colormap` field (gray by default)
+  reused across ABSOLUTE/REAL/IMAGINARY/SQUARE_AMPLITUDE, plus `colormap()` /
+  `set_colormap()` (silx `getColormap`/`setColormap`, complex.py:125-143,216-233).
+  Phase keeps the fixed `[-pi, pi]` hsv colormap.
+- *Per-bound range refinement (this session)* — the `3bde59a` fix force-autoscaled
+  both bounds every rebuild (`autoscaled`), so a user-pinned range set via
+  `set_colormap` was silently overwritten. Now the default is
+  `Colormap::autoscale(Gray)` and the scalar path uses per-bound
+  `Colormap::resolved` (the R2-46 primitive) through a pure `scalar_mode_colormap`
+  helper: an *auto* bound tracks each image (silx `getColormapRange` on
+  `vmin/vmax = None`) while a *pinned* bound survives across data and mode changes
+  (silx keeps a set `vmin`/`vmax`). Per-boundary tests: default-tracks-image /
+  pinned-survives-data-change / phase-ignores-base.
+
 Severity: Low
 
 Rust: `src/widget/complex_image_view.rs:475-486` — `scalar_colormap`: `phase_colormap()` for Phase, else `Colormap::viridis(finite_range(scalar))` recomputed on every rebuild; no `set_colormap` surface exists.
