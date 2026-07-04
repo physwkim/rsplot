@@ -930,14 +930,20 @@ impl Colormap {
     /// Map a data value to its straight-alpha `[r, g, b, a]` color under this
     /// colormap — the CPU mirror of the image shader's LUT lookup, the single
     /// value→color entry point for items that colour their geometry on the CPU
-    /// (e.g. 3D scatter). A non-finite `v` yields [`nan_color`](Self::nan_color)
-    /// (silx's NaN handling); a finite value is normalised (see
-    /// [`normalize`](Self::normalize)) and looked up in the 256-entry
-    /// [`lut`](Self::lut).
+    /// (e.g. 3D scatter). Only `NaN` yields [`nan_color`](Self::nan_color) (silx
+    /// `_colormap.pyx:362-376` / `GLPlotImage.py:202-206`: `nancolor` is used
+    /// solely for `isnan`); `±inf` survive normalization and clamp into the LUT
+    /// ends (`+inf` → top color, `-inf` → bottom), matching the GL path. A finite
+    /// value is normalised (see [`normalize`](Self::normalize)) and looked up in
+    /// the 256-entry [`lut`](Self::lut).
     pub fn color_at(&self, v: f64) -> [u8; 4] {
-        if !v.is_finite() {
+        if v.is_nan() {
             return self.nan_color;
         }
+        // normalize clamps the ratio to [0, 1], so ±inf resolve to 1.0 / 0.0.
+        // For a degenerate colormap range (one_over_range == 0) `0 * inf` is NaN;
+        // Rust's saturating `NaN as usize` is 0, so an infinite sample lands on
+        // the low color there, matching silx's degenerate-range fallback.
         let idx = (self.normalize(v) * 255.0).clamp(0.0, 255.0) as usize;
         self.lut[idx]
     }
@@ -1884,7 +1890,7 @@ mod tests {
     }
 
     #[test]
-    fn color_at_looks_up_lut_and_uses_nan_color_for_nonfinite() {
+    fn color_at_looks_up_lut_and_uses_nan_color_only_for_nan() {
         let cmap = Colormap::new(ColormapName::Viridis, 0.0, 4.0).with_nan_color([1, 2, 3, 4]);
         // Endpoints hit the first/last LUT entries; the midpoint the middle.
         assert_eq!(cmap.color_at(0.0), cmap.lut[0]);
@@ -1894,10 +1900,23 @@ mod tests {
         // Out-of-range values clamp to the endpoints (normalize clamps to [0, 1]).
         assert_eq!(cmap.color_at(-10.0), cmap.lut[0]);
         assert_eq!(cmap.color_at(10.0), cmap.lut[255]);
-        // Non-finite values take the NaN color, not a LUT entry.
+        // R2-40: only NaN takes the NaN color. ±inf clamp into the LUT ends
+        // (+inf → top, -inf → bottom), matching silx GLPlotImage / _colormap.pyx.
         assert_eq!(cmap.color_at(f64::NAN), [1, 2, 3, 4]);
-        assert_eq!(cmap.color_at(f64::INFINITY), [1, 2, 3, 4]);
-        assert_eq!(cmap.color_at(f64::NEG_INFINITY), [1, 2, 3, 4]);
+        assert_eq!(cmap.color_at(f64::INFINITY), cmap.lut[255]);
+        assert_eq!(cmap.color_at(f64::NEG_INFINITY), cmap.lut[0]);
+    }
+
+    #[test]
+    fn color_at_degenerate_range_maps_infinity_to_low_color() {
+        // A degenerate range (vmin == vmax) makes norm_bounds return one_over_range
+        // 0; a +inf sample then hits the low LUT entry (not nan_color), matching
+        // silx's degenerate-range fallback (everything → low color).
+        let cmap = Colormap::new(ColormapName::Viridis, 2.0, 2.0).with_nan_color([1, 2, 3, 4]);
+        assert_eq!(cmap.color_at(f64::INFINITY), cmap.lut[0]);
+        assert_eq!(cmap.color_at(f64::NEG_INFINITY), cmap.lut[0]);
+        // NaN still uses the nan color.
+        assert_eq!(cmap.color_at(f64::NAN), [1, 2, 3, 4]);
     }
 
     #[test]

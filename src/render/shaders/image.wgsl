@@ -182,17 +182,21 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         a = a * clamp(sample_alpha(in.uv), 0.0, 1.0);
     }
     let v = sample_data(in.uv);
-    // Non-finite samples (NaN / +/-inf) get the colormap's nan_color instead of
-    // the low color, mirroring silx (default transparent white). NaN fails both
-    // ordered comparisons, so a value is finite iff it lies within [-MAX, MAX];
-    // +/-inf and NaN both fall outside. The nan_color is pre-converted to linear
-    // RGBA on the CPU so it composites identically to the sRGB LUT colors, and
-    // its alpha is scaled by the image's global alpha like the colormapped path.
-    let finite = (v >= -3.4028235e38) && (v <= 3.4028235e38);
-    if (!finite) {
+    // Only NaN gets the colormap's nan_color (silx GLPlotImage.py:202-206 /
+    // _colormap.pyx:362-376: nancolor solely for isnan). +/-inf survive the
+    // normalization clamp and land on the LUT ends (+inf -> top, -inf -> bottom).
+    // NaN is the only value that fails self-equality. The nan_color is
+    // pre-converted to linear RGBA on the CPU so it composites identically to the
+    // sRGB LUT colors, and its alpha is scaled by the image's global alpha.
+    if (v != v) {
         return vec4<f32>(params.nan_color.rgb, params.nan_color.a * a);
     }
     let value = normalize_value(v);
-    let rgb = textureSample(lut_tex, lut_samp, vec2<f32>(value, 0.5)).rgb;
+    // A degenerate colormap range makes cmap_one_over_range 0, so 0*inf = NaN for
+    // an infinite sample; fall back to the low color (LUT coord 0) so the texcoord
+    // is never NaN — matches the CPU color_at saturating cast and silx's
+    // degenerate-range fallback.
+    let coord = select(value, 0.0, value != value);
+    let rgb = textureSample(lut_tex, lut_samp, vec2<f32>(coord, 0.5)).rgb;
     return vec4<f32>(rgb, a);
 }

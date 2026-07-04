@@ -1404,6 +1404,21 @@ Impact: a 1e0..1e12 axis shows 13 labeled ticks vs silx's ~6 (61 overlapping lab
 
 ### R2-40: ±inf maps to `nan_color`; both silx pipelines clip infinities into the LUT ends
 
+**FIXED (colormap cluster, this session):** the value→color gate now routes only
+`NaN` to `nan_color`; `±inf` survive the normalization clamp and land on the LUT
+ends (`+inf` → top color, `-inf` → bottom), matching silx `GLPlotImage.py:202-206`
+(`nancolor` for `isnan` only) and `_colormap.pyx:362-376`. Two sites — the family:
+`Colormap::color_at` (CPU, feeds every CPU-colormapped item — 3D scatter/mesh/
+image/heightmap/cut-plane) changed `!v.is_finite()` → `v.is_nan()`; and the 2D
+GPU path `image.wgsl` changed the `[-MAX, MAX]` finite gate to `v != v`
+(NaN-only). `normalize`/`normalize_value` already clamp the ratio to `[0, 1]`, so
+`±inf` resolve to `1.0`/`0.0`. Degenerate range (`one_over_range == 0`) makes
+`0*inf = NaN`: the CPU is safe via Rust's saturating `NaN as usize == 0`, and the
+shader adds a `select(value, 0.0, value != value)` guard so the texcoord is never
+NaN — both fall back to the low color like silx. The 3D shaders carry no finite
+gate (they color on the CPU / sample pre-colored textures), so `color_at` covers
+them. Tests: `±inf` → LUT ends, `NaN` → nan_color; degenerate range → low color.
+
 Severity: Medium
 
 Rust: `src/render/shaders/image.wgsl` fs_main — `finite = (v >= -3.4028235e38) && (v <= 3.4028235e38); if (!finite) { return nan_color; }` (the comment claims this mirrors silx); `src/core/colormap.rs:880-886` — `color_at` returns `nan_color` for every non-finite value, feeding all CPU-colored items (`src/render/scene3d_items.rs:239/475/937/1623/2447/...`).
