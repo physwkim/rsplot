@@ -337,26 +337,97 @@ fn format_tick(v: f64, step: f64) -> String {
     format!("{v:.decimals$}")
 }
 
-/// Decade tick values within `[min, max]` for a log10 axis: one tick per power
-/// of ten (…, 0.1, 1, 10, 100, …). Empty if the range is not strictly positive.
-fn log_decade_ticks(min: f64, max: f64) -> Vec<f64> {
-    let valid = min.is_finite() && max.is_finite() && min > 0.0 && max > min;
-    if !valid {
-        return Vec::new();
+/// silx `niceNumbersForLog10`'s default tick count (`ticklayout.py:205`).
+const LOG_NUM_TICKS: usize = 5;
+
+/// Tolerance for the decade-boundary inclusion test, so a decade landing exactly
+/// on `log_min`/`log_max` (e.g. `log10(1000) == 3`) is not dropped by float error.
+const LOG_TICK_EPS: f64 = 1e-9;
+
+/// silx `niceNumbersForLog10` (`ticklayout.py:193-218`) plus the `dataMin <= 0`
+/// clamp (`GLPlotFrame.py:371-375`): resolve `[min, max]` into integer log10 tick
+/// bounds `(tick_min_log, tick_max_log, spacing)` and the clamped data bounds
+/// `(lo, hi)`. Wide ranges coarsen — for `> LOG_NUM_TICKS` decades the spacing is
+/// `floor(rangelog / LOG_NUM_TICKS)` with the bounds re-anchored to spacing
+/// multiples. A non-positive lower bound is clamped to 1.0 (and `hi` pulled up to
+/// match) so a log axis over non-positive limits still yields ticks. `None` for a
+/// non-finite or degenerate (`lo == hi`) range.
+fn log10_tick_layout(min: f64, max: f64) -> Option<(i32, i32, i32, f64, f64)> {
+    if !min.is_finite() || !max.is_finite() {
+        return None;
     }
-    let k0 = min.log10().ceil() as i32;
-    let k1 = max.log10().floor() as i32;
-    (k0..=k1).map(|k| 10f64.powi(k)).collect()
+    let mut lo = min;
+    let mut hi = max;
+    if lo <= 0.0 {
+        lo = 1.0;
+        if hi < lo {
+            hi = 1.0;
+        }
+    }
+    if lo == hi {
+        return None;
+    }
+    let mut graph_min_log = lo.log10().floor();
+    let mut graph_max_log = hi.log10().ceil();
+    let range_log = graph_max_log - graph_min_log;
+    let spacing = if range_log <= LOG_NUM_TICKS as f64 {
+        1.0
+    } else {
+        let s = (range_log / LOG_NUM_TICKS as f64).floor();
+        graph_min_log = (graph_min_log / s).floor() * s;
+        graph_max_log = (graph_max_log / s).ceil() * s;
+        s
+    };
+    Some((
+        graph_min_log as i32,
+        graph_max_log as i32,
+        spacing as i32,
+        lo,
+        hi,
+    ))
 }
 
-/// Format a log-axis decade tick: plain decimal in the everyday range,
-/// scientific notation outside it (e.g. 1e-6, 1e9).
+/// Decade tick values within `[min, max]` for a log10 axis — silx
+/// `niceNumbersForLog10` layout (see [`log10_tick_layout`]): one tick per
+/// `spacing` decades, coarsening on wide ranges, yielded where
+/// `log_min <= log_pos <= log_max`. Empty for a non-finite or degenerate range;
+/// a non-positive lower bound is clamped to 1.0 rather than rendering blank.
+fn log_decade_ticks(min: f64, max: f64) -> Vec<f64> {
+    let Some((tick_min, tick_max, spacing, lo, hi)) = log10_tick_layout(min, max) else {
+        return Vec::new();
+    };
+    let (log_min, log_max) = (lo.log10(), hi.log10());
+    let mut ticks = Vec::new();
+    let mut logpos = tick_min;
+    while logpos <= tick_max {
+        let lp = logpos as f64;
+        if lp >= log_min - LOG_TICK_EPS && lp <= log_max + LOG_TICK_EPS {
+            ticks.push(10f64.powi(logpos));
+        }
+        logpos += spacing;
+    }
+    ticks
+}
+
+/// Format a log-axis decade tick VALUE: plain decimal in the everyday range,
+/// scientific notation outside it (e.g. 1e-6, 1e9). Used by the inline colorbar,
+/// which labels values like silx's colorbar; the data axes use
+/// [`format_axis_log_tick`] instead.
 fn format_log_tick(v: f64) -> String {
     if (1e-4..1e6).contains(&v) {
         format!("{v}")
     } else {
         format!("{v:e}")
     }
+}
+
+/// Axis log-decade tick label — silx `GLPlotFrame.py:395` `"1e%+03d" % logPos`:
+/// the base-10 exponent, signed, zero-padded to at least two digits, e.g.
+/// `1e+02`, `1e-06`, `1e+12`. The data axes label the exponent (matching silx's
+/// GL frame); the inline colorbar keeps value labels via [`format_log_tick`].
+fn format_axis_log_tick(v: f64) -> String {
+    let logpos = v.log10().round() as i32;
+    format!("1e{logpos:+03}")
 }
 
 /// Default target tick count for a date-time (TimeSeries) axis, mirroring silx
@@ -433,7 +504,7 @@ fn axis_ticks_with_mode(
         }
         Scale::Log10 => log_decade_ticks(axis.min, axis.max)
             .into_iter()
-            .map(|v| (v, format_log_tick(v)))
+            .map(|v| (v, format_axis_log_tick(v)))
             .collect(),
     }
 }
@@ -467,19 +538,22 @@ fn linear_minor_ticks(axis: &Axis, major: &[(f64, String)]) -> Vec<f64> {
 }
 
 fn log_minor_ticks(axis: &Axis) -> Vec<f64> {
-    let valid =
-        axis.min.is_finite() && axis.max.is_finite() && axis.min > 0.0 && axis.max > axis.min;
-    if !valid {
+    let Some((tick_min, tick_max, spacing, lo, hi)) = log10_tick_layout(axis.min, axis.max) else {
+        return Vec::new();
+    };
+    // silx draws log sub-ticks only when the decade spacing is 1, i.e. no
+    // coarsening (`GLPlotFrame.py:398`: `if step == 1`).
+    if spacing != 1 {
         return Vec::new();
     }
-    let k0 = axis.min.log10().floor() as i32;
-    let k1 = axis.max.log10().ceil() as i32;
+    // frange(tickMin, tickMax, 1)[:-1] → decades tick_min..tick_max (drop the top
+    // decade), each contributing 2..9 × 10^k within the clamped [lo, hi].
     let mut ticks = Vec::new();
-    for k in k0..=k1 {
+    for k in tick_min..tick_max {
         let decade = 10f64.powi(k);
         for m in 2..10 {
             let v = m as f64 * decade;
-            if v > axis.min && v < axis.max {
+            if lo <= v && v <= hi {
                 ticks.push(v);
             }
         }
@@ -2011,10 +2085,56 @@ mod tests {
         );
         // Sub-decade range [2, 9] has no integer power of ten inside it.
         assert!(log_decade_ticks(2.0, 9.0).is_empty());
-        // Non-positive or inverted limits yield no ticks (log undefined).
-        assert!(log_decade_ticks(0.0, 100.0).is_empty());
-        assert!(log_decade_ticks(-1.0, 100.0).is_empty());
+        // R2-39: a non-positive lower bound is clamped to 1.0 and still draws
+        // (silx GLPlotFrame.py:371-375), instead of rendering tickless.
+        assert_eq!(log_decade_ticks(0.0, 100.0), vec![1.0, 10.0, 100.0]);
+        assert_eq!(log_decade_ticks(-1.0, 100.0), vec![1.0, 10.0, 100.0]);
+        // Inverted limits still yield no ticks.
         assert!(log_decade_ticks(100.0, 1.0).is_empty());
+    }
+
+    #[test]
+    fn log_decade_ticks_coarsen_wide_ranges() {
+        // R2-39: 1e0..1e12 spans 12 decades > nTicks(5) → spacing = floor(12/5) =
+        // 2, so ticks land every 2 decades (silx niceNumbersForLog10), 7 ticks
+        // instead of 13.
+        assert_eq!(
+            log_decade_ticks(1.0, 1e12),
+            vec![1.0, 100.0, 1e4, 1e6, 1e8, 1e10, 1e12]
+        );
+    }
+
+    #[test]
+    fn format_axis_log_tick_uses_silx_exponent_format() {
+        // R2-39: silx GLPlotFrame.py:395 "1e%+03d" — signed exponent, ≥2 digits.
+        assert_eq!(format_axis_log_tick(100.0), "1e+02");
+        assert_eq!(format_axis_log_tick(1e9), "1e+09");
+        assert_eq!(format_axis_log_tick(1e-6), "1e-06");
+        assert_eq!(format_axis_log_tick(1e12), "1e+12");
+    }
+
+    #[test]
+    fn log_minor_ticks_gated_on_unit_spacing() {
+        // R2-39: sub-ticks only when the decade spacing is 1 (silx step==1 gate).
+        let narrow = Axis {
+            min: 1.0,
+            max: 100.0,
+            scale: Scale::Log10,
+            inverted: false,
+        };
+        // 2..9 for decade 1 and 2..9×10 for decade 10 (the top decade 100 is
+        // dropped like silx's frange[:-1]); all within [1, 100].
+        let minor = log_minor_ticks(&narrow);
+        assert!(minor.contains(&2.0) && minor.contains(&90.0));
+        assert!(!minor.contains(&200.0));
+        // A wide, coarsened range (spacing > 1) draws no sub-ticks.
+        let wide = Axis {
+            min: 1.0,
+            max: 1e12,
+            scale: Scale::Log10,
+            inverted: false,
+        };
+        assert!(log_minor_ticks(&wide).is_empty());
     }
 
     #[test]

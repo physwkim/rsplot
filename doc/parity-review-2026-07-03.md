@@ -1445,6 +1445,30 @@ Impact: different tick sets for identical views (e.g. [0,100]: silx nticks=5 →
 
 ### R2-39: Log axis never coarsens decade ticks (`niceNumbersForLog10` unported in chrome) and returns no ticks for `min ≤ 0`
 
+**FIXED (axis-tick cluster, this session):** all four log divergences closed in
+`chrome.rs`. A new `log10_tick_layout` ports silx `niceNumbersForLog10` +
+the `dataMin ≤ 0` clamp (`GLPlotFrame.py:371-375`):
+- **Coarsening:** for `> LOG_NUM_TICKS` (5) decades, spacing =
+  `floor(rangelog / 5)` with the log bounds re-anchored to spacing multiples, so
+  a 1e0..1e12 axis now shows 7 ticks (every 2 decades) instead of 13.
+- **`min ≤ 0` clamp:** a non-positive lower bound is clamped to 1.0 (and the
+  upper pulled up to match) so the axis draws over `[1, max]` instead of blank.
+- **Label format:** the data axes now label the exponent via
+  `format_axis_log_tick` = silx `"1e%+03d"` (e.g. `1e+02`, `1e-06`, `1e+12`).
+  This is split from `format_log_tick` (value labels), which the inline colorbar
+  keeps — matching silx, where the GL frame labels exponents and the colorbar
+  labels values.
+- **Sub-ticks gated on `step == 1`:** `log_minor_ticks` shares
+  `log10_tick_layout` and emits the `2..9 × 10^k` sub-ticks (over the clamped
+  `[lo, hi]`, dropping the top decade like silx's `frange[:-1]`) only when the
+  decade spacing is 1, so a coarsened wide range no longer piles sub-ticks over
+  sparse majors.
+Tests: coarsening (1e0..1e12 → 7 ticks), `min ≤ 0` clamp to `[1, max]`,
+`"1e%+03d"` exponent labels, and sub-tick unit-spacing gating.
+
+(Note: the `niceNumbersForLog10` logic now exists in both chrome and colorbar —
+see R2-38's structural follow-up on consolidating the four tick-layout copies.)
+
 Severity: Medium
 
 Rust: `src/widget/chrome.rs:335-343` — `log_decade_ticks` emits every decade in `ceil(log10 min)..floor(log10 max)` and returns empty when `min ≤ 0`; sub-ticks are always drawn (`:453-472`).
