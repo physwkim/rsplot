@@ -1661,6 +1661,36 @@ Impact: any colormapped 3D item shown with default settings and data outside [0,
 
 ### R2-47: Line, triangle, and mesh pipelines are opaque — silx renders the whole viewport with GL_BLEND, so iso-surface/mesh alpha is dropped (and the iso depth-sort is dead code)
 
+**FIXED (3D cluster, this session):** enabled `PREMULTIPLIED_ALPHA_BLENDING` on
+the shared line/triangle pipeline (`make_scene_pipeline`) and the mesh pipeline
+in `gpu_scene3d.rs`. silx enables `GL_BLEND` with
+`glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)` for the whole scene
+(`viewport.py:356-357`), depth-test on and **depth-write on** (no `glDepthMask`
+disable), relying on the primitive-level sort for translucent ordering. All
+siplot scene geometry carries linear-**premultiplied** RGBA (`egui::Rgba`, the
+same convention as the points/image pipelines, which already blend), and both
+the `scene3d.wgsl` and `scene3d_mesh.wgsl` fragment shaders output premultiplied
+color (mesh: `color.rgb·factor + specular·α`, `apply_fog` scales its target by
+`α`) — so premultiplied blending reproduces silx's straight `SRC_ALPHA` over
+premultiplied input. Depth-write is left on, matching silx; the `-level`
+iso-surface sort (`ScalarField3D::append_raw`, silx `volume.py:659-663`) is now
+live rather than dead. Opaque geometry (α=1) writes fully, so no existing golden
+changed; the 0.6-α axis tick lines (`axes.py:114`) now composite over non-black
+content (they matched over the dark scene background because `rgb·0.6` opaque and
+`rgb·0.6 + dark·0.4` coincide there).
+
+Verified with pixel-readback regression tests (`tests/scene3d_blend_render.rs`):
+a 50 %-α blue triangle and a 50 %-α blue lit mesh over a bright-green backdrop
+now let the green show through (composite), and the triangle test was confirmed
+to **fail** (`g=0`, pure blue) when the blend was reverted to opaque. The full
+3D render suite (157 tests, incl. the lit-cube / mesh-shading / fog goldens)
+stays green.
+
+Note: `ComplexIsosurface`-style *colormapped* translucent surfaces
+(`ColormapMesh3D` with per-vertex α) are a separate composition gap tracked under
+R2-49; this finding wires the blend contract the existing solid-color meshes and
+`Mesh3D`/`ColormapMesh3D` vertex alpha already needed.
+
 Severity: Medium
 
 Rust: `src/render/gpu_scene3d.rs:791-793` — shared line/triangle pipeline `targets: &[Some(target_format.into())]` "blend: None … → opaque write"; `:929-930` — mesh pipeline (iso-surfaces, `Mesh3D`, `ColormapMesh3D`) likewise "Opaque (blend None)". Only points, image quads, and textured meshes blend (`:867, :999`). Meanwhile `ScalarField3D::append_raw` sorts iso-surfaces by decreasing level (`src/render/scene3d_items.rs:2752-2758`) — an order that only matters under alpha blending — and the widget's tick lines are emitted at 60% alpha (`src/widget/scene_widget.rs:360-365`) into the opaque line pipeline.

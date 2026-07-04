@@ -788,9 +788,17 @@ impl Scene3dPipeline {
                 fragment: Some(wgpu::FragmentState {
                     module: &scene_shader,
                     entry_point: Some("fs_main"),
-                    // blend: None (from target_format.into()) → opaque write;
-                    // depth testing resolves occlusion.
-                    targets: &[Some(target_format.into())],
+                    // silx enables GL_BLEND (SRC_ALPHA/ONE_MINUS_SRC_ALPHA) for the
+                    // whole scene (`viewport.py:356-357`); our vertex colors are
+                    // linear-premultiplied, so PREMULTIPLIED_ALPHA_BLENDING gives
+                    // the same result. Opaque geometry (α=1) still writes fully;
+                    // translucent content (e.g. axis tick lines at 0.6 α,
+                    // `axes.py:114`) composites. Depth write stays on, as in silx.
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: target_format,
+                        blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
                     compilation_options: wgpu::PipelineCompilationOptions::default(),
                 }),
                 primitive: wgpu::PrimitiveState {
@@ -887,8 +895,8 @@ impl Scene3dPipeline {
         });
 
         // Shaded meshes: their own uniform (MVP + normal matrix + fog +
-        // shininess) and a depth-tested, opaque, double-sided triangle pipeline
-        // with headlight lighting in the fragment shader.
+        // shininess) and a depth-tested, premultiplied-alpha-blended, double-sided
+        // triangle pipeline with headlight lighting in the fragment shader.
         let mesh_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("siplot scene3d mesh bgl"),
             entries: &[wgpu::BindGroupLayoutEntry {
@@ -926,8 +934,18 @@ impl Scene3dPipeline {
             fragment: Some(wgpu::FragmentState {
                 module: &mesh_shader,
                 entry_point: Some("fs_main"),
-                // Opaque (blend None): depth testing resolves occlusion.
-                targets: &[Some(target_format.into())],
+                // silx blends the whole scene (`viewport.py:356-357`); the mesh
+                // shader outputs linear-premultiplied RGBA, so
+                // PREMULTIPLIED_ALPHA_BLENDING matches silx's straight SRC_ALPHA
+                // over premultiplied color. A translucent iso-surface / Mesh3D now
+                // composites (silx `volume.py:659-663` sorts iso-surfaces by
+                // -level for this, which `ScalarField3D::append_raw` already does);
+                // opaque meshes (α=1) write fully. Depth write stays on, as in silx.
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: target_format,
+                    blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             }),
             primitive: wgpu::PrimitiveState {
