@@ -39,6 +39,15 @@ mod rd_screen {
     include!("fixtures/rd_screen.rs");
 }
 
+// R2-64: the related-display `visual` variants that diverge from the default
+// menu — a row of buttons, a column of buttons, and an invisible hotspot.
+// Compiling this module type-checks the emitted `ui.put`/`allocate_rect` cell
+// layout against the real egui APIs, the same fidelity gate as `rd_screen`.
+#[allow(dead_code)]
+mod rd_visuals_screen {
+    include!("fixtures/rd_visuals_screen.rs");
+}
+
 /// The exact options the committed `sample_screen.rs` was generated with; the
 /// drift test must match them or it will compare against differently-rendered
 /// output.
@@ -142,6 +151,29 @@ fn recursive_conversion_matches_the_committed_module() {
             .any(|w| w.contains("no runtime display loader")),
         "{:?}",
         converted.warnings
+    );
+}
+
+#[test]
+fn rd_visuals_matches_the_committed_module() {
+    // The committed `rd_visuals_screen.rs` is the converter's output for the
+    // row/column/invisible related-display visuals (R2-64); keep it from
+    // drifting from the emitter, the same way as the fixtures above. Generated
+    // non-recursively (targets left as report-only buttons) so the module is
+    // self-contained: it exists only to compile-gate the new cell layout.
+    let adl = include_str!("fixtures/rd_visuals.adl");
+    let options = Options {
+        protocol: String::new(),
+        ..Options::default()
+    };
+    let generated = generate(&parse(adl), &options);
+    let committed = include_str!("fixtures/rd_visuals_screen.rs");
+    assert_eq!(
+        generated.source, committed,
+        "converter output drifted from tests/fixtures/rd_visuals_screen.rs — \
+         regenerate it with: cargo run -p adl2sidm -- \
+         adl2sidm/tests/fixtures/rd_visuals.adl -o \
+         adl2sidm/tests/fixtures/rd_visuals_screen.rs --protocol \"\""
     );
 }
 

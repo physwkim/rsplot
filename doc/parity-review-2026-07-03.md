@@ -2205,16 +2205,37 @@ internal field name — so `spec.get("mode")` never matched and the replace-mode
 deviation warning (`rd_click`) could never fire. Test:
 `related_display_replace_flag_reads_the_policy_key_not_mode`.
 
-**UNFIXED (sign-off-gated) — `visual` rendering port:** honoring `visual`
-(`"a row of buttons"`/`"a column of buttons"`/`"invisible"`, tokens
-stringValueTable[FIRST_RD_VISUAL+1..+3], default `"menu"`) is a UI feature port,
-not a key fix: RD_HIDDEN_BTN draws no widget at all (a sparse 4×4 stipple over the
-underlying graphic, click handled globally — medmRelatedDisplay.c:562-593), and
-row/column create N side-by-side buttons (:461-556). Faithful sidm emit requires
-rendering decisions the user should sign off on — how "invisible" a GUI hotspot
-should be to stay usable, whether an N-target hidden button pops a menu, and
-equal-cell vs content-sized button layout. Deferred to the sign-off batch rather
-than sprawled into here.
+**FIXED (`visual` rendering port) — no sign-off needed, the C source pins every
+choice:** `emit_related_display` now parses `visual` into `RdVisual`
+(`related_display_visual`, medmRelatedDisplay.c:728-739; unrecognized/absent →
+`RD_MENU`, plus an adl2sidm warning) and branches the emitted egui:
+
+- **`RD_MENU` (default) / single target:** unchanged menu path — one button for a
+  single target (MEDM "case 1 of 4", :243, applies to *any* non-hidden visual),
+  a `menu_button` dropdown for many. Existing tests/goldens are byte-identical.
+- **`RD_ROW_OF_BTN` / `RD_COL_OF_BTN` (`emit_related_display_buttons`):** N
+  equal-cell push buttons (`XmNrecomputeSize FALSE`, :461-561) — a row splits the
+  width (`ui.put` at cell `x + i·w/N`, full height), a column splits the height
+  (`y + i·h/N`, full width); column font sized to the split cell height. Each
+  button opens its own target, captioned by that display's `label`. Only ≥2
+  targets take this path; a single target stays one button (case 1).
+- **`RD_HIDDEN_BTN` (`emit_hidden_related_display`):** no widget and **no fill** —
+  a transparent `allocate_rect(.., Sense::click())` hotspot over the geometry so
+  the underlying graphic shows through; a click opens the **first** target
+  (eventHandlers.c:228-251 opens `display[0]`, never a menu). The prior
+  `style_prelude` bclr fill is skipped entirely on this path.
+
+The finding's feared "rendering decisions" are all pinned by the C source (no
+menu for a hidden N-target button; equal-cell, not content-sized, layout), so no
+sign-off was required. Generated egui is compile-gated by a new self-contained
+fixture (`tests/fixtures/rd_visuals.adl` → `rd_visuals_screen.rs`, `include!`d in
+`compiles.rs`) that type-checks the `ui.put`/`allocate_rect` cell layout against
+real egui 0.34. Tests: `related_display_row_of_buttons_emits_n_filled_cells_not_a_menu`,
+`related_display_column_of_buttons_splits_the_height`,
+`related_display_invisible_is_a_transparent_hotspot_opening_the_first`,
+`related_display_single_target_row_is_still_one_button`,
+`related_display_unrecognized_visual_warns_and_uses_menu`,
+`rd_visuals_matches_the_committed_module`.
 
 Severity: Medium
 

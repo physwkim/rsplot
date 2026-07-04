@@ -2215,6 +2215,21 @@ fn emit_related_display(b: &mut Builder, widget: &MedmWidget, z: ZLayer) {
     }
 
     let id = b.index();
+    // MEDM `visual` (medmRelatedDisplay.c:180-593) picks the rendering. Only a
+    // multi-target row/column or an invisible hotspot diverge from the default
+    // menu path; a single target is always one button (MEDM "case 1 of 4",
+    // :243), so those visuals fall through to the menu path below unchanged.
+    match related_display_visual(b, widget) {
+        RdVisual::Hidden => {
+            emit_hidden_related_display(b, widget, z, geom, id, &entries);
+            return;
+        }
+        v @ (RdVisual::Row | RdVisual::Col) if entries.len() >= 2 => {
+            emit_related_display_buttons(b, widget, z, geom, id, &entries, v);
+            return;
+        }
+        _ => {}
+    }
     // MEDM captions the button from the widget's own `label` only; a label-less
     // related display renders just MEDM's overlapping-frames icon
     // (medmRelatedDisplay.c `renderRelatedDisplayPixmap`).
@@ -2291,6 +2306,113 @@ struct RdEntry {
     /// MEDM `mode="replace display"` — MEDM reuses the parent's shell; SiDM
     /// opens a new window instead (deviation warned at emission).
     replace: bool,
+}
+
+/// MEDM related-display `visual` (`displayList.h:306-309`, parsed at
+/// `medmRelatedDisplay.c:728-739`). `RD_MENU` is the default (any unrecognized
+/// token stays menu, like MEDM).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RdVisual {
+    /// `"menu"`: one button for a single target, a dropdown menu for many.
+    Menu,
+    /// `"a row of buttons"`: N side-by-side buttons (each width = geom.width/N).
+    Row,
+    /// `"a column of buttons"`: N stacked buttons (each height = geom.height/N).
+    Col,
+    /// `"invisible"`: no widget — a transparent hotspot over the graphic whose
+    /// click opens the first target (`RD_HIDDEN_BTN`).
+    Hidden,
+}
+
+/// Parse a related display's `visual` key (`medmRelatedDisplay.c:728-739`). MEDM
+/// leaves the default `RD_MENU` for `"menu"`, an absent key, or anything it does
+/// not recognize; adl2sidm additionally warns on an unrecognized token.
+fn related_display_visual(b: &mut Builder, widget: &MedmWidget) -> RdVisual {
+    match widget.assignments.get("visual").map(String::as_str) {
+        Some("a row of buttons") => RdVisual::Row,
+        Some("a column of buttons") => RdVisual::Col,
+        Some("invisible") => RdVisual::Hidden,
+        Some("menu") | None => RdVisual::Menu,
+        Some(other) => {
+            b.warnings.push(format!(
+                "line {}: related display visual {other:?} unrecognized, using \"menu\"",
+                widget.line
+            ));
+            RdVisual::Menu
+        }
+    }
+}
+
+/// MEDM `RD_HIDDEN_BTN` (`medmRelatedDisplay.c:562-593`): no widget is drawn (MEDM
+/// stipples the underlying graphic), and a Button-1 click opens the *first* target
+/// directly (`eventHandlers.c:228-251`), never a menu. Emit a transparent
+/// clickable area over the geometry — no fill, so the graphic beneath shows
+/// through — that opens `entries[0]` on click.
+fn emit_hidden_related_display(
+    b: &mut Builder,
+    widget: &MedmWidget,
+    z: ZLayer,
+    geom: Geometry,
+    id: u64,
+    entries: &[RdEntry],
+) {
+    let (hover, click) = rd_click(b, widget.line, &entries[0]);
+    let inner = format!(
+        "let __rect = ui.max_rect();\nlet __r = ui.allocate_rect(__rect, egui::Sense::click()).on_hover_text({hover});\nif __r.clicked() {{\n{}\n}}",
+        indent_lines(&click, 4),
+    );
+    let body = format!("{{\n    {}\n}}", inner.replace('\n', "\n    "));
+    b.placements.push(Placement::drawn(z, id, geom, body));
+}
+
+/// MEDM `RD_ROW_OF_BTN` / `RD_COL_OF_BTN` (`medmRelatedDisplay.c:461-561`): a
+/// RowColumn of N equal-cell push buttons — a row lays them left-to-right (each
+/// width = `width/N`), a column top-to-bottom (each height = `height/N`), with
+/// `XmNrecomputeSize FALSE` so the cells are equal. Each button opens its own
+/// target and is captioned by that display's `label`. Colours come from the
+/// widget's `clr`/`bclr` via the shared prelude, the same as the menu path.
+fn emit_related_display_buttons(
+    b: &mut Builder,
+    widget: &MedmWidget,
+    z: ZLayer,
+    geom: Geometry,
+    id: u64,
+    entries: &[RdEntry],
+    visual: RdVisual,
+) {
+    let n = entries.len();
+    let row = visual == RdVisual::Row;
+    // MEDM sizes each button's font to its cell height: a row keeps the full
+    // height, a column splits it among the N cells (medmRelatedDisplay.c:497-508,
+    // relatedDisplayFontListIndex).
+    let font_px = if row {
+        font_px_from_height(geom.height)
+    } else {
+        font_px_from_fractional_height(f64::from(geom.height) / n as f64)
+    };
+    let cell = if row {
+        "egui::Rect::from_min_size(__rect.min + egui::vec2(__i as f32 * __rect.width() / __n, 0.0), egui::vec2(__rect.width() / __n, __rect.height()))"
+    } else {
+        "egui::Rect::from_min_size(__rect.min + egui::vec2(0.0, __i as f32 * __rect.height() / __n), egui::vec2(__rect.width(), __rect.height() / __n))"
+    };
+    let mut inner = String::from(
+        "let __rect = ui.max_rect();\nlet __sp = ui.spacing_mut();\n__sp.interact_size = egui::Vec2::ZERO;\n__sp.button_padding = egui::Vec2::ZERO;\n",
+    );
+    // A plain `{n}f32` float literal — not `{n} as f32`, which trips
+    // `clippy::unnecessary_cast` when the generated module is linted.
+    let _ = write!(inner, "let __n = {n}f32;");
+    for (i, entry) in entries.iter().enumerate() {
+        let (hover, click) = rd_click(b, widget.line, entry);
+        let _ = write!(
+            inner,
+            "\n{{\n    let __i = {i};\n    let __cell = {cell};\n    if ui.put(__cell, egui::Button::new({})).on_hover_text({hover}).clicked() {{\n{}\n    }}\n}}",
+            medm_str(b, &entry.caption),
+            indent_lines(&click, 8),
+        );
+    }
+    let prelude = style_prelude(b, WidgetColors::from_widget(widget), Some(font_px));
+    let body = format!("{{\n{prelude}    {}\n}}", inner.replace('\n', "\n    "));
+    b.placements.push(Placement::drawn(z, id, geom, body));
 }
 
 /// The hover-text *expression* and click statements for one related-display
@@ -8269,6 +8391,169 @@ composite {
             g.source
         );
         assert!(g.source.contains("ui.close();"), "{}", g.source);
+    }
+
+    /// A 2-target related display with `visual="a row of buttons"`, used by the
+    /// row/column/invisible tests below.
+    fn rd_two_targets(visual: &str) -> String {
+        format!(
+            r#"
+"color map" {{
+	colors {{
+		ffffff,
+	}}
+}}
+"related display" {{
+	object {{
+		x=0
+		y=0
+		width=120
+		height=20
+	}}
+	label="Screens"
+	visual="{visual}"
+	display[0] {{
+		label="A"
+		name="a.adl"
+	}}
+	display[1] {{
+		label="B"
+		name="b.adl"
+	}}
+}}
+"#
+        )
+    }
+
+    #[test]
+    fn related_display_row_of_buttons_emits_n_filled_cells_not_a_menu() {
+        // R2-64: `visual="a row of buttons"` -> N side-by-side buttons (MEDM
+        // RD_ROW_OF_BTN, medmRelatedDisplay.c:461-561), each opening its target.
+        let g = generate(
+            &parse(&rd_two_targets("a row of buttons")),
+            &Options::default(),
+        );
+        assert!(!g.source.contains("menu_button"), "{}", g.source);
+        // Two per-target buttons placed in equal cells split along the width.
+        assert!(
+            g.source
+                .contains("ui.put(__cell, egui::Button::new(\"A\"))"),
+            "{}",
+            g.source
+        );
+        assert!(
+            g.source
+                .contains("ui.put(__cell, egui::Button::new(\"B\"))"),
+            "{}",
+            g.source
+        );
+        assert!(
+            g.source.contains("__rect.width() / __n"),
+            "row cells split the width:\n{}",
+            g.source
+        );
+        assert!(
+            g.source.contains("related display: open a.adl")
+                && g.source.contains("related display: open b.adl"),
+            "{}",
+            g.source
+        );
+    }
+
+    #[test]
+    fn related_display_column_of_buttons_splits_the_height() {
+        // RD_COL_OF_BTN -> vertical stack, each cell height = height/N.
+        let g = generate(
+            &parse(&rd_two_targets("a column of buttons")),
+            &Options::default(),
+        );
+        assert!(!g.source.contains("menu_button"), "{}", g.source);
+        assert!(
+            g.source.contains("__rect.height() / __n"),
+            "column cells split the height:\n{}",
+            g.source
+        );
+        assert!(
+            g.source
+                .contains("ui.put(__cell, egui::Button::new(\"A\"))"),
+            "{}",
+            g.source
+        );
+    }
+
+    #[test]
+    fn related_display_invisible_is_a_transparent_hotspot_opening_the_first() {
+        // RD_HIDDEN_BTN: no widget/fill, a click opens display[0] (a.adl) —
+        // eventHandlers.c:228-251 opens the first target, never a menu.
+        let g = generate(&parse(&rd_two_targets("invisible")), &Options::default());
+        assert!(
+            g.source
+                .contains("ui.allocate_rect(__rect, egui::Sense::click())"),
+            "invisible RD is a bare clickable rect:\n{}",
+            g.source
+        );
+        assert!(!g.source.contains("menu_button"), "{}", g.source);
+        assert!(!g.source.contains("egui::Button::new"), "{}", g.source);
+        assert!(
+            g.source.contains("related display: open a.adl"),
+            "opens the first target:\n{}",
+            g.source
+        );
+        // The second target is unreachable via the hidden hotspot (MEDM opens
+        // only display[0]).
+        assert!(
+            !g.source.contains("related display: open b.adl"),
+            "hidden button wires only the first target:\n{}",
+            g.source
+        );
+    }
+
+    #[test]
+    fn related_display_single_target_row_is_still_one_button() {
+        // MEDM "case 1 of 4": a single target is one button regardless of visual
+        // (only >=2 targets use the row/column layout), medmRelatedDisplay.c:243.
+        let adl = r#"
+"color map" {
+	colors {
+		ffffff,
+	}
+}
+"related display" {
+	object {
+		x=0
+		y=0
+		width=120
+		height=20
+	}
+	label="One"
+	visual="a row of buttons"
+	display[0] {
+		label="A"
+		name="a.adl"
+	}
+}
+"#;
+        let g = generate(&parse(adl), &Options::default());
+        assert!(!g.source.contains("ui.put(__cell"), "{}", g.source);
+        assert!(!g.source.contains("menu_button"), "{}", g.source);
+        assert!(
+            g.source.contains("ui.button(\"One\")"),
+            "single-target row is one captioned button:\n{}",
+            g.source
+        );
+    }
+
+    #[test]
+    fn related_display_unrecognized_visual_warns_and_uses_menu() {
+        let g = generate(&parse(&rd_two_targets("bogus")), &Options::default());
+        assert!(
+            g.warnings
+                .iter()
+                .any(|w| w.contains("visual") && w.contains("bogus")),
+            "unrecognized visual warns: {:?}",
+            g.warnings
+        );
+        assert!(g.source.contains("menu_button"), "{}", g.source);
     }
 
     #[test]

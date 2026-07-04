@@ -1,0 +1,71 @@
+file {
+	name="rd_visuals.adl"
+	version=030107
+}
+"color map" {
+	colors {
+		ffffff,
+		000000,
+		c0c0c0,
+	}
+}
+display {
+	object {
+		x=0
+		y=0
+		width=300
+		height=160
+	}
+	clr=1
+	bclr=2
+}
+"related display" {
+	object {
+		x=10
+		y=10
+		width=180
+		height=24
+	}
+	label="Row"
+	visual="a row of buttons"
+	display[0] {
+		label="A"
+		name="rd_target_a.adl"
+	}
+	display[1] {
+		label="B"
+		name="rd_target_b.adl"
+	}
+}
+"related display" {
+	object {
+		x=10
+		y=44
+		width=180
+		height=48
+	}
+	label="Col"
+	visual="a column of buttons"
+	display[0] {
+		label="C"
+		name="rd_target_c.adl"
+	}
+	display[1] {
+		label="D"
+		name="rd_target_d.adl"
+	}
+}
+"related display" {
+	object {
+		x=10
+		y=100
+		width=180
+		height=24
+	}
+	label="Hidden"
+	visual="invisible"
+	display[0] {
+		label="E"
+		name="rd_target_e.adl"
+	}
+}
