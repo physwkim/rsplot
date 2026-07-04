@@ -16,8 +16,13 @@ use std::collections::VecDeque;
 
 /// PyDM `MINIMUM_BUFFER_SIZE`: a buffer always holds at least two samples.
 pub const MINIMUM_BUFFER_SIZE: usize = 2;
-/// PyDM `DEFAULT_BUFFER_SIZE`: the default capacity for a time-plot curve.
+/// PyDM `timeplot.DEFAULT_BUFFER_SIZE`: the default capacity for a *time-plot*
+/// curve.
 pub const DEFAULT_BUFFER_SIZE: usize = 18000;
+/// PyDM `scatterplot.DEFAULT_BUFFER_SIZE` / `eventplot.DEFAULT_BUFFER_SIZE`: the
+/// default capacity for a scatter or event curve — 1200, not the 18000 the time
+/// plot uses (`scatterplot.py:12`, `eventplot.py:11`).
+pub const DEFAULT_SCATTER_EVENT_BUFFER_SIZE: usize = 1200;
 
 /// A capacity-bounded FIFO of `(x, y)` samples that overwrites the oldest sample
 /// when full (PyDM `TimePlotCurveItem` data buffer).
@@ -117,6 +122,16 @@ mod tests {
         let (mut xs, mut ys) = (Vec::new(), Vec::new());
         buf.ordered_into(&mut xs, &mut ys);
         (xs, ys)
+    }
+
+    #[test]
+    fn scatter_event_default_buffer_matches_pydm_not_timeplot() {
+        // PyDM's scatter/event curves default to 1200 samples
+        // (`scatterplot.py:12`, `eventplot.py:11`), a 15×-smaller window than the
+        // time plot's 18000 (`timeplot.py`). The two must stay distinct.
+        assert_eq!(DEFAULT_SCATTER_EVENT_BUFFER_SIZE, 1200);
+        assert_eq!(DEFAULT_BUFFER_SIZE, 18000);
+        assert_ne!(DEFAULT_SCATTER_EVENT_BUFFER_SIZE, DEFAULT_BUFFER_SIZE);
     }
 
     #[test]

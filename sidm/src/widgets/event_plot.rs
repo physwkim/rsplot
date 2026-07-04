@@ -27,7 +27,7 @@ use crate::widgets::plot_menu::{
     YAxisMenu, enable_y_autoscale, set_y_range, show_with_y_axis_menu,
 };
 use crate::widgets::plot_style::{CurveStyle, DEFAULT_SYMBOL_SIZE, ensure_axis_autoscale};
-use crate::widgets::ring_buffer::{DEFAULT_BUFFER_SIZE, TimeSeriesBuffer};
+use crate::widgets::ring_buffer::{DEFAULT_SCATTER_EVENT_BUFFER_SIZE, TimeSeriesBuffer};
 use crate::widgets::waveform_plot::value_to_waveform;
 
 /// Select the `(x, y)` sample from an event array at `(x_idx, y_idx)`, or `None`
@@ -101,7 +101,7 @@ impl SidmEventPlot {
         Self {
             plot: Plot1D::new(render_state, id),
             curves: Vec::new(),
-            buffer_size: DEFAULT_BUFFER_SIZE,
+            buffer_size: DEFAULT_SCATTER_EVENT_BUFFER_SIZE,
             y_menu: YAxisMenu::new(),
         }
     }
