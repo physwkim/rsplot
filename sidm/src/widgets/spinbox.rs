@@ -36,12 +36,25 @@ pub struct SidmSpinbox {
     pub step_exponent: i32,
     /// Show the `Step: 1E{n}` suffix (PyDM `showStepExponent`, default `true`).
     pub show_step_exponent: bool,
+    /// Send on every step/change rather than only on Enter (PyDM `writeOnPress`,
+    /// default `false`, `spinbox.py:31`). When `false` the entry composes
+    /// locally and commits once on Enter (`keyPressEvent` Return/Enter →
+    /// `send_value`, `spinbox.py:90-91`).
+    pub write_on_press: bool,
 }
 
 /// Clamp a step exponent to PyDM's floor of `-decimals` after a `delta` change
 /// (`spinbox.py:88`, `step_exponent = max(-decimals, step_exponent ± 1)`).
 pub fn stepped_exponent(step_exponent: i32, decimals: i32, delta: i32) -> i32 {
     (step_exponent + delta).max(-decimals)
+}
+
+/// Whether a spinbox interaction should write to the channel this frame. PyDM
+/// sends on Enter unconditionally (`keyPressEvent`, `spinbox.py:90-91`) and on
+/// any step/change only when `write_on_press` is set (`stepBy`,
+/// `spinbox.py:55-66`, default `false`).
+pub fn should_write(enter_pressed: bool, changed: bool, write_on_press: bool) -> bool {
+    enter_pressed || (changed && write_on_press)
 }
 
 impl SidmSpinbox {
@@ -54,6 +67,7 @@ impl SidmSpinbox {
             user_limits: None,
             step_exponent: 0,
             show_step_exponent: true,
+            write_on_press: false,
         })
     }
 
@@ -79,6 +93,13 @@ impl SidmSpinbox {
     /// The single step: `10^step_exponent` (PyDM `setSingleStep(10**exp)`).
     pub fn single_step(&self) -> f64 {
         10f64.powi(self.step_exponent)
+    }
+
+    /// Send on every step/change instead of only on Enter (builder style; PyDM
+    /// `writeOnPress`).
+    pub fn with_write_on_press(mut self, write_on_press: bool) -> Self {
+        self.write_on_press = write_on_press;
+        self
     }
 
     /// Choose which severities draw a border (builder style;
@@ -110,8 +131,9 @@ impl SidmSpinbox {
         written
     }
 
-    /// Render the spin box this frame. Returns the value written if the user
-    /// changed it.
+    /// Render the spin box this frame. Returns the value written this frame:
+    /// PyDM sends on Enter, and on every step only when `write_on_press` is set
+    /// (default off — the entry composes locally and commits on Enter).
     pub fn show(&mut self, ui: &mut egui::Ui) -> Option<PvValue> {
         let state = self.base.channel().state();
         let decimals = self.decimals(&state);
@@ -159,7 +181,11 @@ impl SidmSpinbox {
             }
         }
 
-        response.changed().then(|| self.set_value(value))
+        // PyDM sends only on Enter (the entry buffers edits until commit), and on
+        // each step only under write_on_press — never on every drag/step tick.
+        let enter_pressed = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        should_write(enter_pressed, response.changed(), self.write_on_press)
+            .then(|| self.set_value(value))
     }
 }
 
@@ -215,6 +241,28 @@ mod tests {
         assert_eq!(spin.with_step_exponent(-2).single_step(), 0.01);
         let (_e, spin) = spinbox("loc://spin_step_exp2");
         assert_eq!(spin.with_step_exponent(3).single_step(), 1000.0);
+    }
+
+    #[test]
+    fn write_gated_on_enter_unless_write_on_press() {
+        // The core R2-53 fix: a change without Enter and without write_on_press
+        // must NOT write (PyDM sends only on Enter by default).
+        assert!(!should_write(false, true, false));
+        // Enter always writes, changed or not (keyPressEvent → send_value).
+        assert!(should_write(true, false, false));
+        assert!(should_write(true, true, false));
+        // write_on_press writes on any change (stepBy → send_value).
+        assert!(should_write(false, true, true));
+        // Idle: no interaction, no write.
+        assert!(!should_write(false, false, false));
+        assert!(!should_write(false, false, true));
+    }
+
+    #[test]
+    fn write_on_press_defaults_off_like_pydm() {
+        let (_e, spin) = spinbox("loc://spin_wop_default");
+        assert!(!spin.write_on_press);
+        assert!(spin.with_write_on_press(true).write_on_press);
     }
 
     #[test]

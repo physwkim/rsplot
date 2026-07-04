@@ -1815,6 +1815,8 @@ Reference: `~/codes/pydm/pydm/widgets/spinbox.py:31,55-66,90-91` — `_write_on_
 
 Impact: stepping a sidm spinbox from 0 to 10 emits ten (or more, when dragged) puts to the control PV where PyDM emits exactly one on Enter — intermediate setpoints are written to hardware that PyDM never sends, and there is no way to get PyDM's compose-then-commit behaviour.
 
+**FIXED (this session):** `show` no longer writes on every `changed()`. Added a pure `should_write(enter_pressed, changed, write_on_press)` gate: PyDM sends on Enter unconditionally (keyPressEvent, spinbox.py:90-91) and on any step only under `write_on_press` (stepBy, spinbox.py:55-66, default false, added as `pub write_on_press` + `with_write_on_press`). The DragValue buffers text edits until commit, so `enter_pressed = response.lost_focus() && key_pressed(Enter)` reproduces compose-then-commit. Test `write_gated_on_enter_unless_write_on_press` (per-boundary matrix), `write_on_press_defaults_off_like_pydm`.
+
 ### R2-54: SidmSpinbox default step is `10^-precision`; PyDM's default single step is 1 (`step_exponent = 0`)
 
 Severity: Low
