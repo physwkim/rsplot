@@ -70,6 +70,7 @@ impl Screen {
         let w7 = SidmSlider::new(&engine, "ca://DMM1:level")
             .expect("adl2sidm: connect ca://DMM1:level (valuator)")
             .with_border_mode(BorderMode::DisconnectedOnly)
+            .with_alarm_sensitive_content(false)
             .with_limits(0.0, 100.0)
             .with_precision(2);
         let w8 = SidmByteIndicator::new(&engine, "ca://DMM1:bits")

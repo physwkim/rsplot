@@ -18,7 +18,7 @@ use siplot::egui;
 
 use crate::channel::{Channel, PvValue};
 use crate::engine::{Engine, EngineError};
-use crate::widgets::base::{BorderMode, ChannelBase, layout_justify};
+use crate::widgets::base::{AlarmPalette, BorderMode, ChannelBase, layout_justify};
 use crate::widgets::byte::Orientation;
 use crate::widgets::enum_choice::{enum_current_index, enum_index_value, enum_options};
 
@@ -102,6 +102,21 @@ impl SidmEnumButton {
         self
     }
 
+    /// Colour the choice captions by alarm severity when the channel is in alarm
+    /// (MEDM `clrmod="alarm"` sets `XmNforeground = alarmColor`,
+    /// medmChoiceButtons.c:375; PyDM `alarmSensitiveContent`). Off by default.
+    pub fn with_alarm_sensitive_content(mut self, on: bool) -> Self {
+        self.base.alarm_sensitive_content = on;
+        self
+    }
+
+    /// Which palette the alarm colouring draws from (builder style; default PyDM,
+    /// `Medm` for converted screens so `NoAlarm` paints Green3 like MEDM).
+    pub fn with_alarm_palette(mut self, palette: AlarmPalette) -> Self {
+        self.base.alarm_palette = palette;
+        self
+    }
+
     /// The underlying channel.
     pub fn channel(&self) -> &Channel {
         self.base.channel()
@@ -130,7 +145,7 @@ impl SidmEnumButton {
         let orientation = self.orientation;
 
         let mut chosen = None;
-        self.base.framed(ui, &state, true, |ui| {
+        self.base.framed_alarm_content(ui, &state, true, |ui| {
             let justify = layout_justify(ui);
             if justify.0 || justify.1 {
                 // MEDM divides the choice-button rect EXACTLY among the
@@ -277,5 +292,17 @@ mod tests {
             "channel did not receive the selected index (got {:?})",
             button.channel().read(|s| s.value.clone())
         );
+    }
+
+    #[test]
+    fn alarm_sensitive_content_builder_flips_the_flag() {
+        let engine = Engine::new();
+        let button = SidmEnumButton::new(&engine, "loc://enum_button_alarm").expect("connect");
+        assert!(
+            !button.base.alarm_sensitive_content,
+            "off by default (PyDM)"
+        );
+        let button = button.with_alarm_sensitive_content(true);
+        assert!(button.base.alarm_sensitive_content);
     }
 }

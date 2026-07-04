@@ -63,6 +63,7 @@ impl Screen {
         let w6 = SidmSlider::new(&engine, "loc://setpoint?type=float&init=5&precision=2")
             .expect("adl2sidm: connect loc://setpoint?type=float&init=5&precision=2 (valuator)")
             .with_border_mode(BorderMode::DisconnectedOnly)
+            .with_alarm_sensitive_content(false)
             .with_limits(0.0, 10.0)
             .with_precision(2);
         let w7 = SidmByteIndicator::new(&engine, "loc://flags?type=int&init=170")

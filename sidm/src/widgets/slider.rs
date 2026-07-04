@@ -17,7 +17,7 @@ use siplot::egui;
 
 use crate::channel::{Channel, PvValue};
 use crate::engine::{Engine, EngineError};
-use crate::widgets::base::{BorderMode, ChannelBase, control_range};
+use crate::widgets::base::{AlarmPalette, BorderMode, ChannelBase, control_range};
 use crate::widgets::byte::Orientation;
 
 /// PyDM's default number of slider positions (`PyDMSlider._num_steps`).
@@ -88,6 +88,22 @@ impl SidmSlider {
         self
     }
 
+    /// Colour the value readout by alarm severity when the channel is in alarm
+    /// (MEDM `clrmod="alarm"` sets `XmNforeground = alarmColor`, medmValuator.c:
+    /// 892-895; PyDM `alarmSensitiveContent`, which `SidmSlider::new` defaults on
+    /// — the converter turns it off for a MEDM valuator without `clrmod=alarm`).
+    pub fn with_alarm_sensitive_content(mut self, on: bool) -> Self {
+        self.base.alarm_sensitive_content = on;
+        self
+    }
+
+    /// Which palette the alarm colouring draws from (builder style; default PyDM,
+    /// `Medm` for converted screens so `NoAlarm` paints Green3 like MEDM).
+    pub fn with_alarm_palette(mut self, palette: AlarmPalette) -> Self {
+        self.base.alarm_palette = palette;
+        self
+    }
+
     /// The underlying channel.
     pub fn channel(&self) -> &Channel {
         self.base.channel()
@@ -127,7 +143,7 @@ impl SidmSlider {
 
         let changed = self
             .base
-            .framed(ui, &state, true, |ui| match range {
+            .framed_alarm_content(ui, &state, true, |ui| match range {
                 Some((lo, hi)) => {
                     let step = self.step_size((lo, hi));
                     // Clamp/step-normalize EDITS only. The default
@@ -197,6 +213,9 @@ mod tests {
         let (_e, slider) = slider("loc://slider_alarm_defaults");
         assert_eq!(slider.base.border_mode, BorderMode::Off);
         assert!(slider.base.alarm_sensitive_content);
+        // The converter turns it off for a MEDM valuator without clrmod=alarm.
+        let slider = slider.with_alarm_sensitive_content(false);
+        assert!(!slider.base.alarm_sensitive_content);
     }
 
     #[test]

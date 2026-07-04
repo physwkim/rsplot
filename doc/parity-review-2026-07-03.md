@@ -2297,20 +2297,39 @@ Impact: a `.adl` carrying a leftover `precDefault=3` with channel-sourced precis
 
 ### R2-67: `clrmod="alarm"` silently ignored on every controller — MEDM alarm-colours text entry, message button, menu, choice button, valuator, and wheel switch
 
-**PARTIALLY FIXED (silent-drop cluster) — warn half closed:** all six controller
-emitters (`emit_text_entry`, `emit_message_button`, `emit_menu`,
-`emit_choice_button`, `emit_valuator`, `emit_wheel_switch`) now call
-`warn_controller_alarm_clrmod`, so `clrmod="alarm"` on a control is warned instead
-of silently dropped — symmetric with the monitor widgets, which wire it via
-`alarm_content_builder`. Test:
-`clrmod_alarm_on_a_controller_warns_since_sidm_has_no_surface`.
+**FIXED (alarm wiring, structural) — controllers now colour by severity like the
+monitors.** The cross-crate builder the finding flagged is now present on all six
+sidm controllers, and the converter wires it:
 
-**UNFIXED (sign-off-gated) — alarm wiring:** sidm exposes
-`with_alarm_sensitive_content` only on `SidmLabel`/`SidmByteIndicator`/
-`SidmScaleIndicator`/`SidmDrawing`, not on `SidmLineEdit`/`SidmPushButton`/
-`SidmEnumComboBox`/`SidmEnumButton`/`SidmSlider`/`SidmSpinbox`. Actually
-alarm-colouring the controls (MEDM medmTextEntry.c:418-424 et al.) needs a
-cross-crate sidm builder on those widgets — deferred to the sign-off batch.
+- **sidm (single owner).** `ChannelBase::framed_alarm_content` is the one place
+  that installs MEDM's `XmNforeground = alarmColor(severity)` rule: it sets
+  `override_text_color` from `content_color(state)` (a no-op unless
+  `alarm_sensitive_content` is set and the channel is in a coloured alarm). Every
+  egui text widget the controllers use — `Button`, `RadioButton`, `TextEdit`,
+  `Slider`/`DragValue` — honours `override_text_color`, so `SidmLineEdit`,
+  `SidmPushButton`, `SidmEnumButton`, `SidmSlider`, `SidmSpinbox` all route their
+  content through it. `SidmEnumComboBox` paints its face caption by hand, so it
+  reads `content_color` directly into that galley instead. All six gain
+  `with_alarm_sensitive_content` + `with_alarm_palette` builders (previously only
+  the four monitor widgets had them). Tests: `base.rs`
+  `framed_alarm_content_overrides_foreground_only_when_alarm_sensitive` (headless
+  render proves the override is installed only when sensitive) plus a per-widget
+  builder test on each controller.
+- **adl2sidm.** The six emitters now `extend(alarm_content_builder(widget))`
+  (`clrmod="alarm"` → `.with_alarm_sensitive_content(true).with_alarm_palette(AlarmPalette::Medm)`,
+  the same string the monitors already emit — one source of truth), replacing the
+  interim `warn_controller_alarm_clrmod` (removed). The valuator is special:
+  `SidmSlider` ships `alarm_sensitive_content` ON (PyDM parity), so a MEDM valuator
+  *without* `clrmod="alarm"` gets `valuator_alarm_builder` → an explicit
+  `.with_alarm_sensitive_content(false)` so it does not alarm-colour with no MEDM
+  basis. Tests: `clrmod_alarm_on_a_controller_wires_severity_content`,
+  `valuator_without_alarm_clrmod_turns_off_default_content_sensitivity`; the
+  regenerated `sample_screen.rs`/`local_panel_screen.rs` goldens compile the
+  slider builder against real sidm through the `compiles.rs` gate.
+
+MEDM's palette rides along (`AlarmPalette::Medm` → `NoAlarm` = Green3, total
+replacement), so the controllers match the monitor widgets exactly — the symmetry
+the finding asked for.
 
 Severity: Medium
 

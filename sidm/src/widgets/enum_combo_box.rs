@@ -16,7 +16,7 @@ use siplot::egui::NumExt as _;
 
 use crate::channel::{Channel, ChannelState, PvValue};
 use crate::engine::{Engine, EngineError};
-use crate::widgets::base::{BorderMode, ChannelBase, layout_justify};
+use crate::widgets::base::{AlarmPalette, BorderMode, ChannelBase, layout_justify};
 use crate::widgets::enum_choice::{enum_current_index, enum_index_value, enum_options};
 use crate::widgets::label::TextAlign;
 
@@ -55,6 +55,27 @@ impl SidmEnumComboBox {
         self
     }
 
+    /// Colour the face caption by alarm severity when the channel is in alarm
+    /// (MEDM `clrmod="alarm"` sets `XmNforeground = alarmColor`, medmMenu.c:540;
+    /// PyDM `alarmSensitiveContent`). Off by default. The face text is painted by
+    /// hand below (stock geometry), so this reads [`content_color`] directly
+    /// rather than going through [`framed_alarm_content`] like the other
+    /// controllers.
+    ///
+    /// [`content_color`]: ChannelBase::content_color
+    /// [`framed_alarm_content`]: ChannelBase::framed_alarm_content
+    pub fn with_alarm_sensitive_content(mut self, on: bool) -> Self {
+        self.base.alarm_sensitive_content = on;
+        self
+    }
+
+    /// Which palette the alarm colouring draws from (builder style; default PyDM,
+    /// `Medm` for converted screens so `NoAlarm` paints Green3 like MEDM).
+    pub fn with_alarm_palette(mut self, palette: AlarmPalette) -> Self {
+        self.base.alarm_palette = palette;
+        self
+    }
+
     /// The underlying channel.
     pub fn channel(&self) -> &Channel {
         self.base.channel()
@@ -88,6 +109,11 @@ impl SidmEnumComboBox {
         let options = Self::options(&state);
         let current = Self::current_index(&state);
 
+        // MEDM clrmod="alarm" recolours the option-menu foreground by severity;
+        // the face caption is painted by hand below, so fold the override into
+        // that paint (the shared `framed_alarm_content` helper only reaches the
+        // egui text widgets the other controllers use).
+        let alarm_fg = self.base.content_color(&state);
         let mut chosen = None;
         self.base.framed(ui, &state, true, |ui| {
             let selected_text = current
@@ -174,8 +200,11 @@ impl SidmEnumComboBox {
                 );
                 let align2 = egui::Align2([self.alignment.to_align(), egui::Align::Center]);
                 let text_rect = align2.align_size_within_rect(galley.size(), text_area);
-                ui.painter()
-                    .galley(text_rect.min, galley, visuals.text_color());
+                ui.painter().galley(
+                    text_rect.min,
+                    galley,
+                    alarm_fg.unwrap_or(visuals.text_color()),
+                );
             }
 
             egui::Popup::menu(&response)
@@ -313,5 +342,14 @@ mod tests {
             "channel did not receive the selected index (got {:?})",
             combo.channel().read(|s| s.value.clone())
         );
+    }
+
+    #[test]
+    fn alarm_sensitive_content_builder_flips_the_flag() {
+        let engine = Engine::new();
+        let combo = SidmEnumComboBox::new(&engine, "loc://enum_combo_alarm").expect("connect");
+        assert!(!combo.base.alarm_sensitive_content, "off by default (PyDM)");
+        let combo = combo.with_alarm_sensitive_content(true);
+        assert!(combo.base.alarm_sensitive_content);
     }
 }

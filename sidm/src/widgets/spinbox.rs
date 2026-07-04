@@ -19,7 +19,7 @@ use siplot::egui;
 
 use crate::channel::{Channel, ChannelState, PvValue};
 use crate::engine::{Engine, EngineError};
-use crate::widgets::base::{BorderMode, ChannelBase, control_range};
+use crate::widgets::base::{AlarmPalette, BorderMode, ChannelBase, control_range};
 
 /// A writable numeric spin box (PyDM `PyDMSpinbox`).
 pub struct SidmSpinbox {
@@ -110,6 +110,21 @@ impl SidmSpinbox {
         self
     }
 
+    /// Colour the digits by alarm severity when the channel is in alarm (MEDM
+    /// `clrmod="alarm"` sets `XmNforeground = alarmColor`, medmWheelSwitch.c:390;
+    /// PyDM `alarmSensitiveContent`). Off by default.
+    pub fn with_alarm_sensitive_content(mut self, on: bool) -> Self {
+        self.base.alarm_sensitive_content = on;
+        self
+    }
+
+    /// Which palette the alarm colouring draws from (builder style; default PyDM,
+    /// `Medm` for converted screens so `NoAlarm` paints Green3 like MEDM).
+    pub fn with_alarm_palette(mut self, palette: AlarmPalette) -> Self {
+        self.base.alarm_palette = palette;
+        self
+    }
+
     /// The underlying channel.
     pub fn channel(&self) -> &Channel {
         self.base.channel()
@@ -149,7 +164,7 @@ impl SidmSpinbox {
 
         let response = self
             .base
-            .framed(ui, &state, true, |ui| {
+            .framed_alarm_content(ui, &state, true, |ui| {
                 let mut drag = egui::DragValue::new(&mut value)
                     .speed(step)
                     .max_decimals(decimals.max(0) as usize);
@@ -282,6 +297,9 @@ mod tests {
         let (_e, spin) = spinbox("loc://spin_border");
         assert_eq!(spin.base.border_mode, BorderMode::Off);
         assert!(!spin.base.alarm_sensitive_content);
+        // The builder opts the digits into severity colouring (MEDM clrmod=alarm).
+        let spin = spin.with_alarm_sensitive_content(true);
+        assert!(spin.base.alarm_sensitive_content);
     }
 
     #[test]

@@ -17,7 +17,7 @@ use siplot::egui;
 
 use crate::channel::{Channel, ChannelState, PvValue};
 use crate::engine::{Engine, EngineError};
-use crate::widgets::base::{BorderMode, ChannelBase};
+use crate::widgets::base::{AlarmPalette, BorderMode, ChannelBase};
 use crate::widgets::display_format::{DisplayFormat, FormatSpec};
 use crate::widgets::line_edit::parse_input;
 
@@ -124,6 +124,21 @@ impl SidmPushButton {
         self
     }
 
+    /// Colour the button caption by alarm severity when the channel is in alarm
+    /// (MEDM `clrmod="alarm"` sets `XmNforeground = alarmColor`,
+    /// medmMessageButton.c:348; PyDM `alarmSensitiveContent`). Off by default.
+    pub fn with_alarm_sensitive_content(mut self, on: bool) -> Self {
+        self.base.alarm_sensitive_content = on;
+        self
+    }
+
+    /// Which palette the alarm colouring draws from (builder style; default PyDM,
+    /// `Medm` for converted screens so `NoAlarm` paints Green3 like MEDM).
+    pub fn with_alarm_palette(mut self, palette: AlarmPalette) -> Self {
+        self.base.alarm_palette = palette;
+        self
+    }
+
     /// The underlying channel.
     pub fn channel(&self) -> &Channel {
         self.base.channel()
@@ -152,7 +167,7 @@ impl SidmPushButton {
 
         let clicked = self
             .base
-            .framed(ui, &state, true, |ui| {
+            .framed_alarm_content(ui, &state, true, |ui| {
                 ui.button(self.label.as_str()).clicked()
             })
             .inner;
@@ -231,6 +246,9 @@ mod tests {
             SidmPushButton::new(&engine, "loc://pushbtn_border", "Step", "5").expect("connect");
         assert_eq!(button.base.border_mode, BorderMode::Off);
         assert!(!button.base.alarm_sensitive_content);
+        // The builder opts the caption into severity colouring (MEDM clrmod=alarm).
+        let button = button.with_alarm_sensitive_content(true);
+        assert!(button.base.alarm_sensitive_content);
     }
 
     #[test]

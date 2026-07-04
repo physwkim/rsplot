@@ -27,7 +27,7 @@ use siplot::egui;
 
 use crate::channel::{Channel, ChannelState, PvValue};
 use crate::engine::{Engine, EngineError};
-use crate::widgets::base::{BorderMode, ChannelBase, layout_justify};
+use crate::widgets::base::{AlarmPalette, BorderMode, ChannelBase, layout_justify};
 use crate::widgets::display_format::{DisplayFormat, FormatSpec, format_value_for_edit};
 use crate::widgets::label::TextAlign;
 
@@ -99,6 +99,21 @@ impl SidmLineEdit {
         self
     }
 
+    /// Colour the field text by alarm severity when the channel is in alarm
+    /// (MEDM `clrmod="alarm"` sets `XmNforeground = alarmColor`, medmTextEntry.c:
+    /// 418-424; PyDM `alarmSensitiveContent`). Off by default.
+    pub fn with_alarm_sensitive_content(mut self, on: bool) -> Self {
+        self.base.alarm_sensitive_content = on;
+        self
+    }
+
+    /// Which palette the alarm colouring draws from (builder style; default PyDM,
+    /// `Medm` for converted screens so `NoAlarm` paints Green3 like MEDM).
+    pub fn with_alarm_palette(mut self, palette: AlarmPalette) -> Self {
+        self.base.alarm_palette = palette;
+        self
+    }
+
     /// The underlying channel.
     pub fn channel(&self) -> &Channel {
         self.base.channel()
@@ -135,7 +150,7 @@ impl SidmLineEdit {
             self.edit_buffer = display.clone();
         }
 
-        let inner = self.base.framed(ui, &state, true, |ui| {
+        let inner = self.base.framed_alarm_content(ui, &state, true, |ui| {
             let mut edit = egui::TextEdit::singleline(&mut self.edit_buffer)
                 .horizontal_align(self.alignment.to_align());
             if layout_justify(ui).1 {
@@ -524,5 +539,14 @@ mod tests {
             parse_input("anything", &st, spec(DisplayFormat::Default, false)),
             Ok(PvValue::Str(Arc::from("anything")))
         );
+    }
+
+    #[test]
+    fn alarm_sensitive_content_builder_flips_the_flag() {
+        let engine = Engine::new();
+        let le = SidmLineEdit::new(&engine, "loc://line_edit_alarm").expect("connect");
+        assert!(!le.base.alarm_sensitive_content, "off by default (PyDM)");
+        let le = le.with_alarm_sensitive_content(true);
+        assert!(le.base.alarm_sensitive_content);
     }
 }

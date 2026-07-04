@@ -463,6 +463,34 @@ impl ChannelBase {
         }
         egui::InnerResponse::new(value, response)
     }
+
+    /// Like [`Self::framed`] but first replaces the foreground text colour with the
+    /// alarm-severity colour whenever [`content_color`](Self::content_color) yields
+    /// one — i.e. `alarm_sensitive_content` is set and the channel is in a coloured
+    /// alarm state. This is the single owner of MEDM's `clrmod="alarm"` foreground
+    /// rule for the controllers: MEDM sets `XmNforeground = alarmColor(severity)` on
+    /// the text entry, message button, menu, choice button, valuator, and wheel
+    /// switch (medmTextEntry.c:418-424 and siblings); PyDM's `alarmSensitiveContent`.
+    /// Every egui text widget the controllers draw (Button, RadioButton, TextEdit,
+    /// Slider/DragValue) honours `override_text_color`, so overriding it here recolours
+    /// them uniformly. A no-op when there is no override, leaving the default colour.
+    /// (The enum combo paints its face text by hand and reads `content_color` directly
+    /// instead of going through this helper.)
+    pub fn framed_alarm_content<R>(
+        &self,
+        ui: &mut egui::Ui,
+        state: &ChannelState,
+        writable: bool,
+        add: impl FnOnce(&mut egui::Ui) -> R,
+    ) -> egui::InnerResponse<R> {
+        let content = self.content_color(state);
+        self.framed(ui, state, writable, move |ui| {
+            if let Some(color) = content {
+                ui.style_mut().visuals.override_text_color = Some(color);
+            }
+            add(ui)
+        })
+    }
 }
 
 /// Paint the alarm border on `rect`: a solid inside stroke, or a hand-drawn
@@ -591,6 +619,56 @@ mod tests {
         assert_eq!(b.content_color(&major), None);
         b.alarm_sensitive_content = true;
         assert_eq!(b.content_color(&major), Some(Color32::from_rgb(0xFF, 0, 0)));
+    }
+
+    #[test]
+    fn framed_alarm_content_overrides_foreground_only_when_alarm_sensitive() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        let expected = {
+            let mut b = base();
+            b.alarm_sensitive_content = true;
+            b.content_color(&st(true, true, AlarmSeverity::Major))
+        };
+        assert_eq!(expected, Some(Color32::from_rgb(0xFF, 0, 0)));
+
+        // The inner closure records the override egui sees this frame; start it at
+        // a sentinel so "no override" (None) is distinguishable from "never ran".
+        let observed = Rc::new(Cell::new(Some(Color32::PLACEHOLDER)));
+
+        // Flag off: no override is installed — the widget keeps its default colour.
+        {
+            let b = base();
+            let major = st(true, true, AlarmSeverity::Major);
+            let out = Rc::clone(&observed);
+            let mut harness = egui_kittest::Harness::new_ui(move |ui| {
+                b.framed_alarm_content(ui, &major, false, |ui| {
+                    out.set(ui.visuals().override_text_color);
+                });
+            });
+            harness.run();
+        }
+        assert_eq!(
+            observed.get(),
+            None,
+            "no override without alarm sensitivity"
+        );
+
+        // Flag on + Major: the foreground is overridden to the severity colour.
+        {
+            let mut b = base();
+            b.alarm_sensitive_content = true;
+            let major = st(true, true, AlarmSeverity::Major);
+            let out = Rc::clone(&observed);
+            let mut harness = egui_kittest::Harness::new_ui(move |ui| {
+                b.framed_alarm_content(ui, &major, false, |ui| {
+                    out.set(ui.visuals().override_text_color);
+                });
+            });
+            harness.run();
+        }
+        assert_eq!(observed.get(), expected);
     }
 
     #[test]

@@ -530,10 +530,12 @@ fn emit_text_entry(b: &mut Builder, widget: &MedmWidget, options: &Options, z: Z
     let Some((geom, addr)) = resolve_channel(b, widget, options) else {
         return;
     };
-    warn_controller_alarm_clrmod(b, widget, "text entry");
     let new_call = format!("SidmLineEdit::new(&engine, {})", medm_str(b, &addr));
     let mut builders: Vec<String> = precision_default_builder(widget).into_iter().collect();
     builders.extend(string_format_builder(b, widget, &addr));
+    // MEDM clrmod="alarm" recolours the field text by severity (medmTextEntry.c:
+    // 418-424); wired via SidmLineEdit's alarm-sensitive content.
+    builders.extend(alarm_content_builder(widget));
     // Centre the field text. This is a DELIBERATE DEVIATION from MEDM and PyDM,
     // both of which left-align text entries (MEDM's `XmTextField` has no
     // `XmNalignment`; adl2pydm sets `alignment` only on text/text-update, not on
@@ -561,7 +563,6 @@ fn emit_message_button(b: &mut Builder, widget: &MedmWidget, options: &Options, 
     let Some((geom, addr)) = resolve_channel(b, widget, options) else {
         return;
     };
-    warn_controller_alarm_clrmod(b, widget, "message button");
     let label = widget.title.clone().unwrap_or_default();
     let press = widget
         .assignments
@@ -578,6 +579,8 @@ fn emit_message_button(b: &mut Builder, widget: &MedmWidget, options: &Options, 
     if let Some(release) = widget.assignments.get("release_msg").cloned() {
         builders.push(format!(".with_release_value({})", medm_str(b, &release)));
     }
+    // MEDM clrmod="alarm" recolours the caption by severity (medmMessageButton.c:348).
+    builders.extend(alarm_content_builder(widget));
     push_channel_widget(
         b,
         z,
@@ -598,8 +601,13 @@ fn emit_menu(b: &mut Builder, widget: &MedmWidget, options: &Options, z: ZLayer)
     let Some((geom, addr)) = resolve_channel(b, widget, options) else {
         return;
     };
-    warn_controller_alarm_clrmod(b, widget, "menu");
     let new_call = format!("SidmEnumComboBox::new(&engine, {})", medm_str(b, &addr));
+    // An MEDM menu is a Motif option menu whose caption is centred (XmLabel's
+    // default XmNalignment; medmMenu.c never overrides it), so every converted
+    // menu centres — there is no per-widget `align`.
+    let mut builders = vec![".with_alignment(TextAlign::Center)".to_string()];
+    // MEDM clrmod="alarm" recolours the face caption by severity (medmMenu.c:540).
+    builders.extend(alarm_content_builder(widget));
     push_channel_widget(
         b,
         z,
@@ -608,10 +616,7 @@ fn emit_menu(b: &mut Builder, widget: &MedmWidget, options: &Options, z: ZLayer)
             ty: "SidmEnumComboBox",
             new_call: &new_call,
             connect_desc: &format!("adl2sidm: connect {addr} (menu)"),
-            // An MEDM menu is a Motif option menu whose caption is centred
-            // (XmLabel's default XmNalignment; medmMenu.c never overrides it),
-            // so every converted menu centres — there is no per-widget `align`.
-            builders: &[".with_alignment(TextAlign::Center)".to_string()],
+            builders: &builders,
             colors: WidgetColors::from_widget(widget),
             font_px: Some(font_px_from_height(geom.height)),
         },
@@ -625,7 +630,6 @@ fn emit_choice_button(b: &mut Builder, widget: &MedmWidget, options: &Options, z
     let Some((geom, addr)) = resolve_channel(b, widget, options) else {
         return;
     };
-    warn_controller_alarm_clrmod(b, widget, "choice button");
     let new_call = format!("SidmEnumButton::new(&engine, {})", medm_str(b, &addr));
     let mut builders = Vec::new();
     let stacking = widget
@@ -662,6 +666,9 @@ fn emit_choice_button(b: &mut Builder, widget: &MedmWidget, options: &Options, z
     } else {
         font_px_from_height(geom.height)
     };
+    // MEDM clrmod="alarm" recolours the choice captions by severity
+    // (medmChoiceButtons.c:375).
+    builders.extend(alarm_content_builder(widget));
     push_channel_widget(
         b,
         z,
@@ -685,9 +692,12 @@ fn emit_valuator(b: &mut Builder, widget: &MedmWidget, options: &Options, z: ZLa
     let Some((geom, addr)) = resolve_channel(b, widget, options) else {
         return;
     };
-    warn_controller_alarm_clrmod(b, widget, "valuator");
     let new_call = format!("SidmSlider::new(&engine, {})", medm_str(b, &addr));
     let mut builders = Vec::new();
+    // MEDM clrmod="alarm" recolours the value by severity (medmValuator.c:892-895).
+    // SidmSlider ships alarm-sensitive content ON (PyDM parity), so a valuator
+    // without clrmod="alarm" must turn it OFF; one with it takes the MEDM palette.
+    builders.extend(valuator_alarm_builder(widget));
     if let Some((lo, hi)) = user_defined_limits(b, widget) {
         builders.push(format!(
             ".with_limits({}, {})",
@@ -740,9 +750,10 @@ fn emit_wheel_switch(b: &mut Builder, widget: &MedmWidget, options: &Options, z:
     let Some((geom, addr)) = resolve_channel(b, widget, options) else {
         return;
     };
-    warn_controller_alarm_clrmod(b, widget, "wheel switch");
     let new_call = format!("SidmSpinbox::new(&engine, {})", medm_str(b, &addr));
     let mut builders = Vec::new();
+    // MEDM clrmod="alarm" recolours the digits by severity (medmWheelSwitch.c:390).
+    builders.extend(alarm_content_builder(widget));
     if let Some((lo, hi)) = user_defined_limits(b, widget) {
         builders.push(format!(
             ".with_limits({}, {})",
@@ -2865,10 +2876,15 @@ fn string_format_builder(b: &mut Builder, widget: &MedmWidget, addr: &str) -> Op
 /// alarm colouring needs the builder set explicitly. The MEDM palette rides
 /// along: MEDM's `alarmColor` table replaces the foreground for EVERY severity
 /// (`NO_ALARM` paints Green3 — medmWidget.c `alarmColorString`, utils.c
-/// `alarmColor`), where PyDM keeps the static colour outside an alarm. Only
-/// callers whose sidm widget actually exposes `with_alarm_sensitive_content`
-/// (`SidmLabel`, `SidmDrawing`, `SidmScaleIndicator`, `SidmByteIndicator`) may
-/// use this.
+/// `alarmColor`), where PyDM keeps the static colour outside an alarm. Every
+/// widget this is applied to exposes `with_alarm_sensitive_content` +
+/// `with_alarm_palette`: the MONITOR widgets (`SidmLabel`, `SidmDrawing`,
+/// `SidmScaleIndicator`, `SidmByteIndicator`) and, since R2-67, the CONTROLLERS
+/// (`SidmLineEdit`, `SidmPushButton`, `SidmEnumComboBox`, `SidmEnumButton`,
+/// `SidmSlider`, `SidmSpinbox`) — MEDM alarm-colours the control foreground the
+/// same way (medmTextEntry.c:418-424, medmMessageButton.c:348, medmMenu.c:540,
+/// medmChoiceButtons.c:375, medmValuator.c:892-895, medmWheelSwitch.c:390). The
+/// valuator ships the flag ON, so it uses [`valuator_alarm_builder`] instead.
 fn alarm_content_builder(widget: &MedmWidget) -> Option<String> {
     (widget.assignments.get("clrmod").map(String::as_str) == Some("alarm")).then(|| {
         ".with_alarm_sensitive_content(true)\n            \
@@ -2877,23 +2893,14 @@ fn alarm_content_builder(widget: &MedmWidget) -> Option<String> {
     })
 }
 
-/// Warn when a CONTROLLER carries `clrmod="alarm"`. MEDM alarm-colours the
-/// control's foreground by severity at runtime (medmTextEntry.c:418-424,
-/// medmMessageButton.c:348, medmMenu.c:540, medmChoiceButtons.c:375,
-/// medmValuator.c:892-895, medmWheelSwitch.c:390), but sidm exposes
-/// `with_alarm_sensitive_content` only on the MONITOR widgets (`SidmLabel`,
-/// `SidmByteIndicator`, `SidmScaleIndicator`, `SidmDrawing`) — not on
-/// `SidmLineEdit`/`SidmPushButton`/`SidmEnumComboBox`/`SidmEnumButton`/
-/// `SidmSlider`/`SidmSpinbox`. Wiring it needs a cross-crate sidm builder on those
-/// controls (sign-off-gated); until then the drop is warned, not silent.
-fn warn_controller_alarm_clrmod(b: &mut Builder, widget: &MedmWidget, kind: &str) {
-    if widget.assignments.get("clrmod").map(String::as_str) == Some("alarm") {
-        b.warnings.push(format!(
-            "line {}: {kind} clrmod=\"alarm\" not wired; sidm has no alarm-sensitive \
-             colour on this control",
-            widget.line
-        ));
-    }
+/// Alarm-content builder for the valuator (`SidmSlider`), which unlike the other
+/// controllers ships `alarm_sensitive_content` ON by default (PyDM parity,
+/// slider.py:264-265). So a MEDM valuator WITHOUT `clrmod="alarm"` must turn it
+/// OFF explicitly (else it would alarm-colour with no MEDM basis); one WITH it
+/// takes the same MEDM-palette wiring as every other widget
+/// ([`alarm_content_builder`]).
+fn valuator_alarm_builder(widget: &MedmWidget) -> Option<String> {
+    alarm_content_builder(widget).or(Some(".with_alarm_sensitive_content(false)".to_string()))
 }
 
 /// The MEDM `dynamic attribute` colour MODE (`clr`: `static`/`alarm`/`discrete`),
@@ -4656,9 +4663,10 @@ rectangle {
     }
 
     #[test]
-    fn clrmod_alarm_on_a_controller_warns_since_sidm_has_no_surface() {
-        // R2-67: controllers have no sidm alarm-sensitive builder, so clrmod="alarm"
-        // on one must warn (not silently drop) and must not emit the monitor builder.
+    fn clrmod_alarm_on_a_controller_wires_severity_content() {
+        // R2-67: clrmod="alarm" on a controller now colours its foreground by
+        // severity with MEDM's palette — the same wiring as the monitor widgets,
+        // no longer a warned silent drop.
         let adl = r#"
 "color map" {
 	colors {
@@ -4694,26 +4702,63 @@ valuator {
 }
 "#;
         let g = generate(&parse(adl), &Options::default());
-        // No controller gets the monitor-only alarm builder.
-        assert!(
-            !g.source.contains(".with_alarm_sensitive_content(true)"),
-            "controllers have no alarm-sensitive surface:\n{}",
+        // Both controllers (text entry + valuator) alarm-wire their content.
+        assert_eq!(
+            g.source
+                .matches(".with_alarm_sensitive_content(true)")
+                .count(),
+            2,
+            "both controllers alarm-wired:\n{}",
             g.source
         );
-        // Both controllers warn, named by kind.
         assert!(
-            g.warnings
-                .iter()
-                .any(|w| w.contains("text entry clrmod=\"alarm\"")),
-            "text entry alarm clrmod must warn: {:?}",
+            g.source.contains(".with_alarm_palette(AlarmPalette::Medm)"),
+            "controllers use MEDM's alarm palette:\n{}",
+            g.source
+        );
+        // The old "not wired" warning is gone — the drop is closed, not warned.
+        assert!(
+            !g.warnings.iter().any(|w| w.contains("not wired")),
+            "alarm clrmod is wired, not warned: {:?}",
             g.warnings
         );
+    }
+
+    #[test]
+    fn valuator_without_alarm_clrmod_turns_off_default_content_sensitivity() {
+        // SidmSlider ships alarm_sensitive_content ON (PyDM parity); a MEDM
+        // valuator without clrmod="alarm" must cancel it so it does not
+        // alarm-colour with no MEDM basis.
+        let adl = r#"
+"color map" {
+	colors {
+		ffffff,
+		000000,
+	}
+}
+valuator {
+	object {
+		x=0
+		y=0
+		width=120
+		height=20
+	}
+	control {
+		chan="$(P)lvl"
+		clr=0
+	}
+}
+"#;
+        let g = generate(&parse(adl), &Options::default());
         assert!(
-            g.warnings
-                .iter()
-                .any(|w| w.contains("valuator clrmod=\"alarm\"")),
-            "valuator alarm clrmod must warn: {:?}",
-            g.warnings
+            g.source.contains(".with_alarm_sensitive_content(false)"),
+            "valuator default content sensitivity turned off:\n{}",
+            g.source
+        );
+        assert!(
+            !g.source.contains(".with_alarm_sensitive_content(true)"),
+            "no alarm colouring without clrmod=alarm:\n{}",
+            g.source
         );
     }
 
