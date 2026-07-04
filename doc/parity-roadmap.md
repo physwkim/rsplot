@@ -995,8 +995,9 @@ the C++ `median<T>()` in `include/median_filter.hpp`) and `actions/{medfilt,hist
   NEAREST corner clamp, constant image, conditional keep-vs-fix, 1D≡2D-(k,1), 1×1 identity, NaN cases).
 - **Pixel-intensity histogram**: pure `pixel_intensity_histogram(pixels, n_bins) → Option<PixelHistogram>`
   (edges/counts/min/max/mean/std/sum/n_bins) in `analysis.rs`. Faithful to silx `PixelIntensitiesHistoAction`
-  / `HistogramWidget._updateFromItem` (histogram.py:226-419): bins = `min(1024, floor(sqrt(finite_count)))`
-  then `max(2, …)` (a `Some(n)` override also floored at 2); range = finite `(min,max)` (NaN/±inf excluded
+  / `HistogramWidget._updateFromItem` (histogram.py:226-419): bins = `min(1024, floor(sqrt(array.size)))`
+  — the TOTAL element count, NaN/inf included (silx histogram.py:250; corrected from a finite-count drift,
+  R2-20) — then `max(2, …)` (a `Some(n)` override also floored at 2); range = finite `(min,max)` (NaN/±inf excluded
   from range, counts AND stats); `last_bin_closed=True` (max lands in the last bin, interior `v` →
   `floor((v-min)·n_bins/range)`); degenerate `min==max` range enlarged exactly as silx (`(-0.01,0.01)` at 0,
   else sorted `(v·0.99, v·1.01)`); stats = `nanmean`/population `nanstd`(ddof=0)/`nansum`; `None` on all-not-

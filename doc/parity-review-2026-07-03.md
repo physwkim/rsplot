@@ -930,6 +930,21 @@ Impact: toggling the ruler off/on restores the last measurement in silx; in sipl
 
 ### R2-20: Pixel-histogram default bin count derived from finite-pixel count; silx uses total `array.size`
 
+**FIXED (analysis cluster):** `pixel_intensity_histogram` now guesses
+`min(1024, floor(sqrt(pixels.len())))` — the TOTAL element count, NaN/inf
+included, exactly silx `guessed_nbins = min(1024, int(numpy.sqrt(
+array.size)))` (histogram.py:250); only the range/stats stay
+finite-filtered. Doc comment and the drifted roadmap Wave-7C text
+(parity-roadmap.md:998, which stated the finite formula while labeling the
+port faithful) both corrected. Anchor audit: the ColormapDialog histogram
+path (`core/histogram.rs:57`) already used total `data.len()` = silx
+ColormapDialog.py:1277 `data.size` — distinct, no change. Recorded for
+completeness (unported UI chrome around the same widget, unchanged this
+round): silx's integer-dtype `xmax−xmin` bin clamp is a documented N/A
+(real-valued pixel model); the "Use weights" checkbox and the 2..9999
+bin-spin range remain unported. Test: 100 elements with 36 NaN → 10 bins
+(finite-count formula would give 8), 64 counted, range from finite pixels.
+
 Severity: Low
 
 Rust: `src/widget/actions/analysis.rs:279-280` — `guessed = sqrt(finite_count)`, `nbins = guessed.min(1024).max(2)`.

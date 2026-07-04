@@ -220,11 +220,13 @@ pub struct PixelHistogram {
 /// `PixelIntensitiesHistoAction` / `HistogramWidget._updateFromItem`.
 ///
 /// silx defaults reproduced here:
-/// - Bin count: `min(1024, floor(sqrt(finite_count)))`, then clamped to a
-///   minimum of 2 (silx `max(2, guessed_nbins)`). When `n_bins` is `Some(n)`
-///   the caller's value is used instead (still floored at 2), mirroring the
-///   widget's editable bin-count field. (silx's integer-dtype `xmax - xmin`
-///   clamp does not apply: these pixels are real-valued.)
+/// - Bin count: `min(1024, floor(sqrt(total_size)))`, then clamped to a
+///   minimum of 2 (silx `guessed_nbins = min(1024, int(numpy.sqrt(array.size)))`
+///   then `max(2, ...)`, histogram.py:250-256 — the **total** element count,
+///   NaN/inf included; only the range is finite-filtered). When `n_bins` is
+///   `Some(n)` the caller's value is used instead (still floored at 2),
+///   mirroring the widget's editable bin-count field. (silx's integer-dtype
+///   `xmax - xmin` clamp does not apply: these pixels are real-valued.)
 /// - Range: the finite `(min, max)` of the pixels (silx `min_max(finite=True)`).
 ///   Non-finite pixels (NaN, ±inf) are excluded from both the range and the
 ///   counts. A degenerate range (`min == max`) is enlarged exactly as silx does
@@ -273,10 +275,11 @@ pub fn pixel_intensity_histogram(pixels: &[f64], n_bins: Option<usize>) -> Optio
     }
     let std = (var_acc / finite_count as f64).sqrt();
 
-    // Bin count: silx guessed = min(1024, floor(sqrt(size))), then max(2, ...).
-    // Here `size` is the finite-pixel count (the values that actually populate
-    // the histogram). A caller-supplied count overrides the guess.
-    let guessed = (finite_count as f64).sqrt().floor() as usize;
+    // Bin count: silx guessed = min(1024, int(sqrt(array.size))), then
+    // max(2, ...) — the TOTAL element count, NaN/inf included (only the range
+    // is finite-filtered, histogram.py:250-256). A caller-supplied count
+    // overrides the guess.
+    let guessed = (pixels.len() as f64).sqrt().floor() as usize;
     let nbins = n_bins.unwrap_or_else(|| guessed.min(1024)).max(2);
 
     // Histogram range: enlarge a degenerate (min == max) range as silx does.
@@ -596,9 +599,28 @@ mod tests {
     /// The bin count is floored at 2 even when sqrt(size) would be smaller.
     #[test]
     fn histogram_bin_count_floored_at_two() {
-        // 1 finite pixel -> floor(sqrt(1)) = 1, clamped up to 2.
+        // 2 elements -> floor(sqrt(2)) = 1, clamped up to 2.
         let h = pixel_intensity_histogram(&[3.0, f64::NAN], None).expect("one finite pixel");
         assert_eq!(h.n_bins, 2);
+    }
+
+    /// The default bin guess uses the TOTAL element count, NaN/inf included —
+    /// silx `min(1024, int(numpy.sqrt(array.size)))` (histogram.py:250); only
+    /// the range is finite-filtered. A finite-count formula would give
+    /// floor(sqrt(64)) = 8 here.
+    #[test]
+    fn histogram_bin_guess_counts_nan_pixels() {
+        let pixels: Vec<f64> = (0..100)
+            .map(|i| if i < 36 { f64::NAN } else { i as f64 })
+            .collect();
+        let h = pixel_intensity_histogram(&pixels, None).expect("finite pixels present");
+        assert_eq!(h.n_bins, 10, "100 total elements -> floor(sqrt(100)) = 10");
+        assert_eq!(
+            h.counts.iter().sum::<u64>(),
+            64,
+            "only the finite pixels are counted"
+        );
+        assert_eq!(h.min, 36.0, "range comes from the finite pixels only");
     }
 
     /// A value strictly below the range minimum is discarded (cannot happen for
