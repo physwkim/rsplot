@@ -2311,7 +2311,12 @@ fn related_display_entries(b: &mut Builder, widget: &MedmWidget) -> Vec<RdEntry>
             continue;
         };
         let args = spec.get("args").cloned().unwrap_or_default();
-        let replace = spec.get("mode").is_some_and(|m| m.contains("replace"));
+        // MEDM's per-entry replace flag is the `policy` key with value
+        // "replace display" (medmRelatedDisplay.c:666-671, stringValueTable
+        // [REPLACE_DISPLAY]); the file format has no `mode` key — that is MEDM's
+        // internal field name. Reading `mode` here meant `replace` was never
+        // detected and the replace-mode deviation warning could never fire.
+        let replace = spec.get("policy").is_some_and(|p| p == "replace display");
         let caption = spec
             .get("label")
             .filter(|s| !s.is_empty())
@@ -7768,6 +7773,55 @@ composite {
             g.source
         );
         assert!(g.source.contains("ui.close();"), "{}", g.source);
+    }
+
+    #[test]
+    fn related_display_replace_flag_reads_the_policy_key_not_mode() {
+        // R2-64: MEDM's per-entry replace flag is `policy="replace display"`
+        // (medmRelatedDisplay.c:666-671). The file format has no `mode` key, so a
+        // spec keyed on `mode` must NOT be read as replace.
+        let entry = |pairs: &[(&str, &str)]| -> BTreeMap<String, String> {
+            pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect()
+        };
+        let widget = |spec: BTreeMap<String, String>| MedmWidget {
+            records: [("displays".to_string(), vec![spec])].into_iter().collect(),
+            line: 1,
+            ..MedmWidget::default()
+        };
+
+        let mut b = Builder::default();
+        let replaced = related_display_entries(
+            &mut b,
+            &widget(entry(&[("name", "c.adl"), ("policy", "replace display")])),
+        );
+        assert_eq!(replaced.len(), 1);
+        assert!(
+            replaced[0].replace,
+            "policy=\"replace display\" must set replace"
+        );
+
+        // The old (wrong) `mode` key is not the file format's key -> not replace.
+        let via_mode = related_display_entries(
+            &mut b,
+            &widget(entry(&[("name", "c.adl"), ("mode", "replace display")])),
+        );
+        assert!(
+            !via_mode[0].replace,
+            "a `mode` key must not be read as replace"
+        );
+
+        // The non-replace policy value stays non-replace.
+        let created = related_display_entries(
+            &mut b,
+            &widget(entry(&[
+                ("name", "c.adl"),
+                ("policy", "create new display"),
+            ])),
+        );
+        assert!(!created[0].replace);
     }
 
     #[test]

@@ -1205,6 +1205,25 @@ Impact: every pre-MEDM-2.2 `.adl` converts with all static graphics in default b
 
 ### R2-64: Related display `visual` never read — "invisible" hotspots render as opaque buttons, row/column-of-buttons render as a menu; entry `policy` misread as `mode`
 
+**PARTIALLY FIXED (silent-drop cluster) — `policy` misread closed:** the per-entry
+replace flag now reads the `policy` key with value `"replace display"`
+(medmRelatedDisplay.c:666-671, stringValueTable[REPLACE_DISPLAY]="replace display",
+verified in the C source). The `.adl` format has no `mode` key — that is MEDM's
+internal field name — so `spec.get("mode")` never matched and the replace-mode
+deviation warning (`rd_click`) could never fire. Test:
+`related_display_replace_flag_reads_the_policy_key_not_mode`.
+
+**UNFIXED (sign-off-gated) — `visual` rendering port:** honoring `visual`
+(`"a row of buttons"`/`"a column of buttons"`/`"invisible"`, tokens
+stringValueTable[FIRST_RD_VISUAL+1..+3], default `"menu"`) is a UI feature port,
+not a key fix: RD_HIDDEN_BTN draws no widget at all (a sparse 4×4 stipple over the
+underlying graphic, click handled globally — medmRelatedDisplay.c:562-593), and
+row/column create N side-by-side buttons (:461-556). Faithful sidm emit requires
+rendering decisions the user should sign off on — how "invisible" a GUI hotspot
+should be to stay usable, whether an N-target hidden button pops a menu, and
+equal-cell vs content-sized button layout. Deferred to the sign-off batch rather
+than sprawled into here.
+
 Severity: Medium
 
 Rust: `adl2sidm/src/codegen.rs:2076-2157` — `emit_related_display` chooses plain-button (1 entry) vs `menu_button` (N entries) purely from entry count; no code reads the `visual` key (zero hits in `codegen.rs`), and `style_prelude` (`:2149-2153`) paints the widget's `bclr` as a filled rect over the full geometry. `:2265` — `related_display_entries` reads `spec.get("mode")` for the replace flag.
