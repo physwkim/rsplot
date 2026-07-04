@@ -1215,6 +1215,17 @@ Impact: screens that overlay invisible related displays on graphics (a standard 
 
 ### R2-65: Text-update/text-entry `format` types beyond `string` silently dropped — `exponential` and `hexadecimal` have exact sidm surfaces
 
+**FIXED (silent-drop cluster):** `string_format_builder` now maps `exponential`
+(+ the backward-compat `decimal- exponential notation`) → `DisplayFormat::Exponential`
+and `hexadecimal` (+ misspelling `hexidecimal`) → `DisplayFormat::Hex`, keeps
+`string`/`$`-suffix → `DisplayFormat::String`, and treats `decimal`/absent as the
+fixed-point default (no builder). The formats with no sidm surface — `engr.
+notation`, `compact`, `truncated`, `octal`, `sexagesimal`/`-hms`/`-dms` — now emit
+a converter warning instead of a silent drop. Tokens verified against MEDM
+`displayList.h` stringValueTable[22..32] and the `medmTextUpdate.c:581-600`
+backward-compat aliases. Test:
+`exponential_and_hex_formats_map_to_sidm_and_the_rest_warn`.
+
 Severity: Medium
 
 Rust: `adl2sidm/src/codegen.rs:2561-2568` — `string_format_builder` maps only `format="string"` (or a `$`-suffixed PV) to `DisplayFormat::String`; every other MEDM format (`exponential`, `engr. notation`, `compact`, `truncated`, `hexadecimal`, `octal`, `sexagesimal*`) falls through to `None` with **no warning**, leaving sidm's fixed-point default. Call sites `:499` (text update), `:526` (text entry).

@@ -505,7 +505,7 @@ fn emit_text_update(b: &mut Builder, widget: &MedmWidget, options: &Options, z: 
     };
     let new_call = format!("SidmLabel::new(&engine, {})", medm_str(b, &addr));
     let mut builders: Vec<String> = precision_default_builder(widget).into_iter().collect();
-    builders.extend(string_format_builder(widget, &addr));
+    builders.extend(string_format_builder(b, widget, &addr));
     builders.extend(alarm_content_builder(widget));
     if let Some((variant, _)) = text_alignment(widget) {
         builders.push(format!(".with_alignment(TextAlign::{variant})"));
@@ -532,7 +532,7 @@ fn emit_text_entry(b: &mut Builder, widget: &MedmWidget, options: &Options, z: Z
     };
     let new_call = format!("SidmLineEdit::new(&engine, {})", medm_str(b, &addr));
     let mut builders: Vec<String> = precision_default_builder(widget).into_iter().collect();
-    builders.extend(string_format_builder(widget, &addr));
+    builders.extend(string_format_builder(b, widget, &addr));
     // Centre the field text. This is a DELIBERATE DEVIATION from MEDM and PyDM,
     // both of which left-align text entries (MEDM's `XmTextField` has no
     // `XmNalignment`; adl2pydm sets `alignment` only on text/text-update, not on
@@ -2615,19 +2615,44 @@ fn precision_default_builder(widget: &MedmWidget) -> Option<String> {
     Some(format!(".with_precision({n})"))
 }
 
-/// A `.with_format(DisplayFormat::String)` builder when MEDM asks for string
-/// rendering — either an explicit `format="string"` or a long-string PV (a
-/// `$`-suffixed channel name). Mirrors `adl2pydm`'s `write_display_format`,
-/// which sets PyDM's `displayFormat=String` on exactly these two conditions for
-/// text-update / text-entry widgets. `None` otherwise (the widget keeps its
-/// `DisplayFormat::Default`, the only other format `adl2pydm` emits here).
-fn string_format_builder(widget: &MedmWidget, addr: &str) -> Option<String> {
-    let explicit_string = widget.assignments.get("format").map(String::as_str) == Some("string");
-    if explicit_string || addr.ends_with('$') {
-        Some(".with_format(DisplayFormat::String)".to_string())
-    } else {
-        None
+/// A `.with_format(DisplayFormat::…)` builder from a text-update / text-entry
+/// widget's MEDM `format` key (and the `$`-suffix long-string convention). MEDM's
+/// runtime renders `exponential` and `hexadecimal` in those representations
+/// (`medmTextUpdate.c:300-345`), which sidm exposes as `DisplayFormat::Exponential`
+/// / `Hex`; `string` decodes a CHAR waveform. `decimal` and an absent key are the
+/// fixed-point default (sidm's `DisplayFormat::Default`), so they emit nothing.
+/// The remaining MEDM formats (`engr. notation`, `compact`, `truncated`, `octal`,
+/// `sexagesimal*`) have no sidm surface and are WARNED, not silently dropped —
+/// unlike `adl2pydm`, which maps only `string`.
+fn string_format_builder(b: &mut Builder, widget: &MedmWidget, addr: &str) -> Option<String> {
+    // A `$`-suffixed PV is MEDM's CHAR-waveform-as-string convention regardless
+    // of the `format` key (adl2pydm output_handler.py:266-267).
+    if addr.ends_with('$') {
+        return Some(".with_format(DisplayFormat::String)".to_string());
     }
+    // MEDM `format` tokens (displayList.h stringValueTable[22..32], plus the
+    // backward-compat aliases parsed in medmTextUpdate.c:581-600). Absent `format`
+    // is the fixed-point default, which sidm's `DisplayFormat::Default` already
+    // renders — so no builder and no warning.
+    let variant = match widget.assignments.get("format")?.as_str() {
+        "string" => "String",
+        "exponential" | "decimal- exponential notation" => "Exponential",
+        "hexadecimal" | "hexidecimal" => "Hex",
+        // MEDM's plain fixed-point; identical to sidm's default rendering.
+        "decimal" => return None,
+        // No sidm surface: `engr. notation`, `compact`, `truncated`, `octal`,
+        // `sexagesimal`/`-hms`/`-dms`. Never a silent drop — warn and fall back to
+        // the fixed-point default.
+        other => {
+            b.warnings.push(format!(
+                "line {}: text format {other:?} has no sidm equivalent; rendered as \
+                 the fixed-point default",
+                widget.line
+            ));
+            return None;
+        }
+    };
+    Some(format!(".with_format(DisplayFormat::{variant})"))
 }
 
 /// A `.with_alarm_sensitive_content(true)` builder when MEDM `clrmod="alarm"` —
@@ -3954,6 +3979,86 @@ text {
                 .contains("SidmLabel::new(&engine, __m.expand(\"ca://$(P)rbv\").as_str())"),
             "decimal text update should still be emitted:\n{}",
             g.source
+        );
+    }
+
+    #[test]
+    fn exponential_and_hex_formats_map_to_sidm_and_the_rest_warn() {
+        // R2-65: `exponential`/`hexadecimal` have exact sidm surfaces; the
+        // formats with no surface warn instead of silently rendering fixed-point.
+        let adl = r#"
+"color map" {
+	colors {
+		ffffff,
+		000000,
+	}
+}
+"text update" {
+	object {
+		x=0
+		y=0
+		width=80
+		height=18
+	}
+	monitor {
+		chan="$(P)e"
+		clr=0
+	}
+	format="exponential"
+}
+"text update" {
+	object {
+		x=0
+		y=20
+		width=80
+		height=18
+	}
+	monitor {
+		chan="$(P)h"
+		clr=0
+	}
+	format="hexadecimal"
+}
+"text entry" {
+	object {
+		x=0
+		y=40
+		width=80
+		height=18
+	}
+	control {
+		chan="$(P)o"
+	}
+	format="octal"
+}
+"#;
+        let g = generate(&parse(adl), &Options::default());
+        assert_eq!(
+            g.source
+                .matches(".with_format(DisplayFormat::Exponential)")
+                .count(),
+            1,
+            "format=exponential must map to DisplayFormat::Exponential:\n{}",
+            g.source
+        );
+        assert_eq!(
+            g.source.matches(".with_format(DisplayFormat::Hex)").count(),
+            1,
+            "format=hexadecimal must map to DisplayFormat::Hex:\n{}",
+            g.source
+        );
+        // `octal` has no sidm surface: no builder, but a warning (never silent).
+        assert!(
+            !g.source.contains("DisplayFormat::Octal"),
+            "octal has no sidm surface and must not be emitted:\n{}",
+            g.source
+        );
+        assert!(
+            g.warnings
+                .iter()
+                .any(|w| w.contains("text format \"octal\"") && w.contains("no sidm equivalent")),
+            "octal must warn, not silently drop: {:?}",
+            g.warnings
         );
     }
 
