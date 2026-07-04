@@ -1236,6 +1236,29 @@ Impact: a default sidm scatter/event curve retains 15× more points than PyDM be
 
 ### R2-59: `calc://` plain dialect cannot evaluate PyDM's expression vocabulary — bare `math` names, `np`, `epics_string`, `epics_unsigned` all fail and the failure is silent
 
+**FIXED (R1-family recurrence batch):** the plain dialect now evaluates in the
+PyDM calc vocabulary (`pydm_calc_context()` in `calc_plugin.rs`): the bare
+`math.__dict__` names PyDM injects (28 unary fns incl. `erf`/`erfc` via
+siplot's SunPro port — now `pub use`d from `siplot::core::fitting` — plus
+`atan2`/`copysign`/`fmod`/`hypot`/`pow`, two-arity `log`, `ldexp`,
+`isnan`/`isinf`/`isfinite`, `isclose`, and constants `pi`/`e`/`tau`/`inf`/
+`nan`), plus `epics_string` and `epics_unsigned` (default bits=32, explicit
+bits, ≥63-bit float fallback). A `Bytes` char-waveform child now binds as its
+NUL-terminated UTF-8 string (the `epics_string` transform applied at binding,
+since evalexpr has no byte-array value; `epics_string(A)` is then
+identity-on-string so PyDM screens work unchanged). The silent half is closed:
+an eval/bind failure logs a warn **once per connection** (PyDM
+`logger.exception`s every failure; sidm's 50 ms poll would repeat it
+indefinitely) and the warn-once flag is asserted by test. Documented remaining
+gaps (all now *visible* as logged eval errors, enumerated on
+`pydm_calc_context`): `np`/`numpy` and dotted `math.` spellings, Python's
+implicit builtins beyond evalexpr's own, `frexp`/`modf`, iterable
+`fsum`/`prod`/`dist`, combinatorics, `gamma`/`lgamma`/`nextafter`/`ulp`/
+`remainder`. Tests: `bare_math_names_evaluate_like_pydm`,
+`epics_unsigned_reinterprets_negative_ints`,
+`bytes_child_binds_as_nul_terminated_string_for_epics_string`,
+`eval_failure_warns_once_and_publishes_nothing`.
+
 Severity: Medium
 
 Rust: `sidm/src/data_plugins/calc_plugin.rs:341-357` — the default (non-medm) dialect feeds the expression to evalexpr, whose math builtins are namespaced (`math::sin`, no bare `sin`, no `pi`, no numpy, no EPICS helpers); `eval_with_context(expr, &ctx).ok()?` maps every parse/eval error to `None` = "publish nothing", with no log.

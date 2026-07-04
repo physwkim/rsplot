@@ -1698,7 +1698,7 @@ mod sunpro_erf {
     }
 }
 
-use sunpro_erf::{erf, erfc};
+pub use sunpro_erf::{erf, erfc};
 
 /// The C `sum_step*` edge scale: `denom = fwhm * sqrt(2) / (2*sqrt(2*LOG2))`,
 /// i.e. `sigma * sqrt(2)`. The erf argument is `(x - centre) / denom`.

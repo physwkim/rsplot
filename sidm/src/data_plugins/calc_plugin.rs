@@ -18,9 +18,18 @@
 //!
 //! Unlike PyDM's `eval()` over Python with numpy, sidm evaluates with
 //! [`evalexpr`] (a pure-Rust evaluator: arithmetic, comparison, boolean, and the
-//! built-in `math::*` functions). Only **scalar** children participate — an
-//! array-valued child leaves its variable unset, so an expression referencing it
-//! does not evaluate until/unless it carries a scalar.
+//! built-in `math::*` functions), in the PyDM calc vocabulary
+//! ([`pydm_calc_context`]): every bare `math` name PyDM injects (`sin(A)`,
+//! `pi`, `floor(B)`, …) plus `epics_string` / `epics_unsigned`
+//! (`CalcThread.eval_env`, `calc_plugin.py:50-53`; the gaps — `np`, dotted
+//! `math.` spellings, Python builtins — are enumerated on that function). Only
+//! **scalar** children participate — an array-valued child leaves its variable
+//! unset, so an expression referencing it does not evaluate until/unless it
+//! carries a scalar — except a [`PvValue::Bytes`] char waveform, which binds as
+//! its NUL-terminated string (the `epics_string` transform). An expression that
+//! fails to evaluate publishes nothing and **warns once** per connection
+//! (PyDM `logger.exception`s every failure, `calc_plugin.py:174-179`; sidm's
+//! 50 ms poll would repeat the message indefinitely, so it logs once).
 //!
 //! # The MEDM CALC dialect (`?dialect=medm`)
 //!
@@ -85,7 +94,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use epics_base_rs::calc as medm_calc;
-use evalexpr::{ContextWithMutableVariables, HashMapContext, Value, eval_with_context};
+use evalexpr::{
+    ContextWithMutableFunctions, ContextWithMutableVariables, EvalexprError, Function,
+    HashMapContext, Value, eval_with_context,
+};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -312,7 +324,7 @@ fn evaluate(
     warned_eval: &mut bool,
 ) -> Option<PvValue> {
     match evaluator {
-        Evaluator::Evalexpr(expr) => evaluate_evalexpr(expr, children, prev),
+        Evaluator::Evalexpr(expr) => evaluate_evalexpr(id, expr, children, prev, warned_eval),
         Evaluator::Medm {
             compiled,
             operand_indices,
@@ -335,26 +347,237 @@ fn evaluate(
     }
 }
 
-/// Evaluate `expr` against the children's current scalar values plus `prev_res`.
-/// Returns `None` (skip) when any variable lacks a scalar value or the
-/// expression fails to evaluate — matching PyDM's "skip until all values set".
+/// Evaluate `expr` against the children's current scalar values plus `prev_res`,
+/// in the PyDM calc vocabulary ([`pydm_calc_context`]). Returns `None` (skip)
+/// when any variable lacks a bindable value — matching PyDM's "skip until all
+/// values set" — and `None` **with a warn-once log** when the expression itself
+/// fails, matching PyDM's `logger.exception` on an `eval` failure
+/// (`calc_plugin.py:174-179`; PyDM logs every failure, sidm once per connection
+/// — the 50 ms poll would otherwise repeat the same message indefinitely).
 fn evaluate_evalexpr(
+    id: &str,
     expr: &str,
     children: &[(String, Channel)],
     prev: Option<&PvValue>,
+    warned_eval: &mut bool,
 ) -> Option<PvValue> {
-    let mut ctx = HashMapContext::new();
+    let mut ctx = pydm_calc_context();
     for (name, ch) in children {
         let value = ch.read(|s| s.value.clone());
         let var = value.as_ref().and_then(pv_to_evalexpr)?;
-        ctx.set_value(name.clone(), var).ok()?;
+        if let Err(err) = ctx.set_value(name.clone(), var) {
+            if !*warned_eval {
+                *warned_eval = true;
+                log::warn!("{id}: cannot bind calc variable {name:?} ({err}); publishing nothing");
+            }
+            return None;
+        }
     }
     if let Some(prev_var) = prev.and_then(pv_to_evalexpr) {
         // Best-effort: a missing `prev_res` only matters if the expression uses
         // it, in which case the eval below fails and we skip — same as PyDM.
         let _ = ctx.set_value("prev_res".to_owned(), prev_var);
     }
-    evalexpr_to_pv(&eval_with_context(expr, &ctx).ok()?)
+    match eval_with_context(expr, &ctx) {
+        Ok(value) => evalexpr_to_pv(&value),
+        Err(err) => {
+            if !*warned_eval {
+                *warned_eval = true;
+                log::warn!("{id}: calc expression failed ({err}); publishing nothing");
+            }
+            None
+        }
+    }
+}
+
+/// The PyDM calc evaluation vocabulary (`CalcThread.eval_env`,
+/// `calc_plugin.py:50-53`): every non-underscore name of Python's `math` module
+/// injected **bare** (`sin(A)`, `pi`, `floor(B)` — no `math.` prefix needed),
+/// plus the two EPICS helpers `epics_string` / `epics_unsigned`. evalexpr's own
+/// builtins (`min`, `max`, `len`, `math::*` under the `::` spelling) remain
+/// available alongside.
+///
+/// Deliberate gaps, all *visible* (an unknown name is an eval error, which
+/// [`evaluate_evalexpr`] now logs): the `np`/`numpy` namespaces and the dotted
+/// `math.sin` spelling (evalexpr has no attribute syntax; sidm's value model is
+/// scalar, so the array vocabulary has nothing to operate on); Python's
+/// implicit `__builtins__` (`abs`, `round`, `int`, `str`, …) beyond what
+/// evalexpr provides; the tuple-returning `frexp`/`modf`; the iterable-consuming
+/// `fsum`/`prod`/`dist`/`sumprod`/`isqrt`; the integer-combinatoric
+/// `factorial`/`comb`/`perm`/`gcd`/`lcm`; and `gamma`/`lgamma`/`nextafter`/
+/// `ulp`/`remainder` (no std implementation; `erf`/`erfc` are covered by
+/// siplot's SunPro port).
+fn pydm_calc_context() -> HashMapContext {
+    /// A bare math-vocabulary entry: Python name -> f64 implementation.
+    type Unary = (&'static str, fn(f64) -> f64);
+    type Binary = (&'static str, fn(f64, f64) -> f64);
+    type Predicate = (&'static str, fn(f64) -> bool);
+
+    let mut ctx = HashMapContext::new();
+
+    // Constants (math.pi, math.e, math.tau, math.inf, math.nan).
+    for (name, value) in [
+        ("pi", std::f64::consts::PI),
+        ("e", std::f64::consts::E),
+        ("tau", std::f64::consts::TAU),
+        ("inf", f64::INFINITY),
+        ("nan", f64::NAN),
+    ] {
+        ctx.set_value(name.to_owned(), Value::Float(value))
+            .expect("HashMapContext is mutable");
+    }
+
+    // 1-argument float functions.
+    let unary: [Unary; 28] = [
+        ("acos", f64::acos),
+        ("acosh", f64::acosh),
+        ("asin", f64::asin),
+        ("asinh", f64::asinh),
+        ("atan", f64::atan),
+        ("atanh", f64::atanh),
+        ("cbrt", f64::cbrt),
+        ("ceil", f64::ceil),
+        ("cos", f64::cos),
+        ("cosh", f64::cosh),
+        ("degrees", f64::to_degrees),
+        ("erf", siplot::core::fitting::erf),
+        ("erfc", siplot::core::fitting::erfc),
+        ("exp", f64::exp),
+        ("exp2", f64::exp2),
+        ("expm1", f64::exp_m1),
+        ("fabs", f64::abs),
+        ("floor", f64::floor),
+        ("log10", f64::log10),
+        ("log1p", f64::ln_1p),
+        ("log2", f64::log2),
+        ("radians", f64::to_radians),
+        ("sin", f64::sin),
+        ("sinh", f64::sinh),
+        ("sqrt", f64::sqrt),
+        ("tan", f64::tan),
+        ("tanh", f64::tanh),
+        ("trunc", f64::trunc),
+    ];
+    for (name, f) in unary {
+        ctx.set_function(
+            name.to_owned(),
+            Function::new(move |arg| Ok(Value::Float(f(arg.as_number()?)))),
+        )
+        .expect("HashMapContext is mutable");
+    }
+
+    // 2-argument float functions.
+    let binary: [Binary; 5] = [
+        ("atan2", f64::atan2),
+        ("copysign", f64::copysign),
+        ("fmod", |x, y| x % y), // C fmod: sign of x, as Python's
+        ("hypot", f64::hypot),
+        ("pow", f64::powf),
+    ];
+    for (name, f) in binary {
+        ctx.set_function(
+            name.to_owned(),
+            Function::new(move |arg| {
+                let args = arg.as_fixed_len_tuple(2)?;
+                Ok(Value::Float(f(args[0].as_number()?, args[1].as_number()?)))
+            }),
+        )
+        .expect("HashMapContext is mutable");
+    }
+
+    // log(x) = ln, log(x, base) — Python math.log's two arities.
+    ctx.set_function(
+        "log".to_owned(),
+        Function::new(|arg| match arg {
+            Value::Tuple(args) if args.len() == 2 => {
+                let (x, base): (f64, f64) = (args[0].as_number()?, args[1].as_number()?);
+                Ok(Value::Float(x.log(base)))
+            }
+            _ => {
+                let x: f64 = arg.as_number()?;
+                Ok(Value::Float(x.ln()))
+            }
+        }),
+    )
+    .expect("HashMapContext is mutable");
+
+    // ldexp(x, i) = x * 2^i.
+    ctx.set_function(
+        "ldexp".to_owned(),
+        Function::new(|arg| {
+            let args = arg.as_fixed_len_tuple(2)?;
+            let (x, i): (f64, f64) = (args[0].as_number()?, args[1].as_number()?);
+            Ok(Value::Float(x * i.exp2()))
+        }),
+    )
+    .expect("HashMapContext is mutable");
+
+    // Predicates → Boolean, as Python's.
+    let predicates: [Predicate; 3] = [
+        ("isnan", f64::is_nan),
+        ("isinf", f64::is_infinite),
+        ("isfinite", f64::is_finite),
+    ];
+    for (name, f) in predicates {
+        ctx.set_function(
+            name.to_owned(),
+            Function::new(move |arg| Ok(Value::Boolean(f(arg.as_number()?)))),
+        )
+        .expect("HashMapContext is mutable");
+    }
+
+    // isclose(a, b) with Python's defaults (rel_tol=1e-9, abs_tol=0.0);
+    // the keyword arguments have no evalexpr spelling.
+    ctx.set_function(
+        "isclose".to_owned(),
+        Function::new(|arg| {
+            let args = arg.as_fixed_len_tuple(2)?;
+            let (a, b): (f64, f64) = (args[0].as_number()?, args[1].as_number()?);
+            Ok(Value::Boolean((a - b).abs() <= 1e-9 * a.abs().max(b.abs())))
+        }),
+    )
+    .expect("HashMapContext is mutable");
+
+    // epics_string(value): PyDM's char-waveform→string helper
+    // (calc_plugin.py:19-33). sidm already binds a Bytes child as its
+    // NUL-terminated UTF-8 string (`pv_to_evalexpr`), so this is identity on
+    // strings — it exists so PyDM screens spelling `epics_string(A)` work
+    // unchanged. The `string_encoding` second argument is not supported
+    // (sidm decodes UTF-8 lossily); passing one is a visible eval error.
+    ctx.set_function(
+        "epics_string".to_owned(),
+        Function::new(|arg| Ok(Value::String(arg.as_string()?))),
+    )
+    .expect("HashMapContext is mutable");
+
+    // epics_unsigned(value, bits=32): reinterpret a negative signed integer
+    // as unsigned (calc_plugin.py:36-47).
+    ctx.set_function(
+        "epics_unsigned".to_owned(),
+        Function::new(|arg| {
+            let (value, bits) = match arg {
+                Value::Tuple(args) if args.len() == 2 => {
+                    (args[0].as_int()?, u32::try_from(args[1].as_int()?).ok())
+                }
+                _ => (arg.as_int()?, Some(32)),
+            };
+            let bits = bits.ok_or_else(|| {
+                EvalexprError::CustomMessage("epics_unsigned: bits must be >= 0".to_owned())
+            })?;
+            Ok(if value >= 0 {
+                Value::Int(value)
+            } else if bits < 63 {
+                Value::Int((1i64 << bits) + value)
+            } else {
+                // 2^bits overflows i64 — return the float Python's arbitrary
+                // precision would print (exact for bits <= 52 either way).
+                Value::Float((bits as f64).exp2() + value as f64)
+            })
+        }),
+    )
+    .expect("HashMapContext is mutable");
+
+    ctx
 }
 
 /// Evaluate a compiled MEDM CALC expression over the children (MEDM
@@ -475,6 +698,15 @@ fn pv_to_evalexpr(value: &PvValue) -> Option<Value> {
         PvValue::Bool(b) => Value::Boolean(*b),
         PvValue::Str(s) => Value::String(s.to_string()),
         PvValue::Enum { index, .. } => Value::Int(i64::from(*index)),
+        // A char waveform binds as its NUL-terminated UTF-8 string — the
+        // `epics_string` transform (calc_plugin.py:19-33) applied at binding
+        // time, since evalexpr has no byte-array value. PyDM binds the raw
+        // ndarray and lets `epics_string(A)` convert; sidm's evalexpr
+        // `epics_string` is therefore identity-on-string.
+        PvValue::Bytes(b) => {
+            let nul_terminated = &b[..b.iter().position(|&c| c == 0).unwrap_or(b.len())];
+            Value::String(String::from_utf8_lossy(nul_terminated).into_owned())
+        }
         _ => return None,
     })
 }
@@ -672,9 +904,9 @@ mod tests {
     }
 
     /// Evaluate an expression against a fixed variable map (no live channels) —
-    /// exercises the same `evalexpr` path `evaluate` uses.
+    /// exercises the same vocabulary-bearing context `evaluate_evalexpr` uses.
     fn eval_vars(expr: &str, vars: &[(&str, Value)]) -> Option<PvValue> {
-        let mut ctx = HashMapContext::new();
+        let mut ctx = pydm_calc_context();
         for (name, value) in vars {
             ctx.set_value((*name).to_owned(), value.clone()).ok()?;
         }
@@ -712,6 +944,90 @@ mod tests {
     fn missing_variable_fails_and_skips() {
         // `b` is undefined → eval errors → skip (None), not a panic.
         assert_eq!(eval_vars("a + b", &[("a", Value::Int(1))]), None);
+    }
+
+    #[test]
+    fn bare_math_names_evaluate_like_pydm() {
+        // R2-59: PyDM injects every non-underscore math.__dict__ name bare
+        // (CalcThread.eval_env, calc_plugin.py:50-53) — no `math.` prefix.
+        assert_eq!(
+            eval_vars("sin(a)", &[("a", Value::Float(0.0))]),
+            Some(PvValue::Float(0.0))
+        );
+        assert_eq!(eval_vars("cos(pi)", &[]), Some(PvValue::Float(-1.0)));
+        assert_eq!(
+            eval_vars("floor(a) + ceil(a)", &[("a", Value::Float(1.5))]),
+            Some(PvValue::Float(3.0))
+        );
+        assert_eq!(eval_vars("log(e)", &[]), Some(PvValue::Float(1.0)));
+        // Two-arity log(x, base), atan2, and a predicate.
+        assert_eq!(eval_vars("log(8, 2)", &[]), Some(PvValue::Float(3.0)));
+        assert_eq!(eval_vars("atan2(0, 1)", &[]), Some(PvValue::Float(0.0)));
+        assert_eq!(
+            eval_vars("isnan(a)", &[("a", Value::Float(f64::NAN))]),
+            Some(PvValue::Bool(true))
+        );
+        // Int arguments coerce (as_number), as Python's math does.
+        assert_eq!(
+            eval_vars("sqrt(a)", &[("a", Value::Int(9))]),
+            Some(PvValue::Float(3.0))
+        );
+        assert_eq!(eval_vars("erf(0)", &[]), Some(PvValue::Float(0.0)));
+    }
+
+    #[test]
+    fn epics_unsigned_reinterprets_negative_ints() {
+        // calc_plugin.py:36-47: 2**bits + value for negative values.
+        assert_eq!(
+            eval_vars("epics_unsigned(a)", &[("a", Value::Int(-1))]),
+            Some(PvValue::Int(4294967295)) // default bits=32
+        );
+        assert_eq!(
+            eval_vars("epics_unsigned(a, 16)", &[("a", Value::Int(-1))]),
+            Some(PvValue::Int(65535))
+        );
+        // Non-negative values pass through.
+        assert_eq!(
+            eval_vars("epics_unsigned(a)", &[("a", Value::Int(7))]),
+            Some(PvValue::Int(7))
+        );
+    }
+
+    #[test]
+    fn bytes_child_binds_as_nul_terminated_string_for_epics_string() {
+        // A CHAR waveform binds as its NUL-terminated string, so PyDM screens
+        // spelling `epics_string(A)` work (calc_plugin.py:19-33).
+        let bound = pv_to_evalexpr(&PvValue::Bytes(Arc::from([b'h', b'i', 0, b'x'].as_slice())));
+        assert_eq!(bound, Some(Value::String("hi".to_owned())));
+        assert_eq!(
+            eval_vars("epics_string(a)", &[("a", Value::String("hi".to_owned()))]),
+            Some(PvValue::Str(Arc::from("hi")))
+        );
+        // No NUL: the whole buffer decodes.
+        assert_eq!(
+            pv_to_evalexpr(&PvValue::Bytes(Arc::from([b'o', b'k'].as_slice()))),
+            Some(Value::String("ok".to_owned()))
+        );
+    }
+
+    #[test]
+    fn eval_failure_warns_once_and_publishes_nothing() {
+        // R2-59's silent half: an unknown name must return None AND flip the
+        // warn-once flag (the log call is behind it), not `.ok()?` silently.
+        let mut warned = false;
+        assert_eq!(
+            evaluate_evalexpr("calc://t", "no_such_fn(1)", &[], None, &mut warned),
+            None
+        );
+        assert!(warned, "eval failure must trip the warn-once flag");
+
+        // A successful expression must NOT trip it.
+        let mut warned = false;
+        assert_eq!(
+            evaluate_evalexpr("calc://t", "1 + 1", &[], None, &mut warned),
+            Some(PvValue::Int(2))
+        );
+        assert!(!warned);
     }
 
     #[test]
