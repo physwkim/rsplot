@@ -862,6 +862,22 @@ Impact: an entire axis-scale mode (and its two tool buttons) present in the curr
 
 ### R2-17: `SyncAxes` synchronizes limits only — silx's default contract also synchronizes scale and direction
 
+**FIXED (sync cluster):** `SyncAxes` now carries the three silx constructor
+aspects — `sync_limits`/`sync_scale`/`sync_direction`, ALL defaulting `true`
+("By default everything is synchronized", axis.py:57-66) — alongside the
+existing `sync_x`/`sync_y` axis-linking flags (silx builds one `SyncAxes`
+per axis list; the aspect flags choose what propagates along the linked
+axes, preserving the old `with_sync_x(false)` semantics). One generic
+`sync_aspect` helper owns the per-frame contract for every aspect
+(first-differing-plot source, propagate to all, remember): limits as before,
+plus `x_scale`/`y_scale` (silx `sigScaleChanged → __axisScaleChanged`,
+:158-171) and `x_inverted`/`y_inverted` (`sigInvertedChanged →
+__axisInvertedChanged`); the first call pushes scale and inverted state from
+the first plot too (silx `synchronize()`, :238-241). Tests: scale-syncs-by-
+default, direction-syncs-by-default (untouched direction stays put),
+first-call pushes scale+direction, aspect flags gate independently while
+limits still sync, and an unlinked axis syncs no aspect.
+
 Severity: Medium
 
 Rust: `src/widget/sync.rs:81-139` — `sync` propagates only `plot.limits` (X and/or Y); `x_scale`/`y_scale`/`x_inverted`/`y_inverted` (`src/core/plot.rs:375-381`) are never read or written, though the module doc (`sync.rs:9-11`) claims it "Mirrors silx `SyncAxes`".
