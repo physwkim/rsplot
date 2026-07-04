@@ -259,6 +259,9 @@ pub fn generate(screen: &MedmScreen, options: &Options) -> Generated {
         child_module: options.child_module,
         ..Default::default()
     };
+    // Surface parse-time diagnostics (e.g. the pre-2.2 old-format warning) ahead
+    // of the per-widget warnings.
+    b.warnings.extend(screen.warnings.iter().cloned());
     for widget in &screen.widgets {
         emit_widget(&mut b, widget, options);
     }
@@ -4592,6 +4595,55 @@ valuator {
                 .any(|w| w.contains("valuator clrmod=\"alarm\"")),
             "valuator alarm clrmod must warn: {:?}",
             g.warnings
+        );
+    }
+
+    #[test]
+    fn pre_2_2_top_level_attribute_blocks_warn_not_silently_dropped() {
+        // R2-63: MEDM rolls top-level basic/dynamic attribute blocks into later
+        // graphics only for versionNumber < 20200 (display.c:487,507-546). We do
+        // not port that inheritance, so an old file must warn, not silently render
+        // its graphics in default black-solid. A modern file (>= 20200) draws no
+        // warning — MEDM itself ignores a stray top-level attribute block there.
+        let adl = r#"
+file {
+	name="old.adl"
+	version=020112
+}
+"color map" {
+	colors {
+		ffffff,
+		000000,
+	}
+}
+"basic attribute" {
+	attr {
+		clr=1
+		width=2
+	}
+}
+rectangle {
+	object {
+		x=0
+		y=0
+		width=50
+		height=50
+	}
+}
+"#;
+        let g = generate(&parse(adl), &Options::default());
+        assert!(
+            g.warnings.iter().any(|w| w.contains("pre-2.2 old-format")),
+            "pre-2.2 attribute block must warn: {:?}",
+            g.warnings
+        );
+
+        let modern = adl.replace("020112", "030111");
+        let g2 = generate(&parse(&modern), &Options::default());
+        assert!(
+            !g2.warnings.iter().any(|w| w.contains("pre-2.2 old-format")),
+            "modern file must not warn on a stray top-level attribute block: {:?}",
+            g2.warnings
         );
     }
 

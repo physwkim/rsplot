@@ -100,6 +100,10 @@ pub struct MedmScreen {
     /// Remaining `display`-block assignments (e.g. `cmap`, `gridSpacing`).
     pub assignments: BTreeMap<String, String>,
     pub widgets: Vec<MedmWidget>,
+    /// Parse-time diagnostics the converter must surface (e.g. a pre-2.2
+    /// old-format construct that is recognised but not ported). Merged into the
+    /// generated module's warnings by [`crate::codegen::generate`].
+    pub warnings: Vec<String>,
 }
 
 /// The set of MEDM block symbols that are GUI widgets (the keys of
@@ -557,6 +561,26 @@ pub fn parse(text: &str) -> MedmScreen {
         let content = block_content(&buf, block);
         let table = screen.color_table.clone();
         parse_display(&content, &table, &mut screen);
+    }
+
+    // Pre-2.2 (`versionNumber < 20200`) old attribute format: MEDM parses
+    // top-level `basic attribute`/`dynamic attribute` blocks as rolling state that
+    // each later graphic inherits (display.c:487,507-546). We do not port that
+    // inheritance, so a graphic in such a file would silently lose its colour,
+    // fill, width, and visibility rules — warn instead of dropping silently.
+    // (For `>= 20200`, MEDM itself ignores a stray top-level attribute block, so
+    // discarding it below is faithful and no warning is due.)
+    if screen.adl_version.parse::<u32>().unwrap_or(0) < 20200
+        && blocks
+            .iter()
+            .any(|b| b.symbol == "basic attribute" || b.symbol == "dynamic attribute")
+    {
+        screen.warnings.push(
+            "pre-2.2 old-format top-level `basic attribute`/`dynamic attribute` \
+             blocks are not ported (rolling-attribute inheritance); affected static \
+             graphics keep default colour/fill/width and lose their visibility rules"
+                .to_string(),
+        );
     }
 
     // The remaining top-level blocks are widgets.
