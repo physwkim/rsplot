@@ -746,9 +746,15 @@ impl Roi {
                         *outer_radius = mid + w * 0.5;
                     }
                     // Start / end handles (Vertex 2 / 3) → sweep angles (silx
-                    // `withStartAngle` / `withEndAngle`).
-                    RoiEdge::Vertex(2) => *start_angle = (dy - cy).atan2(dx - cx),
-                    RoiEdge::Vertex(3) => *end_angle = (dy - cy).atan2(dx - cx),
+                    // `withStartAngle` / `withEndAngle`), accumulated with the
+                    // ±180° coherency rule so crossing the atan2 branch cut
+                    // never flips the sweep by ~2π.
+                    RoiEdge::Vertex(2) => {
+                        *start_angle = coherent_angle(*start_angle, (dy - cy).atan2(dx - cx));
+                    }
+                    RoiEdge::Vertex(3) => {
+                        *end_angle = coherent_angle(*end_angle, (dy - cy).atan2(dx - cx));
+                    }
                     _ => {}
                 }
             }
@@ -1337,6 +1343,24 @@ fn band_vertex_pos(roi: &Roi, index: usize) -> Option<(f64, f64)> {
         3 => (center.0 - off.0, center.1 - off.1),
         _ => return None,
     })
+}
+
+/// Accumulate a dragged arc angle onto its previous value without ever
+/// jumping more than 180°: the delta from `previous` to the raw `target`
+/// (an `atan2` result in `(-π, π]`) is wrapped into `±π` before being added
+/// (silx `_ArcGeometry.withStartAngle`/`withEndAngle` "Never add more than
+/// 180 to maintain coherency", `items/_arc_roi.py:139-146,162-170`). The
+/// stored angle stays continuous across the branch cut and may accumulate
+/// beyond `±π` — exactly like silx's geometry angles. silx applies a single
+/// wrap correction, not a loop; ported as-is.
+fn coherent_angle(previous: f64, target: f64) -> f64 {
+    let mut delta = target - previous;
+    if delta > std::f64::consts::PI {
+        delta -= std::f64::consts::TAU;
+    } else if delta < -std::f64::consts::PI {
+        delta += std::f64::consts::TAU;
+    }
+    previous + delta
 }
 
 /// Unit normal to the band's `begin → end` direction (silx `BandGeometry.normal`:
@@ -2051,6 +2075,77 @@ mod tests {
             approx(end_angle, PI, "end angle");
             approx(inner_radius, 2.0, "angle keeps inner");
             approx(outer_radius, 4.0, "angle keeps outer");
+        } else {
+            panic!("not an arc");
+        }
+    }
+
+    #[test]
+    fn arc_angle_drag_stays_coherent_across_the_branch_cut() {
+        // silx "Never add more than 180 to maintain coherency"
+        // (_ArcGeometry.withStartAngle/withEndAngle, _arc_roi.py:139-146,
+        // 162-170): a drag crossing the atan2 branch cut wraps the delta into
+        // ±π and accumulates, so the stored angle stays continuous instead of
+        // flipping by ~2π (which visually inverts the arc).
+        let approx =
+            |a: f64, b: f64, what: &str| assert!((a - b).abs() < 1e-9, "{what}: {a} vs {b}");
+
+        // Start handle at 3.0 rad nudged to a cursor whose raw atan2 is −3.0:
+        // delta −6.0 wraps to +0.283 → the angle advances to ≈ 3.283.
+        let mut roi = Roi::Arc {
+            center: (0.0, 0.0),
+            inner_radius: 2.0,
+            outer_radius: 4.0,
+            start_angle: 3.0,
+            end_angle: std::f64::consts::FRAC_PI_2,
+        };
+        let target = -3.0f64;
+        roi.move_edge(RoiEdge::Vertex(2), (5.0 * target.cos(), 5.0 * target.sin()));
+        if let Roi::Arc { start_angle, .. } = roi {
+            approx(
+                start_angle,
+                3.0 + (std::f64::consts::TAU - 6.0),
+                "coherent start",
+            );
+        } else {
+            panic!("not an arc");
+        }
+
+        // End handle mirrored: −3.0 rad dragged to raw +3.0 → delta +6.0
+        // wraps to −0.283 → ≈ −3.283.
+        let mut roi = Roi::Arc {
+            center: (0.0, 0.0),
+            inner_radius: 2.0,
+            outer_radius: 4.0,
+            start_angle: 0.0,
+            end_angle: -3.0,
+        };
+        let target = 3.0f64;
+        roi.move_edge(RoiEdge::Vertex(3), (5.0 * target.cos(), 5.0 * target.sin()));
+        if let Roi::Arc { end_angle, .. } = roi {
+            approx(
+                end_angle,
+                -3.0 - (std::f64::consts::TAU - 6.0),
+                "coherent end",
+            );
+        } else {
+            panic!("not an arc");
+        }
+
+        // A stored angle accumulated past ±π keeps accumulating from there
+        // (silx geometry angles are unbounded): 3.283 nudged a bit further
+        // across lands near 3.4, not near −2.9.
+        let mut roi = Roi::Arc {
+            center: (0.0, 0.0),
+            inner_radius: 2.0,
+            outer_radius: 4.0,
+            start_angle: 3.0 + (std::f64::consts::TAU - 6.0),
+            end_angle: 0.0,
+        };
+        let target = 3.4 - std::f64::consts::TAU; // raw atan2 of a 3.4-rad cursor
+        roi.move_edge(RoiEdge::Vertex(2), (5.0 * target.cos(), 5.0 * target.sin()));
+        if let Roi::Arc { start_angle, .. } = roi {
+            approx(start_angle, 3.4, "accumulated start");
         } else {
             panic!("not an arc");
         }

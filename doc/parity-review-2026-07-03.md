@@ -797,6 +797,33 @@ Impact: the common silx workflow "pin vmax, let vmin track the data" (and its in
 
 ### R2-15: Arc polar start/end handle drag drops silx's ±180° angle-coherency rule — crossing the branch cut flips the arc to a near-full annulus
 
+**FIXED (roi cluster), angle-coherency half:** new `coherent_angle(previous,
+target)` in roi.rs — the silx `_ArcGeometry.withStartAngle`/`withEndAngle`
+"Never add more than 180 to maintain coherency" rule
+(_arc_roi.py:139-146,162-170): the delta from the previous stored angle is
+wrapped into ±π (single correction, as silx) before accumulating, so a drag
+across the atan2 branch cut advances 3.0 → ≈3.283 instead of flipping to
+−3.08, and stored angles may accumulate beyond ±π exactly like silx geometry
+angles. Applied at both arc handles (Vertex 2/3). Anchor audit of raw-atan2
+angle writes: ellipse `orientation` handles are distinct (silx `EllipseROI`
+also assigns raw `atan2`, no coherency accumulation — orientation has no
+sweep pairing); arc *creation* angles in interaction.rs are distinct (silx
+creation also assigns fresh `numpy.angle` values; coherency governs edits of
+an existing geometry only). Tests: branch-cut crossing both handles +
+accumulated-past-π continuation.
+
+**UNFIXED (sign-off gated), radius/weight residual:** the adjacent impact —
+silx stores `(radius, weight)` and clamps only the *reported* inner radius
+(_arc_roi.py:856-865), so `weight > 2·radius` survives follow-up drags —
+cannot be closed inside the current `Roi::Arc { inner_radius, outer_radius }`
+model: the clamped pair cannot represent that state. Closing it means either
+(a) restoring silx's `(radius, weight)` storage with clamped-at-report
+inner/outer (public `Roi` enum change rippling through roi_io serialization,
+chrome rendering, interaction creation, arc_contains), or (b) redefining
+`inner_radius` as allowed-negative with every consumer clamping at use.
+Both change public field semantics — queued for sign-off with the
+R2-14/autoscale model decision.
+
 Severity: Medium
 
 Rust: `src/core/roi.rs:750-751` — `RoiEdge::Vertex(2) => *start_angle = (dy - cy).atan2(dx - cx)` (raw atan2 in (−π, π]), same for the end handle.
