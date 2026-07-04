@@ -25,6 +25,10 @@ use crate::render::gpu_scene3d::{
 /// silx's default plot symbol size in pixels (`_config.DEFAULT_PLOT_SYMBOL_SIZE`).
 pub const DEFAULT_SCATTER3D_SIZE: f32 = 6.0;
 
+/// The autoscale mode a colormapped 3D item uses to refresh its auto bounds on
+/// data change — silx's default `Colormap.MINMAX` (`Colormap._DEFAULT_MODE`).
+const DEFAULT_COLORMAP_AUTOSCALE_MODE: AutoscaleMode = AutoscaleMode::MinMax;
+
 /// Append `build`'s raw geometry through `transform` — the single owner of the
 /// bake-time transform application. silx applies the `DataItem3D` transform
 /// stack in the scene graph at render time (`items/core.py:288-315`); this
@@ -110,7 +114,7 @@ impl Scatter3D {
             y: Vec::new(),
             z: Vec::new(),
             values: Vec::new(),
-            colormap: Colormap::new(ColormapName::Gray, 0.0, 1.0),
+            colormap: Colormap::autoscale(ColormapName::Gray),
             marker: PointMarker::Circle,
             size: DEFAULT_SCATTER3D_SIZE,
             transform: Item3DTransform::default(),
@@ -129,6 +133,7 @@ impl Scatter3D {
         self.y = y.to_vec();
         self.z = z.to_vec();
         self.values = values.to_vec();
+        self.resolve_colormap();
         true
     }
 
@@ -139,14 +144,16 @@ impl Scatter3D {
         self
     }
 
-    /// Set the colormap (silx `ColormapMixIn.setColormap`).
+    /// Set the colormap (silx `ColormapMixIn.setColormap`). An autoscale
+    /// colormap immediately resolves its range to the current data.
     pub fn set_colormap(&mut self, colormap: Colormap) {
         self.colormap = colormap;
+        self.resolve_colormap();
     }
 
     /// Builder form of [`set_colormap`](Self::set_colormap).
     pub fn with_colormap(mut self, colormap: Colormap) -> Self {
-        self.colormap = colormap;
+        self.set_colormap(colormap);
         self
     }
 
@@ -158,6 +165,15 @@ impl Scatter3D {
     /// Mutable access to the colormap (e.g. to set the value range directly).
     pub fn colormap_mut(&mut self) -> &mut Colormap {
         &mut self.colormap
+    }
+
+    /// Refresh the autoscale bounds of the colormap from the current values —
+    /// silx `_syncSceneColormap` pushing `getColormapRange(data)` on every data
+    /// or colormap change. A no-op for a fully pinned colormap.
+    fn resolve_colormap(&mut self) {
+        self.colormap = self
+            .colormap
+            .resolved(DEFAULT_COLORMAP_AUTOSCALE_MODE, &self.values);
     }
 
     /// Fit the colormap's value range to the current data with `mode` (silx's
@@ -311,7 +327,7 @@ impl Scatter2D {
             x: Vec::new(),
             y: Vec::new(),
             values: Vec::new(),
-            colormap: Colormap::new(ColormapName::Gray, 0.0, 1.0),
+            colormap: Colormap::autoscale(ColormapName::Gray),
             marker: PointMarker::Circle,
             size: DEFAULT_SCATTER3D_SIZE,
             line_width: DEFAULT_SCATTER2D_LINE_WIDTH,
@@ -332,6 +348,7 @@ impl Scatter2D {
         self.x = x.to_vec();
         self.y = y.to_vec();
         self.values = values.to_vec();
+        self.resolve_colormap();
         true
     }
 
@@ -342,14 +359,16 @@ impl Scatter2D {
         self
     }
 
-    /// Set the colormap (silx `ColormapMixIn.setColormap`).
+    /// Set the colormap (silx `ColormapMixIn.setColormap`). An autoscale
+    /// colormap immediately resolves its range to the current data.
     pub fn set_colormap(&mut self, colormap: Colormap) {
         self.colormap = colormap;
+        self.resolve_colormap();
     }
 
     /// Builder form of [`set_colormap`](Self::set_colormap).
     pub fn with_colormap(mut self, colormap: Colormap) -> Self {
-        self.colormap = colormap;
+        self.set_colormap(colormap);
         self
     }
 
@@ -361,6 +380,14 @@ impl Scatter2D {
     /// Mutable access to the colormap (e.g. to set the value range directly).
     pub fn colormap_mut(&mut self) -> &mut Colormap {
         &mut self.colormap
+    }
+
+    /// Refresh the colormap's autoscale bounds from the current values (silx
+    /// `_syncSceneColormap`); a no-op for a pinned colormap.
+    fn resolve_colormap(&mut self) {
+        self.colormap = self
+            .colormap
+            .resolved(DEFAULT_COLORMAP_AUTOSCALE_MODE, &self.values);
     }
 
     /// Fit the colormap's value range to the current data with `mode`, returning
@@ -828,7 +855,7 @@ impl ColormapMesh3D {
             normals: None,
             mode: MeshDrawMode::Triangles,
             indices: None,
-            colormap: Colormap::new(ColormapName::Gray, 0.0, 1.0),
+            colormap: Colormap::autoscale(ColormapName::Gray),
             transform: Item3DTransform::default(),
         }
     }
@@ -857,6 +884,7 @@ impl ColormapMesh3D {
         self.normals = normals.map(<[[f32; 3]]>::to_vec);
         self.mode = mode;
         self.indices = indices.map(<[u32]>::to_vec);
+        self.resolve_colormap();
         true
     }
 
@@ -874,14 +902,16 @@ impl ColormapMesh3D {
         self
     }
 
-    /// Set the colormap (silx `ColormapMixIn.setColormap`).
+    /// Set the colormap (silx `ColormapMixIn.setColormap`). An autoscale
+    /// colormap immediately resolves its range to the current data.
     pub fn set_colormap(&mut self, colormap: Colormap) {
         self.colormap = colormap;
+        self.resolve_colormap();
     }
 
     /// Builder form of [`set_colormap`](Self::set_colormap).
     pub fn with_colormap(mut self, colormap: Colormap) -> Self {
-        self.colormap = colormap;
+        self.set_colormap(colormap);
         self
     }
 
@@ -893,6 +923,14 @@ impl ColormapMesh3D {
     /// Mutable access to the colormap.
     pub fn colormap_mut(&mut self) -> &mut Colormap {
         &mut self.colormap
+    }
+
+    /// Refresh the colormap's autoscale bounds from the current values (silx
+    /// `_syncSceneColormap`); a no-op for a pinned colormap.
+    fn resolve_colormap(&mut self) {
+        self.colormap = self
+            .colormap
+            .resolved(DEFAULT_COLORMAP_AUTOSCALE_MODE, &self.values);
     }
 
     /// Fit the colormap's value range to the current data with `mode`, returning
@@ -1500,7 +1538,7 @@ impl ImageData3D {
             data: Vec::new(),
             width: 0,
             height: 0,
-            colormap: Colormap::new(ColormapName::Gray, 0.0, 1.0),
+            colormap: Colormap::autoscale(ColormapName::Gray),
             origin: [0.0, 0.0, 0.0],
             scale: [1.0, 1.0],
             interpolation: ImageInterpolation::Nearest,
@@ -1517,6 +1555,7 @@ impl ImageData3D {
         self.data = data.to_vec();
         self.width = width;
         self.height = height;
+        self.resolve_colormap();
         true
     }
 
@@ -1526,14 +1565,16 @@ impl ImageData3D {
         self
     }
 
-    /// Set the colormap.
+    /// Set the colormap. An autoscale colormap immediately resolves its range to
+    /// the current data.
     pub fn set_colormap(&mut self, colormap: Colormap) {
         self.colormap = colormap;
+        self.resolve_colormap();
     }
 
     /// Builder form of [`set_colormap`](Self::set_colormap).
     pub fn with_colormap(mut self, colormap: Colormap) -> Self {
-        self.colormap = colormap;
+        self.set_colormap(colormap);
         self
     }
 
@@ -1545,6 +1586,14 @@ impl ImageData3D {
     /// Mutable access to the colormap.
     pub fn colormap_mut(&mut self) -> &mut Colormap {
         &mut self.colormap
+    }
+
+    /// Refresh the colormap's autoscale bounds from the current data (silx
+    /// `_syncSceneColormap`); a no-op for a pinned colormap.
+    fn resolve_colormap(&mut self) {
+        self.colormap = self
+            .colormap
+            .resolved(DEFAULT_COLORMAP_AUTOSCALE_MODE, &self.data);
     }
 
     /// Fit the colormap's value range to the current data with `mode`, returning
@@ -1835,7 +1884,7 @@ impl HeightMapData {
             values: Vec::new(),
             v_width: 0,
             v_height: 0,
-            colormap: Colormap::new(ColormapName::Gray, 0.0, 1.0),
+            colormap: Colormap::autoscale(ColormapName::Gray),
             transform: Item3DTransform::default(),
         }
     }
@@ -1868,6 +1917,7 @@ impl HeightMapData {
         self.values = data.to_vec();
         self.v_width = width;
         self.v_height = height;
+        self.resolve_colormap();
         true
     }
 
@@ -1877,15 +1927,25 @@ impl HeightMapData {
         self
     }
 
-    /// Set the colormap.
+    /// Set the colormap. An autoscale colormap immediately resolves its range to
+    /// the current colormapped data.
     pub fn set_colormap(&mut self, colormap: Colormap) {
         self.colormap = colormap;
+        self.resolve_colormap();
     }
 
     /// Builder form of [`set_colormap`](Self::set_colormap).
     pub fn with_colormap(mut self, colormap: Colormap) -> Self {
-        self.colormap = colormap;
+        self.set_colormap(colormap);
         self
+    }
+
+    /// Refresh the colormap's autoscale bounds from the current colormapped data
+    /// (silx `_syncSceneColormap`); a no-op for a pinned colormap.
+    fn resolve_colormap(&mut self) {
+        self.colormap = self
+            .colormap
+            .resolved(DEFAULT_COLORMAP_AUTOSCALE_MODE, &self.values);
     }
 
     /// Read-only access to the colormap.
@@ -2225,12 +2285,14 @@ impl Default for CutPlane {
 
 impl CutPlane {
     /// A hidden cut plane with silx defaults: normal `(0, 1, 0)` through the
-    /// origin, the gray colormap over `[0, 1]`, linear interpolation, and a
-    /// visible white contour stroke.
+    /// origin, the gray autoscale colormap, linear interpolation, and a visible
+    /// white contour stroke. The range autoscales to the volume when the owning
+    /// [`ScalarField3D`] sets data (silx `ScalarFieldView` re-autoscales the
+    /// cut-plane colormap on `_updateData`).
     pub fn new() -> Self {
         Self {
             plane: Plane::new(Vec3::new(0.0, 0.0, 0.0), Vec3::new(0.0, 1.0, 0.0)),
-            colormap: Colormap::new(ColormapName::Gray, 0.0, 1.0),
+            colormap: Colormap::autoscale(ColormapName::Gray),
             interpolation: ImageInterpolation::Linear,
             resolution: DEFAULT_CUT_PLANE_RESOLUTION,
             visible: false,
@@ -2569,6 +2631,7 @@ impl ScalarField3D {
             iso.resolve(&data);
         }
         self.data = data;
+        self.resolve_cut_plane_colormap();
         true
     }
 
@@ -2654,6 +2717,29 @@ impl ScalarField3D {
     /// interpolation, resolution, or visibility.
     pub fn cut_plane_mut(&mut self) -> &mut CutPlane {
         &mut self.cut_plane
+    }
+
+    /// Set the cut plane's colormap and resolve its autoscale bounds against the
+    /// field (silx `ScalarFieldView.setColormap` → `_syncSceneColormap`). Prefer
+    /// this over `cut_plane_mut().set_colormap`, which cannot see the volume and
+    /// so leaves an autoscale colormap at its placeholder range.
+    pub fn set_cut_plane_colormap(&mut self, colormap: Colormap) {
+        self.cut_plane.colormap = colormap;
+        self.resolve_cut_plane_colormap();
+    }
+
+    /// Refresh only the cut plane colormap's autoscale bounds from the volume
+    /// (silx re-autoscales the cut plane on `_updateData`); a no-op for a pinned
+    /// colormap or an empty field.
+    fn resolve_cut_plane_colormap(&mut self) {
+        if self.data.is_empty() || !self.cut_plane.colormap.is_autoscale() {
+            return;
+        }
+        let values: Vec<f64> = self.data.iter().map(|&v| v as f64).collect();
+        self.cut_plane.colormap = self
+            .cut_plane
+            .colormap
+            .resolved(DEFAULT_COLORMAP_AUTOSCALE_MODE, &values);
     }
 
     /// Fit the cut plane's colormap range to the field with `mode` (silx
@@ -3099,6 +3185,67 @@ mod tests {
             }
         }
         ScalarField3D::new().with_data(&data, d, h, w)
+    }
+
+    #[test]
+    fn colormapped_items_default_to_gray_autoscale_like_silx() {
+        // silx ColormapMixIn items default to gray + autoscale
+        // (vmin=vmax=None): the range must track the data, not a fixed [0, 1].
+        assert!(Scatter3D::new().colormap().is_autoscale());
+        assert!(Scatter2D::new().colormap().is_autoscale());
+        assert!(ColormapMesh3D::new().colormap().is_autoscale());
+        assert!(ImageData3D::new().colormap().is_autoscale());
+        assert!(HeightMapData::new().colormap().is_autoscale());
+        assert!(CutPlane::new().colormap().is_autoscale());
+        // Gray palette (silx `ColormapMixIn` default colormap name).
+        assert_eq!(
+            Scatter3D::new().colormap().lut,
+            Colormap::new(ColormapName::Gray, 0.0, 1.0).lut
+        );
+    }
+
+    #[test]
+    fn set_data_resolves_the_default_colormap_to_the_data_range() {
+        // A default (autoscale) colormap fed out-of-[0,1] data resolves its
+        // range to the data min/max — silx `_syncSceneColormap` on data change.
+        let mut s = Scatter3D::new();
+        s.set_data(&[0.0, 1.0, 2.0], &[0.0; 3], &[0.0; 3], &[10.0, 30.0, 20.0]);
+        assert_eq!((s.colormap().vmin, s.colormap().vmax), (10.0, 30.0));
+
+        let mut img = ImageData3D::new();
+        img.set_data(&[-5.0, 0.0, 5.0, 15.0], 2, 2);
+        assert_eq!((img.colormap().vmin, img.colormap().vmax), (-5.0, 15.0));
+    }
+
+    #[test]
+    fn set_data_leaves_a_pinned_colormap_untouched() {
+        // A user-pinned colormap must NOT be re-ranged by data (silx keeps a
+        // set vmin/vmax across data updates).
+        let mut s = Scatter3D::new();
+        s.set_colormap(Colormap::new(ColormapName::Viridis, 0.0, 1.0));
+        s.set_data(&[0.0, 1.0], &[0.0; 2], &[0.0; 2], &[100.0, 200.0]);
+        assert_eq!((s.colormap().vmin, s.colormap().vmax), (0.0, 1.0));
+    }
+
+    #[test]
+    fn cut_plane_autoscales_to_the_volume_on_set_data() {
+        // The cut-plane colormap defaults to autoscale and, per silx
+        // ScalarFieldView, re-ranges to the volume when data is set. The ramp
+        // field spans z = 0..2, so MINMAX → (0, 2).
+        let field = ramp_field();
+        let cm = field.cut_plane().colormap();
+        assert_eq!((cm.vmin, cm.vmax), (0.0, 2.0));
+    }
+
+    #[test]
+    fn set_cut_plane_colormap_resolves_against_the_volume() {
+        // Swapping to another autoscale colormap re-ranges against the field
+        // (not the placeholder [0, 1]).
+        let mut field = ramp_field();
+        field.set_cut_plane_colormap(Colormap::autoscale(ColormapName::Viridis));
+        let cm = field.cut_plane().colormap();
+        assert_eq!(cm.lut, Colormap::new(ColormapName::Viridis, 0.0, 1.0).lut);
+        assert_eq!((cm.vmin, cm.vmax), (0.0, 2.0));
     }
 
     #[test]

@@ -671,6 +671,16 @@ pub struct Colormap {
     pub lut: [[u8; 4]; 256],
     pub vmin: f64,
     pub vmax: f64,
+    /// Whether `vmin` tracks the data instead of being pinned — silx
+    /// `Colormap.vmin is None` (autoscale that bound, `math/colormap.py`). The
+    /// concrete `vmin` above is still the range *in effect* for rendering (all
+    /// readers use it); this flag only tells [`Self::resolved`] to refresh it
+    /// from data on each update. Both flags default `false` (a `new`/`viridis`/
+    /// `from_*` colormap has explicit, pinned bounds).
+    pub vmin_auto: bool,
+    /// Whether `vmax` tracks the data — silx `Colormap.vmax is None`. See
+    /// [`Self::vmin_auto`].
+    pub vmax_auto: bool,
     /// How a value is mapped to the LUT coordinate (linear by default).
     pub normalization: Normalization,
     /// Exponent for [`Normalization::Gamma`] (ignored otherwise); `2.0` by
@@ -713,12 +723,27 @@ impl Colormap {
             lut: name.build_lut(),
             vmin,
             vmax,
+            vmin_auto: false,
+            vmax_auto: false,
             normalization: Normalization::Linear,
             gamma: DEFAULT_GAMMA,
             nan_color: DEFAULT_NAN_COLOR,
             autoscale_percentiles: DEFAULT_PERCENTILES,
             editable: true,
             cursor_color: name.cursor_color(),
+        }
+    }
+
+    /// A colormap over `name` whose range autoscales to the data — silx's
+    /// default `Colormap(name, vmin=None, vmax=None)` (`ColormapMixIn` items,
+    /// `ScalarFieldView` cut plane). Both bounds are `auto`; the concrete
+    /// `[0, 1]` placeholder is only what renders before any data arrives and is
+    /// replaced by [`Self::resolved`] on the first update.
+    pub fn autoscale(name: ColormapName) -> Self {
+        Self {
+            vmin_auto: true,
+            vmax_auto: true,
+            ..Self::new(name, 0.0, 1.0)
         }
     }
 
@@ -793,6 +818,8 @@ impl Colormap {
             lut,
             vmin,
             vmax,
+            vmin_auto: false,
+            vmax_auto: false,
             normalization: Normalization::Linear,
             gamma: DEFAULT_GAMMA,
             nan_color: DEFAULT_NAN_COLOR,
@@ -820,6 +847,8 @@ impl Colormap {
             lut,
             vmin,
             vmax,
+            vmin_auto: false,
+            vmax_auto: false,
             normalization: Normalization::Linear,
             gamma: DEFAULT_GAMMA,
             nan_color: DEFAULT_NAN_COLOR,
@@ -984,6 +1013,34 @@ impl Colormap {
         let mut cm = self.clone();
         cm.vmin = vmin;
         cm.vmax = vmax;
+        cm
+    }
+
+    /// Whether either bound autoscales to data ([`Self::vmin_auto`] /
+    /// [`Self::vmax_auto`]) — silx `Colormap.vmin is None or vmax is None`.
+    pub fn is_autoscale(&self) -> bool {
+        self.vmin_auto || self.vmax_auto
+    }
+
+    /// Clone `self` with only its *auto* bounds refreshed from `data`, keeping
+    /// pinned bounds and the auto flags — silx `getColormapRange(data)`, which
+    /// fills a `None` bound from the data and keeps a set one
+    /// (`math/colormap.py`). This is the per-bound counterpart of
+    /// [`Self::autoscaled`] (which forces *both* bounds): "pin `vmax`, let
+    /// `vmin` track the data" resolves to `(autoscale_min, vmax)`. A fully
+    /// pinned colormap resolves to an unchanged clone.
+    pub fn resolved(&self, mode: AutoscaleMode, data: &[f64]) -> Colormap {
+        let mut cm = self.clone();
+        if !self.is_autoscale() {
+            return cm;
+        }
+        let (amin, amax) = self.autoscale_range(mode, data);
+        if self.vmin_auto {
+            cm.vmin = amin;
+        }
+        if self.vmax_auto {
+            cm.vmax = amax;
+        }
         cm
     }
 }
@@ -1288,6 +1345,56 @@ mod tests {
     /// silx's `(c * 256).astype(uint8)` (160/255 * 256 = 160.6 -> 160;
     /// 164/255 * 256 = 164.6 -> 164).
     const GRAY: [f32; 3] = [160.0 / 255.0, 160.0 / 255.0, 164.0 / 255.0];
+
+    #[test]
+    fn new_colormap_has_pinned_bounds() {
+        // An explicit-range colormap does not autoscale (silx `Colormap(name,
+        // vmin=.., vmax=..)` has both bounds set, `vmin/vmax is not None`).
+        let cm = Colormap::new(ColormapName::Viridis, 2.0, 8.0);
+        assert!(!cm.vmin_auto);
+        assert!(!cm.vmax_auto);
+        assert!(!cm.is_autoscale());
+    }
+
+    #[test]
+    fn autoscale_colormap_has_both_bounds_auto() {
+        // silx default `Colormap(name)` leaves both bounds None → autoscale.
+        let cm = Colormap::autoscale(ColormapName::Gray);
+        assert!(cm.vmin_auto);
+        assert!(cm.vmax_auto);
+        assert!(cm.is_autoscale());
+    }
+
+    #[test]
+    fn resolved_fills_both_auto_bounds_from_data() {
+        // Both bounds auto → both come from the data's min/max (silx
+        // getColormapRange over MINMAX).
+        let cm = Colormap::autoscale(ColormapName::Gray);
+        let out = cm.resolved(AutoscaleMode::MinMax, &[3.0, 7.0, 5.0]);
+        assert_eq!((out.vmin, out.vmax), (3.0, 7.0));
+        // Flags are preserved: a later data change re-resolves.
+        assert!(out.vmin_auto && out.vmax_auto);
+    }
+
+    #[test]
+    fn resolved_keeps_a_pinned_bound_and_fills_the_auto_one() {
+        // silx per-bound: vmax set, vmin None → (data_min, vmax_pinned).
+        let mut cm = Colormap::autoscale(ColormapName::Gray);
+        cm.vmax = 100.0;
+        cm.vmax_auto = false; // pin the upper bound
+        let out = cm.resolved(AutoscaleMode::MinMax, &[3.0, 7.0, 5.0]);
+        assert_eq!(out.vmin, 3.0, "auto lower bound follows the data");
+        assert_eq!(out.vmax, 100.0, "pinned upper bound is kept");
+        assert!(out.vmin_auto && !out.vmax_auto);
+    }
+
+    #[test]
+    fn resolved_is_a_noop_for_a_fully_pinned_colormap() {
+        // Neither bound auto → data is ignored, range unchanged.
+        let cm = Colormap::new(ColormapName::Viridis, 2.0, 8.0);
+        let out = cm.resolved(AutoscaleMode::MinMax, &[100.0, 200.0]);
+        assert_eq!((out.vmin, out.vmax), (2.0, 8.0));
+    }
 
     #[test]
     fn mask_overlay_lut_matches_silx_set_mask_colors() {

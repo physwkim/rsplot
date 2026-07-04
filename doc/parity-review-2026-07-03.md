@@ -1653,6 +1653,33 @@ LM core (flambda 0.001/×10/÷10/cap 1000, deltachi/epsfcn stops, derivative ste
 
 ### R2-46: Every colormapped 3D item defaults to a fixed viridis [0, 1] range — silx defaults to gray with autoscale that tracks the data
 
+**FIXED (colormap-autoscale cluster, two halves):**
+
+- *Palette half* — `61b2872` (earlier this session) already changed all six
+  plot3d item constructors from `ColormapName::Viridis` to `ColormapName::Gray`
+  (silx `_config.py:58` default colormap name), closing the R1-16 defect at the
+  six 3D sites.
+- *Autoscale-follows-data half (this session)* — `Colormap` now models per-bound
+  autoscale (`vmin_auto`/`vmax_auto`, silx `vmin/vmax is None`). A new
+  `Colormap::autoscale(name)` constructs gray + both-bounds-auto, and
+  `Colormap::resolved(mode, data)` refreshes *only* the auto bounds from the data
+  while preserving pinned bounds and the flags (silx `getColormapRange`, the
+  per-bound counterpart of the existing force-both `autoscaled`). All six items
+  (`Scatter3D`, `Scatter2D`, `ColormapMesh3D`, `ImageData3D`, `HeightMapData`,
+  `CutPlane`) now default to `Colormap::autoscale(Gray)` and re-resolve against
+  their value array on every `set_data`/`set_colormap` (silx
+  `mixins.py:128-137` `_syncSceneColormap`). The cut-plane colormap is resolved
+  through its owner `ScalarField3D` (which holds the volume): `set_data` and the
+  new `set_cut_plane_colormap` both drive `resolve_cut_plane_colormap`
+  (silx `ScalarFieldView.py:403-405` `_sfViewDataChanged`). The pre-existing
+  one-shot `autoscale_colormap`/`autoscale_cut_plane_colormap` (the manual
+  Autoscale button) are unchanged. Per-boundary tests: `Colormap::resolved`
+  fills-both / pins-one-fills-other / noop-when-pinned, and item-level
+  default-is-gray-autoscale / set_data-resolves / pinned-colormap-untouched /
+  cut-plane-autoscales-to-volume. Full siplot suite 1687 green (no golden
+  changed — no existing test pinned colors on out-of-[0,1] data via the default
+  colormap).
+
 Severity: Medium
 
 Rust: `src/render/scene3d_items.rs:113, 314, 831, 1503, 1838, 2227` — `Scatter3D`, `Scatter2D`, `ColormapMesh3D`, `ImageData3D`, `HeightMapData`, and `CutPlane` all construct `Colormap::new(ColormapName::Viridis, 0.0, 1.0)` (each doc-commented "silx defaults"). `Colormap` carries plain `vmin`/`vmax` f64s — there is no autoscale state — and the only range-follows-data paths are the manual one-shot `autoscale_colormap()` / `autoscale_cut_plane_colormap()` (`scene3d_items.rs:167-172, 2632-2641`), which nothing calls on `set_data`.
