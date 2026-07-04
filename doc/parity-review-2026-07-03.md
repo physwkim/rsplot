@@ -1866,6 +1866,8 @@ Reference: `~/codes/pydm/pydm/widgets/image.py:196` — `self._reading_order = R
 
 Impact: an image widget instantiated with defaults renders with a different orientation family (C vs Fortran interpretation of the same flat array — compounding R2-56) and a different palette than the same PyDM widget. Neither default flip is recorded in `doc/pydm-parity-roadmap.md` P4 or the module docs as a deviation (same class as the R1-16 gray-vs-viridis finding).
 
+**FIXED (this session):** moved `#[default]` on `ReadingOrder` from `CLike` to `Fortran` (image.py:196) and changed the `colormap` field default from `ColormapName::Viridis` to `ColormapName::Inferno` (image.py:185), both verified against the PyDM source. Test `reading_order_defaults_to_fortran_like_pydm`.
+
 ### R2-58: Scatter and event plots default to the 18000-sample time-plot buffer; PyDM's default for both is 1200
 
 Severity: Low

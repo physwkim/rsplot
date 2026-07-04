@@ -23,13 +23,14 @@ use crate::widgets::base::middle_click_copy;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum ReadingOrder {
     /// Row-major (C order): element `(r, c)` is `data[r * width + c]` (PyDM
-    /// `ReadingOrder.Clike`, the EPICS areaDetector default).
-    #[default]
+    /// `ReadingOrder.Clike`).
     CLike,
     /// Column-major (Fortran order): PyDM reshapes to `(width, -1)` with
     /// `order="F"` (image.py:108-109), so `width` becomes the ROW axis — the
     /// image is `width` rows × `len/width` columns and element `(r, c)` is
-    /// `data[c * width + r]`, displayed row-major (image.py:210).
+    /// `data[c * width + r]`, displayed row-major (image.py:210). This is
+    /// PyDMImageView's constructor default (image.py:196).
+    #[default]
     Fortran,
 }
 
@@ -156,7 +157,8 @@ impl SidmImageView {
             width_channel,
             width: 0,
             reading_order: ReadingOrder::default(),
-            colormap: ColormapName::Viridis,
+            // PyDMImageView defaults to Inferno (image.py:185).
+            colormap: ColormapName::Inferno,
             normalize: false,
             cm_min: 0.0,
             cm_max: 255.0,
@@ -297,6 +299,13 @@ impl SidmImageView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reading_order_defaults_to_fortran_like_pydm() {
+        // PyDMImageView constructs with ReadingOrder.Fortranlike (image.py:196),
+        // not Clike.
+        assert_eq!(ReadingOrder::default(), ReadingOrder::Fortran);
+    }
 
     #[test]
     fn reshape_clike_is_row_major() {
