@@ -156,10 +156,11 @@ pub enum TickMode {
 /// Grid lines drawn in the plot data area.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum GraphGrid {
-    /// No grid lines.
+    /// No grid lines. silx `PlotWidget` starts here (`PlotWidget.py:435`,
+    /// `self._grid = None`) — no grid until the user toggles `GridAction`.
+    #[default]
     None,
     /// Major tick grid lines only.
-    #[default]
     Major,
     /// Major and minor tick grid lines.
     MajorAndMinor,
@@ -602,7 +603,7 @@ impl Plot {
             active_y2_label: None,
             foreground: None,
             grid_color: None,
-            grid: GraphGrid::Major,
+            grid: GraphGrid::None,
             x_constraints: AxisConstraints::default(),
             y_constraints: AxisConstraints::default(),
             x_max_ticks: None,
@@ -1381,6 +1382,14 @@ mod tests {
     fn limits_history_starts_empty() {
         let plot = Plot::new(0);
         assert_eq!(plot.limits_history_len(), 0);
+    }
+
+    #[test]
+    fn grid_defaults_to_none_like_silx() {
+        // silx `PlotWidget` opens with `self._grid = None` (`PlotWidget.py:435`):
+        // no grid until the user toggles `GridAction`.
+        assert_eq!(Plot::new(0).grid, GraphGrid::None);
+        assert_eq!(GraphGrid::default(), GraphGrid::None);
     }
 
     #[test]

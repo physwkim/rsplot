@@ -928,6 +928,8 @@ Reference: `silx/gui/plot/PlotWidget.py:435` — `self._grid = None`; `GridActio
 
 Impact: every siplot plot renders a major grid before any user action; silx renders none until toggled. Same shape as R1-16 (unrecorded default divergence) — needs either a fix or a roadmap decision entry.
 
+**FIXED (this session):** moved `#[default]` from `GraphGrid::Major` to `GraphGrid::None` and set `Plot::new`'s `grid` to `None`. The user-facing `set_grid`/`set_grid_minor` toggles keep setting `Major` on turn-on (distinct — those mirror `GridAction`, not the default). Test `grid_defaults_to_none_like_silx`.
+
 ### R2-19: Ruler disarm destroys the measurement; silx hides it and reshows it on re-arm
 
 **FIXED (tool-buttons cluster), structurally — ROI visibility is now the
