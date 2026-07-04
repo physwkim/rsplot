@@ -773,6 +773,18 @@ Impact: the widget-path Jacobian is O(δ)-accurate where silx's is O(δ²) — d
 
 ### R2-28: LM iteration budget decrements per lambda attempt in silx, per accepted outer iteration in Rust
 
+**FIXED (fit-stack cluster):** both engines now decrement `iiter` once per inner
+damping pass (top-of-pass placement — count-identical to silx's end-of-pass
+`iiter -= 1` at leastsq.py:470 since the inner loop never tests `iiter` and the
+outer test is `<= 0`), so rejected-λ retries consume the `max_iter` budget. The
+Rust-only singular-matrix retry arm is charged the same way (it is modelled as a
+rejected step). Golden-verified against silx leastsq.py run directly under
+numpy: model `a·exp(b·x)`, `p0 = [1, 3]`, `max_iter = 8` → exactly 5 outer
+iterations (three λ rejections billed) with parameters matching to
+summation-order noise (~1e-7, numpy pairwise vs Rust sequential accumulation),
+and `max_iter = 100` → converges with `niter = 15`, silx's exact trajectory
+length. Test: `lm_budget_counts_lambda_attempts_like_silx`.
+
 Severity: Medium
 
 Rust: `src/core/fitting.rs:645` and `:1074` — `iiter -= 1` sits after the inner damping loop, so rejected-λ retries are free.

@@ -573,8 +573,14 @@ where
         chisq0 = help0.iter().zip(deltay.iter()).map(|(&h, &d)| h * d).sum();
         alpha0 = alpha.clone();
 
-        // --- LM inner loop: pick a step that decreases chisq ---
+        // --- LM inner loop: pick a step that decreases chisq. Every λ attempt
+        // (accepted or rejected) consumes one unit of the `max_iter` budget:
+        // silx decrements `iiter` inside the damping loop (leastsq.py:470), so
+        // rejected-λ retries are not free. Decrementing at the top of each pass
+        // counts identically — the inner loop never tests `iiter`, and the
+        // outer test is `<= 0` either way. ---
         loop {
+            iiter -= 1;
             // alpha' = alpha0 * (1 + flambda*I): only the diagonal is scaled.
             let mut alpha_lm = alpha0.clone();
             for (d, row) in alpha_lm.iter_mut().enumerate() {
@@ -647,7 +653,6 @@ where
                 break;
             }
         }
-        iiter -= 1;
     }
 
     // Covariance is inv(alpha0) (silx cov0).
@@ -999,7 +1004,11 @@ where
             return Err(FitError::NoFreeParameters);
         }
 
+        // Every λ attempt consumes one unit of the `max_iter` budget — silx
+        // decrements `iiter` inside the damping loop (leastsq.py:470); see the
+        // unconstrained engine for the placement rationale.
         loop {
+            iiter -= 1;
             let mut alpha_lm = alpha0.clone();
             for (d, row) in alpha_lm.iter_mut().enumerate() {
                 row[d] *= 1.0 + flambda;
@@ -1076,7 +1085,6 @@ where
                 break;
             }
         }
-        iiter -= 1;
     }
 
     // cov0 = inv(alpha0): the free-space covariance (silx).
@@ -2908,6 +2916,49 @@ mod tests {
     fn invert_singular_returns_none() {
         let m = vec![vec![1.0, 2.0], vec![2.0, 4.0]];
         assert!(invert_matrix(&m).is_none());
+    }
+
+    #[test]
+    fn lm_budget_counts_lambda_attempts_like_silx() {
+        // R2-28 goldens from silx leastsq itself (leastsq.py run directly with
+        // numpy: model a*exp(b*x), y = exp(x), x = linspace(0, 3, 16),
+        // p0 = [1, 3], no sigma, deltachi default): the overshooting seed makes
+        // iteration 5 reject three λ steps, and silx charges every attempt to
+        // the max_iter budget (iiter -= 1 inside the damping loop,
+        // leastsq.py:470). max_iter=8 therefore stops after FIVE outer
+        // iterations, not eight.
+        let xs = linspace(0.0, 3.0, 16);
+        let ys: Vec<f64> = xs.iter().map(|&x| x.exp()).collect();
+        let expo = |x: &[f64], p: &[f64]| {
+            x.iter()
+                .map(|&xi| p[0] * (p[1] * xi).exp())
+                .collect::<Vec<_>>()
+        };
+
+        let r8 = leastsq(expo, &xs, &ys, &[1.0, 3.0], None, 8, DEFAULT_DELTACHI).unwrap();
+        assert_eq!(r8.niter, 5, "rejected-λ attempts must consume the budget");
+        // Parameters match silx to summation-order noise (numpy accumulates
+        // chisq/alpha/beta pairwise, Rust sequentially; ~1e-7 relative after
+        // five iterations of this trajectory).
+        assert!(
+            (r8.parameters[0] - 0.156_263_258_615_617_27).abs() < 1e-6,
+            "a {}",
+            r8.parameters[0]
+        );
+        assert!(
+            (r8.parameters[1] - 1.609_532_248_302_758).abs() < 1e-6,
+            "b {}",
+            r8.parameters[1]
+        );
+
+        // With budget to spare the same fit converges on silx's schedule.
+        let r100 = leastsq(expo, &xs, &ys, &[1.0, 3.0], None, 100, DEFAULT_DELTACHI).unwrap();
+        assert_eq!(
+            r100.niter, 15,
+            "converged trajectory length must match silx"
+        );
+        assert!((r100.parameters[0] - 1.0).abs() < 1e-6);
+        assert!((r100.parameters[1] - 1.0).abs() < 1e-6);
     }
 
     #[test]
