@@ -2549,10 +2549,10 @@ on `main`):**
   (Scatter3D/Scatter2D/ColormapMesh3D/ImageData3D/HeightMapData/CutPlane)
   and CompareImages now default to gray, not viridis — the R1-16 family
   sweep across the last seven `Colormap::viridis(0.0, 1.0)`-at-
-  construction sites. **Autoscale-follows-data half NOT closed** — see
-  UNFIXED below; it needs the autoscale-representability model decision
-  and would otherwise clobber the explicit ranges examples pin via
-  `with_colormap(Colormap::new(name, -0.5, 1.0))`.
+  construction sites. **Autoscale-follows-data half NOW closed** (`649135c`)
+  via the per-bound `vmin_auto`/`vmax_auto` model — see the RESOLVED
+  autoscale-representability note below; pinned ranges from
+  `with_colormap(Colormap::new(name, -0.5, 1.0))` are preserved.
 
 **Round 2 profile-subsystem cluster (on `main`):**
 
@@ -2579,25 +2579,26 @@ on `main`):**
   stack line profile varies with width/method; 2D profile equals a
   width-3 Sum extraction, not width-1 Mean.
 
-**UNFIXED / deferred — autoscale-representability cluster (needs a model
-decision before the autoscale-follows-data half of R2-1..R2-46 can
-close uniformly):**
+**RESOLVED — autoscale-representability cluster (model decision made and
+implemented; this whole cluster is now closed):**
 
 - The shared root of R2-14 (per-bound autoscale), R2-46's second half,
   and the pin-gap left open by the R2-1/R2-23 "always autoscale on
-  rebuild" fixes is that `Colormap` carries plain `f64` vmin/vmax with no
-  way to express silx's `None`-means-autoscale-this-bound contract.
-  Consequences today: R2-1/R2-23 autoscale unconditionally (correct for
-  the default, but a user cannot pin a range — they get re-derived on
-  every rebuild); the six 3D items + CompareImages cannot autoscale on
-  `set_data` at all without clobbering the explicit ranges callers pin
-  via `with_colormap`/`set_images`. Closing this needs either
-  `Colormap { vmin: Option<f64>, vmax: Option<f64> }` resolved against
-  item data at apply time (silx-faithful, closes R2-14 per-bound too,
-  large blast radius across every color_at/GPU-upload/dialog/
-  construction site) or a per-consumer autoscale flag (lighter, does not
-  close R2-14's per-bound half). Surfaced for sign-off; not chosen
-  unilaterally.
+  rebuild" fixes was that `Colormap` carried plain `f64` vmin/vmax with
+  no way to express silx's `None`-means-autoscale-this-bound contract.
+  This was closed by adding **per-bound autoscale to `Colormap`**:
+  `vmin_auto` / `vmax_auto` flags alongside the concrete `vmin` / `vmax`
+  (silx `vmin/vmax is None`), with `Colormap::autoscale(name)` (both
+  bounds auto) and `Colormap::resolved(mode, data)` refreshing *only* the
+  auto bounds while preserving pinned ones. This is the per-bound model
+  the cluster was waiting on — it closes R2-14 per-bound, lets R2-1/R2-23
+  autoscale the default while still honouring a user-pinned range, and
+  lets the six 3D items + CompareImages autoscale on `set_data` without
+  clobbering explicit `with_colormap`/`set_images` ranges. Landed across
+  `649135c` (R2-46 3D items → gray autoscale), `517e479` (R2-1 CompareImages
+  seals both images' combined range), `4b5fbfb` (R2-23 pinned range honoured),
+  `565b9b0` (R2-14 per-bound Auto toggles in the colormap dialog). The
+  individual R2-1/R2-14/R2-23/R2-46 finding blocks above all now read FIXED.
 
 ## Review Log
 
