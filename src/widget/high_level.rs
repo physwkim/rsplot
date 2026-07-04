@@ -6082,6 +6082,12 @@ impl PlotWidget {
         match self.retained_data(handle).and_then(retained_curve_xy) {
             Some((x, y)) => {
                 fit.set_data(x, y);
+                // silx's FitAction seeds the fit range from the plot's CURRENT
+                // X view window at trigger time
+                // (`self._setXRange(*plot.getXAxis().getLimits())`,
+                // actions/fit.py:249), so fitting a zoomed-in peak fits the
+                // visible window, not the whole spectrum.
+                fit.set_fit_range(Some(self.x_limits()));
                 true
             }
             None => false,
@@ -6094,6 +6100,69 @@ impl PlotWidget {
     pub fn set_active_fit_target(&self, fit: &mut crate::widget::fit_widget::FitWidget) -> bool {
         self.active_item
             .is_some_and(|handle| self.set_fit_target(fit, handle))
+    }
+
+    /// Mirror the fit result onto this plot as a `Fit <legend>` overlay curve
+    /// — the plot half of silx's FitAction `handle_signal`
+    /// (actions/fit.py:429-451): a successful fit adds or updates a curve
+    /// named after the fitted item (no zoom reset, silx `resetzoom=False`),
+    /// on the source item's Y axis (silx re-applies `setYAxis` on every fit);
+    /// while the widget has no fit result (not run yet, new data, or a failed
+    /// fit) an existing overlay is hidden, matching silx's
+    /// `FitStarted`/`FitFailed` → `setVisible(False)`. Call each frame (or
+    /// after [`FitWidget::perform_fit_choice`]) with the fitted item's handle.
+    /// Returns the overlay's handle when one exists. The overlay is red — the
+    /// fit-curve colour used throughout siplot's [`FitWidget`] (silx lets the
+    /// default palette pick the next colour; siplot has no palette cycle).
+    ///
+    /// [`FitWidget`]: crate::FitWidget
+    /// [`FitWidget::perform_fit_choice`]: crate::FitWidget::perform_fit_choice
+    pub fn sync_fit_overlay(
+        &mut self,
+        fit: &crate::widget::fit_widget::FitWidget,
+        source: ItemHandle,
+    ) -> Option<ItemHandle> {
+        let record = self.item_record(source)?;
+        let legend = format!("Fit <{}>", self.legend_label(record));
+        // The source's Y axis (silx curveParams["yaxis"], fit.py:369-375).
+        let y_axis = match &record.stats {
+            Some(ItemStats::Curve(stats)) => stats.y_axis,
+            _ => YAxis::Left,
+        };
+        let existing = self.curve_by_legend(&legend);
+        match fit.fit_curve() {
+            Some((x, y)) => {
+                let handle = match existing {
+                    Some(handle) => {
+                        let curve = CurveData::new(x.to_vec(), y.to_vec(), Color32::RED);
+                        self.update_curve_data(handle, &curve);
+                        self.set_item_visible(handle, true);
+                        handle
+                    }
+                    None => {
+                        let handle = self.add_curve_with_legend(x, y, Color32::RED, legend);
+                        // The overlay carries the plot's axis labels (silx
+                        // curveParams xlabel/ylabel, fit.py:371-375) so
+                        // activating it keeps the source's labels.
+                        let x_label = self.graph_x_label().map(ToOwned::to_owned);
+                        let y_label = self.graph_y_label(y_axis).map(ToOwned::to_owned);
+                        if let Some(rec) = self.item_record_mut(handle) {
+                            rec.x_label = x_label;
+                            rec.y_label = y_label;
+                        }
+                        handle
+                    }
+                };
+                self.set_curve_y_axis(handle, y_axis);
+                Some(handle)
+            }
+            None => {
+                if let Some(handle) = existing {
+                    self.set_item_visible(handle, false);
+                }
+                existing
+            }
+        }
     }
 
     /// Feed the active item's retained data into a [`StatsWidget`](crate::StatsWidget) and render

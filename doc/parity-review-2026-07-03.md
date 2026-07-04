@@ -562,6 +562,28 @@ Impact: Apply at width 3 then width 5 displays `medfilt5(medfilt3(orig))` in sip
 
 ### R2-8: FitAction plot flow unported — fit range not seeded from the visible X window, no "Fit <legend>" overlay curve on the source plot
 
+**FIXED (fit-subsystem cluster):** both halves. (1) `set_fit_target` now seeds
+`FitWidget`'s fit range from the plot's current X limits
+(`fit.set_fit_range(Some(self.x_limits()))` — silx
+`self._setXRange(*plot.getXAxis().getLimits())` at trigger, fit.py:249), and
+`perform_fit` was brought in line with `perform_fit_choice` to honor the
+configured range (silx's fitmanager always fits its xmin/xmax-restricted
+data — with the seeded range, the old whole-curve path would have fitted the
+full spectrum while `fit_range()` reported a window). (2) New
+`PlotWidget::sync_fit_overlay(fit, source)` — the plot half of silx
+`handle_signal` (fit.py:429-451): a successful fit adds/updates a
+`Fit <legend>` curve on the SOURCE plot (no zoom reset; source's Y axis
+re-applied per fit as silx `setYAxis`; plot axis labels carried as silx
+curveParams), and while no result exists an existing overlay is hidden
+(FitStarted/FitFailed → `setVisible(False)`), not removed. `FitWidget` gained
+`fit_range()`/`fit_curve()` accessors (the ranged finite xs + fitted model —
+what silx overlays). Tests (`tests/fit_action_flow.rs`, headless-GPU):
+`fit_target_seeds_range_from_visible_x_window` (range == view window, fitted
+xs ⊂ window, model reproduces the line),
+`fit_overlay_appears_updates_in_place_and_hides_without_result` (no overlay
+before first result; appears visible; re-fit updates same handle; new data
+hides not removes; next success re-shows).
+
 Severity: Medium
 
 Rust: `src/widget/fit_widget.rs:726-735` — the fit result is a curve named `"Fit"` on the FitWidget's own internal Plot1D; `src/widget/high_level.rs:5872-5884` — `set_fit_target` passes the full `(x, y)`; `fit_widget.rs:445,452-457` — range defaults to whole-curve and, when enabled, seeds from the *data extent*, never from the plot's current X limits.

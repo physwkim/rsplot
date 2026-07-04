@@ -431,6 +431,12 @@ pub struct FitWidget {
     // Fit state
     selected_function_idx: usize,
     fit_result: Option<FitResult>,
+    /// The last successful fit's drawn points `(x, y_fit)`: the ranged, finite
+    /// xs the fit ran on and the model evaluated over them. Exposed via
+    /// [`Self::fit_curve`] so the source plot can overlay the result (silx
+    /// FitAction `handle_signal`, actions/fit.py:429-451). Cleared on new
+    /// data and on a failed fit.
+    fit_points: Option<(Vec<f64>, Vec<f64>)>,
 
     // Iterative-fit state (Wave 5, additive).
     selected_choice: FitModelChoice,
@@ -471,6 +477,7 @@ impl FitWidget {
             y_data: Vec::new(),
             selected_function_idx: 0,
             fit_result: None,
+            fit_points: None,
             selected_choice: FitModelChoice::Linear,
             iterative_result: None,
             fit_range: None,
@@ -491,6 +498,24 @@ impl FitWidget {
     /// (silx `FitWidget` xmin/xmax). Pass `None` to fit the whole curve.
     pub fn set_fit_range(&mut self, range: Option<(f64, f64)>) {
         self.fit_range = range;
+    }
+
+    /// The configured fit range, if any (silx `FitAction.getXRange`).
+    pub fn fit_range(&self) -> Option<(f64, f64)> {
+        self.fit_range
+    }
+
+    /// The last successful fit's `(x, y_fit)` points — the ranged, finite xs
+    /// the fit ran on and the fitted model evaluated over them. `None` while
+    /// no fit has run, after a failed fit, or after new data. This is what
+    /// silx overlays on the source plot as the `Fit <legend>` curve
+    /// ([`PlotWidget::sync_fit_overlay`]; silx actions/fit.py:429-451).
+    ///
+    /// [`PlotWidget::sync_fit_overlay`]: crate::PlotWidget::sync_fit_overlay
+    pub fn fit_curve(&self) -> Option<(&[f64], &[f64])> {
+        self.fit_points
+            .as_ref()
+            .map(|(x, y)| (x.as_slice(), y.as_slice()))
     }
 
     /// The currently selected fit model choice.
@@ -596,6 +621,7 @@ impl FitWidget {
             self.fit_handle = None;
         }
         self.fit_result = None;
+        self.fit_points = None;
         self.iterative_result = None;
         self.initial_params = None;
         self.plot.reset_zoom_to_data();
@@ -752,10 +778,12 @@ impl FitWidget {
                         "Fit",
                     ));
                 }
+                self.fit_points = Some((xs, result.y_fit.clone()));
                 self.fit_result = Some(result);
             }
             None => {
                 self.fit_result = None;
+                self.fit_points = None;
                 self.iterative_result = None;
                 if let Some(handle) = self.fit_handle {
                     self.plot.remove(handle);
@@ -774,9 +802,11 @@ impl FitWidget {
         let functions: [&dyn FitFunction; 2] = [&LinearFit, &GaussianEstimateFit];
         let func = functions[self.selected_function_idx];
 
-        // Fit and draw over the finite samples only (silx `_finite_mask`;
-        // this entry point has no range control, so `range` is None).
-        let (xs, ys) = fit_ready_data(&self.x_data, &self.y_data, None);
+        // Fit and draw over the ranged, finite samples (silx `_finite_mask`
+        // plus the FitWidget xmin/xmax — silx's fitmanager always fits its
+        // range-restricted data, and the range may have been seeded from the
+        // plot's visible window by `set_fit_target`).
+        let (xs, ys) = self.ranged_data();
         if let Some(result) = func.fit(&xs, &ys) {
             let curve = CurveData::new(xs.clone(), result.y_fit.clone(), Color32::RED);
             if let Some(handle) = self.fit_handle {
@@ -788,10 +818,12 @@ impl FitWidget {
                             .add_curve_with_legend(&xs, &result.y_fit, Color32::RED, "Fit"),
                     );
             }
+            self.fit_points = Some((xs, result.y_fit.clone()));
             self.fit_result = Some(result);
         } else {
             // Fit failed
             self.fit_result = None;
+            self.fit_points = None;
             if let Some(handle) = self.fit_handle {
                 self.plot.remove(handle);
                 self.fit_handle = None;
