@@ -1716,6 +1716,19 @@ Impact: in the `ScalarFieldView` default interactive state (cut plane visible, n
 
 ### R2-51: `CutPlane` has no `displayValuesBelowMin` — values ≤ colormap min cannot be discarded
 
+**FIXED (3D cluster, this session):** added `CutPlane::display_values_below_min`
+(default `true`, silx `volume.py:134-150`) with `display_values_below_min()` /
+`set_display_values_below_min()`, and wired the discard into
+`build_cut_plane_mesh`. When the flag is `false`, a texel whose *normalized*
+value is `0.0` (raw ≤ vmin — `Colormap::normalize` clamps below-min to 0, the CPU
+mirror of silx's GLSL `clamp(...)`) is emitted fully transparent, matching silx's
+`function.py:462-520` `if (value == 0.) { discard; }`. The discard is applied
+after normalization but gated on `!value.is_nan()`, so NaN still takes
+`nan_color` rather than being punched out — silx places `$discard` before the
+isnan branch and NaN never satisfies `value == 0.`. Tests: below-min texels
+become transparent only when the flag is off (default draws them opaque), the
+above-vmin block core stays opaque, and the flag defaults `true`.
+
 Severity: Low
 
 Rust: `src/render/scene3d_items.rs:2200-2212` — `CutPlane` carries `plane / colormap / interpolation / resolution / visible / stroke_*` only; the slice raster (`build_cut_plane_mesh`, `:2439-2447`) always maps every sample through `color_at`, which clamps below-min values to the low LUT colour. No API in the 3D surface toggles below-min transparency.

@@ -2209,6 +2209,12 @@ pub struct CutPlane {
     /// Whether the contour is drawn (silx `PlaneInGroup.strokeVisible`,
     /// default `True`, `primitives.py:1010`).
     stroke_visible: bool,
+    /// Whether samples at/below the colormap minimum are drawn (silx
+    /// `CutPlane.getDisplayValuesBelowMin`, `volume.py:134-150`, default `True`).
+    /// When `false`, silx's colormap GLSL runs `if (value == 0.) { discard; }`
+    /// after normalization (`function.py:462-466, 516-520`), punching every texel
+    /// whose normalized value clamps to 0 (raw ≤ vmin) out of the slice.
+    display_values_below_min: bool,
 }
 
 impl Default for CutPlane {
@@ -2230,6 +2236,7 @@ impl CutPlane {
             visible: false,
             stroke_color: Color32::WHITE,
             stroke_visible: true,
+            display_values_below_min: true,
         }
     }
 
@@ -2328,6 +2335,20 @@ impl CutPlane {
     /// setter, `primitives.py:1052-1056`).
     pub fn set_stroke_visible(&mut self, visible: bool) {
         self.stroke_visible = visible;
+    }
+
+    /// Whether samples at/below the colormap minimum are drawn (silx
+    /// `CutPlane.getDisplayValuesBelowMin`, `volume.py:134-141`, default `True`).
+    pub fn display_values_below_min(&self) -> bool {
+        self.display_values_below_min
+    }
+
+    /// Show or hide samples at/below the colormap minimum (silx
+    /// `CutPlane.setDisplayValuesBelowMin`, `volume.py:143-150`). When `false`,
+    /// texels whose normalized value clamps to 0 (raw ≤ vmin) are punched out of
+    /// the slice — silx's `discard` mask mode.
+    pub fn set_display_values_below_min(&mut self, display: bool) {
+        self.display_values_below_min = display;
     }
 }
 
@@ -2444,10 +2465,20 @@ fn build_cut_plane_mesh(
             let s = smin + (i as f32 + 0.5) / res as f32 * sspan;
             let p = origin + e1 * s + e2 * t;
             let value = sample_field_value(data, depth, height, width, p, cut_plane.interpolation);
-            let [r, g, b, a] = cut_plane.colormap.color_at(value as f64);
-            pixels.extend_from_slice(&premul_linear_rgba8(Color32::from_rgba_unmultiplied(
-                r, g, b, a,
-            )));
+            // silx's colormap GLSL discards texels whose *normalized* value clamps
+            // to 0 (raw ≤ vmin) when displayValuesBelowMin is off — the discard
+            // runs after normalization but before the isnan test, so NaN still
+            // takes nancolor rather than being punched out (`function.py:462-520`).
+            let color = if !cut_plane.display_values_below_min
+                && !(value as f64).is_nan()
+                && cut_plane.colormap.normalize(value as f64) == 0.0
+            {
+                Color32::TRANSPARENT
+            } else {
+                let [r, g, b, a] = cut_plane.colormap.color_at(value as f64);
+                Color32::from_rgba_unmultiplied(r, g, b, a)
+            };
+            pixels.extend_from_slice(&premul_linear_rgba8(color));
         }
     }
 
@@ -4085,6 +4116,54 @@ mod tests {
         }
         assert_eq!([lo[0], lo[1]], [0.0, 0.0]);
         assert_eq!([hi[0], hi[1]], [5.0, 5.0]);
+    }
+
+    #[test]
+    fn cut_plane_discards_below_min_texels_when_display_off() {
+        // R2-51: silx CutPlane.setDisplayValuesBelowMin(False) runs `if (value ==
+        // 0.) { discard; }` on the normalized value, punching texels whose raw
+        // value clamps to vmin (or below) out of the slice.
+        let (data, d, h, w) = blob_field(); // background 0.0, central block 1.0
+        let mut sf = ScalarField3D::new().with_data(&data, d, h, w);
+        {
+            let cp = sf.cut_plane_mut();
+            // vmin 0.5 → the 0.0 background (and the block/background trilinear
+            // fringe below 0.5) normalizes to 0.
+            cp.set_colormap(Colormap::new(ColormapName::Gray, 0.5, 1.0));
+            cp.set_normal(Vec3::new(0.0, 0.0, 1.0));
+            cp.set_point(Vec3::new(2.5, 2.5, 2.5)); // z=2.5 slices the block
+            cp.set_resolution(16);
+            cp.set_visible(true);
+        }
+        let transparent = |sf: &ScalarField3D| -> usize {
+            let mut g = Scene3dGeometry::new();
+            sf.append_to(&mut g);
+            g.textured_meshes[0]
+                .pixels
+                .chunks_exact(4)
+                .filter(|c| c[3] == 0)
+                .count()
+        };
+        // Default (display on): below-min texels are drawn opaque, none discarded.
+        assert_eq!(transparent(&sf), 0, "default draws below-min texels opaque");
+        sf.cut_plane_mut().set_display_values_below_min(false);
+        let holes = transparent(&sf);
+        assert!(holes > 0, "below-min discard punches transparent texels");
+        // The above-vmin block core stays opaque (not everything discarded).
+        let mut g = Scene3dGeometry::new();
+        sf.append_to(&mut g);
+        let opaque = g.textured_meshes[0]
+            .pixels
+            .chunks_exact(4)
+            .filter(|c| c[3] == 255)
+            .count();
+        assert!(opaque > 0, "above-min block texels stay opaque");
+    }
+
+    #[test]
+    fn cut_plane_display_values_below_min_defaults_true() {
+        // silx CutPlane default (volume.py:134-150).
+        assert!(CutPlane::new().display_values_below_min());
     }
 
     #[test]
