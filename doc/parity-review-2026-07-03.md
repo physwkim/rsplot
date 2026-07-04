@@ -1453,6 +1453,18 @@ Impact: a negative error entry draws an inverted whisker instead of a suppressed
 
 ### R2-45: Histogram step outline is 2N+2 points (two hard-coded y=0 end anchors); silx builds exactly 2N and leaves closure to the fill baseline
 
+**FIXED (this session):** `histogram_step_values` now emits exactly `2N` stair
+points (two per bin, `(left, count)` / `(right, count)`), matching silx
+`_getHistogramCurve` (`items/histogram.py:88-106`). The two `(edge, 0.0)` end
+anchors are gone; closure to the baseline is the fill's job (the consumer sets
+`baseline = Baseline::Scalar(0.0)` and the fill pipeline draws per-segment quads
+down to the baseline, so the removed anchors were zero-width vertical segments
+contributing no fill area — fill output is byte-identical, only the two vertical
+end segments silx never strokes are dropped from the outline). The outline is now
+correct under any baseline, not just 0. The log-range-repair consumer
+(high_level.rs:2107) is unaffected (its y=0 points were dropped under log anyway,
+and its comment already assumed 2N). Tests updated to the 2N shape.
+
 Severity: Low
 
 Rust: `src/widget/high_level.rs:1161-1173` — `histogram_step_values` pushes `(edges[0], 0.0)` first and `(edges[N], 0.0)` last around the 2N stair points.

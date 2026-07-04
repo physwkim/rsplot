@@ -1163,7 +1163,13 @@ fn mask_rgba_pixels(mask: &[bool], color: Color32) -> Vec<[u8; 4]> {
         .collect()
 }
 
-/// Build a step-line outline for histogram `counts` and bin `edges`.
+/// Build the stair outline for histogram `counts` and bin `edges`: exactly
+/// `2N` points (two per bin, `(left_edge, count)` and `(right_edge, count)`),
+/// matching silx `_getHistogramCurve` (`items/histogram.py:88-106`,
+/// `x[::2]=edges[:-1]; x[1::2]=edges[1:]; y[::2]=y[1::2]=histogram`). No y=0 end
+/// anchors: closure to the baseline is the fill's job (silx passes `baseline` to
+/// the backend fill, `:194`), so the outline carries no vertical end segments
+/// silx never strokes and stays correct under a non-zero baseline.
 pub fn histogram_step_values(
     edges: &[f64],
     counts: &[f64],
@@ -1178,18 +1184,14 @@ pub fn histogram_step_values(
         return Ok((Vec::new(), Vec::new()));
     }
 
-    let mut x = Vec::with_capacity(counts.len() * 2 + 2);
-    let mut y = Vec::with_capacity(counts.len() * 2 + 2);
-    x.push(edges[0]);
-    y.push(0.0);
+    let mut x = Vec::with_capacity(counts.len() * 2);
+    let mut y = Vec::with_capacity(counts.len() * 2);
     for (index, count) in counts.iter().copied().enumerate() {
         x.push(edges[index]);
         y.push(count);
         x.push(edges[index + 1]);
         y.push(count);
     }
-    x.push(edges[counts.len()]);
-    y.push(0.0);
     Ok((x, y))
 }
 
@@ -14993,10 +14995,14 @@ mod tests {
     }
 
     #[test]
-    fn histogram_step_values_builds_closed_outline() {
+    fn histogram_step_values_builds_2n_stair_without_baseline_anchors() {
+        // silx _getHistogramCurve: exactly 2N points, two per bin
+        // ((left, count), (right, count)); no y=0 end anchors — the fill
+        // baseline closes the shape.
         let (x, y) = histogram_step_values(&[0.0, 1.0, 3.0], &[2.0, 4.0]).unwrap();
-        assert_eq!(x, vec![0.0, 0.0, 1.0, 1.0, 3.0, 3.0]);
-        assert_eq!(y, vec![0.0, 2.0, 2.0, 4.0, 4.0, 0.0]);
+        assert_eq!(x, vec![0.0, 1.0, 1.0, 3.0]);
+        assert_eq!(y, vec![2.0, 2.0, 4.0, 4.0]);
+        assert_eq!(x.len(), 4); // 2N for N=2 bins, not 2N+2
     }
 
     #[test]
@@ -15127,8 +15133,9 @@ mod tests {
         let counts = [5.0, 6.0, 7.0];
         let edges = histogram_edges(&positions, HistogramAlign::Center);
         let (x, y) = histogram_step_values(&edges, &counts).unwrap();
-        assert_eq!(x, vec![0.5, 0.5, 1.5, 1.5, 2.5, 2.5, 3.5, 3.5]);
-        assert_eq!(y, vec![0.0, 5.0, 5.0, 6.0, 6.0, 7.0, 7.0, 0.0]);
+        // 2N stair points, two per bin; no y=0 end anchors (silx _getHistogramCurve).
+        assert_eq!(x, vec![0.5, 1.5, 1.5, 2.5, 2.5, 3.5]);
+        assert_eq!(y, vec![5.0, 5.0, 6.0, 6.0, 7.0, 7.0]);
     }
 
     #[test]
