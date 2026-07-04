@@ -637,8 +637,12 @@ impl FitWidget {
                 // sensitivity (DEFAULT_CONFIG["Sensitivity"] = 2.5,
                 // fittheories.py:107, passed as search_sens at :338/:356). The
                 // background combo does not apply — the multi-gaussian model
-                // carries no per-peak constant and silx's `StripBackgroundFlag`
-                // is off by default.
+                // carries no per-peak constant. silx's default strip
+                // background (`StripBackgroundFlag` on, fittheories.py:142) is
+                // applied inside the ESTIMATION (`estimate_multi_gaussian`
+                // seeds and refines against `y − strip_bg(y)`), matching silx
+                // where it corrects the seeds without adding a background
+                // term to the fitted model.
                 match fit_multi_gaussian_full(
                     &xs,
                     &ys,

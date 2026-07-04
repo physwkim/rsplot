@@ -815,6 +815,28 @@ Impact: under λ rejections Rust runs strictly more outer iterations for the sam
 
 ### R2-29: Peak estimation ignores silx's default strip background (+ Savitzky-Golay pre-smooth); three sites assert a false "off by default"
 
+**FIXED (fit-stack cluster):** the blocking sub-gap is closed —
+`core::background` gains `savitsky_golay` (ported from silx's C
+`SavitskyGolay` + `smooth1d`, smoothnd.c:53-149: even width promoted to odd,
+signed coefficient arithmetic, `npoints/3 + 1` rounds of end smoothing with
+the tail window stopping one short of the last sample, `dhelp > 0` write
+guard, invalid-width error path returns the input) and
+`estimation_strip_bg(y)` = `strip(savitsky_golay(y, 5), w=2, n=5000,
+factor=1.0)` (fittheories.py:236-251, DEFAULT_CONFIG
+StripBackgroundFlag/SmoothingFlag True at :142-147). Goldens came from silx's
+own smoothnd.c compiled directly and driven over the fixtures
+(`savitsky_golay_matches_the_silx_c_filter_npoints_5`/`_7`, plus the
+positive-sum guard and invalid-width boundaries). `estimate_multi_gaussian`
+now computes `bg = estimation_strip_bg(y)` and uses it exactly where silx
+does: seed heights `y[peak] − bg[peak]` (:374/:378), ForcePeakPresence argmax
+of `y − bg` (:361-364), 4-iteration refine against `yw = y − bg` (:386-387);
+the peak search and the caller's final fit keep raw `y`. All three false
+"off by default" claims corrected (fitting.rs doc comment,
+fit_widget.rs MultiGaussian comment, roadmap row 551). Discrimination
+verified: `estimation_seeds_baseline_corrected_heights` and
+`forced_peak_is_picked_from_the_stripped_signal` both FAIL when `bg` is
+zeroed and pass with the fix.
+
 Severity: Medium
 
 Rust: `src/core/fitting.rs:2412` (`let height = y[pi];` raw), `:2392-2398` (ForcePeakPresence = argmax of raw `y`), `:2459-2471` (4-iter refine against raw `y`). The doc comment at `:2375`, `src/widget/fit_widget.rs:626-627`, and `doc/parity-roadmap.md` row 551 all claim "silx `StripBackgroundFlag` off by default" — factually wrong, so the recorded decision does not stand.

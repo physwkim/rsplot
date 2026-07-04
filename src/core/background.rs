@@ -18,6 +18,9 @@ pub const DEFAULT_STRIP_ITERATIONS: usize = 5000;
 pub const DEFAULT_STRIP_THRESHOLD_FACTOR: f64 = 1.0;
 /// silx `CONFIG["SnipWidth"]` default.
 pub const DEFAULT_SNIP_WIDTH: usize = 16;
+/// silx `CONFIG["SmoothingWidth"]` default (Savitzky-Golay operator size, in
+/// samples).
+pub const DEFAULT_SMOOTHING_WIDTH: usize = 5;
 
 /// The strip background filter (silx `filters.strip`, C `strip.c`).
 ///
@@ -65,6 +68,108 @@ pub fn strip_background(
         cur.copy_from_slice(&out);
     }
     out
+}
+
+/// Simple 3-sample smoothing pass (silx C `smooth1d`, smoothnd.c:53-72),
+/// in place over `data`:
+/// `ys_i = 0.25·(y_{i−1} + 2·y_i + y_{i+1})` with `0.75/0.25` end weights.
+/// The C loop carries the pre-update left neighbour in `prev_sample`, so each
+/// output reads original (not already-smoothed) neighbours. Slices shorter
+/// than 3 are returned untouched (the C `size < 3` early return) — which makes
+/// the edge treatment of [`savitsky_golay`] a no-op for `npoints = 5`.
+fn smooth1d_inplace(data: &mut [f64]) {
+    let size = data.len();
+    if size < 3 {
+        return;
+    }
+    let mut prev = data[0];
+    for i in 0..size - 1 {
+        let next = 0.25 * (prev + 2.0 * data[i] + data[i + 1]);
+        prev = data[i];
+        data[i] = next;
+    }
+    data[size - 1] = 0.25 * prev + 0.75 * data[size - 1];
+}
+
+/// Savitzky-Golay smoothing (silx `filters.savitsky_golay`, C `SavitskyGolay`,
+/// smoothnd.c:93-149).
+///
+/// Quadratic/cubic Savitzky-Golay convolution of width `npoints` (promoted to
+/// the next odd value when even): coefficients
+/// `3·(3m² + 3m − 1 − 5i²)` for offsets `i = −m..m`, `m = npoints/2`,
+/// normalised by `(2m−1)(2m+1)(2m+3)`. Before the convolution, the first `m`
+/// and last `m` samples (window ending one short of the final sample, as in
+/// the C pointer arithmetic) get `npoints/3 + 1` rounds of [`smooth1d_inplace`].
+/// A smoothed value is only written where the convolution sum is positive
+/// (`dhelp > 0`), so non-positive regions keep their original samples. Returns
+/// the input unchanged when `npoints` (after promotion) is below 3, above 101,
+/// or longer than the data — the C error path, which still copies the input to
+/// the output buffer.
+pub fn savitsky_golay(y: &[f64], npoints: usize) -> Vec<f64> {
+    let len = y.len();
+    let mut output = y.to_vec();
+    let npoints = if npoints.is_multiple_of(2) {
+        npoints + 1
+    } else {
+        npoints
+    };
+    if !(3..=101).contains(&npoints) || len < npoints {
+        return output;
+    }
+    let m = npoints / 2;
+    let mi = m as i64;
+    let den = ((2 * mi - 1) * (2 * mi + 1) * (2 * mi + 3)) as f64;
+    let mut coeff = vec![0.0_f64; npoints];
+    for i in 0..=m {
+        // 3m² + 3m − 1 − 5i² goes negative near the window ends (e.g. m=2,
+        // i=2), so compute in signed arithmetic.
+        let ii = i as i64;
+        let c = (3 * (3 * mi * mi + 3 * mi - 1 - 5 * ii * ii)) as f64;
+        coeff[m + i] = c;
+        coeff[m - i] = c;
+    }
+
+    // Simple smoothing at both ends (C: npoints/3 + 1 rounds of smooth1d over
+    // m samples; the tail window is [len−m−1, len−2]).
+    let rounds = npoints / 3 + 1;
+    for _ in 0..rounds {
+        smooth1d_inplace(&mut output[..m]);
+    }
+    for _ in 0..rounds {
+        smooth1d_inplace(&mut output[len - m - 1..len - 1]);
+    }
+
+    // The actual SG convolution in the middle, reading a frozen snapshot taken
+    // after the edge smoothing.
+    let data = output.clone();
+    for i in m..len - m {
+        let mut dhelp = 0.0;
+        for (j, &c) in coeff.iter().enumerate() {
+            dhelp += c * data[i + j - m];
+        }
+        if dhelp > 0.0 {
+            output[i] = dhelp / den;
+        }
+    }
+    output
+}
+
+/// The estimation-time strip background with silx defaults
+/// (`FitTheories.strip_bg`, fittheories.py:236-251):
+/// `strip(savitsky_golay(y, SmoothingWidth), w=StripWidth,
+/// niterations=StripIterations, factor=StripThresholdFactor)`, no anchors.
+/// `DEFAULT_CONFIG` has `StripBackgroundFlag: True` and `SmoothingFlag: True`
+/// (fittheories.py:142-147), so every silx theory estimation subtracts this
+/// background before seeding peak heights.
+pub fn estimation_strip_bg(y: &[f64]) -> Vec<f64> {
+    let smoothed = savitsky_golay(y, DEFAULT_SMOOTHING_WIDTH);
+    strip_background(
+        &smoothed,
+        DEFAULT_STRIP_WIDTH,
+        DEFAULT_STRIP_ITERATIONS,
+        DEFAULT_STRIP_THRESHOLD_FACTOR,
+        &[],
+    )
 }
 
 /// The SNIP background filter in 1D (silx `filters.snip1d`, C `snip1d.c`).
@@ -267,6 +372,118 @@ mod tests {
         (0..n)
             .map(|i| a + (b - a) * (i as f64) / ((n - 1) as f64))
             .collect()
+    }
+
+    /// The R2-29 Savitzky-Golay fixture: `sin(0.3·i)·10 + 0.05·i² − 3·[i==7]`
+    /// over 16 samples, and its goldens from silx's own C `SavitskyGolay`
+    /// (smoothnd.c compiled directly and driven over this array).
+    fn sg_fixture() -> Vec<f64> {
+        (0..16)
+            .map(|i| {
+                (0.3 * i as f64).sin() * 10.0 + 0.05 * (i * i) as f64
+                    - if i == 7 { 3.0 } else { 0.0 }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn savitsky_golay_matches_the_silx_c_filter_npoints_5() {
+        // npoints=5 (the strip_bg default): m=2, so the edge treatment is a
+        // no-op (smooth1d returns for size < 3) and the first/last 2 samples
+        // pass through.
+        let golden = [
+            0.0,
+            3.0052020666133954,
+            5.842562910079942,
+            8.277911598919477,
+            10.114016258114743,
+            11.47527044159569,
+            10.50324433268838,
+            9.619046962762674,
+            8.921440604327952,
+            8.578018631368701,
+            6.410234902381666,
+            4.473621946741542,
+            2.7778221477491485,
+            1.577042325941772,
+            1.0842422758641188,
+            1.47469882334903,
+        ];
+        let y = sg_fixture();
+        let out = savitsky_golay(&y, 5);
+        for (i, (&o, &g)) in out.iter().zip(golden.iter()).enumerate() {
+            assert!((o - g).abs() < 1e-12, "sample {i}: {o} vs {g}");
+        }
+        // Even npoints promotes to the next odd (C `npoints += 1`).
+        assert_eq!(savitsky_golay(&y, 4), out);
+    }
+
+    #[test]
+    fn savitsky_golay_matches_the_silx_c_filter_npoints_7() {
+        // npoints=7: m=3, so the edge smoothing is ACTIVE (3 rounds of
+        // smooth1d over 3-sample windows at each end) — this golden pins the
+        // edge-treatment path, including the tail window stopping one short
+        // of the final sample.
+        let golden = [
+            1.7168850198513144,
+            2.9513963262258147,
+            4.18334545448662,
+            7.6106484513528425,
+            10.142406433141652,
+            10.921332659109693,
+            10.648691788332117,
+            10.053160403608413,
+            9.074848608117552,
+            7.938604770945253,
+            6.583306858301657,
+            4.30283019002851,
+            2.707708907459852,
+            1.8067381200117714,
+            1.4557179806722114,
+            1.47469882334903,
+        ];
+        let y = sg_fixture();
+        let out = savitsky_golay(&y, 7);
+        for (i, (&o, &g)) in out.iter().zip(golden.iter()).enumerate() {
+            assert!((o - g).abs() < 1e-12, "sample {i}: {o} vs {g}");
+        }
+    }
+
+    #[test]
+    fn savitsky_golay_positive_sum_guard_keeps_negative_data() {
+        // The C filter only writes a smoothed value where the convolution sum
+        // is positive — an all-negative curve passes through unchanged
+        // (verified against the compiled C filter).
+        let y = vec![-1.0, -2.0, -3.0, -2.5, -1.5, -2.0, -3.0, -2.0, -1.0, -2.0];
+        assert_eq!(savitsky_golay(&y, 5), y);
+    }
+
+    #[test]
+    fn savitsky_golay_short_or_invalid_width_returns_the_input() {
+        // len < npoints and npoints < 3 are the C error paths: the output is
+        // the unsmoothed copy.
+        let y = vec![1.0, 2.0, 3.0];
+        assert_eq!(savitsky_golay(&y, 5), y);
+        let y2 = sg_fixture();
+        assert_eq!(savitsky_golay(&y2, 1), y2);
+        assert_eq!(savitsky_golay(&y2, 103), y2);
+    }
+
+    #[test]
+    fn estimation_strip_bg_recovers_a_flat_baseline_under_a_peak() {
+        // A gaussian on a constant baseline: the default strip background
+        // (savitsky_golay(5) then strip(w=2, n=5000, factor=1)) erodes the
+        // peak down to the baseline, so y − bg isolates the peak.
+        let x = linspace(0.0, 40.0, 81);
+        let y: Vec<f64> = x
+            .iter()
+            .map(|&xi| 100.0 + 10.0 * (-((xi - 20.0) / 2.0).powi(2)).exp())
+            .collect();
+        let bg = estimation_strip_bg(&y);
+        // At the peak centre the background is the baseline, not the peak.
+        assert!((bg[40] - 100.0).abs() < 1.0, "bg at peak {}", bg[40]);
+        // Away from the peak the background tracks the data.
+        assert!((bg[5] - y[5]).abs() < 0.5);
     }
 
     #[test]

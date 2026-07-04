@@ -2612,14 +2612,23 @@ pub fn multi_gaussian_model(x: &[f64], params: &[f64]) -> Vec<f64> {
 /// fittheories.py:280-313; `search_fwhm` floored at 3, `sensitivity` floored
 /// at 1; falls back to the global maximum when none are found, silx
 /// `ForcePeakPresence`). Seeds each
-/// peak as `(y[peak], x[peak], 5·|xspan|/n)`, refines the seeds with a quick
-/// 4-iteration constrained fit (height/FWHM positive, centre quoted to ±½ of the
-/// `search_fwhm`-sample x-width), and returns the refined seeds together with the
-/// final per-parameter constraints (height & FWHM `Positive`, centre `Free` —
-/// silx default `PositiveHeightAreaFlag`/`PositiveFwhmFlag` on, `QuotedPositionFlag`
-/// off). Background removal (silx `StripBackgroundFlag`, off by default) is left
-/// to the caller via [`crate::core::background`]. Returns `None` for empty or
-/// length-mismatched input, or when no peak can be seeded.
+/// peak as `(y[peak] − bg[peak], x[peak], 5·|xspan|/n)`, refines the seeds with
+/// a quick 4-iteration constrained fit (height/FWHM positive, centre quoted to
+/// ±½ of the `search_fwhm`-sample x-width) against `y − bg`, and returns the
+/// refined seeds together with the final per-parameter constraints (height &
+/// FWHM `Positive`, centre `Free` — silx default
+/// `PositiveHeightAreaFlag`/`PositiveFwhmFlag` on, `QuotedPositionFlag` off).
+///
+/// `bg` is the default strip background
+/// ([`estimation_strip_bg`](crate::core::background::estimation_strip_bg)):
+/// silx `DEFAULT_CONFIG` has `StripBackgroundFlag: True` and
+/// `SmoothingFlag: True` (fittheories.py:142-147), so every theory estimation
+/// computes `bg = self.strip_bg(y)` (:332), seeds heights `y[peak] − bg[peak]`
+/// (:374/:378), picks the `ForcePeakPresence` fallback from `y − bg`
+/// (:361-364), and refines against `yw = y − bg` (:386-387). The peak SEARCH
+/// itself runs on raw `y` (:356), and the final fit does too — the strip
+/// affects estimation only. Returns `None` for empty or length-mismatched
+/// input, or when no peak can be seeded.
 pub fn estimate_multi_gaussian(
     x: &[f64],
     y: &[f64],
@@ -2633,11 +2642,18 @@ pub fn estimate_multi_gaussian(
     let search_fwhm = search_fwhm.max(3.0);
     let search_sens = sensitivity.max(1.0);
 
+    // Default strip background (fittheories.py:332): seeds, the forced-peak
+    // pick, and the quick refine are all baseline-corrected; the peak search
+    // and the caller's final fit see raw `y`.
+    let bg = crate::core::background::estimation_strip_bg(y);
+
     let found = crate::core::peaks::padded_peak_search(y, search_fwhm, search_sens);
     let peaks: Vec<usize> = if found.is_empty() {
-        // silx ForcePeakPresence: use the (first) global maximum.
-        let maxv = y.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-        match y.iter().position(|&v| v == maxv) {
+        // silx ForcePeakPresence: the (first) global maximum of `y − bg`
+        // (fittheories.py:361-364).
+        let delta: Vec<f64> = y.iter().zip(bg.iter()).map(|(&a, &b)| a - b).collect();
+        let maxv = delta.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        match delta.iter().position(|&v| v == maxv) {
             Some(p) => vec![p],
             None => return None,
         }
@@ -2654,7 +2670,8 @@ pub fn estimate_multi_gaussian(
     let mut index_largest = 0usize;
     let mut height_largest = f64::NEG_INFINITY;
     for (k, &pi) in peaks.iter().enumerate() {
-        let height = y[pi];
+        // Baseline-corrected seed height (fittheories.py:374/:378).
+        let height = y[pi] - bg[pi];
         // silx zeroes a near-zero position only for the first peak.
         let pos = if k == 0 && x[pi].abs() < 1.0e-16 {
             0.0
@@ -2701,13 +2718,15 @@ pub fn estimate_multi_gaussian(
         prelim.push(Constraint::Positive);
     }
 
-    // Quick 4-iteration refine (silx max_iter=4); fall back to the raw seeds.
+    // Quick 4-iteration refine against the background-subtracted signal
+    // `yw = y − bg` (fittheories.py:386-387); fall back to the raw seeds.
     // Forward Jacobian: the estimation micro-fit calls leastsq with silx's
     // default derivative mode (fittheories.py:411-419), unlike the runfit path.
+    let yw: Vec<f64> = y.iter().zip(bg.iter()).map(|(&a, &b)| a - b).collect();
     let fittedpar = leastsq_constrained(
         multi_gaussian_model,
         x,
-        y,
+        &yw,
         &param,
         &prelim,
         None,
@@ -4412,6 +4431,49 @@ mod tests {
             seeds_pyx.len(),
             3,
             "the pyx default 3.5 drops the marginal peak"
+        );
+    }
+
+    #[test]
+    fn estimation_seeds_baseline_corrected_heights() {
+        // R2-29: silx seeds `y[peak] − bg[peak]` (fittheories.py:374/:378)
+        // and refines against `yw = y − bg` (:386-387), where bg is the
+        // default strip background — DEFAULT_CONFIG StripBackgroundFlag /
+        // SmoothingFlag are True (:142-147). On a 100-high flat baseline the
+        // h=10 peak must seed/refine to ~10, not ~110.
+        let xs: Vec<f64> = (0..81).map(|i| i as f64 * 0.5).collect();
+        let ys: Vec<f64> = xs
+            .iter()
+            .map(|&x| 100.0 + gaussian_model(&[x], &[10.0, 20.0, 3.0, 0.0])[0])
+            .collect();
+        let (seeds, _) = estimate_multi_gaussian(&xs, &ys, 6.0, DEFAULT_FIT_SENSITIVITY).unwrap();
+        assert_eq!(seeds.len(), 3, "one peak, got {seeds:?}");
+        assert!(
+            seeds[0] > 5.0 && seeds[0] < 30.0,
+            "height must be baseline-corrected, got {}",
+            seeds[0]
+        );
+        assert!((seeds[1] - 20.0).abs() < 2.0, "centre {}", seeds[1]);
+    }
+
+    #[test]
+    fn forced_peak_is_picked_from_the_stripped_signal() {
+        // R2-29: when the search finds nothing, ForcePeakPresence takes the
+        // argmax of `y − bg` (fittheories.py:361-364), not of raw `y`. On a
+        // steep ramp the raw maximum is the ramp's top-right sample; the
+        // stripped maximum is the actual peak.
+        let xs: Vec<f64> = (0..81).map(|i| i as f64 * 0.5).collect();
+        let ys: Vec<f64> = xs
+            .iter()
+            .map(|&x| 2.0 * x + gaussian_model(&[x], &[10.0, 20.0, 3.0, 0.0])[0])
+            .collect();
+        // Absurd sensitivity: the search returns nothing, forcing the pick.
+        let (seeds, _) = estimate_multi_gaussian(&xs, &ys, 6.0, 1e9).unwrap();
+        assert_eq!(seeds.len(), 3, "forced single peak, got {seeds:?}");
+        assert!(
+            (seeds[1] - 20.0).abs() < 3.0,
+            "forced pick must come from y − bg (peak at 20), got centre {}",
+            seeds[1]
         );
     }
 
