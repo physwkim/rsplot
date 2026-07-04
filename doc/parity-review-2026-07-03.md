@@ -955,6 +955,28 @@ Impact: masked/NaN-bearing images get systematically fewer default bins than sil
 
 ### R2-21: Curve CSV export hardcodes an `x,y` header and drops error columns — silx writes the real axis labels plus `*_errors` columns
 
+**FIXED (io cluster):** `curve_to_csv` now takes
+`(x, y, xlabel, ylabel, x_error, y_error)` and reproduces the silx
+`_saveCurve → _get1dData → save1D` contract: header
+`xlabel + "," + ",".join(ylabels)` (io/utils.py:279); column order y →
+x-error(s) → y-error(s) (actions/io.py:254-289); a scalar `ErrorBars`
+broadcasts to a full `<label>_errors` column
+(`numpy.zeros_like(y) + err`), a per-point error is one `<label>_errors`
+column, an asymmetric `(2,N)` error splits into `<label>_errors_below`
+(row 0) then `<label>_errors_above` (row 1). `save_to_path` resolves the
+labels as silx `_getAxesLabels` (:248-252): the curve record's own
+`x_label`/`y_label`, else the axis' currently-displayed label; an
+unlabeled bare plot writes empty header labels exactly as a bare silx
+`PlotWidget` (silx Plot1D's "X"/"Y" come from PlotWindow defaults
+siplot never sets). Errors come from the record's retained `CurveData`.
+Also ported from the same `_saveCurve` body: the no-active-curve
+fallback to the first curve on the plot (`getAllCurves()[0]`, :342-351)
+— previously `Ok(false)`. The reduced save surface (CSV-only; no
+npy/NXdata/spec) remains the recorded decision. Tests: byte-exact
+header+error-column matrix (scalar broadcast, per-point, asymmetric
+below/above ordering), real-label + empty-label headers, existing
+byte-for-byte `%.18e` rows unchanged.
+
 Severity: Low
 
 Rust: `src/widget/actions/io.rs:79-88` — `String::from("x,y\n")` then zips only `(x, y)`.

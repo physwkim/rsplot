@@ -9,6 +9,7 @@
 use std::borrow::Cow;
 use std::path::Path;
 
+use crate::core::items::ErrorBars;
 use crate::render::save::SaveFormat;
 
 /// Digits after the decimal point in the CSV float format: 18, matching silx
@@ -68,20 +69,101 @@ fn format_csv_float(v: f64) -> String {
     }
 }
 
-/// Serialize a curve's `(x, y)` to silx-style `,`-separated CSV: a header line
-/// `x,y` followed by one `xval,yval` row per point, `%.18e`-formatted, `\n`
-/// line endings (silx `SaveAction._saveCurve` → `save1D` with the default
+/// One CSV data column: a slice of per-point values, or a scalar broadcast to
+/// every row (silx `_get1dData` turns a scalar error into
+/// `numpy.zeros_like(y_data) + err`).
+enum CsvColumn<'a> {
+    Values(&'a [f64]),
+    Broadcast(f64),
+}
+
+/// Append the CSV column(s) and label(s) for one error-bar set, exactly as
+/// silx `SaveAction._get1dData` (`actions/io.py:264-289`): a scalar error
+/// broadcasts to a full `<label>_errors` column, a 1-D error is a
+/// `<label>_errors` column as-is, and a `(2, N)` asymmetric error splits into
+/// `<label>_errors_below` (row 0) then `<label>_errors_above` (row 1).
+fn push_error_columns<'a>(
+    error: &'a ErrorBars,
+    label: &str,
+    labels: &mut Vec<String>,
+    columns: &mut Vec<CsvColumn<'a>>,
+) {
+    match error {
+        ErrorBars::Symmetric(e) => {
+            labels.push(format!("{label}_errors"));
+            columns.push(CsvColumn::Broadcast(*e));
+        }
+        ErrorBars::PerPoint(es) => {
+            labels.push(format!("{label}_errors"));
+            columns.push(CsvColumn::Values(es));
+        }
+        ErrorBars::Asymmetric { lower, upper } => {
+            labels.push(format!("{label}_errors_below"));
+            columns.push(CsvColumn::Values(lower));
+            labels.push(format!("{label}_errors_above"));
+            columns.push(CsvColumn::Values(upper));
+        }
+    }
+}
+
+/// Serialize a curve to silx-style `,`-separated CSV (silx
+/// `SaveAction._saveCurve` → `_get1dData` → `save1D` with the default
 /// `","`-CSV filter: `header=True`, `delimiter=","`, `fmt="%.18e"`).
 ///
-/// `x` and `y` must have equal length; on a length mismatch the shorter is
-/// followed (each row needs both columns), matching a zipped write. Pure, so the
-/// exact byte output is unit-testable without touching the filesystem.
-pub fn curve_to_csv(x: &[f64], y: &[f64]) -> String {
-    let mut out = String::from("x,y\n");
-    for (xv, yv) in x.iter().zip(y.iter()) {
-        out.push_str(&format_csv_float(*xv));
+/// The header is the real labels — `xlabel + "," + ",".join(ylabels)`
+/// (`silx/io/utils.py:279`), where the y-label list starts with `ylabel` and
+/// grows one entry per error column: the x-error column(s) first, then the
+/// y-error column(s), scalar errors broadcast and `(2, N)` asymmetric errors
+/// split into `_errors_below`/`_errors_above` (silx `_get1dData`,
+/// `actions/io.py:254-289`). silx writes whatever the labels resolve to —
+/// empty labels stay empty in the header.
+///
+/// All per-point columns must have equal length; on a mismatch the shortest is
+/// followed (every row needs all its columns), matching a zipped write. Pure,
+/// so the exact byte output is unit-testable without touching the filesystem.
+pub fn curve_to_csv(
+    x: &[f64],
+    y: &[f64],
+    xlabel: &str,
+    ylabel: &str,
+    x_error: Option<&ErrorBars>,
+    y_error: Option<&ErrorBars>,
+) -> String {
+    // Column order is silx `_get1dData`: y, then x-errors, then y-errors.
+    let mut labels: Vec<String> = vec![ylabel.to_string()];
+    let mut columns: Vec<CsvColumn<'_>> = vec![CsvColumn::Values(y)];
+    if let Some(error) = x_error {
+        push_error_columns(error, xlabel, &mut labels, &mut columns);
+    }
+    if let Some(error) = y_error {
+        push_error_columns(error, ylabel, &mut labels, &mut columns);
+    }
+
+    let mut out = String::new();
+    out.push_str(xlabel);
+    for label in &labels {
         out.push(',');
-        out.push_str(&format_csv_float(*yv));
+        out.push_str(label);
+    }
+    out.push('\n');
+
+    let rows = columns
+        .iter()
+        .filter_map(|c| match c {
+            CsvColumn::Values(v) => Some(v.len()),
+            CsvColumn::Broadcast(_) => None,
+        })
+        .fold(x.len(), usize::min);
+    for i in 0..rows {
+        out.push_str(&format_csv_float(x[i]));
+        for column in &columns {
+            let v = match column {
+                CsvColumn::Values(vals) => vals[i],
+                CsvColumn::Broadcast(e) => *e,
+            };
+            out.push(',');
+            out.push_str(&format_csv_float(v));
+        }
         out.push('\n');
     }
     out
@@ -205,7 +287,7 @@ mod tests {
     fn curve_to_csv_produces_exact_silx_style_output() {
         let x = [0.0, 1.5];
         let y = [-2.0, 3.25];
-        let csv = curve_to_csv(&x, &y);
+        let csv = curve_to_csv(&x, &y, "x", "y", None, None);
         // These rows are byte-for-byte what silx writes: numpy.savetxt with
         // fmt="%.18e", which is C/Python `'%.18e' % v` — signed, two-digit
         // exponent (`e+00`), 18 fractional digits. (Cross-checked against
@@ -214,6 +296,64 @@ mod tests {
              0.000000000000000000e+00,-2.000000000000000000e+00\n\
              1.500000000000000000e+00,3.250000000000000000e+00\n";
         assert_eq!(csv, expected);
+    }
+
+    #[test]
+    fn curve_to_csv_header_uses_the_real_labels() {
+        // silx save1D: header = xlabel + "," + ",".join(ylabels)
+        // (io/utils.py:279) — the resolved axis labels, not literal "x,y".
+        let csv = curve_to_csv(&[1.0], &[2.0], "Energy [keV]", "Counts", None, None);
+        assert!(
+            csv.starts_with("Energy [keV],Counts\n"),
+            "header must carry the real labels, got {csv:?}"
+        );
+        // Empty labels stay empty (a bare silx PlotWidget has "" axis labels).
+        let csv = curve_to_csv(&[1.0], &[2.0], "", "", None, None);
+        assert!(csv.starts_with(",\n"));
+    }
+
+    #[test]
+    fn curve_to_csv_error_columns_follow_silx_get1ddata() {
+        // silx _get1dData (actions/io.py:254-289): columns y, then x-errors,
+        // then y-errors; a scalar broadcasts to a full column; a (2,N) error
+        // splits into _errors_below (row 0) then _errors_above (row 1).
+        let x = [1.0, 2.0];
+        let y = [10.0, 20.0];
+        let x_err = ErrorBars::Symmetric(0.5);
+        let y_err = ErrorBars::Asymmetric {
+            lower: vec![3.0, 4.0],
+            upper: vec![5.0, 6.0],
+        };
+        let csv = curve_to_csv(&x, &y, "x", "y", Some(&x_err), Some(&y_err));
+        let mut lines = csv.lines();
+        assert_eq!(
+            lines.next(),
+            Some("x,y,x_errors,y_errors_below,y_errors_above")
+        );
+        assert_eq!(
+            lines.next(),
+            Some(
+                "1.000000000000000000e+00,1.000000000000000000e+01,\
+                 5.000000000000000000e-01,3.000000000000000000e+00,\
+                 5.000000000000000000e+00"
+            )
+        );
+        assert_eq!(
+            lines.next(),
+            Some(
+                "2.000000000000000000e+00,2.000000000000000000e+01,\
+                 5.000000000000000000e-01,4.000000000000000000e+00,\
+                 6.000000000000000000e+00"
+            )
+        );
+        assert_eq!(lines.next(), None);
+
+        // A 1-D per-point error is a single `<label>_errors` column.
+        // (`'%.18e' % 0.1` == 1.000000000000000056e-01 — the f64 tail shows.)
+        let y_err = ErrorBars::PerPoint(vec![0.1, 0.2]);
+        let csv = curve_to_csv(&x, &y, "x", "y", None, Some(&y_err));
+        assert!(csv.starts_with("x,y,y_errors\n"));
+        assert!(csv.contains(",1.000000000000000056e-01\n"));
     }
 
     #[test]
@@ -229,7 +369,7 @@ mod tests {
 
     #[test]
     fn curve_to_csv_empty_is_header_only() {
-        assert_eq!(curve_to_csv(&[], &[]), "x,y\n");
+        assert_eq!(curve_to_csv(&[], &[], "x", "y", None, None), "x,y\n");
     }
 
     #[test]

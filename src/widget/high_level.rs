@@ -8101,13 +8101,41 @@ impl PlotWidget {
                 Ok(true)
             }
             Some(SaveTarget::CurveCsv) => {
-                let Some(handle) = self.active_curve() else {
+                // silx _saveCurve: the active curve, else the first curve on
+                // the plot (actions/io.py:342-351, `getAllCurves()[0]`).
+                let handle = self.active_curve().or_else(|| {
+                    self.item_records
+                        .iter()
+                        .find(|r| r.kind == PlotItemKind::Curve && r.data.is_some())
+                        .map(|r| r.handle)
+                });
+                let Some(handle) = handle else {
                     return Ok(false);
                 };
                 let Some((x, y)) = self.retained_data(handle).and_then(retained_curve_xy) else {
                     return Ok(false);
                 };
-                let csv = curve_to_csv(x, y);
+                // silx _getAxesLabels: the curve's own label, else the axis'
+                // currently displayed label (actions/io.py:248-252).
+                let record = self.item_record(handle);
+                let plot = self.backend.plot();
+                let xlabel = record
+                    .and_then(|r| r.x_label.clone())
+                    .or_else(|| plot.displayed_x_label())
+                    .unwrap_or_default();
+                let ylabel = record
+                    .and_then(|r| r.y_label.clone())
+                    .or_else(|| plot.displayed_y_label())
+                    .unwrap_or_default();
+                let curve_data = record.and_then(|r| r.curve_data.as_ref());
+                let csv = curve_to_csv(
+                    x,
+                    y,
+                    &xlabel,
+                    &ylabel,
+                    curve_data.and_then(|c| c.x_error.as_ref()),
+                    curve_data.and_then(|c| c.y_error.as_ref()),
+                );
                 std::fs::write(path, csv)?;
                 Ok(true)
             }
