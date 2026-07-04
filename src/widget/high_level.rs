@@ -9044,7 +9044,9 @@ const KEYPOINT_COLOR: Color32 = Color32::from_rgb(255, 0, 255);
 ///
 /// ```ignore
 /// let mut cmp = CompareImages::new(render_state, 0);
-/// cmp.set_images((wa, ha), &data_a, (wb, hb), &data_b, Colormap::viridis(0.0, 1.0))?;
+/// // Gray + autoscale (the silx default): the range tracks both images'
+/// // combined data. Pass a pinned `Colormap::viridis(lo, hi)` to fix it.
+/// cmp.set_images((wa, ha), &data_a, (wb, hb), &data_b, Colormap::autoscale(ColormapName::Gray))?;
 ///
 /// // frame loop
 /// cmp.show_toolbar(ui);
@@ -9115,9 +9117,11 @@ impl CompareImages {
             height_b: 0,
             data_a: Vec::new(),
             data_b: Vec::new(),
-            // Placeholder until `set_images` supplies one; silx's CompareImages
-            // starts from `Colormap()` = gray (R1-16 family default), not viridis.
-            colormap: Colormap::new(ColormapName::Gray, 0.0, 1.0),
+            // silx's CompareImages starts from `Colormap()` = gray with
+            // autoscale (vmin/vmax = None); `build_composite` seals that range
+            // over both images' combined data each rebuild. A caller may pass a
+            // pinned colormap to `set_images` to fix the range instead.
+            colormap: Colormap::autoscale(ColormapName::Gray),
             composite_handle: None,
             split: 0.5,
             mode: CompareMode::HalfHalf,
@@ -9653,18 +9657,26 @@ impl CompareImages {
         let w = cw as usize;
         let h = ch as usize;
 
+        // Seal the colormap over both placed images' combined range (silx
+        // `__getSealedColormap`); the zero margin padding is included, matching
+        // silx's `__createMarginImage` (fills zeros, CompareImages.py:842-844).
+        // Both images seal to the same range in every mode — silx keeps both in
+        // `__item` even for ONLY_A/ONLY_B (core.py sets both before the mode
+        // reduction).
+        let colormap = seal_compare_colormap(&self.colormap, &data1, &data2);
+
         let pixels = match self.mode {
-            CompareMode::OnlyA => colormap_to_rgba(cw, &data1, &self.colormap),
-            CompareMode::OnlyB => colormap_to_rgba(cw, &data2, &self.colormap),
+            CompareMode::OnlyA => colormap_to_rgba(cw, &data1, &colormap),
+            CompareMode::OnlyB => colormap_to_rgba(cw, &data2, &colormap),
             CompareMode::HalfHalf => {
-                let rgba_a = colormap_to_rgba(cw, &data1, &self.colormap);
-                let rgba_b = colormap_to_rgba(cw, &data2, &self.colormap);
+                let rgba_a = colormap_to_rgba(cw, &data1, &colormap);
+                let rgba_b = colormap_to_rgba(cw, &data2, &colormap);
                 let split_col = (self.split * cw as f32).round() as usize;
                 split_composite(&rgba_a, &rgba_b, w, h, split_col, false)
             }
             CompareMode::SplitHorizontal => {
-                let rgba_a = colormap_to_rgba(cw, &data1, &self.colormap);
-                let rgba_b = colormap_to_rgba(cw, &data2, &self.colormap);
+                let rgba_a = colormap_to_rgba(cw, &data1, &colormap);
+                let rgba_b = colormap_to_rgba(cw, &data2, &colormap);
                 let split_row = (self.split * ch as f32).round() as usize;
                 split_composite(&rgba_a, &rgba_b, w, h, split_row, true)
             }
@@ -9682,12 +9694,8 @@ impl CompareImages {
                     }
                 })
                 .collect(),
-            CompareMode::RedBlueGray => {
-                red_blue_gray_composite(&data1, &data2, &self.colormap, false)
-            }
-            CompareMode::RedBlueGrayNeg => {
-                red_blue_gray_composite(&data1, &data2, &self.colormap, true)
-            }
+            CompareMode::RedBlueGray => red_blue_gray_composite(&data1, &data2, &colormap, false),
+            CompareMode::RedBlueGrayNeg => red_blue_gray_composite(&data1, &data2, &colormap, true),
         };
         (pixels, cw, ch)
     }
@@ -9997,6 +10005,23 @@ fn colormap_to_rgba(_width: u32, data: &[f32], colormap: &Colormap) -> Vec<[u8; 
     data.iter()
         .map(|&v| colormap.lut[colormap.lut_index(v as f64)])
         .collect()
+}
+
+/// Seal `base` over both compare images by autoscaling its *auto* bounds across
+/// the concatenated finite values of `data1` and `data2` — silx
+/// `CompareImages.__getSealedColormap` over `_CompareImageItem`'s combined data
+/// (tools/compare/core.py:166-183, 192-198). An autoscale colormap (the silx
+/// default `Colormap()` = gray) thus tracks the pair's range; a pinned colormap
+/// is returned unchanged (`Colormap::resolved` is a no-op), matching silx
+/// keeping a user-set `vmin`/`vmax`. Both images seal to the same range in every
+/// mode. Split out so the range derivation is unit-testable without a GPU.
+fn seal_compare_colormap(base: &Colormap, data1: &[f32], data2: &[f32]) -> Colormap {
+    let combined: Vec<f64> = data1
+        .iter()
+        .chain(data2.iter())
+        .map(|&v| f64::from(v))
+        .collect();
+    base.resolved(AutoscaleMode::MinMax, &combined)
 }
 
 /// Compose two scalar images into an RGB composite, mirroring silx CompareImages
@@ -14508,6 +14533,38 @@ mod tests {
         let neg = red_blue_gray_composite(&data_a, &data_b, &cm, true);
         assert_eq!(neg[0], [255 - b0, 255 - (a0 / 2 + b0 / 2), 255 - a0, 255]);
         assert_eq!(neg[1], [255 - b1, 255 - (a1 / 2 + b1 / 2), 255 - a1, 255]);
+    }
+
+    #[test]
+    fn seal_compare_colormap_autoscales_over_both_images() {
+        // silx seals the colormap over the concatenation of BOTH images'
+        // finite values (getColormappedData). An autoscale colormap therefore
+        // spans the pair: image A in [10,20], image B in [5,40] → [5,40].
+        let base = Colormap::autoscale(ColormapName::Gray);
+        let sealed = seal_compare_colormap(&base, &[10.0, 20.0], &[5.0, 40.0]);
+        assert_eq!((sealed.vmin, sealed.vmax), (5.0, 40.0));
+        // Still autoscale: the next rebuild re-seals to fresh data.
+        assert!(sealed.is_autoscale());
+    }
+
+    #[test]
+    fn seal_compare_colormap_keeps_a_pinned_range() {
+        // A caller that pins vmin/vmax (silx setVRange) is left untouched — the
+        // pair's data does not override an explicit range.
+        let base = Colormap::viridis(0.0, 1.0);
+        let sealed = seal_compare_colormap(&base, &[100.0, 200.0], &[300.0, 400.0]);
+        assert_eq!((sealed.vmin, sealed.vmax), (0.0, 1.0));
+    }
+
+    #[test]
+    fn seal_compare_colormap_includes_zero_margin_padding() {
+        // silx pads the smaller image with zeros (__createMarginImage) and seals
+        // over the padded data, so an all-positive pair whose grid carries pad
+        // zeros ranges down to 0 — parity with silx including the padding.
+        let base = Colormap::autoscale(ColormapName::Gray);
+        // data1 carries a 0.0 pad cell alongside positive values.
+        let sealed = seal_compare_colormap(&base, &[0.0, 30.0, 20.0], &[25.0, 15.0]);
+        assert_eq!((sealed.vmin, sealed.vmax), (0.0, 30.0));
     }
 
     #[test]

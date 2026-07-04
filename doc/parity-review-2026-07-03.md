@@ -446,6 +446,27 @@ inventory for future rounds, not findings.
 
 ### R2-1: ImageStack renders every frame through a fixed `viridis(0.0, 1.0)` colormap — silx autoscales the plot-default gray per frame
 
+**FIXED (two sites):**
+
+- *ImageStack core* — `9921117`: `rebuild_image` now derives each frame's range
+  through a split-out `frame_colormap()` helper (base LUT/normalization
+  preserved, range re-autoscaled minmax per frame); the default base colormap is
+  gray. silx `addImage` with no colormap → the plot default gray with
+  `vmin/vmax = None`, re-autoscaled to each frame (ImageStack.py:548-550,
+  PlotWidget.py:1465-1467).
+- *CompareImages sibling* — this session: `build_composite` seals the colormap
+  over both placed images' concatenated finite values via a pure
+  `seal_compare_colormap` helper, applied to every intensity mode
+  (OnlyA/OnlyB/HalfHalf/SplitHorizontal/RedBlueGray[Neg]) — silx
+  `CompareImages.__getSealedColormap` over `_CompareImageItem.getColormappedData`
+  (tools/compare/core.py:166-183, 192-198), including the zero margin padding
+  (`__createMarginImage`, CompareImages.py:842-844). The default colormap is now
+  `Colormap::autoscale(Gray)` (silx `Colormap()`); a caller may still pass a
+  pinned colormap to `set_images` to fix the range (`resolved` is a no-op on a
+  pinned map, matching silx `setVRange`). Per-boundary tests: seal
+  autoscales-over-both / keeps-a-pinned-range / includes-zero-padding. Both
+  halves build on the R2-46 per-bound `Colormap::resolved` primitive.
+
 Severity: High
 
 Rust: `src/widget/image_stack.rs:521` — `colormap: Colormap::viridis(0.0, 1.0)` in `ImageStack::new`; `rebuild_image` (`:807-822`) passes `self.colormap.clone()` verbatim into `try_add_image`/`try_update_image`, and `set_colormap` (`:699`) only replaces the fixed map — no autoscale path exists.
