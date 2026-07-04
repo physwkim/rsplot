@@ -153,10 +153,15 @@ impl ColormapDialog {
                 self.histogram = None;
             }
             if self.histogram.is_none() || self.histogram_norm != Some(self.normalization) {
+                // silx computes the histogram over the normalization's data
+                // range first (`_computeNormalizedHistogram` →
+                // `computeHistogram(data, scale=norm, dataRange)`), then bins
+                // log-uniformly only for LOG.
                 let log = self.normalization == Normalization::Log;
-                self.histogram = plot
-                    .get_image_pixels_raw()
-                    .and_then(|px| compute_histogram(&px, None, log));
+                self.histogram = plot.get_image_pixels_raw().and_then(|px| {
+                    let range = normalized_data_range(&px, self.normalization)?;
+                    compute_histogram(&px, Some(range), log)
+                });
                 self.histogram_norm = Some(self.normalization);
             }
         }
@@ -223,7 +228,9 @@ impl ColormapDialog {
                         ui.add(
                             egui::DragValue::new(&mut self.gamma)
                                 .speed(0.1)
-                                .range(0.1..=10.0),
+                                // silx _gammaSpinBox.setRange(0.01, 100.0)
+                                // (ColormapDialog.py:947).
+                                .range(0.01..=100.0),
                         );
                         if self.gamma != prev {
                             changed = true;
@@ -403,6 +410,14 @@ impl ColormapDialog {
         if counts.is_empty() || edges.len() != counts.len() + 1 {
             return;
         }
+        // silx clips leading bins whose lower edge is invalid under the
+        // current normalization before displaying (a user-set histogram can
+        // carry log/sqrt-invalid bins; the auto-computed one is already
+        // range-clipped, so its first valid bin is 0).
+        let Some(first) = first_valid_bin(edges, counts.len(), self.normalization) else {
+            return; // every bin invalid: nothing to display (silx (None, None))
+        };
+        let (counts, edges) = (&counts[first..], &edges[first..]);
         let dmin = edges[0];
         let dmax = edges[edges.len() - 1];
         let dspan = dmax - dmin;
@@ -478,6 +493,61 @@ impl ColormapDialog {
             }
         }
     }
+}
+
+/// The auto-histogram data range for a normalization — silx
+/// `_computeNormalizedDataRange` (ColormapDialog.py:445-476): `Linear`/`Gamma`
+/// use the finite `(min, max)`; `Log` and `Sqrt` clip the lower bound to the
+/// smallest strictly-positive finite value (silx
+/// `min_max(data, min_positive=True)` → `(minimum, min_positive, maximum)`,
+/// :1208-1214, indexed `[1], [2]` for both LOG and SQRT). Returns `None` when
+/// there is no finite value, or no positive one under `Log`/`Sqrt` (silx
+/// `_computeNormalizedHistogram` bails when the range has a `None` bound).
+fn normalized_data_range(data: &[f64], norm: Normalization) -> Option<(f64, f64)> {
+    let mut min = f64::INFINITY;
+    let mut min_positive = f64::INFINITY;
+    let mut max = f64::NEG_INFINITY;
+    for &v in data {
+        if !v.is_finite() {
+            continue;
+        }
+        min = min.min(v);
+        max = max.max(v);
+        if v > 0.0 {
+            min_positive = min_positive.min(v);
+        }
+    }
+    if !max.is_finite() {
+        return None;
+    }
+    let lo = match norm {
+        Normalization::Log | Normalization::Sqrt => {
+            if !min_positive.is_finite() {
+                return None;
+            }
+            min_positive
+        }
+        // silx: `norm in (LINEAR, GAMMA, ARCSINH)` → (min, max) (:455-456).
+        Normalization::Linear | Normalization::Gamma | Normalization::Arcsinh => min,
+    };
+    Some((lo, max))
+}
+
+/// The first displayable bin of a histogram under `norm` — silx
+/// `_computeNormalizedHistogram`'s lower-edge validity clip
+/// (ColormapDialog.py:409-418): a bin is kept when its LOWER edge satisfies
+/// the normalizer's `is_valid` (`Log`: `> 0`, `Sqrt`: `>= 0`,
+/// math/colormap.py:416-435; `Linear`/`Gamma`: always). Edges increase
+/// monotonically, so everything from the first valid bin on is displayable;
+/// `None` when every lower edge is invalid (silx returns `(None, None)`).
+fn first_valid_bin(edges: &[f64], n_bins: usize, norm: Normalization) -> Option<usize> {
+    let valid = |e: f64| match norm {
+        Normalization::Log => e > 0.0,
+        Normalization::Sqrt => e >= 0.0,
+        // Arcsinh has the default all-valid `is_valid` in silx.
+        Normalization::Linear | Normalization::Gamma | Normalization::Arcsinh => true,
+    };
+    edges.get(..n_bins)?.iter().position(|&e| valid(e))
 }
 
 #[cfg(test)]
@@ -619,5 +689,61 @@ mod tests {
         dialog.clear_histogram();
         assert!(dialog.histogram().is_none());
         assert!(!dialog.histogram_user_set);
+    }
+
+    // ── R2-24: normalization-dependent histogram range & validity ────────────
+
+    #[test]
+    fn normalized_range_clips_to_min_positive_for_log_and_sqrt() {
+        // silx _computeNormalizedDataRange: LOG and SQRT both take
+        // (min_positive, max) (ColormapDialog.py:455-459); LINEAR/GAMMA take
+        // the full finite (min, max).
+        let data = [-4.0, -1.0, 0.0, 0.5, 2.0, 8.0, f64::NAN];
+        assert_eq!(
+            normalized_data_range(&data, Normalization::Sqrt),
+            Some((0.5, 8.0))
+        );
+        assert_eq!(
+            normalized_data_range(&data, Normalization::Log),
+            Some((0.5, 8.0))
+        );
+        assert_eq!(
+            normalized_data_range(&data, Normalization::Linear),
+            Some((-4.0, 8.0))
+        );
+        assert_eq!(
+            normalized_data_range(&data, Normalization::Gamma),
+            Some((-4.0, 8.0))
+        );
+        // No positive value: LOG/SQRT have no range; LINEAR still does.
+        let negatives = [-3.0, -1.0, 0.0];
+        assert_eq!(normalized_data_range(&negatives, Normalization::Sqrt), None);
+        assert_eq!(normalized_data_range(&negatives, Normalization::Log), None);
+        assert_eq!(
+            normalized_data_range(&negatives, Normalization::Linear),
+            Some((-3.0, 0.0))
+        );
+        // No finite value at all: no range for any normalization.
+        assert_eq!(
+            normalized_data_range(&[f64::NAN], Normalization::Linear),
+            None
+        );
+    }
+
+    #[test]
+    fn first_valid_bin_applies_the_normalizer_validity_to_lower_edges() {
+        // silx _computeNormalizedHistogram clips a user histogram to the bins
+        // whose LOWER edge is valid (ColormapDialog.py:409-418); Log needs
+        // > 0, Sqrt >= 0 (is_valid, math/colormap.py:416-435).
+        let edges = [-1.0, 0.0, 1.0, 2.0];
+        assert_eq!(first_valid_bin(&edges, 3, Normalization::Log), Some(2));
+        assert_eq!(first_valid_bin(&edges, 3, Normalization::Sqrt), Some(1));
+        assert_eq!(first_valid_bin(&edges, 3, Normalization::Linear), Some(0));
+        assert_eq!(first_valid_bin(&edges, 3, Normalization::Gamma), Some(0));
+        // Every lower edge invalid -> nothing displayable (silx (None, None)).
+        assert_eq!(
+            first_valid_bin(&[-3.0, -2.0, -1.0], 2, Normalization::Log),
+            None
+        );
     }
 }

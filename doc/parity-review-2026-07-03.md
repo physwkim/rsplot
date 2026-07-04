@@ -1018,6 +1018,27 @@ Impact: default look diverges (R1-16 residual site), and a user cannot set or ke
 
 ### R2-24: ColormapDialog editor numerics — gamma clamped to [0.1, 10] vs silx [0.01, 100]; sqrt-normalization histogram range not clipped to min-positive
 
+**FIXED (colormap-dialog cluster):** three sites, one normalization-validity
+rule. (1) Gamma `DragValue` range → `0.01..=100.0` (silx
+`_gammaSpinBox.setRange(0.01, 100.0)`, ColormapDialog.py:947). (2) The
+auto-histogram now computes its range through new `normalized_data_range`
+= silx `_computeNormalizedDataRange` (:445-476): `Log`/`Sqrt` →
+`(min_positive, max)` (both indexed `[1],[2]` at :455-459),
+`Linear`/`Gamma`/`Arcsinh` → finite `(min, max)`; `None` (no histogram)
+when no positive value exists under `Log`/`Sqrt` — then
+`compute_histogram(px, Some(range), log)` with log-binning only for `Log`,
+exactly the `computeHistogram(data, scale=norm, dataRange)` shape. (3) Same
+family, uncited: silx clips a *user-set* histogram to the bins whose lower
+edge is valid under the normalization before displaying
+(`_computeNormalizedHistogram`, :409-418; `is_valid`: Log `> 0`, Sqrt
+`>= 0`, math/colormap.py:416-435) — siplot displayed it untouched. New
+`first_valid_bin` applies that clip in `draw_histogram_panel` (all-invalid
+→ nothing drawn, silx `(None, None)`); the stored histogram stays raw like
+silx `_getHistogram`. Tests: range matrix per normalization (min-positive
+clip, negatives-only → None for Log/Sqrt, NaN-only → None), lower-edge
+validity clip per normalization incl. all-invalid. The gamma range is a
+UI-widget bound (GPU/UI path, not unit-tested).
+
 Severity: Low
 
 Rust: `src/widget/colormap_dialog.rs:223-227` — gamma `DragValue ... .range(0.1..=10.0)`; `:155-160` — only `Log` is special-cased for the auto-histogram range, so sqrt uses the full finite min/max.
