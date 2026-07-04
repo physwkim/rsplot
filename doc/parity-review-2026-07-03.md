@@ -1736,6 +1736,23 @@ Impact: two whole silx display branches of the complex flagship cannot be expres
 
 ### R2-50: Gesture depth anchors cannot see the cut plane — `SceneWidget::pick` skips the textured-mesh channel, so orbit/pan/zoom over the flagship's slice anchor at the far plane
 
+**FIXED (3D cluster, this session):** added a textured-mesh channel to
+`SceneWidget::pick` — it now intersects the picking segment with every
+`textured_meshes` triangle (the cut plane's colormapped slice) and reports a new
+`ScenePickKind::TexturedSurface { mesh }`, competing in the same nearest-by-NDC-
+depth selection as the data surfaces. This makes the gesture depth read geometry-
+complete like silx's item-agnostic depth-buffer read
+(`interaction.py:153-156, 228-229, 331` → `viewport._pickNdcZGL`), so the orbit
+pivot / pan plane / wheel anchor land on the slice under the cursor instead of
+falling back to the far plane. `ScalarFieldView::pick` still combines this with
+its own `pick_cut_plane` (for the sampled value); both now find the cut plane at
+the same plane∩box intersection, so the nearest-wins reduction is unchanged (its
+`pick_hits_the_visible_cut_plane_and_samples_its_value` test still passes). No
+production code exhaustively matches `ScenePickKind`, so the new variant is
+additive. Tests: a centre ray hits the cut-plane quad (`TexturedSurface`), and
+the channel is ordered by depth against a data triangle in both directions
+(cut-plane-nearer vs surface-nearer).
+
 Severity: Low
 
 Rust: `src/render/gpu_scene3d.rs:397-400` — `pick_triangles()` documents "Image quads and textured meshes (the cut plane) are excluded"; `SceneWidget::pick` (`src/widget/scene_widget.rs:549-647`) covers triangles, meshes, points, line anchors, and image layers, but never `textured_meshes`. Orbit pivot (`:445-449`), pan plane (`:464-471`), wheel anchor (`:487-493`) all fall back to scene centre / NDC z = 1 on a miss; `ScalarFieldView::show` (`src/widget/scalar_field_view.rs:285-287`) delegates straight to `SceneWidget::show`, never consulting `ScalarField3D::pick_cut_plane` for gestures (only `ScalarFieldView::pick` does, `:256-281`).

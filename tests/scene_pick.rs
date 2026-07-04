@@ -9,8 +9,35 @@ use egui_kittest::wgpu::{create_render_state, default_wgpu_setup};
 use siplot::egui::Color32;
 use siplot::{
     CameraFace, ImageInterpolation, PointMarker, Scatter2D, Scatter2DVisualization, Scatter3D,
-    Scene3dGeometry, Scene3dImageLayer, ScenePickKind, SceneWidget, Vec3,
+    Scene3dGeometry, Scene3dImageLayer, Scene3dTexturedMesh, ScenePickKind, SceneWidget, Vec3,
 };
+
+/// A textured-mesh quad (two triangles) spanning `(0,0)..(1,1)` in the `z` plane,
+/// standing in for the cut plane's colormapped slice.
+fn cut_plane_quad(z: f32) -> Scene3dTexturedMesh {
+    Scene3dTexturedMesh {
+        pixels: vec![255; 4], // 1×1 white texel
+        width: 1,
+        height: 1,
+        vertices: vec![
+            [0.0, 0.0, z],
+            [1.0, 0.0, z],
+            [1.0, 1.0, z],
+            [0.0, 0.0, z],
+            [1.0, 1.0, z],
+            [0.0, 1.0, z],
+        ],
+        uvs: vec![
+            [0.0, 0.0],
+            [1.0, 0.0],
+            [1.0, 1.0],
+            [0.0, 0.0],
+            [1.0, 1.0],
+            [0.0, 1.0],
+        ],
+        interpolation: ImageInterpolation::Nearest,
+    }
+}
 
 /// Frame a unit-box scene from the Front viewpoint, with the camera sized
 /// square so the centre-screen ray is unambiguous. `pick` reads the widget's own
@@ -114,6 +141,79 @@ fn pick_prefers_the_nearer_surface() {
     assert!(
         (pick.position.z - 0.8).abs() < 1e-2,
         "nearer plane (z=0.8) should win, got z = {}",
+        pick.position.z
+    );
+}
+
+#[test]
+fn pick_hits_the_cut_plane_textured_mesh() {
+    // R2-50: silx's gesture anchors read the depth buffer, which contains every
+    // rendered fragment including the cut plane (a textured mesh). The traversal
+    // must intersect textured meshes so orbit/pan/zoom anchor on the slice rather
+    // than the far plane.
+    let mut geo = Scene3dGeometry::new();
+    geo.add_textured_mesh(cut_plane_quad(0.5));
+    let w = front_view_widget(28, geo);
+
+    let pick = w
+        .pick((0.0, 0.0))
+        .expect("centre ray hits the cut-plane mesh");
+    assert_eq!(pick.kind, ScenePickKind::TexturedSurface { mesh: 0 });
+    assert!(
+        (pick.position.z - 0.5).abs() < 1e-3,
+        "hit z = {} (want 0.5)",
+        pick.position.z
+    );
+    assert!(
+        (pick.position.x - 0.5).abs() < 0.1,
+        "hit x = {}",
+        pick.position.x
+    );
+    assert!(
+        (pick.position.y - 0.5).abs() < 0.1,
+        "hit y = {}",
+        pick.position.y
+    );
+}
+
+#[test]
+fn pick_orders_cut_plane_against_data_surface_by_depth() {
+    // The cut-plane channel competes in the same nearest-by-depth selection as
+    // the data triangles. From the Front view (+Z looking toward -Z) the larger
+    // z is nearer.
+    // Cut plane nearer (z=0.8) than the data triangle (z=0.2) → cut plane wins.
+    let mut geo = Scene3dGeometry::new();
+    geo.add_triangle(
+        [0.0, 0.0, 0.2],
+        [1.0, 0.0, 0.2],
+        [0.5, 1.0, 0.2],
+        Color32::WHITE,
+    );
+    geo.add_textured_mesh(cut_plane_quad(0.8));
+    let w = front_view_widget(29, geo);
+    let pick = w.pick((0.0, 0.0)).expect("centre ray hits geometry");
+    assert_eq!(pick.kind, ScenePickKind::TexturedSurface { mesh: 0 });
+    assert!(
+        (pick.position.z - 0.8).abs() < 1e-2,
+        "nearer cut plane wins, z={}",
+        pick.position.z
+    );
+
+    // Data triangle nearer (z=0.8) than the cut plane (z=0.2) → the surface wins.
+    let mut geo = Scene3dGeometry::new();
+    geo.add_triangle(
+        [0.0, 0.0, 0.8],
+        [1.0, 0.0, 0.8],
+        [0.5, 1.0, 0.8],
+        Color32::WHITE,
+    );
+    geo.add_textured_mesh(cut_plane_quad(0.2));
+    let w = front_view_widget(30, geo);
+    let pick = w.pick((0.0, 0.0)).expect("centre ray hits geometry");
+    assert_eq!(pick.kind, ScenePickKind::Surface);
+    assert!(
+        (pick.position.z - 0.8).abs() < 1e-2,
+        "nearer surface wins, z={}",
         pick.position.z
     );
 }

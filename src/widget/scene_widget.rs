@@ -655,6 +655,35 @@ impl SceneWidget {
             });
         }
 
+        // Textured meshes (the cut plane): silx's gesture anchors read the depth
+        // buffer, which contains every rendered fragment — the cut plane included
+        // (`interaction.py:153-156, 228-229, 331` via `viewport._pickNdcZGL`), so
+        // orbit/pan/zoom anchor on the slice, not the far plane. The
+        // `pick_triangles` channel deliberately excludes these (they are not raw
+        // data triangles); intersect them here as their own channel so the
+        // gesture depth read is geometry-complete like silx's buffer read.
+        for (mesh, tm) in self.content.textured_meshes.iter().enumerate() {
+            let tris: Vec<[Vec3; 3]> = tm
+                .vertices
+                .chunks_exact(3)
+                .map(|t| {
+                    [
+                        Vec3::from_array(t[0]),
+                        Vec3::from_array(t[1]),
+                        Vec3::from_array(t[2]),
+                    ]
+                })
+                .collect();
+            if let Some(hit) = segment_triangles_intersection(segment, &tris).first() {
+                let position = hit.position(segment.0, segment.1);
+                consider(ScenePick {
+                    position,
+                    ndc_depth: mvp.transform_point(position, true).z,
+                    kind: ScenePickKind::TexturedSurface { mesh },
+                });
+            }
+        }
+
         best
     }
 }
@@ -690,6 +719,13 @@ pub enum ScenePickKind {
         row: usize,
         col: usize,
     },
+    /// A textured arbitrary-triangle mesh — the cut plane's colormapped slice
+    /// (or a transformed image quad) — with its index in the textured-meshes
+    /// channel. silx's gesture anchors read the depth buffer, which contains
+    /// every rendered fragment including the cut plane
+    /// (`interaction.py:153-156, 228-229, 331` via `viewport._pickNdcZGL`), so
+    /// this channel keeps orbit/pan/zoom anchored on the slice.
+    TexturedSurface { mesh: usize },
 }
 
 /// The nearest scene hit from [`SceneWidget::pick`].
