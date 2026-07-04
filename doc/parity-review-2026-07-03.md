@@ -650,6 +650,25 @@ Impact: an item with a single NaN sample shows `nan` for mean/std/COM (and sum) 
 
 ### R2-12: ScatterMask missing `updateEllipse`, `updateLine`, and the data-extent-scaled pencil — only disk and polygon exist
 
+**FIXED (mask-tools cluster):** all three ported to `scatter_mask.rs` in the
+existing point-array API style. `update_ellipse` — INCLUSIVE
+`(px−ccol)²/rc² + (py−crow)²/rr² <= 1.0` per-axis test (unlike the disk's
+strict `<`; ScatterMaskToolsWidget.py:150-168). `update_line` — rotated
+width-band polygon with silx's own `theta = atan(slope)`, `theta = 0` for a
+vertical line so the band degenerates to zero width (bug-for-bug: a vertical
+pencil stroke masks only through its disks; :170-194). `scatter_pencil_width`
+— `base × 0.01 × max(xMax−xMin, yMax−yMin)` over finite coordinates
+(`_getPencilWidth` :532-540, extent from `_adjustColorAndBrushSize`
+:318-327), unscaled when the data is empty/all-non-finite (silx
+`_data_extent = None`). Tests: `ellipse_test_is_inclusive_and_per_axis`
+(boundary points in, unmask clears), `line_masks_a_width_band_as_a_rotated_
+rectangle`, `vertical_line_band_degenerates_like_silx`,
+`pencil_width_scales_by_one_percent_of_data_extent` (NaN ignored,
+empty/all-NaN unscaled). The roadmap-prose contradiction ("full drawing-tool
+set", parity-roadmap.md:1537) is now true for the geometric operations; the
+panel wiring still drives geometry programmatically (documented on
+`show_mask_tools`).
+
 Severity: Medium
 
 Rust: `src/widget/scatter_mask.rs` — zero hits for ellipse/line/pencil; the ScatterView mask panel wiring (`src/widget/high_level.rs:12081-12131`) exposes level/clear/invert/undo/redo/threshold/not-finite plus disk/rect/polygon only.

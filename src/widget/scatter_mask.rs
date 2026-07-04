@@ -279,6 +279,77 @@ impl ScatterMaskWidget {
         self.update_polygon(level, &vertices, px, py, mask);
     }
 
+    /// Mask or unmask points inside an ellipse at `level`.
+    ///
+    /// Mirrors silx `ScatterMask.updateEllipse`
+    /// (ScatterMaskToolsWidget.py:150-168): a point is inside when
+    /// `(px - ccol)²/radius_c² + (py - crow)²/radius_r² <= 1.0` — INCLUSIVE,
+    /// unlike the disk's strict `<`. `(crow, ccol)` is the center in `(y, x)`
+    /// order and `radius_r`/`radius_c` the per-axis radii; `x`/`y` are the
+    /// point coordinate arrays.
+    #[allow(clippy::too_many_arguments)] // positional mirror of the silx signature
+    pub fn update_ellipse(
+        &mut self,
+        level: u8,
+        crow: f32,
+        ccol: f32,
+        radius_r: f32,
+        radius_c: f32,
+        x: &[f32],
+        y: &[f32],
+        mask: bool,
+    ) {
+        let n = x.len().min(y.len());
+        let indices: Vec<usize> = (0..n)
+            .filter(|&idx| {
+                let dx = x[idx] - ccol;
+                let dy = y[idx] - crow;
+                dx * dx / (radius_c * radius_c) + dy * dy / (radius_r * radius_r) <= 1.0
+            })
+            .collect();
+        self.update_points(level, &indices, mask);
+    }
+
+    /// Mask or unmask points inside a rectangle defined by a line (two end
+    /// points) and a width at `level`.
+    ///
+    /// Mirrors silx `ScatterMask.updateLine`
+    /// (ScatterMaskToolsWidget.py:170-194): the band is the 4-vertex polygon
+    /// spanned by offsetting both end points by `±width/2` perpendicular to
+    /// the line, with `theta = atan((y1 - y0)/(x1 - x0))` — plain `atan` of
+    /// the slope, and `theta = 0` for a vertical line (silx's own rule; the
+    /// polygon then degenerates to zero width, so a vertical pencil stroke
+    /// masks only through its disks — kept bug-for-bug). End points are
+    /// `(y, x)`-ordered rows/columns; `x`/`y` are the point coordinate arrays.
+    #[allow(clippy::too_many_arguments)] // positional mirror of the silx signature
+    pub fn update_line(
+        &mut self,
+        level: u8,
+        y0: f32,
+        x0: f32,
+        y1: f32,
+        x1: f32,
+        width: f32,
+        x: &[f32],
+        y: &[f32],
+        mask: bool,
+    ) {
+        let theta = if x1 != x0 {
+            ((y1 - y0) / (x1 - x0)).atan()
+        } else {
+            0.0
+        };
+        let w_sin = width / 2.0 * theta.sin();
+        let w_cos = width / 2.0 * theta.cos();
+        let vertices = [
+            (y0 - w_cos, x0 + w_sin),
+            (y0 + w_cos, x0 - w_sin),
+            (y1 + w_cos, x1 - w_sin),
+            (y1 - w_cos, x1 + w_sin),
+        ];
+        self.update_polygon(level, &vertices, x, y, mask);
+    }
+
     // --- Threshold / not-finite over the point value array ---
 
     /// Mask or unmask points whose value is below `threshold` at `level`.
@@ -371,9 +442,88 @@ pub fn point_in_polygon(vertices: &[(f32, f32)], row: f32, col: f32) -> bool {
     is_inside
 }
 
+/// The scatter pencil width in data coordinates: the widget pencil size scaled
+/// by 1% of the scatter's data extent — silx
+/// `ScatterMaskToolsWidget._getPencilWidth`
+/// (`width *= 0.01 * self._data_extent`, ScatterMaskToolsWidget.py:532-540)
+/// with `_data_extent = max(xMax - xMin, yMax - yMin)` over the scatter's
+/// coordinates (`_adjustColorAndBrushSize`, :318-327; silx `min_max` ignores
+/// NaN). Returns `base_width` unscaled when the data is empty or has no finite
+/// coordinate (silx `_data_extent = None` skips the scaling).
+pub fn scatter_pencil_width(base_width: f32, x: &[f32], y: &[f32]) -> f32 {
+    let finite_extent = |vals: &[f32]| -> Option<f32> {
+        let mut range: Option<(f32, f32)> = None;
+        for &v in vals {
+            if v.is_finite() {
+                let (lo, hi) = range.get_or_insert((v, v));
+                *lo = lo.min(v);
+                *hi = hi.max(v);
+            }
+        }
+        range.map(|(lo, hi)| hi - lo)
+    };
+    match (finite_extent(x), finite_extent(y)) {
+        (Some(dx), Some(dy)) => base_width * 0.01 * dx.max(dy),
+        _ => base_width,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ellipse_test_is_inclusive_and_per_axis() {
+        // silx updateEllipse (ScatterMaskToolsWidget.py:150-168):
+        // (px-ccol)²/rc² + (py-crow)²/rr² <= 1.0 — INCLUSIVE, unlike the
+        // disk's strict <. Center (row 0, col 0), radius_r = 1 (y), radius_c
+        // = 2 (x): (±2, 0) and (0, ±1) lie exactly on the boundary.
+        let x = [0.0_f32, 2.0, 0.0, 2.0, 2.1, 0.0];
+        let y = [0.0_f32, 0.0, 1.0, 1.0, 0.0, 1.1];
+        let mut m = ScatterMaskWidget::new(6);
+        m.update_ellipse(1, 0.0, 0.0, 1.0, 2.0, &x, &y, true);
+        // (0,0) in; (2,0) on boundary in; (0,1) on boundary in;
+        // (2,1) sum=2 out; (2.1,0) out; (0,1.1) out.
+        assert_eq!(m.mask, vec![1, 1, 1, 0, 0, 0]);
+        // Unmask only clears the level's points inside.
+        m.update_ellipse(1, 0.0, 0.0, 1.0, 2.0, &x, &y, false);
+        assert_eq!(m.mask, vec![0; 6]);
+    }
+
+    #[test]
+    fn line_masks_a_width_band_as_a_rotated_rectangle() {
+        // silx updateLine (ScatterMaskToolsWidget.py:170-194): horizontal
+        // line row 0, columns 0→4, width 2 → band |row| < 1 over x ∈ (0, 4).
+        let x = [1.0_f32, 3.0, 1.0, 1.0, 5.0];
+        let y = [0.0_f32, 0.5, -0.5, 1.5, 0.0];
+        let mut m = ScatterMaskWidget::new(5);
+        m.update_line(1, 0.0, 0.0, 0.0, 4.0, 2.0, &x, &y, true);
+        assert_eq!(m.mask, vec![1, 1, 1, 0, 0], "in-band in, above/past out");
+    }
+
+    #[test]
+    fn vertical_line_band_degenerates_like_silx() {
+        // silx sets theta = 0 for x1 == x0, so the band polygon has zero
+        // width — no point is inside (a vertical pencil stroke masks only
+        // through its disks). Kept bug-for-bug.
+        let x = [0.0_f32, 0.5];
+        let y = [1.0_f32, 1.0];
+        let mut m = ScatterMaskWidget::new(2);
+        m.update_line(1, 0.0, 0.0, 2.0, 0.0, 2.0, &x, &y, true);
+        assert_eq!(m.mask, vec![0, 0]);
+    }
+
+    #[test]
+    fn pencil_width_scales_by_one_percent_of_data_extent() {
+        // silx _getPencilWidth: width *= 0.01 * max(xMax-xMin, yMax-yMin)
+        // (ScatterMaskToolsWidget.py:532-540, extent from :318-327).
+        let x = [0.0_f32, 50.0, f32::NAN];
+        let y = [0.0_f32, 10.0, 0.0];
+        assert_eq!(scatter_pencil_width(4.0, &x, &y), 4.0 * 0.01 * 50.0);
+        // Empty or non-finite data: unscaled (silx _data_extent = None).
+        assert_eq!(scatter_pencil_width(4.0, &[], &[]), 4.0);
+        assert_eq!(scatter_pencil_width(4.0, &[f32::NAN], &[f32::NAN]), 4.0);
+    }
 
     #[test]
     fn disk_selects_points_within_radius() {
