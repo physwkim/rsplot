@@ -259,9 +259,6 @@ pub fn generate(screen: &MedmScreen, options: &Options) -> Generated {
         child_module: options.child_module,
         ..Default::default()
     };
-    // Surface parse-time diagnostics (e.g. the pre-2.2 old-format warning) ahead
-    // of the per-widget warnings.
-    b.warnings.extend(screen.warnings.iter().cloned());
     for widget in &screen.widgets {
         emit_widget(&mut b, widget, options);
     }
@@ -4599,12 +4596,10 @@ valuator {
     }
 
     #[test]
-    fn pre_2_2_top_level_attribute_blocks_warn_not_silently_dropped() {
-        // R2-63: MEDM rolls top-level basic/dynamic attribute blocks into later
-        // graphics only for versionNumber < 20200 (display.c:487,507-546). We do
-        // not port that inheritance, so an old file must warn, not silently render
-        // its graphics in default black-solid. A modern file (>= 20200) draws no
-        // warning — MEDM itself ignores a stray top-level attribute block there.
+    fn pre_2_2_rolling_attributes_apply_to_graphics() {
+        // R2-63: for versionNumber < 20200 MEDM rolls top-level attribute blocks
+        // into each later graphic (display.c:487,507-546): the basic attribute
+        // persists, the dynamic attribute is consumed by the first graphic.
         let adl = r#"
 file {
 	name="old.adl"
@@ -4614,37 +4609,241 @@ file {
 	colors {
 		ffffff,
 		000000,
-	}
-}
-"basic attribute" {
-	attr {
-		clr=1
-		width=2
+		ff0000,
 	}
 }
 rectangle {
 	object {
 		x=0
 		y=0
-		width=50
-		height=50
+		width=10
+		height=10
+	}
+}
+"basic attribute" {
+	attr {
+		clr=2
+		fill="outline"
+		width=3
+	}
+}
+"dynamic attribute" {
+	attr {
+		mod {
+			vis="if not zero"
+		}
+		param {
+			chan="GATE:PV"
+		}
+	}
+}
+rectangle {
+	object {
+		x=20
+		y=0
+		width=10
+		height=10
+	}
+}
+rectangle {
+	object {
+		x=40
+		y=0
+		width=10
+		height=10
 	}
 }
 "#;
-        let g = generate(&parse(adl), &Options::default());
+        let s = parse(adl);
+        // Graphic BEFORE any block: basicAttributeInit — clr=0 (colormap[0]).
+        assert_eq!(
+            s.widgets[0].color,
+            Some(crate::adl_parser::Color {
+                r: 255,
+                g: 255,
+                b: 255
+            }),
+            "pre-block graphic takes basicAttributeInit clr=0"
+        );
+        // Both later rectangles inherit the basic attribute (persists) …
+        for w in &s.widgets[1..3] {
+            assert_eq!(
+                w.color,
+                Some(crate::adl_parser::Color { r: 255, g: 0, b: 0 }),
+                "rolling clr=2 must land on every later graphic"
+            );
+            let basic = &w.attributes["basic attribute"];
+            assert_eq!(basic.get("fill").map(String::as_str), Some("outline"));
+            assert_eq!(basic.get("width").map(String::as_str), Some("3"));
+        }
+        // … but only the FIRST consumes the dynamic attribute (chan cleared).
+        let dyn1 = &s.widgets[1].attributes["dynamic attribute"];
+        assert_eq!(dyn1.get("chan").map(String::as_str), Some("GATE:PV"));
+        assert_eq!(dyn1.get("vis").map(String::as_str), Some("if not zero"));
         assert!(
-            g.warnings.iter().any(|w| w.contains("pre-2.2 old-format")),
-            "pre-2.2 attribute block must warn: {:?}",
-            g.warnings
+            !s.widgets[2].attributes.contains_key("dynamic attribute"),
+            "dynamic attribute is consumed once, not re-applied"
+        );
+        // End-to-end: the vis rule wires the calc:// visibility gate.
+        let g = generate(&s, &Options::default());
+        assert!(
+            g.source.contains("expr=A#0&A=ca://GATE:PV"),
+            "old-format vis must reach the emitted gate:\n{}",
+            g.source
         );
 
+        // A modern file ignores stray top-level attribute blocks (MEDM >= 20200
+        // never routes them into rolling state).
         let modern = adl.replace("020112", "030111");
-        let g2 = generate(&parse(&modern), &Options::default());
+        let s2 = parse(&modern);
         assert!(
-            !g2.warnings.iter().any(|w| w.contains("pre-2.2 old-format")),
-            "modern file must not warn on a stray top-level attribute block: {:?}",
-            g2.warnings
+            !s2.widgets[1].attributes.contains_key("basic attribute"),
+            "modern files must not inherit top-level attribute blocks"
         );
+    }
+
+    #[test]
+    fn pre_2_2_rolling_state_threads_composites_and_resets_per_block() {
+        // R2-63 boundaries: (1) composite children inherit the rolling state —
+        // MEDM parses them through the same parseAndAppendDisplayList; (2) each
+        // basic-attribute block RESETS to defaults before parsing
+        // (parseOldBasicAttribute calls basicAttributeInit first), so keys from
+        // the previous block do not leak forward.
+        let adl = r#"
+file {
+	name="old.adl"
+	version=020112
+}
+"color map" {
+	colors {
+		ffffff,
+		000000,
+		ff0000,
+	}
+}
+"basic attribute" {
+	attr {
+		clr=2
+		width=5
+	}
+}
+composite {
+	object {
+		x=0
+		y=0
+		width=100
+		height=100
+	}
+	chan=""
+	children {
+		rectangle {
+			object {
+				x=0
+				y=0
+				width=10
+				height=10
+			}
+		}
+	}
+}
+"basic attribute" {
+	attr {
+		clr=1
+	}
+}
+rectangle {
+	object {
+		x=20
+		y=0
+		width=10
+		height=10
+	}
+}
+"#;
+        let s = parse(adl);
+        // (1) The composite child inherited the first block through the recursion.
+        let child = &s.widgets[0].children[0];
+        assert_eq!(
+            child.color,
+            Some(crate::adl_parser::Color { r: 255, g: 0, b: 0 }),
+            "composite child must inherit the rolling basic attribute"
+        );
+        assert_eq!(
+            child.attributes["basic attribute"]
+                .get("width")
+                .map(String::as_str),
+            Some("5")
+        );
+        // (2) The second block reset the state: new clr, and width back to the
+        // basicAttributeInit default (absent).
+        let last = &s.widgets[1];
+        assert_eq!(
+            last.color,
+            Some(crate::adl_parser::Color { r: 0, g: 0, b: 0 }),
+            "the later basic-attribute block must replace the rolling colour"
+        );
+        assert!(
+            !last.attributes["basic attribute"].contains_key("width"),
+            "a reset must not leak width=5 from the previous block"
+        );
+    }
+
+    #[test]
+    fn widget_nested_old_attr_wrapper_parses_at_any_version() {
+        // R2-63 (nested half): MEDM's key matching ignores brace depth, so the
+        // pre-2.2 `attr {}` wrapper inside a widget-nested attribute block parses
+        // in every version — including files stamped with a modern version.
+        let adl = r#"
+file {
+	name="mixed.adl"
+	version=030111
+}
+"color map" {
+	colors {
+		ffffff,
+		00ff00,
+	}
+}
+rectangle {
+	object {
+		x=0
+		y=0
+		width=10
+		height=10
+	}
+	"basic attribute" {
+		attr {
+			clr=1
+			width=4
+		}
+	}
+	"dynamic attribute" {
+		attr {
+			mod {
+				vis="if zero"
+			}
+			param {
+				chan="NEST:PV"
+			}
+		}
+	}
+}
+"#;
+        let s = parse(adl);
+        assert_eq!(
+            s.widgets[0].color,
+            Some(crate::adl_parser::Color { r: 0, g: 255, b: 0 }),
+            "nested attr{{}} clr must resolve into the widget colour"
+        );
+        assert_eq!(
+            s.widgets[0].attributes["basic attribute"]
+                .get("width")
+                .map(String::as_str),
+            Some("4")
+        );
+        let d = &s.widgets[0].attributes["dynamic attribute"];
+        assert_eq!(d.get("vis").map(String::as_str), Some("if zero"));
+        assert_eq!(d.get("chan").map(String::as_str), Some("NEST:PV"));
     }
 
     #[test]

@@ -100,10 +100,6 @@ pub struct MedmScreen {
     /// Remaining `display`-block assignments (e.g. `cmap`, `gridSpacing`).
     pub assignments: BTreeMap<String, String>,
     pub widgets: Vec<MedmWidget>,
-    /// Parse-time diagnostics the converter must surface (e.g. a pre-2.2
-    /// old-format construct that is recognised but not ported). Merged into the
-    /// generated module's warnings by [`crate::codegen::generate`].
-    pub warnings: Vec<String>,
 }
 
 /// The set of MEDM block symbols that are GUI widgets (the keys of
@@ -218,6 +214,29 @@ fn locate_assignments(buf: &[&str]) -> BTreeMap<String, String> {
     assignments
 }
 
+/// Like [`locate_assignments`], but collecting `key=value` lines at ANY nesting
+/// depth. MEDM's token-based attribute parsers match keys regardless of brace
+/// depth (`parseBasicAttribute`/`parseDynamicAttribute` never gate the `T_WORD`
+/// match on `nestingLevel` — medmCommon.c:534-580, :870-934), which is what makes
+/// the pre-2.2 nested wrappers (`attr {}`, `mod {}`, `param {}`) parse in every
+/// MEDM version. Only for blocks whose sub-block keys cannot collide.
+fn locate_assignments_deep(buf: &[&str]) -> BTreeMap<String, String> {
+    let mut assignments = BTreeMap::new();
+    for line in buf {
+        if opens_block(line) || closes_block(line) {
+            continue;
+        }
+        if let Some(p) = line.find('=')
+            && p > 0
+        {
+            let key = line[..p].trim().trim_matches('"').to_string();
+            let value = line[p + 1..].trim().trim_matches('"').to_string();
+            assignments.insert(key, value);
+        }
+    }
+    assignments
+}
+
 /// Find the first block with the given symbol.
 fn named_block<'a>(symbol: &str, blocks: &'a [Block]) -> Option<&'a Block> {
     blocks.iter().find(|b| b.symbol == symbol)
@@ -283,9 +302,85 @@ const ATTRIBUTE_BLOCKS: &[&str] = &[
     "y2_axis",
 ];
 
+/// Rolling pre-2.2 attribute state. For `versionNumber < 20200` MEDM parses
+/// top-level `basic attribute`/`dynamic attribute` blocks into rolling state that
+/// each later static graphic inherits (`parseAndAppendDisplayList`,
+/// display.c:475-546) — the basic attribute persists across graphics, the dynamic
+/// attribute is consumed by the first graphic after it is set. The same function
+/// parses composite `children {}` lists, so the state threads through composites
+/// in document order.
+struct OldAttrs {
+    /// The last-seen basic attribute (`clr`/`style`/`fill`/`width`). MEDM assigns
+    /// it to EVERY old-format graphic unconditionally (display.c:516), so it
+    /// always carries at least `clr` — `basicAttributeInit` is `clr=0` plus
+    /// solid/solid/0, and those non-colour defaults are what absent keys already
+    /// mean downstream.
+    basic: BTreeMap<String, String>,
+    /// The last-seen dynamic attribute (`clr` mode / `vis` / `calc` / `chan*`).
+    /// Applied only while `chan` is non-empty; consumed once (display.c:526-529
+    /// clears `chan[0]`, the MEDM 2.2.9 behaviour).
+    dynamic: BTreeMap<String, String>,
+}
+
+impl OldAttrs {
+    fn new() -> Self {
+        Self {
+            basic: [("clr".to_string(), "0".to_string())].into_iter().collect(),
+            dynamic: BTreeMap::new(),
+        }
+    }
+}
+
+/// Classify a top-level block symbol as an old-format attribute carrier:
+/// `Some(true)` for the basic attribute, `Some(false)` for the dynamic one.
+/// Includes the `<<…>>` spellings MEDM accepts for ancient files, misspelling
+/// and all (display.c:539-545).
+fn old_attr_symbol(symbol: &str) -> Option<bool> {
+    match symbol {
+        "basic attribute" | "<<basic attribute>>" | "<<basic atribute>>" => Some(true),
+        "dynamic attribute" | "<<dynamic attribute>>" => Some(false),
+        _ => None,
+    }
+}
+
+/// Apply the rolling old-format attributes to a just-parsed graphic — the six
+/// element types MEDM rolls them onto (display.c:509-514). The basic attribute
+/// REPLACES the widget's own (`pe->…->attr = attr`, unconditional), with its
+/// `clr` index resolved into the widget colour exactly as a widget-carried block
+/// would be; the dynamic attribute lands only while its `chan` is set, and that
+/// `chan` is then cleared so the next graphic does not re-consume it.
+fn apply_old_attrs(widget: &mut MedmWidget, old: &mut OldAttrs, color_table: &[Color]) {
+    const OLD_GRAPHICS: &[&str] = &["arc", "oval", "polygon", "polyline", "rectangle", "text"];
+    if !OLD_GRAPHICS.contains(&widget.symbol.as_str()) {
+        return;
+    }
+    let mut basic = old.basic.clone();
+    let (color, _) = take_colors(&mut basic, color_table);
+    if color.is_some() {
+        widget.color = color;
+    }
+    widget
+        .attributes
+        .insert("basic attribute".to_string(), basic);
+    if old.dynamic.get("chan").is_some_and(|c| !c.is_empty()) {
+        widget
+            .attributes
+            .insert("dynamic attribute".to_string(), old.dynamic.clone());
+        old.dynamic.remove("chan");
+    }
+}
+
 /// Parse one widget block's content into a [`MedmWidget`] (generic handling,
-/// with the per-symbol extensions applied afterwards).
-fn parse_widget(symbol: &str, line: usize, content: &[&str], color_table: &[Color]) -> MedmWidget {
+/// with the per-symbol extensions applied afterwards). `old` is the pre-2.2
+/// rolling-attribute state, threaded through composite children in document
+/// order; `None` for `versionNumber >= 20200` files.
+fn parse_widget(
+    symbol: &str,
+    line: usize,
+    content: &[&str],
+    color_table: &[Color],
+    old: &mut Option<OldAttrs>,
+) -> MedmWidget {
     let mut assignments = locate_assignments(content);
     let blocks = locate_blocks(content);
 
@@ -320,7 +415,16 @@ fn parse_widget(symbol: &str, line: usize, content: &[&str], color_table: &[Colo
     let mut attributes = BTreeMap::new();
     for &name in ATTRIBUTE_BLOCKS {
         if let Some(block) = named_block(name, &blocks) {
-            let mut aa = locate_assignments(&block_content(content, block));
+            // The two attribute carriers collect keys at ANY depth: pre-2.2 MEDM
+            // wrapped them in `attr {}` (basic) / `attr { mod {} param {} }`
+            // (dynamic), and every MEDM version parses those nested shapes because
+            // its key matching ignores brace depth (parseBasicAttribute /
+            // parseDynamicAttribute). The rest keep level-0 (they never nest).
+            let mut aa = if name == "basic attribute" || name == "dynamic attribute" {
+                locate_assignments_deep(&block_content(content, block))
+            } else {
+                locate_assignments(&block_content(content, block))
+            };
             let (c, b) = take_colors(&mut aa, color_table);
             if c.is_some() {
                 color = c;
@@ -367,7 +471,7 @@ fn parse_widget(symbol: &str, line: usize, content: &[&str], color_table: &[Colo
         records: BTreeMap::new(),
     };
 
-    apply_widget_specifics(&mut widget, content, &blocks, color_table);
+    apply_widget_specifics(&mut widget, content, &blocks, color_table, old);
     widget
 }
 
@@ -379,6 +483,7 @@ fn apply_widget_specifics(
     content: &[&str],
     blocks: &[Block],
     color_table: &[Color],
+    old: &mut Option<OldAttrs>,
 ) {
     match widget.symbol.as_str() {
         "text" => {
@@ -390,7 +495,12 @@ fn apply_widget_specifics(
             if let Some(block) = named_block("children", blocks) {
                 let inner = block_content(content, block);
                 let inner_blocks = locate_blocks(&inner);
-                widget.children = parse_children(&inner, &inner_blocks, color_table);
+                // The rolling old-format state threads into the children: MEDM
+                // parses a composite's list through the same
+                // `parseAndAppendDisplayList` (medmComposite.c:582-585), whose
+                // rolling attr/dynAttr are function-`static` — one document-order
+                // stream across nesting.
+                widget.children = parse_children(&inner, &inner_blocks, color_table, old);
             }
         }
         "cartesian plot" => {
@@ -461,18 +571,43 @@ fn indexed_records(
 }
 
 /// Parse the widget blocks within a buffer (the screen's top level, or a
-/// `composite`'s children), recursing into nested composites.
-fn parse_children(buf: &[&str], blocks: &[Block], color_table: &[Color]) -> Vec<MedmWidget> {
+/// `composite`'s children), recursing into nested composites. In old-format mode
+/// (`old` is `Some`), attribute-carrier blocks update the rolling state in
+/// document order and each parsed graphic inherits it — the pre-2.2 contract of
+/// MEDM's `parseAndAppendDisplayList`.
+fn parse_children(
+    buf: &[&str],
+    blocks: &[Block],
+    color_table: &[Color],
+    old: &mut Option<OldAttrs>,
+) -> Vec<MedmWidget> {
     let mut widgets = Vec::new();
     for block in blocks {
+        if old.is_some()
+            && let Some(is_basic) = old_attr_symbol(&block.symbol)
+        {
+            // `parseOldBasicAttribute`/`parseOldDynamicAttribute` both RESET to
+            // defaults before parsing (medmCommon.c:588, :943), so each block
+            // replaces the rolling state rather than merging into it.
+            let map = locate_assignments_deep(&block_content(buf, block));
+            let state = old.as_mut().expect("checked is_some above");
+            if is_basic {
+                let mut basic = OldAttrs::new().basic;
+                basic.extend(map);
+                state.basic = basic;
+            } else {
+                state.dynamic = map;
+            }
+            continue;
+        }
         if ADL_WIDGET_SYMBOLS.contains(&block.symbol.as_str()) {
             let content = block_content(buf, block);
-            widgets.push(parse_widget(
-                &block.symbol,
-                block.start + 1,
-                &content,
-                color_table,
-            ));
+            let mut widget =
+                parse_widget(&block.symbol, block.start + 1, &content, color_table, old);
+            if let Some(state) = old.as_mut() {
+                apply_old_attrs(&mut widget, state, color_table);
+            }
+            widgets.push(widget);
         }
     }
     widgets
@@ -531,15 +666,16 @@ fn parse_display(content: &[&str], color_table: &[Color], screen: &mut MedmScree
     screen.assignments = assignments;
 }
 
-/// Parse the `file` block's `name`/`version` into the screen metadata.
+/// Parse the `file` block's `name`/`version` into the screen metadata. A `file`
+/// block WITHOUT a `version` key means version 0 — MEDM's `parseFile` initialises
+/// `versionNumber = 0` before reading the keys (medmCommon.c:107), which is how
+/// ancient pre-version-key files land in the old (< 20200) format path.
 fn parse_file(content: &[&str], screen: &mut MedmScreen) {
     let a = locate_assignments(content);
     if let Some(name) = a.get("name") {
         screen.adl_filename = name.clone();
     }
-    if let Some(version) = a.get("version") {
-        screen.adl_version = version.clone();
-    }
+    screen.adl_version = a.get("version").cloned().unwrap_or_else(|| "0".to_string());
 }
 
 /// Parse a full MEDM `.adl` document into a [`MedmScreen`].
@@ -563,33 +699,19 @@ pub fn parse(text: &str) -> MedmScreen {
         parse_display(&content, &table, &mut screen);
     }
 
-    // Pre-2.2 (`versionNumber < 20200`) old attribute format: MEDM parses
-    // top-level `basic attribute`/`dynamic attribute` blocks as rolling state that
-    // each later graphic inherits (display.c:487,507-546). We do not port that
-    // inheritance, so a graphic in such a file would silently lose its colour,
-    // fill, width, and visibility rules — warn instead of dropping silently.
-    // (For `>= 20200`, MEDM itself ignores a stray top-level attribute block, so
-    // discarding it below is faithful and no warning is due.)
-    if screen.adl_version.parse::<u32>().unwrap_or(0) < 20200
-        && blocks
-            .iter()
-            .any(|b| b.symbol == "basic attribute" || b.symbol == "dynamic attribute")
-    {
-        screen.warnings.push(
-            "pre-2.2 old-format top-level `basic attribute`/`dynamic attribute` \
-             blocks are not ported (rolling-attribute inheritance); affected static \
-             graphics keep default colour/fill/width and lose their visibility rules"
-                .to_string(),
-        );
-    }
+    // Pre-2.2 (`versionNumber < 20200`) files use the old attribute format:
+    // top-level `basic attribute`/`dynamic attribute` blocks roll into each later
+    // graphic (display.c:487,507-546). A missing `version` key inside a `file`
+    // block is version 0 (old); a file with NO `file` block at all only occurs
+    // synthetically and is treated as current-format (MEDM's `createDlFile`
+    // default is the running version).
+    let mut old =
+        matches!(screen.adl_version.parse::<u32>(), Ok(v) if v < 20200).then(OldAttrs::new);
 
-    // The remaining top-level blocks are widgets.
-    let widget_blocks: Vec<Block> = blocks
-        .into_iter()
-        .filter(|b| ADL_WIDGET_SYMBOLS.contains(&b.symbol.as_str()))
-        .collect();
+    // The remaining top-level blocks are widgets (plus, in old-format mode, the
+    // rolling attribute carriers `parse_children` consumes in document order).
     let color_table = screen.color_table.clone();
-    screen.widgets = parse_children(&buf, &widget_blocks, &color_table);
+    screen.widgets = parse_children(&buf, &blocks, &color_table, &mut old);
 
     screen
 }

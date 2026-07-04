@@ -1195,24 +1195,29 @@ Impact: a `period=500, units="milli-second"` chart (0.5 s window in MEDM) conver
 
 ### R2-63: Pre-2.2 top-level `basic attribute`/`dynamic attribute` inheritance and the old nested `attr{}` form are dropped — legacy static graphics lose colour, fill, width, and visibility rules silently
 
-**PARTIALLY FIXED (silent-drop cluster) — warn half closed:** the parser now
-detects a pre-2.2 file (`adl_version` parsed as `versionNumber < 20200`, matching
-display.c:487,507-546) carrying a top-level `basic attribute`/`dynamic attribute`
-block and emits a screen-level warning (surfaced through `generate`), so the
-old-format inheritance is no longer dropped silently. For `>= 20200`, MEDM itself
-ignores a stray top-level attribute block, so discarding it stays faithful and no
-warning fires. Verified in the C that both the top-level rolling form and the
-nested `attr{}` serialization (medmCommon.c:582-606,628-637) are the SAME
-`versionNumber < 20200` old format — they co-occur, so there is no
-version-independent nested-`attr{}`-only half to fix separately. Test:
-`pre_2_2_top_level_attribute_blocks_warn_not_silently_dropped`.
-
-**UNFIXED (sign-off-gated) — full pre-2.2 port:** actually porting the
-rolling-attribute inheritance (basic persists, dynamic consumed once —
-display.c:507-534) plus the nested `attr{}`/`mod{}`/`param{}` descent is a
-version-gated legacy parser feature (its own change): it reorders `parse()` to
-thread rolling `attr`/`dynAttr` state through the document in order. Deferred
-pending a scope decision on whether adl2sidm should support pre-MEDM-2.2 files.
+**FIXED (full port, user-approved):** the parser now implements the pre-2.2
+rolling-attribute format (`parseAndAppendDisplayList`, display.c:475-546).
+Gated on `adl_version` < 20200, with a `file` block lacking a `version` key read
+as version 0 (MEDM `parseFile` initialises `versionNumber = 0`, medmCommon.c:107).
+`parse_children` intercepts top-level `basic attribute`/`dynamic attribute`
+blocks (including the ancient `<<basic atribute>>` misspellings, display.c:539-545)
+into rolling state: each block RESETS to defaults then parses
+(`parseOldBasicAttribute`/`parseOldDynamicAttribute` call the `*Init` first),
+keys collected at any depth through the `attr{}`/`mod{}`/`param{}` wrappers. Every
+later `rectangle`/`oval`/`arc`/`text`/`polyline`/`polygon` takes the rolling basic
+attribute unconditionally (`clr` resolved into the widget colour; init default
+clr=0), and the rolling dynamic attribute lands only while its `chan` is set, then
+that `chan` is cleared — the consumed-once MEDM 2.2.9 behaviour (display.c:526-529).
+The state threads through composite `children{}` in document order (MEDM parses
+them via the same function with `static` rolling state). Additionally the
+widget-nested attribute lifting for the two attribute carriers now collects keys
+at ANY brace depth — MEDM's token parsers never gate key matching on nesting
+(`parseBasicAttribute`/`parseDynamicAttribute`), so the nested pre-2.2 wrapper
+parses in every MEDM version. The interim warn-only patch (`MedmScreen.warnings`)
+was superseded and removed. Tests:
+`pre_2_2_rolling_attributes_apply_to_graphics`,
+`pre_2_2_rolling_state_threads_composites_and_resets_per_block`,
+`widget_nested_old_attr_wrapper_parses_at_any_version`.
 
 Severity: Medium
 
