@@ -483,6 +483,15 @@ Impact: every free-line profile bilinearly samples 0.5 px up/right of silx — a
 
 ### R2-3: H/V band profiles use plain mean/sum — silx uses `nanmean`/`nansum`, so masked (NaN) pixels poison the whole band
 
+**FIXED (profile cluster, commit 2cef1d4):** `aligned_profile_values` reduces
+the band NaN-aware — `Mean` divides by the finite count (NaN for an all-NaN
+band = `numpy.nanmean`), `Sum` sums the finite pixels (0.0 for all-NaN =
+`numpy.nansum`), silx `_alignedFullProfile` (tools/profile/core.py:241-247).
+The sibling `rect_profile_values` (Roi::Rect strips) was swept for the same
+NaN-poisons-reduction defect and made consistent. Tests: aligned + rect skip
+a NaN in the band; all-NaN band → sum 0.0, mean NaN. (Doc marker backfilled
+— code fix landed earlier this session.)
+
 Severity: Medium
 
 Rust: `src/widget/high_level.rs:1446-1459` — `aligned_profile_values` accumulates `(start..end).map(...).sum()` then divides by the full band size; no NaN filtering (the free-line `line_profile_band` *is* finite-filtered — internally inconsistent).
