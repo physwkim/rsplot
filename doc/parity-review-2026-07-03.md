@@ -1560,6 +1560,21 @@ Impact: siplot displays colors not present in the 256-entry table (registered di
 
 ### R2-43: Snip background snips the full array; silx's default anchor split leaves the last two samples raw
 
+**FIXED (background cluster, this session):** added `snip_background_theory`
+porting silx `bgtheories.estimate_snip`'s default-anchor path
+(`bgtheories.py:229-243`) and pointed `Background::Snip` at it (the raw
+`snip_background` filter is kept for `filters.snip1d` callers). With the default
+config it uses implicit anchors `[0, n-1]` — snipping the body segment
+`y[0:n-1]` and leaving the length-1 tail `y[n-1:]` identity — so index `n-2`
+(last sample of the body sub-array, which `snip1d`'s descending-`p` passes never
+touch) and `n-1` (the identity tail) both stay at the raw value, exactly like
+silx. Verified silx `SmoothingFlag`/`AnchorsFlag` both default to `False`
+(`bgtheories.py:78-80`), so no Savitzky-Golay pre-smoothing and no explicit
+anchor list apply — the `[0, n-1]` split is the sole case; there is no
+additional smoothing gap. Tests: a right-edge peak at `n-2` stays raw in the
+background (whole-array snip strips it), the interior is still snipped, and ≤1
+sample arrays are identity.
+
 Severity: Low
 
 Rust: `src/core/background.rs:78-95` — `snip_background` runs over the whole array (modifies `1..=n−2`), used by `Background::Snip` (`:234`).

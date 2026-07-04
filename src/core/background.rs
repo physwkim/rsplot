@@ -199,6 +199,38 @@ pub fn snip_background(y: &[f64], snip_width: usize) -> Vec<f64> {
     data
 }
 
+/// The SNIP background *theory* (silx `bgtheories.estimate_snip`), as distinct
+/// from the raw [`snip_background`] filter above.
+///
+/// silx's Snip theory does not run [`snip_background`] over the whole array; with
+/// its default config (`SmoothingFlag=False`, `AnchorsFlag=False`,
+/// `bgtheories.py:78-80`) it uses implicit anchors `[0, len-1]` and snips each
+/// inter-anchor segment independently (`bgtheories.py:229-243`):
+/// `background[0:n-1] = snip1d(y[0:n-1], w)` for the body and
+/// `background[n-1:] = snip1d(y[n-1:], w)` — a length-1 identity — for the tail.
+/// Because [`snip_background`]'s descending-`p` passes never touch the first or
+/// last sample of *their* sub-array, index `n-2` (the last sample of the body
+/// segment) stays raw just like index `n-1` (the identity tail). So a peak
+/// abutting the right edge is absorbed into the background exactly as in silx,
+/// whereas a single snip over the whole array would strip `n-2`.
+///
+/// `SmoothingFlag` is `False` by default, so no Savitzky-Golay pre-smoothing is
+/// applied here; siplot exposes no anchor list, so the implicit `[0, len-1]`
+/// split is the only case.
+pub fn snip_background_theory(y: &[f64], snip_width: usize) -> Vec<f64> {
+    let n = y.len();
+    let mut bg = y.to_vec();
+    if n < 2 {
+        // A length-0/1 array is entirely the identity tail (`snip1d` of ≤1
+        // sample returns it unchanged).
+        return bg;
+    }
+    // Body segment y[0:n-1]; the length-1 tail y[n-1:] is left at its raw value.
+    let body = snip_background(&y[0..n - 1], snip_width);
+    bg[0..n - 1].copy_from_slice(&body);
+    bg
+}
+
 /// Least-squares polynomial fit (silx uses `numpy.polyfit`).
 ///
 /// Returns `degree + 1` coefficients highest-power-first (the `numpy.polyfit` /
@@ -274,7 +306,9 @@ pub enum Background {
         /// Threshold scaling factor.
         factor: f64,
     },
-    /// SNIP filter background (silx "Snip"): see [`snip_background`].
+    /// SNIP filter background (silx "Snip" theory): see
+    /// [`snip_background_theory`] (the default-anchor segment split, not the raw
+    /// [`snip_background`] filter).
     Snip {
         /// Snip operator width in samples.
         width: usize,
@@ -336,7 +370,7 @@ impl Background {
                 niterations,
                 factor,
             } => strip_background(y, width, niterations, factor, &[]),
-            Background::Snip { width } => snip_background(y, width),
+            Background::Snip { width } => snip_background_theory(y, width),
             Background::Polynomial { degree } => self.poly_on_strip(x, y, degree),
         }
     }
@@ -545,6 +579,33 @@ mod tests {
         let bg = snip_background(&y, 8);
         assert!(bg.iter().zip(&y).all(|(&b, &yi)| b <= yi + 1e-9));
         assert!((bg[20] - 1.0).abs() < 1e-9, "spike not snipped: {}", bg[20]);
+    }
+
+    #[test]
+    fn snip_theory_leaves_last_two_samples_raw_like_silx_anchors() {
+        // R2-43: silx `bgtheories.estimate_snip` with default anchors [0, n-1]
+        // snips y[0:n-1] and leaves y[n-1:] identity; because snip1d never touches
+        // the last sample of its sub-array, index n-2 (last of the body segment)
+        // and n-1 (the identity tail) both stay raw. A right-edge peak at n-2 is
+        // therefore absorbed into the background, whereas a whole-array snip strips
+        // it.
+        let y = vec![1.0, 1.0, 1.0, 1.0, 100.0, 1.0]; // n=6, peak at index 4 = n-2
+        let n = y.len();
+        let theory = snip_background_theory(&y, 2);
+        assert_eq!(theory[n - 2], 100.0, "n-2 peak must stay raw in background");
+        assert_eq!(theory[n - 1], 1.0, "n-1 identity tail must stay raw");
+        // The interior is still snipped down.
+        assert!(theory[2] <= 1.0 + 1e-9);
+        // A single snip over the whole array strips the n-2 peak — the divergence.
+        let full = snip_background(&y, 2);
+        assert_eq!(full[n - 2], 1.0, "whole-array snip strips the n-2 peak");
+    }
+
+    #[test]
+    fn snip_theory_short_arrays_are_identity() {
+        // ≤1-sample arrays are entirely the identity tail.
+        assert_eq!(snip_background_theory(&[], 4), Vec::<f64>::new());
+        assert_eq!(snip_background_theory(&[7.0], 4), vec![7.0]);
     }
 
     #[test]
