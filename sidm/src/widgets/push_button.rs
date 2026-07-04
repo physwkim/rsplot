@@ -83,7 +83,9 @@ impl SidmPushButton {
         press_value: impl Into<String>,
     ) -> Result<Self, EngineError> {
         Ok(Self {
-            base: ChannelBase::new(engine.connect(address)?),
+            // PyDMPushButton ships with alarmSensitiveBorder = False
+            // (pushbutton.py:74).
+            base: ChannelBase::new(engine.connect(address)?).with_border_mode(BorderMode::Off),
             label: label.into(),
             press_value: press_value.into(),
             release_value: None,
@@ -219,6 +221,16 @@ mod tests {
             value,
             ..ChannelState::default()
         }
+    }
+
+    #[test]
+    fn push_button_defaults_alarm_border_off_like_pydm() {
+        // PyDMPushButton ships alarmSensitiveBorder = False (pushbutton.py:74).
+        let engine = Engine::new();
+        let button =
+            SidmPushButton::new(&engine, "loc://pushbtn_border", "Step", "5").expect("connect");
+        assert_eq!(button.base.border_mode, BorderMode::Off);
+        assert!(!button.base.alarm_sensitive_content);
     }
 
     #[test]

@@ -41,7 +41,11 @@ impl SidmSlider {
     /// Connect `address` and wrap it in a slider.
     pub fn new(engine: &Engine, address: &str) -> Result<Self, EngineError> {
         Ok(Self {
-            base: ChannelBase::new(engine.connect(address)?),
+            // PyDMSlider ships with alarmSensitiveBorder = False and
+            // alarmSensitiveContent = True (slider.py:264-265).
+            base: ChannelBase::new(engine.connect(address)?)
+                .with_border_mode(BorderMode::Off)
+                .with_alarm_sensitive_content(true),
             user_limits: None,
             num_steps: DEFAULT_NUM_STEPS,
             precision_override: None,
@@ -184,6 +188,15 @@ mod tests {
         let engine = Engine::new();
         let slider = SidmSlider::new(&engine, address).expect("connect");
         (engine, slider)
+    }
+
+    #[test]
+    fn slider_defaults_alarm_border_off_content_on_like_pydm() {
+        // PyDMSlider ships alarmSensitiveBorder = False and
+        // alarmSensitiveContent = True (slider.py:264-265).
+        let (_e, slider) = slider("loc://slider_alarm_defaults");
+        assert_eq!(slider.base.border_mode, BorderMode::Off);
+        assert!(slider.base.alarm_sensitive_content);
     }
 
     #[test]

@@ -330,6 +330,22 @@ impl ChannelBase {
         }
     }
 
+    /// Override `alarmSensitiveBorder` at construction, mirroring the per-widget
+    /// `__init__` defaults some PyDM widgets set over the base
+    /// (`alarmSensitiveBorder = True`) — e.g. PushButton/Spinbox/Slider ship
+    /// with it `False`.
+    pub fn with_border_mode(mut self, mode: BorderMode) -> Self {
+        self.border_mode = mode;
+        self
+    }
+
+    /// Override `alarmSensitiveContent` at construction (PyDM base default
+    /// `False`; the Slider sets it `True`).
+    pub fn with_alarm_sensitive_content(mut self, on: bool) -> Self {
+        self.alarm_sensitive_content = on;
+        self
+    }
+
     /// The palette's severity colour for `state` — the single owner of the
     /// palette choice. `None` means "no severity override" (PyDM palette at
     /// `NoAlarm`); the MEDM palette always overrides.

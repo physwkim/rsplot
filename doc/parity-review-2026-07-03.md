@@ -1835,6 +1835,8 @@ Reference: `~/codes/pydm/pydm/widgets/pushbutton.py:74` and `~/codes/pydm/pydm/w
 
 Impact: on any MINOR/MAJOR/INVALID alarm, sidm draws a 2 px severity ring around every push button, spinbox and slider that PyDM leaves unstyled; conversely PyDM's slider recolours its value label by severity while sidm's slider has no severity-coloured content at all.
 
+**FIXED (this session):** added `ChannelBase::with_border_mode`/`with_alarm_sensitive_content` fluent overrides and applied the per-widget PyDM defaults verified against source — PushButton (pushbutton.py:74) and Spinbox (spinbox.py:29) construct `.with_border_mode(BorderMode::Off)`; Slider (slider.py:264-265) adds `.with_alarm_sensitive_content(true)`. Anchor-audit of `alarm_sensitive_border/content = False/True` across all PyDM widgets confirms the full population is Frame/Drawing (already border-off) + these three. Tests `{push_button,spinbox,slider}_defaults_alarm_border_*`.
+
 ### R2-56: Fortran reading order reshapes to the wrong geometry — PyDM makes `width` the first (row) axis, sidm keeps `width` columns and transposes with the wrong stride
 
 **FIXED (R1-family recurrence batch):** `reshape_image`'s Fortran arm now

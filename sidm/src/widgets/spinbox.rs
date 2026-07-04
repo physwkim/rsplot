@@ -35,7 +35,8 @@ impl SidmSpinbox {
     /// Connect `address` and wrap it in a spin box.
     pub fn new(engine: &Engine, address: &str) -> Result<Self, EngineError> {
         Ok(Self {
-            base: ChannelBase::new(engine.connect(address)?),
+            // PyDMSpinbox ships with alarmSensitiveBorder = False (spinbox.py:29).
+            base: ChannelBase::new(engine.connect(address)?).with_border_mode(BorderMode::Off),
             precision_override: None,
             user_limits: None,
             step: None,
@@ -151,6 +152,14 @@ mod tests {
         let engine = Engine::new();
         let spin = SidmSpinbox::new(&engine, address).expect("connect");
         (engine, spin)
+    }
+
+    #[test]
+    fn spinbox_defaults_alarm_border_off_like_pydm() {
+        // PyDMSpinbox ships alarmSensitiveBorder = False (spinbox.py:29).
+        let (_e, spin) = spinbox("loc://spin_border");
+        assert_eq!(spin.base.border_mode, BorderMode::Off);
+        assert!(!spin.base.alarm_sensitive_content);
     }
 
     #[test]
