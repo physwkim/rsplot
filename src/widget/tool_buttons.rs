@@ -8,6 +8,8 @@
 //!   `ProfileToolButton` (`PlotToolButtons.py:304-391`).
 //! - [`SymbolToolButton`] — pick the marker symbol and its size, silx
 //!   `SymbolToolButton` (`PlotToolButtons.py:394-477`).
+//! - [`AxisScaleToolButton`] — pick an axis' scale, silx
+//!   `XAxisScaleToolButton`/`YAxisScaleToolButton` (`PlotToolButtons.py:227-380`).
 //!
 //! Each splits into a pure, headlessly-tested state core (the selected value,
 //! its setters/clamps, and the silx label/catalog mappings) and an egui `ui`
@@ -15,6 +17,7 @@
 //! unverified; the state core is unit-tested.
 
 use crate::core::items::Symbol;
+use crate::core::transform::Scale;
 
 /// silx `ProfileToolButton`: a dropdown toolbar button switching the profile
 /// dimension between **1D** (one profile on the visible image) and **2D** (one
@@ -197,6 +200,113 @@ impl SymbolToolButton {
     }
 }
 
+/// silx `XAxisScaleToolButton` / `YAxisScaleToolButton`
+/// (`PlotToolButtons.py:227-380`): a dropdown toolbar button choosing one
+/// axis' scale. The selected scale is mirrored onto the button (silx swaps
+/// the icon and tooltip in `_yAxisScaleChanged`); the host applies a returned
+/// change to the plot axis and feeds external scale changes back through
+/// [`Self::set_scale`] (silx `sigScaleChanged → _connectPlot` tracking).
+///
+/// silx's menus offer a third state, `asinh` — NOT offered here: the OpenGL
+/// backend siplot ports raises `NotImplementedError` for asinh axis scales
+/// (`BackendOpenGL.py:1555-1571`; only the matplotlib backend implements
+/// them), so the entry would be a guaranteed error on the reference backend
+/// and siplot's axis [`Scale`] is `Linear`/`Log10` accordingly (R2-16).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AxisScaleToolButton {
+    /// `true` drives the Y axis (silx `YAxisScaleToolButton`), `false` the X.
+    y_axis: bool,
+    scale: Scale,
+}
+
+impl AxisScaleToolButton {
+    /// An X-axis scale button (silx `XAxisScaleToolButton`), initially linear.
+    pub fn x_axis() -> Self {
+        Self {
+            y_axis: false,
+            scale: Scale::Linear,
+        }
+    }
+
+    /// A Y-axis scale button (silx `YAxisScaleToolButton`), initially linear.
+    pub fn y_axis() -> Self {
+        Self {
+            y_axis: true,
+            scale: Scale::Linear,
+        }
+    }
+
+    /// The scale currently shown on the button.
+    pub fn scale(&self) -> Scale {
+        self.scale
+    }
+
+    /// Mirror the axis' scale onto the button (silx `_xAxisScaleChanged` /
+    /// `_yAxisScaleChanged`, driven by `sigScaleChanged`). Returns `true` if
+    /// the shown state changed.
+    pub fn set_scale(&mut self, scale: Scale) -> bool {
+        if scale != self.scale {
+            self.scale = scale;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// The axis letter for label text: `"X"` or `"Y"`.
+    fn axis_letter(&self) -> &'static str {
+        if self.y_axis { "Y" } else { "X" }
+    }
+
+    /// The menu-action label for a scale (silx `STATE[(scale, "action")]`,
+    /// e.g. `"Linear Y-axis"` / `"Logarithmic Y-axis"`).
+    pub fn action_label(&self, scale: Scale) -> String {
+        let name = match scale {
+            Scale::Linear => "Linear",
+            Scale::Log10 => "Logarithmic",
+        };
+        format!("{name} {}-axis", self.axis_letter())
+    }
+
+    /// The tooltip/status text for a scale (silx `STATE[(scale, "state")]`,
+    /// e.g. `"Y-axis scale is linear"`).
+    pub fn state_tooltip(&self, scale: Scale) -> String {
+        let name = match scale {
+            Scale::Linear => "linear",
+            Scale::Log10 => "logarithmic",
+        };
+        format!("{}-axis scale is {name}", self.axis_letter())
+    }
+
+    /// Render the dropdown button (silx `InstantPopup` menu of scale actions).
+    /// Returns `Some(new_scale)` if the user changed it this frame (the silx
+    /// action `triggered` → `axis.setScale(...)` the host must apply), else
+    /// `None`. GPU/UI — not covered by the tests.
+    pub fn ui(&mut self, ui: &mut egui::Ui) -> Option<Scale> {
+        let mut changed = None;
+        let title = match self.scale {
+            Scale::Linear => "Lin",
+            Scale::Log10 => "Log",
+        };
+        ui.menu_button(title, |ui| {
+            for scale in [Scale::Linear, Scale::Log10] {
+                let resp = ui
+                    .selectable_label(self.scale == scale, self.action_label(scale))
+                    .on_hover_text(self.state_tooltip(scale));
+                if resp.clicked() {
+                    if self.set_scale(scale) {
+                        changed = Some(scale);
+                    }
+                    ui.close();
+                }
+            }
+        })
+        .response
+        .on_hover_text(self.state_tooltip(self.scale));
+        changed
+    }
+}
+
 /// silx `RulerToolButton` (`tools/RulerToolButton.py:83-181`): a **checkable**
 /// toolbar button that, while active, lets the user measure the distance between
 /// two points by drawing a line ROI whose label shows the distance.
@@ -309,6 +419,30 @@ mod tests {
             ProfileToolButton::state_tooltip(2),
             "2D profile is computed, one 1D profile for each image in the stack"
         );
+    }
+
+    #[test]
+    fn axis_scale_buttons_default_to_linear_and_track_changes() {
+        let mut x = AxisScaleToolButton::x_axis();
+        assert_eq!(x.scale(), Scale::Linear);
+        // No-op on the current value; a real change reports true.
+        assert!(!x.set_scale(Scale::Linear));
+        assert!(x.set_scale(Scale::Log10));
+        assert_eq!(x.scale(), Scale::Log10);
+    }
+
+    #[test]
+    fn axis_scale_labels_match_silx_state() {
+        // silx STATE[(scale, "action")] / [(scale, "state")]
+        // (PlotToolButtons.py:236-247, 315-326), per axis.
+        let x = AxisScaleToolButton::x_axis();
+        let y = AxisScaleToolButton::y_axis();
+        assert_eq!(x.action_label(Scale::Linear), "Linear X-axis");
+        assert_eq!(x.action_label(Scale::Log10), "Logarithmic X-axis");
+        assert_eq!(y.action_label(Scale::Linear), "Linear Y-axis");
+        assert_eq!(y.action_label(Scale::Log10), "Logarithmic Y-axis");
+        assert_eq!(x.state_tooltip(Scale::Linear), "X-axis scale is linear");
+        assert_eq!(y.state_tooltip(Scale::Log10), "Y-axis scale is logarithmic");
     }
 
     #[test]

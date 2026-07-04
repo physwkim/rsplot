@@ -191,7 +191,7 @@ pub use crate::widget::stats_widget::{
 };
 pub use crate::widget::sync::SyncAxes;
 pub use crate::widget::tool_buttons::{
-    ProfileToolButton, RulerToolButton, SymbolToolButton, SymbolToolChange,
+    AxisScaleToolButton, ProfileToolButton, RulerToolButton, SymbolToolButton, SymbolToolChange,
 };
 
 // Plotting-library convention: re-export so downstreams use the same

@@ -834,6 +834,24 @@ Impact: nudging a start handle from 3.2 rad flips the stored angle to ≈ −3.0
 
 ### R2-16: `XAxisScaleToolButton`/`YAxisScaleToolButton` (linear/log/**asinh**) unported — and no arcsinh *axis* scale exists at all
 
+**FIXED (tool-buttons cluster), buttons half + recorded decision on the asinh
+half:** new `AxisScaleToolButton` in tool_buttons.rs (exported at the crate
+root) — the silx `XAxisScaleToolButton`/`YAxisScaleToolButton` port
+(PlotToolButtons.py:227-380) in the file's established split: pure state core
+(`x_axis()`/`y_axis()` constructors, `scale()`/`set_scale` change tracking =
+silx `sigScaleChanged → _xAxisScaleChanged`/`_yAxisScaleChanged` mirroring,
+silx `STATE` action labels "Linear/Logarithmic X/Y-axis" and tooltips
+"X/Y-axis scale is linear/logarithmic") plus an egui `ui` dropdown returning
+the chosen scale for the host to apply. **Recorded scope decision — arcsinh:**
+the OpenGL backend that siplot ports raises `NotImplementedError` for asinh
+axis scales on both axes (BackendOpenGL.py:1555-1571); only the matplotlib
+backend implements them. There is therefore no GL reference for an arcsinh
+axis transform (tick layout, interaction, rendering), and offering the silx
+menu's third entry would be a guaranteed error on the reference backend —
+the button offers the two GL-supported states and documents the omission
+with the citation; `Scale` stays `Linear`/`Log10`. Tests: default/track
+boundaries + the silx STATE label table for both axes.
+
 Severity: Medium
 
 Rust: no counterpart anywhere; `rg asinh` over `src/` hits only colormap normalization; the axis scale enum is `Scale::{Linear, Log10}` only (`src/core/transform.rs:24-29`). Neither the roadmap nor the R1 doc mentions the scale tool buttons or an arcsinh axis scale.
