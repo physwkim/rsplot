@@ -19,8 +19,25 @@
 //! ([`StatScope::OnLimits`]) before computing, and [`Stats::for_curve_roi`]
 //! restricts a curve to an x-range (the silx 1D `ROI` mask, stats.py:322).
 //!
-//! Non-finite values (`NaN`, `±inf`) are filtered out before any aggregation,
-//! matching silx's reliance on finite data for min/max/com.
+//! Non-finite handling mirrors silx exactly (R2-11): the only data filter is
+//! the on-limits/ROI clip (`numpy.ma` mask, stats.py:343-346) — NaN and ±inf
+//! **values stay in the data** and each statistic treats them as numpy does:
+//!
+//! - `min`/`max` skip NaN but let ±inf participate (`silx.math.combo.min_max`,
+//!   combo.pyx:162-181); when every clipped value is NaN they surface `NaN`
+//!   (combo keeps its `data[0]` init).
+//! - `mean`/`sum` propagate NaN/±inf (`numpy.mean`/`numpy.sum` over the
+//!   masked array).
+//! - `std` becomes undefined (`numpy.ma` returns `masked`, shown as `--`)
+//!   whenever any clipped value is non-finite — surfaced as `None`.
+//! - `COM` propagates NaN through its numerator/denominator sums.
+//! - `coord_min`/`coord_max` return the **first NaN sample's** coordinates
+//!   when NaN is present (`numpy argmin/argmax` return the first NaN index).
+//!
+//! Coordinates only gate clip membership: under on-limits/ROI a NaN
+//! coordinate fails the `>= && <=` comparison and is excluded (silx's mask
+//! comparisons do the same); under [`StatScope::All`] it stays and pollutes
+//! only COM / argmin/argmax coordinates.
 
 /// Which subset of the data to include before computing statistics.
 ///
@@ -49,28 +66,38 @@ pub enum StatScope {
 /// Result of the full silx statistic set for one item.
 ///
 /// Every field is `Option<f64>` (or a coordinate tuple): `None` means the
-/// statistic is undefined for the input, e.g. empty data, all-non-finite
-/// data, or (for [`Self::com`]) data whose finite values sum to zero — the
-/// silx `StatCOM` returns `NaN` in that case (stats.py:894-895), which we
-/// surface as `None`.
+/// statistic is undefined for the input — an empty clip, `std` over data
+/// containing a non-finite value (`numpy.ma` `masked`), or (for
+/// [`Self::com`]) data summing to zero — the silx `StatCOM` returns `NaN` in
+/// that case (stats.py:894-895), which we surface as `None`. NaN produced by
+/// the data itself (e.g. the mean of NaN-bearing data) stays `Some(NaN)`,
+/// mirroring silx displaying `nan`.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Stats {
-    /// Number of input values (before finite filtering).
+    /// Number of input values (before the on-limits/ROI clip).
     pub count: usize,
-    /// Number of finite values that participated in the aggregation.
-    pub finite_count: usize,
-    /// Minimum finite value (silx `StatMin`, stats.py:783).
+    /// Number of values inside the on-limits/ROI clip — the count that
+    /// participated in the aggregation (numpy's unmasked count). Non-finite
+    /// values are included (silx leaves them unmasked, stats.py:343-346).
+    pub included_count: usize,
+    /// Minimum value (silx `StatMin`, stats.py:783): NaN-skipping but
+    /// ±inf-participating (`combo.min_max`); `Some(NaN)` when every included
+    /// value is NaN.
     pub min: Option<f64>,
-    /// Maximum finite value (silx `StatMax`, stats.py:794).
+    /// Maximum value (silx `StatMax`, stats.py:794); same NaN/±inf rules as
+    /// [`Self::min`].
     pub max: Option<f64>,
     /// `max - min` (silx `StatDelta`, stats.py:805).
     pub delta: Option<f64>,
-    /// Arithmetic mean of finite values (silx `("mean", numpy.mean)`).
+    /// Arithmetic mean of included values (silx `("mean", numpy.mean)`) —
+    /// NaN/±inf propagate.
     pub mean: Option<f64>,
-    /// Population standard deviation (ddof = 0) of finite values — silx
-    /// `("std", numpy.std)` in `DEFAULT_STATS` (StatsWidget.py:1266-1276).
+    /// Population standard deviation (ddof = 0) — silx `("std", numpy.std)`
+    /// in `DEFAULT_STATS` (StatsWidget.py:1266-1276). `None` when any
+    /// included value is non-finite (`numpy.ma` yields `masked` then,
+    /// displayed as `--`).
     pub std: Option<f64>,
-    /// Sum / integral of finite values.
+    /// Sum / integral of included values — NaN/±inf propagate.
     pub sum: Option<f64>,
     /// Center of mass (silx `StatCOM`, stats.py:881). For a curve this is a
     /// single x coordinate stored in `com[0]` with `com[1] == None`; for an
@@ -78,10 +105,13 @@ pub struct Stats {
     /// `com[1] = y`.
     pub com: ComCoord,
     /// Data coordinates of the first minimum value (silx `StatCoordMin`,
-    /// stats.py:841). Curve: `(x, None)`. Image/scatter: `(x, y)`.
+    /// stats.py:841). Curve: `(x, None)`. Image/scatter: `(x, y)`. When any
+    /// included value is NaN this is the first NaN's coordinates (numpy
+    /// `argmin` returns the first NaN index).
     pub coord_min: ComCoord,
     /// Data coordinates of the first maximum value (silx `StatCoordMax`,
-    /// stats.py:860). Curve: `(x, None)`. Image/scatter: `(x, y)`.
+    /// stats.py:860). Curve: `(x, None)`. Image/scatter: `(x, y)`. Same
+    /// first-NaN rule as [`Self::coord_min`].
     pub coord_max: ComCoord,
 }
 
@@ -100,20 +130,6 @@ pub struct ComCoord {
 impl ComCoord {
     /// An undefined coordinate (`x == None`, `y == None`).
     pub const NONE: ComCoord = ComCoord { x: None, y: None };
-
-    fn x_only(x: f64) -> Self {
-        ComCoord {
-            x: Some(x),
-            y: None,
-        }
-    }
-
-    fn xy(x: f64, y: f64) -> Self {
-        ComCoord {
-            x: Some(x),
-            y: Some(y),
-        }
-    }
 }
 
 impl Stats {
@@ -126,8 +142,10 @@ impl Stats {
     /// the viewport x-range (silx masks on `xData` only, stats.py:331); the
     /// y-range is ignored for curves to match silx.
     ///
-    /// Pairs `(x, y)` where either coordinate is non-finite are dropped, since
-    /// silx's downstream `min_max` / `argmin` work on finite data.
+    /// Non-finite values are NOT dropped — they follow the per-statistic
+    /// numpy rules described in the module docs. A NaN `x` is excluded only
+    /// by an on-limits/ROI comparison (silx's mask, stats.py:331); under
+    /// [`StatScope::All`] it participates and pollutes COM / coords.
     ///
     /// `xs` and `ys` must have equal length; the shorter length is used if
     /// they differ (matching numpy's element-wise pairing being undefined,
@@ -152,26 +170,27 @@ impl Stats {
         for i in 0..count {
             let x = xs[i];
             let y = ys[i];
-            if !x.is_finite() || !y.is_finite() {
-                continue;
-            }
-            // ROI mask (1D x-range), silx stats.py:331.
+            // ROI mask (1D x-range), silx stats.py:331. The positive
+            // `inside` form excludes a NaN x like silx's
+            // `(minX <= x) & (x <= maxX)` mask does.
             if let Some((from, to)) = roi {
                 let (lo, hi) = order(from, to);
-                if x < lo || x > hi {
+                let inside = x >= lo && x <= hi;
+                if !inside {
                     continue;
                 }
             }
             // On-limits mask: curve gates on x only (silx stats.py:331).
             if let StatScope::OnLimits { x_range, .. } = scope {
                 let (lo, hi) = order(x_range.0, x_range.1);
-                if x < lo || x > hi {
+                let inside = x >= lo && x <= hi;
+                if !inside {
                     continue;
                 }
             }
-            acc.push(y, x, f64::NAN);
+            acc.push(y, x, None);
         }
-        acc.finish(count, /* two_d */ false)
+        acc.finish(count)
     }
 
     /// Compute the full statistic set for a scatter `(xs, ys, values)`: the
@@ -186,28 +205,30 @@ impl Stats {
     /// (`(x >= minX) & (x <= maxX) & (y >= minY) & (y <= maxY)`,
     /// stats.py:470-476) — unlike curves, which gate on x only.
     ///
-    /// Triples where any of `x`, `y`, `value` is non-finite are dropped,
-    /// matching this module's finite-data convention. The shortest of the
-    /// three slices bounds the iteration.
+    /// Non-finite values/coordinates are NOT dropped: they follow the
+    /// per-statistic numpy rules in the module docs. Under
+    /// [`StatScope::OnLimits`] a NaN coordinate fails the comparisons and is
+    /// excluded, exactly like silx's mask. The shortest of the three slices
+    /// bounds the iteration.
     pub fn for_scatter(xs: &[f64], ys: &[f64], values: &[f64], scope: StatScope) -> Self {
         let count = xs.len().min(ys.len()).min(values.len());
         let mut acc = Accumulator::default();
         for i in 0..count {
             let (x, y, v) = (xs[i], ys[i], values[i]);
-            if !x.is_finite() || !y.is_finite() || !v.is_finite() {
-                continue;
-            }
             // On-limits mask: scatter gates on x AND y (silx stats.py:470-476).
+            // Positive `inside` form: a NaN coordinate is excluded, matching
+            // silx's `(x >= minX) & (x <= maxX) & ...` mask comparisons.
             if let StatScope::OnLimits { x_range, y_range } = scope {
                 let (lx, hx) = order(x_range.0, x_range.1);
                 let (ly, hy) = order(y_range.0, y_range.1);
-                if x < lx || x > hx || y < ly || y > hy {
+                let inside = x >= lx && x <= hx && y >= ly && y <= hy;
+                if !inside {
                     continue;
                 }
             }
-            acc.push(v, x, y);
+            acc.push(v, x, Some(y));
         }
-        acc.finish(count, /* two_d */ true)
+        acc.finish(count)
     }
 
     /// Compute the full statistic set for a 2D scalar image in row-major
@@ -293,62 +314,84 @@ impl Stats {
                     continue;
                 }
                 let v = data[idx];
-                if !v.is_finite() {
-                    continue;
-                }
                 let x = origin.0 + scale.0 * col as f64;
                 let y = origin.1 + scale.1 * row as f64;
-                acc.push(v, x, y);
+                acc.push(v, x, Some(y));
             }
         }
-        acc.finish(count, /* two_d */ true)
+        acc.finish(count)
     }
 }
 
-/// Single-pass accumulator shared by curve and image paths.
+/// Single-pass accumulator shared by curve, scatter, and image paths.
 ///
-/// Tracks finite count, running min/max (with the first-occurrence position
-/// for argmin/argmax to match silx `argmin`/`argmax` returning the *first*
-/// extremum), running sums for mean and COM.
+/// Every pushed value is inside the on-limits/ROI clip (the only filter,
+/// matching silx's `numpy.ma` mask). Non-finite values participate per the
+/// numpy rules described in the module docs. A push's `y` is `Some` for 2D
+/// data (image/scatter) and `None` for curves — one meaning, no sentinel.
 #[derive(Default)]
 struct Accumulator {
-    finite_count: usize,
+    included: usize,
+    // Plain sum for mean/sum/COM denominator — NaN/±inf propagate like
+    // numpy.sum over the unmasked values.
     sum: f64,
     // Welford running mean / squared-deviation sum for the population std
-    // (numpy.std, ddof = 0 — silx `("std", numpy.std)`).
+    // (numpy.std, ddof = 0 — silx `("std", numpy.std)`). Only consumed when
+    // all values are finite: numpy.ma.std yields `masked` otherwise.
     welford_mean: f64,
     welford_m2: f64,
-    // COM numerators: sum(val * pos).
+    // Any non-finite value makes numpy.ma.std return `masked` (empirically:
+    // std of [3, nan, 1] and of [3, -inf, 1] are both `masked`).
+    has_non_finite: bool,
+    // COM numerators: sum(val * pos) — NaN coordinates/values propagate.
     com_x_num: f64,
     com_y_num: f64,
+    // Coordinates of the FIRST NaN value: numpy argmin/argmax return the
+    // first NaN index when NaN is present, overriding the extremum position.
+    nan_pos: Option<(f64, Option<f64>)>,
     min: f64,
     max: f64,
-    min_pos: (f64, f64),
-    max_pos: (f64, f64),
-    first: bool,
+    min_pos: (f64, Option<f64>),
+    max_pos: (f64, Option<f64>),
+    // Whether min/max saw a non-NaN value yet (combo.pyx:162-170 scans for
+    // the first non-NaN init; ±inf counts as a valid init).
+    inited: bool,
+    // Whether the data is 2D (every push carried Some(y)): selects the 2D
+    // COM shape even when no extremum position was recorded (all-NaN data).
+    two_d: bool,
 }
 
 impl Accumulator {
-    fn push(&mut self, value: f64, x: f64, y: f64) {
-        self.finite_count += 1;
+    fn push(&mut self, value: f64, x: f64, y: Option<f64>) {
+        self.included += 1;
+        self.two_d |= y.is_some();
         self.sum += value;
-        // Welford update: numerically stable running mean + M2.
+        if !value.is_finite() {
+            self.has_non_finite = true;
+        }
+        // Welford update: numerically stable running mean + M2 (garbage once
+        // a non-finite value arrives, but `finish` discards it then).
         let delta = value - self.welford_mean;
-        self.welford_mean += delta / self.finite_count as f64;
+        self.welford_mean += delta / self.included as f64;
         self.welford_m2 += delta * (value - self.welford_mean);
         self.com_x_num += value * x;
-        if y.is_finite() {
+        if let Some(y) = y {
             self.com_y_num += value * y;
         }
-        if !self.first {
-            self.first = true;
+        if value.is_nan() {
+            if self.nan_pos.is_none() {
+                self.nan_pos = Some((x, y));
+            }
+        } else if !self.inited {
+            self.inited = true;
             self.min = value;
             self.max = value;
             self.min_pos = (x, y);
             self.max_pos = (x, y);
         } else {
             // Strictly-less / strictly-greater keeps the *first* extremum,
-            // matching numpy argmin/argmax (silx stats.py:852, 873).
+            // matching numpy argmin/argmax (silx stats.py:852, 873). NaN was
+            // handled above; ±inf compares normally, like combo.min_max.
             if value < self.min {
                 self.min = value;
                 self.min_pos = (x, y);
@@ -360,46 +403,57 @@ impl Accumulator {
         }
     }
 
-    /// `two_d` selects 2D `(x, y)` coordinates for COM/argmin/argmax (image and
-    /// scatter inputs) over the curve's 1D x-only coordinate.
-    fn finish(self, count: usize, two_d: bool) -> Stats {
-        if self.finite_count == 0 {
+    fn finish(self, count: usize) -> Stats {
+        if self.included == 0 {
             return Stats {
                 count,
-                finite_count: 0,
+                included_count: 0,
                 ..Stats::default()
             };
         }
-        let mean = self.sum / self.finite_count as f64;
-        let coord = |pos: (f64, f64)| {
-            if two_d {
-                ComCoord::xy(pos.0, pos.1)
-            } else {
-                ComCoord::x_only(pos.0)
-            }
+        // numpy.ma.mean = sum / unmasked count; NaN/±inf propagate.
+        let mean = self.sum / self.included as f64;
+        let coord = |pos: (f64, Option<f64>)| ComCoord {
+            x: Some(pos.0),
+            y: pos.1,
         };
-        // COM: undefined (silx NaN, stats.py:894) when sum == 0.
+        // min/max: all-NaN data leaves combo.min_max at its `data[0]` init,
+        // i.e. NaN (combo.pyx:153-170) — not None (None is empty-clip only).
+        let (min, max) = if self.inited {
+            (self.min, self.max)
+        } else {
+            (f64::NAN, f64::NAN)
+        };
+        // argmin/argmax: the first NaN wins over the finite extremum.
+        let (coord_min, coord_max) = match self.nan_pos {
+            Some(pos) => (coord(pos), coord(pos)),
+            None => (coord(self.min_pos), coord(self.max_pos)),
+        };
+        // COM: undefined (silx NaN, stats.py:894) when sum == 0; a NaN sum
+        // is NOT the undefined case — it propagates into the components.
         let com = if self.sum == 0.0 {
             ComCoord::NONE
-        } else if two_d {
-            ComCoord::xy(self.com_x_num / self.sum, self.com_y_num / self.sum)
         } else {
-            ComCoord::x_only(self.com_x_num / self.sum)
+            ComCoord {
+                x: Some(self.com_x_num / self.sum),
+                y: self.two_d.then(|| self.com_y_num / self.sum),
+            }
         };
         Stats {
             count,
-            finite_count: self.finite_count,
-            min: Some(self.min),
-            max: Some(self.max),
-            delta: Some(self.max - self.min),
+            included_count: self.included,
+            min: Some(min),
+            max: Some(max),
+            delta: Some(max - min),
             mean: Some(mean),
             // Population std (ddof = 0), matching numpy.std as used by silx
-            // `DEFAULT_STATS` (StatsWidget.py:1275).
-            std: Some((self.welford_m2 / self.finite_count as f64).sqrt()),
+            // `DEFAULT_STATS` (StatsWidget.py:1275); `masked` -> None when
+            // any value is non-finite.
+            std: (!self.has_non_finite).then(|| (self.welford_m2 / self.included as f64).sqrt()),
             sum: Some(self.sum),
             com,
-            coord_min: coord(self.min_pos),
-            coord_max: coord(self.max_pos),
+            coord_min,
+            coord_max,
         }
     }
 }
@@ -422,7 +476,7 @@ mod tests {
     fn curve_empty_yields_none() {
         let s = Stats::for_curve(&[], &[], StatScope::All);
         assert_eq!(s.count, 0);
-        assert_eq!(s.finite_count, 0);
+        assert_eq!(s.included_count, 0);
         assert_eq!(s.min, None);
         assert_eq!(s.max, None);
         assert_eq!(s.delta, None);
@@ -462,7 +516,7 @@ mod tests {
     fn curve_single_point() {
         let s = Stats::for_curve(&[2.0], &[5.0], StatScope::All);
         assert_eq!(s.count, 1);
-        assert_eq!(s.finite_count, 1);
+        assert_eq!(s.included_count, 1);
         approx(s.min.unwrap(), 5.0);
         approx(s.max.unwrap(), 5.0);
         approx(s.delta.unwrap(), 0.0);
@@ -476,21 +530,93 @@ mod tests {
     }
 
     #[test]
-    fn curve_all_nan_yields_none() {
-        let s = Stats::for_curve(&[1.0, 2.0], &[f64::NAN, f64::INFINITY], StatScope::All);
+    fn curve_all_nan_min_max_surface_nan_not_none() {
+        // All-NaN values: combo.min_max keeps its data[0] init (NaN), so
+        // min/max are Some(NaN) — None is reserved for an empty clip.
+        let s = Stats::for_curve(&[1.0, 2.0], &[f64::NAN, f64::NAN], StatScope::All);
         assert_eq!(s.count, 2);
-        assert_eq!(s.finite_count, 0);
-        assert_eq!(s.min, None);
-        assert_eq!(s.com, ComCoord::NONE);
+        assert_eq!(s.included_count, 2);
+        assert!(s.min.unwrap().is_nan());
+        assert!(s.max.unwrap().is_nan());
+        assert!(s.delta.unwrap().is_nan());
+        assert!(s.mean.unwrap().is_nan());
+        assert_eq!(s.std, None, "numpy.ma.std is masked with NaN present");
+        // argmin/argmax: first NaN index -> x = 1.0.
+        approx(s.coord_min.x.unwrap(), 1.0);
+        approx(s.coord_max.x.unwrap(), 1.0);
     }
 
     #[test]
-    fn curve_drops_non_finite_x() {
-        // x non-finite -> pair dropped even though y is finite.
+    fn curve_nan_value_propagates_mean_sum_and_masks_std() {
+        // silx: mask covers only the clip; NaN y stays in the data
+        // (stats.py:343-346). numpy.mean/sum -> nan; numpy.ma.std -> masked;
+        // combo.min_max skips the NaN; argmin/argmax return the first NaN.
+        let s = Stats::for_curve(&[0.0, 1.0, 2.0], &[3.0, f64::NAN, 1.0], StatScope::All);
+        assert_eq!(s.included_count, 3);
+        approx(s.min.unwrap(), 1.0);
+        approx(s.max.unwrap(), 3.0);
+        assert!(s.mean.unwrap().is_nan());
+        assert!(s.sum.unwrap().is_nan());
+        assert_eq!(s.std, None);
+        assert!(s.com.x.unwrap().is_nan());
+        // First NaN at x = 1 wins BOTH coords over the finite extrema.
+        approx(s.coord_min.x.unwrap(), 1.0);
+        approx(s.coord_max.x.unwrap(), 1.0);
+    }
+
+    #[test]
+    fn curve_inf_participates_in_min_max_and_masks_std() {
+        // ±inf is not NaN: combo.min_max lets it win min/max; mean/sum ride
+        // to -inf; numpy.ma.std is masked for inf too (verified empirically).
+        let s = Stats::for_curve(
+            &[0.0, 1.0, 2.0],
+            &[3.0, f64::NEG_INFINITY, 1.0],
+            StatScope::All,
+        );
+        assert_eq!(s.min, Some(f64::NEG_INFINITY));
+        approx(s.max.unwrap(), 3.0);
+        approx(s.coord_min.x.unwrap(), 1.0);
+        approx(s.coord_max.x.unwrap(), 0.0);
+        assert_eq!(s.mean, Some(f64::NEG_INFINITY));
+        assert_eq!(s.sum, Some(f64::NEG_INFINITY));
+        assert_eq!(s.std, None);
+    }
+
+    #[test]
+    fn curve_nan_x_kept_under_all_scope_pollutes_com_and_coords_only() {
+        // silx masks nothing under All scope: a NaN x leaves the y stats
+        // intact and reaches only COM / the argmin-argmax coordinate.
         let s = Stats::for_curve(&[f64::NAN, 3.0], &[10.0, 4.0], StatScope::All);
-        assert_eq!(s.finite_count, 1);
-        approx(s.sum.unwrap(), 4.0);
-        approx(s.coord_max.x.unwrap(), 3.0);
+        assert_eq!(s.included_count, 2);
+        approx(s.min.unwrap(), 4.0);
+        approx(s.max.unwrap(), 10.0);
+        approx(s.sum.unwrap(), 14.0);
+        assert!(s.std.is_some(), "values are finite; only x is NaN");
+        assert!(s.com.x.unwrap().is_nan());
+        assert!(s.coord_max.x.unwrap().is_nan(), "max y=10 sits at x=NaN");
+        approx(s.coord_min.x.unwrap(), 3.0);
+    }
+
+    #[test]
+    fn curve_masks_exclude_nan_x() {
+        // Under on-limits/ROI the silx mask comparisons
+        // `(minX <= x) & (x <= maxX)` are false for NaN -> excluded.
+        let xs = [0.0, f64::NAN, 2.0];
+        let ys = [1.0, 100.0, 3.0];
+        let on_limits = Stats::for_curve(
+            &xs,
+            &ys,
+            StatScope::OnLimits {
+                x_range: (0.0, 2.0),
+                y_range: (-1e9, 1e9),
+            },
+        );
+        assert_eq!(on_limits.included_count, 2);
+        approx(on_limits.sum.unwrap(), 4.0);
+        assert!(on_limits.std.is_some());
+        let roi = Stats::for_curve_roi(&xs, &ys, 0.0, 2.0);
+        assert_eq!(roi.included_count, 2);
+        approx(roi.sum.unwrap(), 4.0);
     }
 
     #[test]
@@ -506,7 +632,7 @@ mod tests {
     fn curve_com_all_zero_is_none() {
         // sum(y) == 0 -> silx returns NaN -> we surface None.
         let s = Stats::for_curve(&[0.0, 1.0, 2.0], &[0.0, 0.0, 0.0], StatScope::All);
-        assert_eq!(s.finite_count, 3);
+        assert_eq!(s.included_count, 3);
         approx(s.sum.unwrap(), 0.0);
         assert_eq!(s.com, ComCoord::NONE);
     }
@@ -542,7 +668,7 @@ mod tests {
                 y_range: (-1e9, 1e9),
             },
         );
-        assert_eq!(s.finite_count, 3);
+        assert_eq!(s.included_count, 3);
         approx(s.min.unwrap(), 20.0);
         approx(s.max.unwrap(), 40.0);
         approx(s.sum.unwrap(), 90.0);
@@ -561,7 +687,7 @@ mod tests {
                 y_range: (0.0, 1.0), // would exclude all if applied
             },
         );
-        assert_eq!(s.finite_count, 3);
+        assert_eq!(s.included_count, 3);
         approx(s.sum.unwrap(), 600.0);
     }
 
@@ -570,7 +696,7 @@ mod tests {
         let xs = [0.0, 1.0, 2.0, 3.0];
         let ys = [1.0, 2.0, 3.0, 4.0];
         let s = Stats::for_curve_roi(&xs, &ys, 1.0, 2.0);
-        assert_eq!(s.finite_count, 2);
+        assert_eq!(s.included_count, 2);
         approx(s.sum.unwrap(), 5.0);
         approx(s.min.unwrap(), 2.0);
         approx(s.max.unwrap(), 3.0);
@@ -582,7 +708,7 @@ mod tests {
         let ys = [1.0, 2.0, 3.0, 4.0];
         // from > to: should still filter to [1,2].
         let s = Stats::for_curve_roi(&xs, &ys, 2.0, 1.0);
-        assert_eq!(s.finite_count, 2);
+        assert_eq!(s.included_count, 2);
         approx(s.sum.unwrap(), 5.0);
     }
 
@@ -593,7 +719,7 @@ mod tests {
         let ys = [10.0, 11.0, 12.0];
         let vs = [5.0, 1.0, 3.0];
         let s = Stats::for_scatter(&xs, &ys, &vs, StatScope::All);
-        assert_eq!(s.finite_count, 3);
+        assert_eq!(s.included_count, 3);
         approx(s.min.unwrap(), 1.0);
         approx(s.max.unwrap(), 5.0);
         approx(s.sum.unwrap(), 9.0);
@@ -625,26 +751,55 @@ mod tests {
                 y_range: (-1.0, 1.0), // excludes the y=100 point
             },
         );
-        assert_eq!(s.finite_count, 2);
+        assert_eq!(s.included_count, 2);
         approx(s.sum.unwrap(), 5.0);
     }
 
     #[test]
-    fn scatter_drops_non_finite_components() {
-        // Any non-finite x, y, or value drops the whole triple.
+    fn scatter_all_scope_keeps_non_finite_components() {
+        // silx's scatter mask covers only on-limits (stats.py:470-476);
+        // under All every triple participates per the numpy rules.
         let xs = [0.0, f64::NAN, 2.0, 3.0];
         let ys = [0.0, 1.0, f64::INFINITY, 3.0];
         let vs = [1.0, 2.0, 4.0, f64::NAN];
         let s = Stats::for_scatter(&xs, &ys, &vs, StatScope::All);
         assert_eq!(s.count, 4);
-        assert_eq!(s.finite_count, 1);
-        approx(s.sum.unwrap(), 1.0);
+        assert_eq!(s.included_count, 4);
+        approx(s.min.unwrap(), 1.0);
+        approx(s.max.unwrap(), 4.0);
+        assert!(s.mean.unwrap().is_nan());
+        assert_eq!(s.std, None);
+        // First NaN VALUE is at index 3 -> both coords report (3, 3).
+        approx(s.coord_min.x.unwrap(), 3.0);
+        approx(s.coord_min.y.unwrap(), 3.0);
+        approx(s.coord_max.x.unwrap(), 3.0);
+    }
+
+    #[test]
+    fn scatter_on_limits_excludes_nan_coordinates() {
+        // The on-limits comparisons are false for a NaN coordinate, so the
+        // point drops out exactly as under silx's mask.
+        let xs = [0.0, f64::NAN, 2.0];
+        let ys = [0.0, 0.0, 0.0];
+        let vs = [1.0, 100.0, 3.0];
+        let s = Stats::for_scatter(
+            &xs,
+            &ys,
+            &vs,
+            StatScope::OnLimits {
+                x_range: (0.0, 2.0),
+                y_range: (-1.0, 1.0),
+            },
+        );
+        assert_eq!(s.included_count, 2);
+        approx(s.sum.unwrap(), 4.0);
+        assert!(s.std.is_some());
     }
 
     #[test]
     fn scatter_empty_yields_none() {
         let s = Stats::for_scatter(&[], &[], &[], StatScope::All);
-        assert_eq!(s.finite_count, 0);
+        assert_eq!(s.included_count, 0);
         assert_eq!(s.min, None);
         assert_eq!(s.com, ComCoord::NONE);
     }
@@ -660,7 +815,7 @@ mod tests {
     #[test]
     fn image_single_pixel() {
         let s = Stats::for_image(&[7.0], 1, 1, (5.0, 6.0), (1.0, 1.0), StatScope::All);
-        assert_eq!(s.finite_count, 1);
+        assert_eq!(s.included_count, 1);
         approx(s.min.unwrap(), 7.0);
         approx(s.max.unwrap(), 7.0);
         // COM data coords = origin (col=0,row=0).
@@ -708,17 +863,26 @@ mod tests {
     fn image_com_all_zero_is_none() {
         let data = vec![0.0; 4];
         let s = Stats::for_image(&data, 2, 2, (0.0, 0.0), (1.0, 1.0), StatScope::All);
-        assert_eq!(s.finite_count, 4);
+        assert_eq!(s.included_count, 4);
         assert_eq!(s.com, ComCoord::NONE);
     }
 
     #[test]
-    fn image_skips_non_finite() {
+    fn image_non_finite_pixels_participate() {
+        // [ [1, NaN], [3, +inf] ]: min/max skip the NaN but take the inf;
+        // mean/sum ride to NaN; std masked; coords = the NaN pixel (1, 0).
         let data = [1.0, f64::NAN, 3.0, f64::INFINITY];
         let s = Stats::for_image(&data, 2, 2, (0.0, 0.0), (1.0, 1.0), StatScope::All);
-        assert_eq!(s.finite_count, 2);
-        approx(s.sum.unwrap(), 4.0);
-        approx(s.max.unwrap(), 3.0);
+        assert_eq!(s.included_count, 4);
+        approx(s.min.unwrap(), 1.0);
+        assert_eq!(s.max, Some(f64::INFINITY));
+        assert!(s.sum.unwrap().is_nan());
+        assert!(s.mean.unwrap().is_nan());
+        assert_eq!(s.std, None);
+        approx(s.coord_min.x.unwrap(), 1.0);
+        approx(s.coord_min.y.unwrap(), 0.0);
+        assert!(s.com.x.unwrap().is_nan());
+        assert!(s.com.y.unwrap().is_nan());
     }
 
     #[test]
@@ -742,7 +906,7 @@ mod tests {
             },
         );
         // Included pixels: (1,1)=5,(2,1)=6,(1,2)=9,(2,2)=10.
-        assert_eq!(s.finite_count, 4);
+        assert_eq!(s.included_count, 4);
         approx(s.min.unwrap(), 5.0);
         approx(s.max.unwrap(), 10.0);
         approx(s.sum.unwrap(), 30.0);
@@ -763,6 +927,6 @@ mod tests {
             },
         );
         assert_eq!(s.min, None);
-        assert_eq!(s.finite_count, 0);
+        assert_eq!(s.included_count, 0);
     }
 }

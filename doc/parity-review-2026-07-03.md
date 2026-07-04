@@ -640,6 +640,32 @@ Impact: silx's `rgba("gray")` is only a pre-first-image placeholder; siplot keep
 
 ### R2-11: Stats mean/std/sum/COM filter NaN out; silx propagates NaN through them (only min/max are NaN-immune)
 
+**FIXED (stats cluster, semantics pinned empirically against numpy):** the
+engine now applies silx's numpy.ma rules with the on-limits/ROI clip as the
+ONLY data filter (stats.py:343-346): mean/sum propagate NaN/±inf
+(`numpy.mean`/`sum`); std is `None` whenever any included value is
+non-finite (numpy.ma.std returns `masked` for NaN AND ±inf — verified by
+running numpy); min/max skip NaN but let ±inf win (combo.pyx:150-200), and
+an all-NaN clip surfaces `Some(NaN)` (combo keeps its `data[0]` init);
+COM propagates NaN (`sum==0` stays the only None case); coord_min/coord_max
+return the FIRST NaN sample's coordinates (numpy argmin/argmax return the
+first NaN index — verified; the finding's "coord-min/max are NaN-immune"
+premise was wrong). Clip comparisons rewritten to the positive
+`x >= lo && x <= hi` form so a NaN coordinate is excluded exactly like
+silx's mask comparisons; under `All` it stays and pollutes COM/coords.
+`finite_count` renamed `included_count` (one meaning: clip-included count).
+Same-defect sites fixed in the same pass: `roi_stats.rs` Accumulator (the
+ROIStatsWidget path — same numpy.ma downstream) and the display layer
+(`format_stat`/`format_coord` now print `nan`/`inf`/`-inf` for data-borne
+non-finite values; `--` only for None/masked, statshandler.py:77-84).
+Distinct, kept: `ValueStats` (siplot items-panel summary, deliberately
+finite-filtered — documented + divergence-boundary test);
+`curve_roi_counts` (already faithful); histogram bin count (R2-20);
+ImageView profile aggregation (separate surface). Boundary tests: NaN
+mean/sum/std, ±inf min/max/std, all-NaN, first-NaN coords, mask-excludes-
+NaN-x (OnLimits + ROI), scatter All-scope keeps non-finite, image NaN
+pixel, roi_stats image/curve NaN. parity-roadmap.md:1654 claim corrected.
+
 Severity: Medium
 
 Rust: `src/core/stats.rs:22-23` — "Non-finite values (`NaN`, `±inf`) are filtered out before any aggregation, matching silx's reliance on finite data for min/max/com"; every `for_curve`/`for_scatter`/`for_image` accumulator skips non-finite values.

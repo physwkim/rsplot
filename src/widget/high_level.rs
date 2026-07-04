@@ -146,43 +146,42 @@ impl ValueStats {
     /// Compute statistics from `f64` values, ignoring non-finite values for
     /// min/max/mean while still counting them in [`Self::count`].
     ///
-    /// Delegates to [`crate::core::stats::Stats`] (the single source of truth
-    /// for the silx statistic set) by treating the flat value array as a
-    /// `width = len`, `height = 1` scalar image with unit geometry, then keeps
-    /// only the count/finite-count/min/max/mean fields of the public
-    /// `ValueStats` shape.
+    /// Deliberately finite-filtered, UNLIKE the silx stats-table engine
+    /// ([`crate::core::stats::Stats`]) which propagates NaN through
+    /// mean/sum/std exactly as numpy does (R2-11). `ValueStats` feeds the
+    /// items-panel summary labels — a siplot-side readout where a single NaN
+    /// sample must not blank the whole line — so it keeps its own finite
+    /// aggregation loop instead of delegating to the parity engine.
     pub fn from_f64(values: &[f64]) -> Self {
-        Self::from_stats(crate::core::stats::Stats::for_image(
-            values,
-            values.len(),
-            1,
-            (0.0, 0.0),
-            (1.0, 1.0),
-            crate::core::stats::StatScope::All,
-        ))
+        let mut finite_count = 0usize;
+        let mut sum = 0.0f64;
+        let mut min = f64::INFINITY;
+        let mut max = f64::NEG_INFINITY;
+        for &v in values {
+            if v.is_finite() {
+                finite_count += 1;
+                sum += v;
+                min = min.min(v);
+                max = max.max(v);
+            }
+        }
+        Self {
+            count: values.len(),
+            finite_count,
+            min: (finite_count > 0).then_some(min),
+            max: (finite_count > 0).then_some(max),
+            mean: (finite_count > 0).then(|| sum / finite_count as f64),
+        }
     }
 
     /// Compute statistics from `f32` values, ignoring non-finite values for
     /// min/max/mean while still counting them in [`Self::count`].
     ///
-    /// Widens to `f64` and delegates to [`crate::core::stats::Stats`], the same
-    /// single-source-of-truth path as [`Self::from_f64`].
+    /// Widens to `f64` and uses the same finite-filtered aggregation as
+    /// [`Self::from_f64`].
     pub fn from_f32(values: &[f32]) -> Self {
         let widened: Vec<f64> = values.iter().map(|&v| v as f64).collect();
         Self::from_f64(&widened)
-    }
-
-    /// Project a [`crate::core::stats::Stats`] result onto the `ValueStats`
-    /// fields. `Stats` carries the full silx statistic set (delta/sum/COM/
-    /// argmin/argmax); `ValueStats` keeps only count/finite-count/min/max/mean.
-    fn from_stats(stats: crate::core::stats::Stats) -> Self {
-        Self {
-            count: stats.count,
-            finite_count: stats.finite_count,
-            min: stats.min,
-            max: stats.max,
-            mean: stats.mean,
-        }
     }
 }
 
@@ -15750,7 +15749,10 @@ mod tests {
         assert_eq!(rows[0].0, "curve");
         let core =
             crate::core::stats::Stats::for_curve(&xs, &ys, crate::core::stats::StatScope::All);
-        assert_eq!(rows[0].1, core);
+        // Debug-string equality: the NaN sample now propagates into
+        // mean/sum/COM (R2-11), and Some(NaN) != Some(NaN) under PartialEq.
+        assert_eq!(format!("{:?}", rows[0].1), format!("{core:?}"));
+        assert!(core.mean.unwrap().is_nan(), "NaN reached the mean");
     }
 
     #[test]
@@ -16297,24 +16299,37 @@ mod tests {
     }
 
     #[test]
-    fn value_stats_match_core_stats_engine() {
-        // Item 8: ValueStats must equal a direct core::stats::Stats run on the
-        // same data (single source of truth).
-        let data = [3.0, -2.0, 7.5, f64::NAN, 0.0, -2.0];
-        let vs = ValueStats::from_f64(&data);
-        let core = crate::core::stats::Stats::for_image(
-            &data,
-            data.len(),
-            1,
-            (0.0, 0.0),
-            (1.0, 1.0),
-            crate::core::stats::StatScope::All,
-        );
+    fn value_stats_match_core_stats_engine_on_finite_data() {
+        // On all-finite data the finite-filtered ValueStats and the
+        // silx-faithful core::stats::Stats agree; with NaN present they
+        // deliberately diverge (R2-11): the core engine propagates NaN like
+        // numpy (silx stats table shows `nan`), ValueStats keeps the
+        // items-panel summary finite.
+        let run_core = |data: &[f64]| {
+            crate::core::stats::Stats::for_image(
+                data,
+                data.len(),
+                1,
+                (0.0, 0.0),
+                (1.0, 1.0),
+                crate::core::stats::StatScope::All,
+            )
+        };
+        let finite = [3.0, -2.0, 7.5, 0.0, -2.0];
+        let vs = ValueStats::from_f64(&finite);
+        let core = run_core(&finite);
         assert_eq!(vs.count, core.count);
-        assert_eq!(vs.finite_count, core.finite_count);
+        assert_eq!(vs.finite_count, core.included_count);
         assert_eq!(vs.min, core.min);
         assert_eq!(vs.max, core.max);
         assert_eq!(vs.mean, core.mean);
+
+        let with_nan = [3.0, f64::NAN, 1.0];
+        let vs = ValueStats::from_f64(&with_nan);
+        let core = run_core(&with_nan);
+        assert_eq!(vs.finite_count, 2);
+        assert_eq!(vs.mean, Some(2.0), "items panel stays finite");
+        assert!(core.mean.unwrap().is_nan(), "stats table propagates NaN");
     }
 
     #[test]

@@ -283,20 +283,42 @@ fn row_cells(stats: &Stats) -> [String; 7] {
 /// float formatting silx applies to coordinate components.
 ///
 /// `(None, None)` -> `"--"`. Curve coords (`y == None`) render the x only.
+/// Non-finite components print as Python would inside silx's `str(tuple)`
+/// fallback (`"nan"`, `"inf"`, `"-inf"`, statshandler.py:84) — a NaN COM or
+/// a NaN-positioned extremum is visible data, not an undefined stat (R2-11).
 fn format_coord(coord: ComCoord) -> String {
     match (coord.x, coord.y) {
         (None, _) => "--".to_owned(),
-        (Some(x), None) => format_g7(x),
-        (Some(x), Some(y)) => format!("{}, {}", format_g7(x), format_g7(y)),
+        (Some(x), None) => coord_component(x),
+        (Some(x), Some(y)) => format!("{}, {}", coord_component(x), coord_component(y)),
+    }
+}
+
+/// One coordinate component: `%.7g` for finite values, Python float
+/// spellings for non-finite ones.
+fn coord_component(v: f64) -> String {
+    if v.is_finite() {
+        format_g7(v)
+    } else if v.is_nan() {
+        "nan".to_owned()
+    } else if v > 0.0 {
+        "inf".to_owned()
+    } else {
+        "-inf".to_owned()
     }
 }
 
 /// Port of silx `StatFormatter.format` with the default `"{0:.3f}"` formatter
-/// (statshandler.py:71-84): `None` -> `"--"`, otherwise three fixed decimals.
+/// (statshandler.py:71-84): `None` (silx `None` / `numpy.ma.masked`) ->
+/// `"--"`; a NaN/±inf VALUE formats as Python's `"{0:.3f}"` does (`"nan"`,
+/// `"inf"`, `"-inf"`) — silx shows `nan` for the mean of NaN-bearing data,
+/// `--` only for undefined stats (R2-11).
 pub fn format_stat(value: Option<f64>) -> String {
     match value {
         None => "--".to_owned(),
-        Some(v) if !v.is_finite() => "--".to_owned(),
+        // Rust `{:.3}` would print "NaN"; Python prints "nan". "inf"/"-inf"
+        // already agree between the two.
+        Some(v) if v.is_nan() => "nan".to_owned(),
         Some(v) => format!("{v:.3}"),
     }
 }
@@ -378,9 +400,21 @@ mod tests {
     }
 
     #[test]
-    fn format_stat_non_finite_is_dashes() {
-        assert_eq!(format_stat(Some(f64::NAN)), "--");
-        assert_eq!(format_stat(Some(f64::INFINITY)), "--");
+    fn format_stat_non_finite_prints_python_spellings() {
+        // silx: "{0:.3f}".format applies to the VALUE — nan/inf are data,
+        // "--" is only for None/masked (statshandler.py:77-84, R2-11).
+        assert_eq!(format_stat(Some(f64::NAN)), "nan");
+        assert_eq!(format_stat(Some(f64::INFINITY)), "inf");
+        assert_eq!(format_stat(Some(f64::NEG_INFINITY)), "-inf");
+    }
+
+    #[test]
+    fn format_coord_non_finite_components_visible() {
+        let c = ComCoord {
+            x: Some(f64::NAN),
+            y: Some(f64::NEG_INFINITY),
+        };
+        assert_eq!(format_coord(c), "nan, -inf");
     }
 
     #[test]
@@ -497,7 +531,7 @@ mod tests {
         w.recompute(&inputs, None);
         assert_eq!(w.rows().len(), 1);
         assert_eq!(w.rows()[0].0, "c");
-        assert_eq!(w.rows()[0].1.finite_count, 3);
+        assert_eq!(w.rows()[0].1.included_count, 3);
     }
 
     #[test]
@@ -517,11 +551,11 @@ mod tests {
         let inputs2: Vec<(&str, StatsInput<'_>)> =
             vec![("c", StatsInput::Curve { xs: &xs2, ys: &ys2 })];
         w.recompute(&inputs2, None);
-        assert_eq!(w.rows()[0].1.finite_count, 2, "should not have refreshed");
+        assert_eq!(w.rows()[0].1.included_count, 2, "should not have refreshed");
         // After explicit request, it refreshes.
         w.request_update();
         w.recompute(&inputs2, None);
-        assert_eq!(w.rows()[0].1.finite_count, 4);
+        assert_eq!(w.rows()[0].1.included_count, 4);
     }
 
     #[test]
@@ -534,11 +568,11 @@ mod tests {
             vec![("c", StatsInput::Curve { xs: &xs, ys: &ys })];
         // Viewport x in [1,3] keeps 3 points.
         w.recompute(&inputs, Some(((1.0, 3.0), (-1e9, 1e9))));
-        assert_eq!(w.rows()[0].1.finite_count, 3);
+        assert_eq!(w.rows()[0].1.included_count, 3);
         // Without viewport given, on-visible falls back to All.
         w.request_update();
         w.recompute(&inputs, None);
-        assert_eq!(w.rows()[0].1.finite_count, 5);
+        assert_eq!(w.rows()[0].1.included_count, 5);
     }
 
     #[test]

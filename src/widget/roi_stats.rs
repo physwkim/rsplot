@@ -10,28 +10,37 @@
 //!   raw-count selection: `from ≤ x ≤ to`, `CurvesROIWidget.py:1178-1217`).
 //!
 //! Everything here is pure (no egui / wgpu), so it is unit-testable on the CPU.
-//! `NaN` samples are skipped in every reduction (silx ignores non-finite image
-//! pixels in its stats).
+//! Non-finite samples follow the numpy rules of the silx stats engine
+//! (R2-11, see [`crate::core::stats`]): the ROI geometry is the only filter —
+//! a NaN value propagates through sum/mean/COM (`numpy.sum`/`numpy.mean`),
+//! min/max skip NaN but let ±inf participate (`combo.min_max`), and
+//! argmin/argmax report the first NaN sample (numpy returns the first NaN
+//! index). A NaN coordinate fails the span comparisons and is excluded,
+//! exactly like silx's `(from <= x) & (x <= to)` mask.
 
 use crate::core::roi::Roi;
 use crate::core::stats::ComCoord;
 
 /// Reduced statistics over the samples selected by a ROI (silx ROI stats).
 ///
-/// `min`, `max`, and `mean` are `None` for an empty selection (no finite sample
-/// inside the ROI); `sum` and `integral` are then `0.0`. `NaN` samples never
-/// contribute.
+/// `min`, `max`, and `mean` are `None` for an empty selection (no sample
+/// inside the ROI); `sum` and `integral` are then `0.0`. Non-finite samples
+/// participate per the numpy rules (module docs): NaN propagates through
+/// `sum`/`mean`/`com`, min/max skip NaN (all-NaN → `Some(NaN)`), the coords
+/// report the first NaN sample.
 #[derive(Clone, Copy, Debug, PartialEq, Default)]
 pub struct RoiStats {
-    /// Number of finite samples inside the ROI.
+    /// Number of samples inside the ROI (the geometric selection count).
     pub count: usize,
-    /// Smallest finite sample, or `None` when `count == 0`.
+    /// Smallest sample (NaN-skipping, ±inf-participating), or `None` when
+    /// `count == 0`.
     pub min: Option<f64>,
-    /// Largest finite sample, or `None` when `count == 0`.
+    /// Largest sample (same rules as `min`), or `None` when `count == 0`.
     pub max: Option<f64>,
-    /// Arithmetic mean of the finite samples, or `None` when `count == 0`.
+    /// Arithmetic mean of the selected samples (NaN/±inf propagate), or
+    /// `None` when `count == 0`.
     pub mean: Option<f64>,
-    /// Sum of the finite samples.
+    /// Sum of the selected samples (NaN/±inf propagate).
     pub sum: f64,
     /// Integral of the samples over the ROI. For an image this is
     /// `sum × pixel_area`; for a curve it is the same as `sum` (no area weight).
@@ -49,41 +58,57 @@ pub struct RoiStats {
     pub coord_max: ComCoord,
 }
 
-/// Accumulate finite samples into running count / min / max / sum plus the
-/// center-of-mass moments and first-extremum positions, skipping `NaN` (and any
-/// non-finite value), mirroring silx's NaN-ignoring stats. Each sample carries
-/// its data-space position `(x, y)`; `y` is `NaN` for a 1D curve sample (its COM
-/// and coords are then x-only).
+/// Accumulate the ROI-selected samples into running count / min / max / sum
+/// plus the center-of-mass moments and first-extremum positions, following
+/// the numpy non-finite rules of the silx stats engine (module docs, R2-11).
+/// Each sample carries its data-space position `(x, y)`; `y` is `None` for a
+/// 1D curve sample (its COM and coords are then x-only) — one meaning, no
+/// NaN sentinel.
 #[derive(Clone, Copy, Debug, Default)]
 struct Accumulator {
     count: usize,
     min: f64,
     max: f64,
+    // Plain sums — NaN/±inf propagate like numpy.sum.
     sum: f64,
     com_x_num: f64,
     com_y_num: f64,
-    min_pos: (f64, f64),
-    max_pos: (f64, f64),
+    // Coordinates of the FIRST NaN sample: numpy argmin/argmax return the
+    // first NaN index when NaN is present.
+    nan_pos: Option<(f64, Option<f64>)>,
+    min_pos: (f64, Option<f64>),
+    max_pos: (f64, Option<f64>),
+    // Whether min/max saw a non-NaN sample yet (combo.min_max scans for a
+    // non-NaN init; ±inf counts as a valid init).
+    inited: bool,
+    // Whether the samples are 2D (image): selects the 2D COM shape even when
+    // no extremum position was recorded (all-NaN selection).
+    two_d: bool,
 }
 
 impl Accumulator {
-    fn push(&mut self, v: f64, x: f64, y: f64) {
-        if !v.is_finite() {
-            return;
-        }
+    fn push(&mut self, v: f64, x: f64, y: Option<f64>) {
+        self.count += 1;
+        self.two_d |= y.is_some();
         self.sum += v;
         self.com_x_num += v * x;
-        if y.is_finite() {
+        if let Some(y) = y {
             self.com_y_num += v * y;
         }
-        if self.count == 0 {
+        if v.is_nan() {
+            if self.nan_pos.is_none() {
+                self.nan_pos = Some((x, y));
+            }
+        } else if !self.inited {
+            self.inited = true;
             self.min = v;
             self.max = v;
             self.min_pos = (x, y);
             self.max_pos = (x, y);
         } else {
             // Strictly-less / strictly-greater keeps the *first* extremum,
-            // matching numpy argmin/argmax (silx stats.py:852, 873).
+            // matching numpy argmin/argmax (silx stats.py:852, 873). NaN was
+            // handled above; ±inf compares normally, like combo.min_max.
             if v < self.min {
                 self.min = v;
                 self.min_pos = (x, y);
@@ -93,56 +118,52 @@ impl Accumulator {
                 self.max_pos = (x, y);
             }
         }
-        self.count += 1;
     }
 
     /// Finish into a [`RoiStats`], weighting the integral by `area_per_sample`
-    /// (the pixel area for an image; `1.0` for a curve). `is_image` selects 2D
-    /// `(x, y)` coordinates vs. an x-only curve coordinate (silx maps the flat
-    /// index back through the axes; a curve has a single position axis).
-    fn finish(self, area_per_sample: f64, is_image: bool) -> RoiStats {
+    /// (the pixel area for an image; `1.0` for a curve).
+    fn finish(self, area_per_sample: f64) -> RoiStats {
         if self.count == 0 {
             return RoiStats::default();
         }
         let mean = self.sum / self.count as f64;
-        let coord = |pos: (f64, f64)| {
-            if is_image {
-                ComCoord {
-                    x: Some(pos.0),
-                    y: Some(pos.1),
-                }
-            } else {
-                ComCoord {
-                    x: Some(pos.0),
-                    y: None,
-                }
-            }
+        let coord = |pos: (f64, Option<f64>)| ComCoord {
+            x: Some(pos.0),
+            y: pos.1,
+        };
+        // min/max: an all-NaN selection surfaces NaN (combo.min_max keeps its
+        // data[0] init) — None is reserved for an empty selection.
+        let (min, max) = if self.inited {
+            (self.min, self.max)
+        } else {
+            (f64::NAN, f64::NAN)
+        };
+        // argmin/argmax: the first NaN wins over the finite extremum.
+        let (coord_min, coord_max) = match self.nan_pos {
+            Some(pos) => (coord(pos), coord(pos)),
+            None => (coord(self.min_pos), coord(self.max_pos)),
         };
         // COM is undefined (silx returns NaN, stats.py:894) when the weight sum
-        // is zero; surface that as the empty coordinate.
+        // is zero; surface that as the empty coordinate. A NaN sum is NOT the
+        // undefined case — it propagates into the components.
         let com = if self.sum == 0.0 {
             ComCoord::NONE
-        } else if is_image {
-            ComCoord {
-                x: Some(self.com_x_num / self.sum),
-                y: Some(self.com_y_num / self.sum),
-            }
         } else {
             ComCoord {
                 x: Some(self.com_x_num / self.sum),
-                y: None,
+                y: self.two_d.then(|| self.com_y_num / self.sum),
             }
         };
         RoiStats {
             count: self.count,
-            min: Some(self.min),
-            max: Some(self.max),
+            min: Some(min),
+            max: Some(max),
             mean: Some(mean),
             sum: self.sum,
             integral: self.sum * area_per_sample,
             com,
-            coord_min: coord(self.min_pos),
-            coord_max: coord(self.max_pos),
+            coord_min,
+            coord_max,
         }
     }
 }
@@ -157,8 +178,9 @@ impl Accumulator {
 /// `pixel_area = scale.x · scale.y` (its absolute value, so a flipped/negative
 /// scale still gives a non-negative area weight).
 ///
-/// `NaN` pixels are skipped. If `data.len() < width · height` the visit stops at
-/// the available data; extra data beyond `width · height` is ignored.
+/// Non-finite pixels participate per the numpy rules (module docs, R2-11).
+/// If `data.len() < width · height` the visit stops at the available data;
+/// extra data beyond `width · height` is ignored.
 pub fn image_roi_stats(
     roi: &Roi,
     data: &[f32],
@@ -179,12 +201,12 @@ pub fn image_roi_stats(
             };
             let cx = origin[0] + (col as f64 + 0.5) * scale[0];
             if roi.contains((cx, cy)) {
-                acc.push(value as f64, cx, cy);
+                acc.push(value as f64, cx, Some(cy));
             }
         }
     }
     let pixel_area = (scale[0] * scale[1]).abs();
-    acc.finish(pixel_area, /* is_image */ true)
+    acc.finish(pixel_area)
 }
 
 /// Statistics over a curve's `y` values inside the `x`-span of `roi`.
@@ -195,18 +217,20 @@ pub fn image_roi_stats(
 /// [`roi_x_span`]; ROIs with no meaningful `x`-span (e.g. an `HRange`, whose
 /// selection is on `y`) select no points and return empty stats. `x` and `y`
 /// are paired by index; points past the shorter of the two are ignored.
-/// `NaN` `y` (or `NaN` `x`) samples are skipped. The integral equals `sum`
-/// (a curve sum carries no area weight).
+/// A NaN `x` fails the span comparisons and is excluded (numpy's
+/// `(from <= x) & (x <= to)` mask); a NaN `y` stays and propagates per the
+/// numpy rules (module docs, R2-11). The integral equals `sum` (a curve sum
+/// carries no area weight).
 pub fn curve_roi_stats(roi: &Roi, x: &[f64], y: &[f64]) -> RoiStats {
     let mut acc = Accumulator::default();
     if let Some((x0, x1)) = roi_x_span(roi) {
         for (&xi, &yi) in x.iter().zip(y.iter()) {
-            if xi.is_finite() && xi >= x0 && xi <= x1 {
-                acc.push(yi, xi, f64::NAN);
+            if xi >= x0 && xi <= x1 {
+                acc.push(yi, xi, None);
             }
         }
     }
-    acc.finish(1.0, /* is_image */ false)
+    acc.finish(1.0)
 }
 
 /// Curve-ROI raw/net counts and raw/net area, mirroring silx
@@ -476,31 +500,44 @@ mod tests {
     }
 
     #[test]
-    fn image_all_nan_pixels_are_skipped() {
+    fn image_all_nan_pixels_surface_nan_not_empty() {
+        // All-NaN selection: count is geometric; min/max keep combo.min_max's
+        // NaN init; mean/sum ride to NaN (numpy rules, R2-11).
         let data = vec![f32::NAN; 16];
         let roi = Roi::Rect {
             x: (0.0, 4.0),
             y: (0.0, 4.0),
         };
         let s = image_roi_stats(&roi, &data, 4, 4, [0.0, 0.0], [1.0, 1.0]);
-        assert_eq!(s.count, 0);
-        assert_eq!(s.min, None);
-        assert_eq!(s.sum, 0.0);
+        assert_eq!(s.count, 16);
+        assert!(s.min.unwrap().is_nan());
+        assert!(s.sum.is_nan());
+        assert!(s.mean.unwrap().is_nan());
+        // First NaN pixel is (col 0, row 0) -> center (0.5, 0.5).
+        assert_eq!(s.coord_min.x, Some(0.5));
+        assert_eq!(s.coord_min.y, Some(0.5));
     }
 
     #[test]
-    fn image_skips_nan_but_keeps_finite_pixels() {
-        // One NaN among finite pixels: it does not contribute, others do.
+    fn image_nan_pixel_propagates_but_min_max_skip_it() {
+        // One NaN among finite pixels: sum/mean go NaN (numpy.sum), min/max
+        // skip the NaN (combo.min_max), coords report the NaN pixel first
+        // (numpy argmin/argmax).
         let mut data = ramp_4x4();
-        data[2 * 4 + 1] = f32::NAN; // the pixel worth 9
+        data[2 * 4 + 1] = f32::NAN; // the pixel worth 9, center (1.5, 2.5)
         let roi = Roi::Rect {
             x: (0.0, 4.0),
             y: (0.0, 4.0),
         };
         let s = image_roi_stats(&roi, &data, 4, 4, [0.0, 0.0], [1.0, 1.0]);
-        assert_eq!(s.count, 15);
-        assert_eq!(s.sum, 120.0 - 9.0);
+        assert_eq!(s.count, 16);
+        assert!(s.sum.is_nan());
+        assert!(s.mean.unwrap().is_nan());
+        assert_eq!(s.min, Some(0.0));
         assert_eq!(s.max, Some(15.0));
+        assert_eq!(s.coord_min.x, Some(1.5), "first NaN wins the coords");
+        assert_eq!(s.coord_min.y, Some(2.5));
+        assert_eq!(s.coord_max, s.coord_min);
     }
 
     #[test]
@@ -603,14 +640,21 @@ mod tests {
     }
 
     #[test]
-    fn curve_skips_nan_y_and_nan_x() {
+    fn curve_nan_x_excluded_nan_y_propagates() {
+        // NaN x (index 1) fails the span comparisons -> excluded, like
+        // numpy's `(from <= x) & (x <= to)` mask. NaN y (index 2) stays:
+        // sum/mean go NaN, min/max skip it, coords report it (R2-11).
         let roi = Roi::VRange { x: (0.0, 10.0) };
         let x = vec![1.0, f64::NAN, 3.0, 4.0];
         let y = vec![1.0, 2.0, f64::NAN, 4.0];
         let s = curve_roi_stats(&roi, &x, &y);
-        // NaN x (index 1) and NaN y (index 2) are skipped; 1.0 and 4.0 remain.
-        assert_eq!(s.count, 2);
-        assert_eq!(s.sum, 5.0);
+        assert_eq!(s.count, 3);
+        assert!(s.sum.is_nan());
+        assert!(s.mean.unwrap().is_nan());
+        assert_eq!(s.min, Some(1.0));
+        assert_eq!(s.max, Some(4.0));
+        assert_eq!(s.coord_min.x, Some(3.0), "first NaN y at x=3");
+        assert_eq!(s.coord_max.x, Some(3.0));
     }
 
     #[test]
