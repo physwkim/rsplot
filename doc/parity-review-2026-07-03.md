@@ -1872,6 +1872,8 @@ Reference: `~/codes/pydm/pydm/widgets/scatterplot.py:12` — `DEFAULT_BUFFER_SIZ
 
 Impact: a default sidm scatter/event curve retains 15× more points than PyDM before dropping the oldest — after the 1200th sample the two widgets show different data windows (PyDM starts rolling; sidm keeps accumulating to 18000), and memory/draw cost per curve differs accordingly.
 
+**FIXED (7e8ab44):** Added `DEFAULT_SCATTER_EVENT_BUFFER_SIZE = 1200` (`ring_buffer.rs`) and pointed `scatter_plot.rs`/`event_plot.rs` at it; the time plot keeps `DEFAULT_BUFFER_SIZE = 18000`. Test `scatter_event_default_buffer_matches_pydm_not_timeplot` pins both PyDM contracts distinct.
+
 ### R2-59: `calc://` plain dialect cannot evaluate PyDM's expression vocabulary — bare `math` names, `np`, `epics_string`, `epics_unsigned` all fail and the failure is silent
 
 **FIXED (R1-family recurrence batch):** the plain dialect now evaluates in the
