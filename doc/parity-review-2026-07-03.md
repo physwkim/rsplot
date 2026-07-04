@@ -1225,6 +1225,25 @@ Impact: a `format="hexadecimal"` status word renders as decimal, `format="expone
 
 ### R2-66: `limits` block source/default resolution misread — `precDefault` applied without its `precSrc` gate, absent `hoprDefault` read as 0.0 instead of MEDM's 1.0, and a single-sided `*Src="default"` overrides both ends
 
+**FIXED (MEDM absent-key-default cluster):** each `limits` bound now resolves from
+its own `*Src` (MEDM `medmTextUpdate.c:495-497`, `medmCommon.c:653-666`).
+`precision_default_builder` pins precision only when `precSrc="default"` (a bare
+`precDefault` is a leftover MEDM ignores → channel PREC), defaulting `precDefault`
+to `PREC_DEFAULT` 0 when absent. `user_defined_limits` emits a fixed range only
+when BOTH `loprSrc` and `hoprSrc` are `"default"`, with `loprDefault`→LOPR_DEFAULT
+0.0 and `hoprDefault`→**HOPR_DEFAULT 1.0** (was 0.0); a single-sided default can't
+be split into sidm's all-or-nothing `with_limits` (`user_limits.or(ctrl_limits)`),
+so it stays channel-driven and warns instead of forcing both ends. Fixtures with a
+bare `precDefault` that were intended to pin precision (`sample.adl`,
+`local_panel.adl`, `embed_child.adl`) gained `precSrc="default"` to stay valid MEDM
+pinning screens; committed modules regenerated. Test:
+`limits_precision_resolves_each_bound_per_its_own_source`.
+
+Residual (documented): sidm has no single-ended limit API, so a genuinely
+single-sided MEDM range (one bound fixed, one channel-driven) is warned and
+deferred to the channel rather than half-pinned — closing fully would need a
+cross-crate sidm extension.
+
 Severity: Medium
 
 Rust: `adl2sidm/src/codegen.rs:2550-2553` — `precision_default_builder` emits `.with_precision(precDefault)` whenever the key parses, never checking `precSrc` (call sites `:498`, `:525`, `:748`, `:906`). `:2704-2721` — `user_defined_limits` triggers when **either** `loprSrc` or `hoprSrc` is `"default"` and then emits `.with_limits(loprDefault.unwrap_or(0.0), hoprDefault.unwrap_or(0.0))` — both ends forced, missing `hoprDefault` read as 0.0.

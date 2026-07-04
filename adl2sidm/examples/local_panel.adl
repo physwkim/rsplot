@@ -46,6 +46,7 @@ text {
 		clr=1
 	}
 	limits {
+		precSrc="default"
 		precDefault=1
 	}
 }
@@ -99,6 +100,7 @@ rectangle {
 		clr=1
 	}
 	limits {
+		precSrc="default"
 		precDefault=2
 	}
 }

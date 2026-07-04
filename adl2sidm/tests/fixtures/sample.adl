@@ -63,6 +63,7 @@ text {
 		clr=0
 	}
 	limits {
+		precSrc="default"
 		precDefault=3
 	}
 }

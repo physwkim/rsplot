@@ -683,7 +683,7 @@ fn emit_valuator(b: &mut Builder, widget: &MedmWidget, options: &Options, z: ZLa
     };
     let new_call = format!("SidmSlider::new(&engine, {})", medm_str(b, &addr));
     let mut builders = Vec::new();
-    if let Some((lo, hi)) = user_defined_limits(widget) {
+    if let Some((lo, hi)) = user_defined_limits(b, widget) {
         builders.push(format!(
             ".with_limits({}, {})",
             float_lit(lo),
@@ -737,7 +737,7 @@ fn emit_wheel_switch(b: &mut Builder, widget: &MedmWidget, options: &Options, z:
     };
     let new_call = format!("SidmSpinbox::new(&engine, {})", medm_str(b, &addr));
     let mut builders = Vec::new();
-    if let Some((lo, hi)) = user_defined_limits(widget) {
+    if let Some((lo, hi)) = user_defined_limits(b, widget) {
         builders.push(format!(
             ".with_limits({}, {})",
             float_lit(lo),
@@ -886,7 +886,7 @@ fn emit_scale_indicator(
         b.needs_color = true;
     }
     builders.extend(alarm_content_builder(widget));
-    if let Some((lo, hi)) = user_defined_limits(widget) {
+    if let Some((lo, hi)) = user_defined_limits(b, widget) {
         builders.push(format!(
             ".with_limits({}, {})",
             float_lit(lo),
@@ -2594,10 +2594,24 @@ fn push_value_widget(
     ));
 }
 
-/// A `.with_precision(n)` builder from a widget's `precDefault` (its `limits`
-/// block), or `None` when it carries no integer precision.
+/// A `.with_precision(n)` builder from a widget's `limits` block, or `None` when
+/// precision is channel-sourced. MEDM applies the limits-block precision only
+/// when `precSrc == PV_LIMITS_DEFAULT` (`medmTextUpdate.c:495-497`); otherwise
+/// precision tracks the channel's PREC at runtime. `precDefault` defaults to
+/// `PREC_DEFAULT` (0) when the key is omitted (`medmWidget.h:57`), and MEDM
+/// writes a non-zero `precDefault` even when `precSrc` stays channel
+/// (`medmCommon.c:665`), so a bare `precDefault` without `precSrc="default"` is a
+/// leftover MEDM ignores — pinning it here would freeze precision where MEDM
+/// tracks the PV.
 fn precision_default_builder(widget: &MedmWidget) -> Option<String> {
-    let n = widget.assignments.get("precDefault")?.parse::<i32>().ok()?;
+    if widget.assignments.get("precSrc").map(String::as_str) != Some("default") {
+        return None; // channel-sourced precision — do not pin
+    }
+    let n = widget
+        .assignments
+        .get("precDefault")
+        .and_then(|s| s.parse::<i32>().ok())
+        .unwrap_or(0); // PREC_DEFAULT
     Some(format!(".with_precision({n})"))
 }
 
@@ -2747,26 +2761,45 @@ fn text_alignment(widget: &MedmWidget) -> Option<(&'static str, &'static str)> {
     }
 }
 
-/// User-defined `(low, high)` limits for a control: present only when MEDM marks
-/// `loprSrc`/`hoprSrc` as `"default"` (otherwise limits come from the channel).
-/// Each missing default reads as `0.0`, matching `adl2pydm`'s `write_limits`.
-fn user_defined_limits(widget: &MedmWidget) -> Option<(f64, f64)> {
+/// User-defined `(low, high)` limits for a control. MEDM resolves each end from
+/// its own source: an end is user-defined only when its `*Src ==
+/// PV_LIMITS_DEFAULT`, and the value falls to `loprDefault` (LOPR_DEFAULT `0.0`)
+/// / `hoprDefault` (HOPR_DEFAULT `1.0`) when the `*Default` key is omitted
+/// (`medmWidget.h:55-56`; `writeDlLimits` omits each default at that value,
+/// `medmCommon.c:653-662`). sidm's `with_limits` is all-or-nothing
+/// (`user_limits.or(ctrl_limits)`), so a fixed range is emitted only when BOTH
+/// ends are default; a single-sided default (one end fixed, the other
+/// channel-driven) cannot be split, so it stays channel-driven and warns rather
+/// than fabricating the channel end.
+fn user_defined_limits(b: &mut Builder, widget: &MedmWidget) -> Option<(f64, f64)> {
     let lo_default = widget.assignments.get("loprSrc").map(String::as_str) == Some("default");
     let hi_default = widget.assignments.get("hoprSrc").map(String::as_str) == Some("default");
-    if !(lo_default || hi_default) {
-        return None;
+    match (lo_default, hi_default) {
+        (false, false) => None, // both channel-sourced
+        (true, true) => {
+            let lo = widget
+                .assignments
+                .get("loprDefault")
+                .and_then(|s| s.parse::<f64>().ok())
+                .unwrap_or(0.0); // LOPR_DEFAULT
+            let hi = widget
+                .assignments
+                .get("hoprDefault")
+                .and_then(|s| s.parse::<f64>().ok())
+                .unwrap_or(1.0); // HOPR_DEFAULT
+            Some((lo, hi))
+        }
+        _ => {
+            let fixed = if lo_default { "loprSrc" } else { "hoprSrc" };
+            b.warnings.push(format!(
+                "line {}: only {fixed}=\"default\" (single-sided limit); the other end \
+                 is channel-sourced and sidm limits are all-or-nothing, so the range \
+                 stays channel-driven",
+                widget.line
+            ));
+            None
+        }
     }
-    let lo = widget
-        .assignments
-        .get("loprDefault")
-        .and_then(|s| s.parse::<f64>().ok())
-        .unwrap_or(0.0);
-    let hi = widget
-        .assignments
-        .get("hoprDefault")
-        .and_then(|s| s.parse::<f64>().ok())
-        .unwrap_or(0.0);
-    Some((lo, hi))
 }
 
 /// A `.with_orientation(...)` builder from a MEDM `direction`, or `None` when the
@@ -3678,6 +3711,7 @@ text {
 		clr=0
 	}
 	limits {
+		precSrc="default"
 		precDefault=2
 	}
 }
@@ -5422,6 +5456,7 @@ bar {
 		loprDefault=0
 		hoprSrc="default"
 		hoprDefault=100
+		precSrc="default"
 		precDefault=1
 	}
 }
@@ -6504,6 +6539,74 @@ composite {
         assert_eq!(span(&[("delay", "2"), ("units", "minute")]).0, 7200.0);
         // period wins over a stray delay (MEDM consults delay only when absent).
         assert_eq!(span(&[("period", "10"), ("delay", "5")]).0, 10.0);
+    }
+
+    #[test]
+    fn limits_precision_resolves_each_bound_per_its_own_source() {
+        // R2-66: MEDM resolves lopr/hopr/prec from their own *Src keys; a bare
+        // `precDefault` (no `precSrc="default"`) is a leftover MEDM ignores, an
+        // absent `hoprDefault` is HOPR_DEFAULT 1.0 (not 0.0), and a single-sided
+        // default cannot be split into sidm's all-or-nothing limits.
+        let widget = |pairs: &[(&str, &str)]| MedmWidget {
+            assignments: pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            line: 1,
+            ..MedmWidget::default()
+        };
+
+        // precision: pinned only when precSrc="default"; precDefault absent -> 0.
+        assert_eq!(
+            precision_default_builder(&widget(&[("precDefault", "3")])),
+            None
+        );
+        assert_eq!(
+            precision_default_builder(&widget(&[("precSrc", "default"), ("precDefault", "3")])),
+            Some(".with_precision(3)".to_string())
+        );
+        assert_eq!(
+            precision_default_builder(&widget(&[("precSrc", "default")])),
+            Some(".with_precision(0)".to_string())
+        );
+
+        // limits: both ends default -> fixed; absent hoprDefault -> 1.0.
+        let mut b = Builder::default();
+        assert_eq!(
+            user_defined_limits(
+                &mut b,
+                &widget(&[
+                    ("loprSrc", "default"),
+                    ("loprDefault", "-5"),
+                    ("hoprSrc", "default"),
+                    ("hoprDefault", "5"),
+                ]),
+            ),
+            Some((-5.0, 5.0))
+        );
+        assert_eq!(
+            user_defined_limits(
+                &mut b,
+                &widget(&[("loprSrc", "default"), ("hoprSrc", "default")]),
+            ),
+            Some((0.0, 1.0)) // LOPR_DEFAULT 0.0, HOPR_DEFAULT 1.0
+        );
+        assert!(b.warnings.is_empty(), "both-default must not warn");
+
+        // neither default -> channel-driven, no warning.
+        assert_eq!(user_defined_limits(&mut b, &widget(&[])), None);
+        assert!(b.warnings.is_empty());
+
+        // single-sided default -> channel-driven with a warning (unrepresentable).
+        assert_eq!(
+            user_defined_limits(
+                &mut b,
+                &widget(&[("hoprSrc", "default"), ("hoprDefault", "9")])
+            ),
+            None
+        );
+        assert_eq!(b.warnings.len(), 1);
+        assert!(b.warnings[0].contains("hoprSrc"));
     }
 
     #[test]

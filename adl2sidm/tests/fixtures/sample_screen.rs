@@ -90,8 +90,8 @@ impl Screen {
             .with_alarm_palette(AlarmPalette::Medm)
             .with_size(egui::Vec2::new(180.0, 120.0));
         let gate11 = engine
-            .connect("calc://adl2sidm_vis_148?dialect=medm&expr=A#0&A=ca://DMM1:show_box&update=A")
-            .expect("adl2sidm: connect visibility gate calc://adl2sidm_vis_148?dialect=medm&expr=A#0&A=ca://DMM1:show_box&update=A");
+            .connect("calc://adl2sidm_vis_149?dialect=medm&expr=A#0&A=ca://DMM1:show_box&update=A")
+            .expect("adl2sidm: connect visibility gate calc://adl2sidm_vis_149?dialect=medm&expr=A#0&A=ca://DMM1:show_box&update=A");
         let w12 = SidmDrawing::new(&engine, "loc://adl2sidm_shape_0", DrawingShape::Ellipse)
             .expect("adl2sidm: connect loc://adl2sidm_shape_0 (drawing)")
             .with_fill(Color32::from_rgb(255, 0, 0))
