@@ -512,6 +512,24 @@ impl MaskToolsWidget {
         self.alpha
     }
 
+    /// Adapt the base overlay color to the masked image's colormap — the port
+    /// of silx `_setOverlayColorForImage` (MaskToolsWidget.py:449-458):
+    /// `_defaultOverlayColor = rgba(cursorColorForColormap(colormap["name"]))`,
+    /// so the mask stays visible on top of the LUT (pink on gray, green on
+    /// inferno, …; the constructor's `rgba("gray")` is only a pre-first-image
+    /// placeholder). Call on every image sync; per-level overrides
+    /// ([`set_mask_colors`](Self::set_mask_colors)) are untouched, as in silx.
+    /// silx's `rgba("black")` branch for non-colormapped (RGBA) images has no
+    /// counterpart here — the mask editor only attaches to colormapped images.
+    pub fn set_overlay_color_for_colormap(&mut self, colormap: &crate::core::colormap::Colormap) {
+        let [r, g, b, _] = colormap.cursor_color;
+        let color = Color32::from_rgb(r, g, b);
+        if self.color != color {
+            self.color = color;
+            self.is_dirty = true;
+        }
+    }
+
     /// Set the overlay color of one mask level, or of all levels.
     ///
     /// Mirrors silx `setMaskColors(rgb, level)`
@@ -2260,6 +2278,31 @@ pub fn line_coords(row0: i64, col0: i64, row1: i64, col1: i64, width: i64) -> (V
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn overlay_color_adapts_to_the_image_colormap() {
+        use crate::core::colormap::{Colormap, ColormapName};
+
+        // R2-10: silx `_setOverlayColorForImage` (MaskToolsWidget.py:449-458)
+        // re-derives the base overlay color from the image's colormap on every
+        // sync; the constructor gray is only a pre-first-image placeholder.
+        let mut mask = MaskToolsWidget::new(4, 4);
+        assert_eq!(mask.color, Color32::from_rgb(160, 160, 164), "placeholder");
+
+        mask.set_overlay_color_for_colormap(&Colormap::new(ColormapName::Gray, 0.0, 1.0));
+        assert_eq!(mask.color, Color32::from_rgb(255, 102, 255), "pink on gray");
+
+        mask.set_overlay_color_for_colormap(&Colormap::new(ColormapName::Inferno, 0.0, 1.0));
+        assert_eq!(mask.color, Color32::from_rgb(0, 255, 0), "green on inferno");
+
+        // Per-level overrides survive the adaptation (silx only replaces
+        // `_defaultOverlayColor`; `_overlayColors` overrides stay).
+        mask.level = 1;
+        mask.set_mask_colors([9, 8, 7], Some(1));
+        mask.set_overlay_color_for_colormap(&Colormap::new(ColormapName::Blue, 0.0, 1.0));
+        assert_eq!(mask.current_mask_color(), Color32::from_rgb(9, 8, 7));
+        assert_eq!(mask.color, Color32::from_rgb(255, 255, 0), "yellow on blue");
+    }
 
     #[test]
     fn mask_save_format_dispatches_by_extension_defaulting_to_npy() {

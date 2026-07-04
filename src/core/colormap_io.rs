@@ -27,13 +27,17 @@
 //! nan_color <RRGGBBAA hex>
 //! percentiles <low> <high>
 //! editable <true | false>
+//! cursor_color <RRGGBBAA hex>
 //! lut <2048 hex chars — 256 RGBA entries, 8 hex digits each>
 //! ```
 //!
 //! `lut` is the only required line (a colormap is its LUT); every other field
 //! falls back to the [`Colormap::new`] default when absent, mirroring silx
 //! `restoreState`'s version-gated defaults (missing normalization → linear,
-//! missing autoscale info → defaults). Unknown keys are ignored for forward
+//! missing autoscale info → defaults) — except `cursor_color`, which falls
+//! back to **black**: a state blob without it carries no name provenance, and
+//! silx resolves a nameless colormap's cursor color to `"black"`
+//! (math/colormap.py:185-196). Unknown keys are ignored for forward
 //! compatibility.
 
 use crate::core::colormap::{Colormap, Normalization};
@@ -91,6 +95,11 @@ pub fn encode_colormap(colormap: &Colormap) -> String {
         "editable",
         if colormap.editable { "true" } else { "false" },
     );
+    push_kv(
+        &mut out,
+        "cursor_color",
+        &rgba_to_hex(colormap.cursor_color),
+    );
     push_kv(&mut out, "lut", &lut_to_hex(&colormap.lut));
     out
 }
@@ -108,6 +117,10 @@ pub fn decode_colormap(text: &str) -> Result<Colormap, ColormapIoError> {
     // A neutral base supplies the defaults for any absent field (silx
     // restoreState defaults: linear norm, default gamma / NaN color / autoscale).
     let mut cm = Colormap::new(crate::core::colormap::ColormapName::Gray, 0.0, 1.0);
+    // …except the cursor color: without a `cursor_color` line the blob carries
+    // no name provenance, and silx resolves a nameless colormap to "black"
+    // (math/colormap.py:185-196) — not to the Gray base's pink.
+    cm.cursor_color = crate::core::colormap::DEFAULT_CURSOR_COLOR;
     let mut have_lut = false;
 
     for line in lines {
@@ -136,6 +149,10 @@ pub fn decode_colormap(text: &str) -> Result<Colormap, ColormapIoError> {
             }
             "editable" => {
                 cm.editable = parse_bool(val).ok_or(ColormapIoError::BadValue("editable"))?
+            }
+            "cursor_color" => {
+                cm.cursor_color =
+                    parse_rgba(val).ok_or(ColormapIoError::BadValue("cursor_color"))?
             }
             "lut" => {
                 cm.lut = parse_lut(val).ok_or(ColormapIoError::BadValue("lut"))?;
@@ -321,11 +338,22 @@ mod tests {
 
     #[test]
     fn absent_optional_fields_fall_back_to_defaults() {
-        // Only the header + lut: everything else defaults (silx restoreState).
+        // Only the header + lut: everything else defaults (silx restoreState) —
+        // except the cursor color, which falls to BLACK (a blob without a
+        // `cursor_color` line carries no name provenance; silx resolves a
+        // nameless colormap to "black", math/colormap.py:185-196), not to the
+        // Gray base's pink.
         let base = Colormap::new(ColormapName::Gray, 0.0, 1.0);
         let text = format!("siplot-colormap 1\nlut {}\n", lut_to_hex(&base.lut));
         let cm = decode_colormap(&text).unwrap();
-        assert_eq!(cm, base);
+        assert_eq!(cm.cursor_color, [0, 0, 0, 255]);
+        assert_eq!(
+            cm,
+            Colormap {
+                cursor_color: [0, 0, 0, 255],
+                ..base
+            }
+        );
     }
 
     #[test]

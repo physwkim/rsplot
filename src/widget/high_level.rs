@@ -10381,6 +10381,10 @@ impl ImageView {
         if self.mask.width != width || self.mask.height != height {
             self.mask.reset_geometry(width, height);
         }
+        // Adapt the mask overlay color to the image's colormap on every image
+        // sync (silx `_setOverlayColorForImage` from `_setMaskedImage` /
+        // `__imageUpdated`, MaskToolsWidget.py:449-458).
+        self.mask.set_overlay_color_for_colormap(&self.colormap);
 
         // The image uses default geometry (origin (0,0), unit scale), so its
         // data extent is [0, width] × [0, height]. Feed it to the radar overview

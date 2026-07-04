@@ -604,6 +604,32 @@ Impact: hovering the middle of a tall filled bar snaps in silx, never in siplot;
 
 ### R2-10: Mask overlay color never adapts to the image colormap — `_setOverlayColorForImage`/`cursorColorForColormap` unported, overlay stays the constructor placeholder
 
+**FIXED (mask-tools cluster; structural):** the structural gap was that
+`Colormap` bakes its LUT and loses name provenance, so *no* consumer could
+apply silx's name-keyed cursor-color rule. `Colormap` now carries
+`cursor_color: [u8; 4]` with one meaning on every path:
+`ColormapName::cursor_color()` (the silx `_AVAILABLE_LUTS` table,
+math/colormap.py:52-66 — pink `#ff66ff` for gray/green/viridis/cividis/
+temperature, green `#00ff00` for red/magma/inferno/plasma, yellow `#ffff00`
+for blue, black for every matplotlib-loaded name per colors.py:244) for
+catalog constructions and `set_name`; the registry's color for
+`from_registered`; black for raw LUTs (`from_colors`, `set_lut`, `with_lut` —
+silx `setColormapLUT` clears the name and nameless resolves to "black",
+math/colormap.py:185-196); `reversed()` keeps it (silx's "reversed gray"
+keeps gray's pink). `colormap_io` persists the field (absent → black, the
+nameless rule). New `MaskToolsWidget::set_overlay_color_for_colormap`
+(silx `_setOverlayColorForImage`, MaskToolsWidget.py:449-458) is called on
+every `ImageView::set_image` sync; per-level overrides survive, and the
+RGBA-image black branch has no counterpart (siplot's mask editor only
+attaches to colormapped images — noted in the method doc). The
+ScatterView mask is distinct: siplot displays masked points via the scatter
+selection flag, not a `_defaultOverlayColor` overlay, so there is no color
+state to adapt there. Tests: `cursor_color_matches_the_silx_builtin_table`,
+`colormap_carries_cursor_color_and_a_raw_lut_resets_it`,
+`overlay_color_adapts_to_the_image_colormap` (placeholder → pink on gray →
+green on inferno; override survives), `absent_optional_fields…` amended to
+the nameless-black boundary.
+
 Severity: Medium
 
 Rust: `src/widget/mask_tools.rs:355-363` — `color: Color32::from_rgb(160, 160, 164)` ("silx `_defaultOverlayColor = rgba(\"gray\")`") is never updated on image sync; the built-in colormaps carry no cursor colors and `registered_colormap_cursor_color` has no widget caller.

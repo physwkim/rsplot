@@ -310,6 +310,30 @@ impl ColormapName {
         }
     }
 
+    /// silx's overlay/cursor color for this colormap — a color that stays
+    /// visible on top of it (`cursorColorForColormap`, gui/colors.py:210 →
+    /// `get_colormap_cursor_color` over `_AVAILABLE_LUTS`,
+    /// math/colormap.py:52-66 and :185-196): pink `#ff66ff` for the light-tone
+    /// builtin LUTs, green `#00ff00` for red/magma/inferno/plasma, yellow
+    /// `#ffff00` for blue, and black for every other name — silx loads those
+    /// from matplotlib with the `registerLUT` default `cursor_color="black"`
+    /// (colors.py:244).
+    pub fn cursor_color(self) -> [u8; 4] {
+        match self {
+            ColormapName::Gray
+            | ColormapName::Green
+            | ColormapName::Viridis
+            | ColormapName::Cividis
+            | ColormapName::Temperature => [255, 102, 255, 255], // #ff66ff
+            ColormapName::Red
+            | ColormapName::Magma
+            | ColormapName::Inferno
+            | ColormapName::Plasma => [0, 255, 0, 255], // #00ff00
+            ColormapName::Blue => [255, 255, 0, 255], // #ffff00
+            _ => DEFAULT_CURSOR_COLOR,
+        }
+    }
+
     /// Human-readable label.
     pub fn label(self) -> &'static str {
         match self {
@@ -579,8 +603,9 @@ const DEFAULT_GAMMA: f32 = 2.0;
 const DEFAULT_NAN_COLOR: [u8; 4] = [255, 255, 255, 0];
 
 /// silx's default overlay/cursor color for a registered LUT
-/// (`registerLUT(..., cursor_color="black")`): opaque black.
-const DEFAULT_CURSOR_COLOR: [u8; 4] = [0, 0, 0, 255];
+/// (`registerLUT(..., cursor_color="black")`) and for any nameless colormap
+/// (`get_colormap_cursor_color` fallback, math/colormap.py:196): opaque black.
+pub(crate) const DEFAULT_CURSOR_COLOR: [u8; 4] = [0, 0, 0, 255];
 
 /// A custom colormap LUT registered by name (silx `register_colormap`): the
 /// resolved 256-entry table plus the overlay cursor color silx associates with
@@ -668,6 +693,16 @@ pub struct Colormap {
     /// [`Self::set_from`]. Read/write it via [`Self::is_editable`] /
     /// [`Self::set_editable`].
     pub editable: bool,
+    /// The overlay/cursor color silx associates with this colormap's
+    /// originating name (`cursorColorForColormap(colormap["name"])`) — what
+    /// overlays (mask, crosshair) draw in to stay visible on top of the LUT.
+    /// [`ColormapName::cursor_color`] for catalog names, the registry's color
+    /// for [`Self::from_registered`], and black for a raw LUT
+    /// ([`Self::from_colors`], [`Self::set_lut`], [`Self::with_lut`]) — silx's
+    /// `setColormapLUT` clears the name, and a nameless colormap resolves to
+    /// `"black"` (math/colormap.py:185-196). [`Self::reversed`] keeps it, as
+    /// silx's `"reversed gray"` table entry keeps `"gray"`'s color.
+    pub cursor_color: [u8; 4],
 }
 
 impl Colormap {
@@ -683,6 +718,7 @@ impl Colormap {
             nan_color: DEFAULT_NAN_COLOR,
             autoscale_percentiles: DEFAULT_PERCENTILES,
             editable: true,
+            cursor_color: name.cursor_color(),
         }
     }
 
@@ -694,9 +730,12 @@ impl Colormap {
     /// Rebuild the LUT from a catalog `name`, keeping the value range,
     /// normalization, gamma, and the other settings (silx `Colormap.setName`).
     /// siplot stores the LUT rather than the name, so this replaces the 256
-    /// entries in place.
+    /// entries in place, and re-derives
+    /// [`cursor_color`](Self::cursor_color) from the new name as silx's
+    /// name-keyed `cursorColorForColormap` lookup would.
     pub fn set_name(&mut self, name: ColormapName) {
         self.lut = name.build_lut();
+        self.cursor_color = name.cursor_color();
     }
 
     /// Reverse the LUT (low and high colors swap) while keeping the value range.
@@ -727,9 +766,13 @@ impl Colormap {
 
     /// Replace the LUT with an explicit 256-entry RGBA table (silx
     /// `Colormap.setColormapLUT` for a length-256 array). Builder form; pairs
-    /// with [`Self::set_lut`] for the editable-guarded setter.
+    /// with [`Self::set_lut`] for the editable-guarded setter. Resets
+    /// [`cursor_color`](Self::cursor_color) to black: silx's `setColormapLUT`
+    /// clears the name, and a nameless colormap's cursor color is `"black"`
+    /// (math/colormap.py:185-196).
     pub fn with_lut(mut self, lut: [[u8; 4]; 256]) -> Self {
         self.lut = lut;
+        self.cursor_color = DEFAULT_CURSOR_COLOR;
         self
     }
 
@@ -755,6 +798,9 @@ impl Colormap {
             nan_color: DEFAULT_NAN_COLOR,
             autoscale_percentiles: DEFAULT_PERCENTILES,
             editable: true,
+            // A raw-LUT colormap has no name; silx resolves that to "black"
+            // (math/colormap.py:185-196).
+            cursor_color: DEFAULT_CURSOR_COLOR,
         })
     }
 
@@ -765,7 +811,11 @@ impl Colormap {
     /// Returns `None` when no colormap is registered under `name` (register one
     /// first with [`register_colormap`]).
     pub fn from_registered(name: &str, vmin: f64, vmax: f64) -> Option<Self> {
-        let lut = registry().read().unwrap().get(name)?.lut;
+        let (lut, cursor_color) = {
+            let registry = registry().read().unwrap();
+            let entry = registry.get(name)?;
+            (entry.lut, entry.cursor_color)
+        };
         Some(Self {
             lut,
             vmin,
@@ -775,6 +825,9 @@ impl Colormap {
             nan_color: DEFAULT_NAN_COLOR,
             autoscale_percentiles: DEFAULT_PERCENTILES,
             editable: true,
+            // The color registered alongside the LUT (silx `registerLUT`'s
+            // `cursor_color`, black by default).
+            cursor_color,
         })
     }
 
@@ -796,11 +849,15 @@ impl Colormap {
     /// Replace the LUT with an explicit 256-entry table if editable (silx
     /// `Colormap.setColormapLUT`, which raises `NotEditableError` otherwise).
     /// Returns `true` when applied, `false` when blocked by the editable guard.
+    /// Resets [`cursor_color`](Self::cursor_color) to black: silx's
+    /// `setColormapLUT` clears the name, and a nameless colormap's cursor
+    /// color is `"black"` (math/colormap.py:185-196).
     pub fn set_lut(&mut self, lut: [[u8; 4]; 256]) -> bool {
         if !self.editable {
             return false;
         }
         self.lut = lut;
+        self.cursor_color = DEFAULT_CURSOR_COLOR;
         true
     }
 
@@ -2076,5 +2133,48 @@ mod tests {
             Some([9, 8, 7, 255])
         );
         assert_eq!(registered_colormap_cursor_color("test-reg-not-there"), None);
+    }
+
+    #[test]
+    fn cursor_color_matches_the_silx_builtin_table() {
+        // silx `_AVAILABLE_LUTS` (math/colormap.py:52-66): pink for the
+        // light-tone builtins, green for red/magma/inferno/plasma, yellow for
+        // blue — and BLACK for every matplotlib-loaded name (colors.py:244).
+        assert_eq!(ColormapName::Gray.cursor_color(), [255, 102, 255, 255]);
+        assert_eq!(ColormapName::Viridis.cursor_color(), [255, 102, 255, 255]);
+        assert_eq!(
+            ColormapName::Temperature.cursor_color(),
+            [255, 102, 255, 255]
+        );
+        assert_eq!(ColormapName::Red.cursor_color(), [0, 255, 0, 255]);
+        assert_eq!(ColormapName::Inferno.cursor_color(), [0, 255, 0, 255]);
+        assert_eq!(ColormapName::Blue.cursor_color(), [255, 255, 0, 255]);
+        assert_eq!(ColormapName::Jet.cursor_color(), DEFAULT_CURSOR_COLOR);
+        assert_eq!(ColormapName::Turbo.cursor_color(), DEFAULT_CURSOR_COLOR);
+    }
+
+    #[test]
+    fn colormap_carries_cursor_color_and_a_raw_lut_resets_it() {
+        // A named colormap carries its silx cursor color…
+        let cm = Colormap::new(ColormapName::Gray, 0.0, 1.0);
+        assert_eq!(cm.cursor_color, [255, 102, 255, 255]);
+        // …a raw LUT clears the name in silx, so the color falls to black
+        // (setColormapLUT → name=None → "black", math/colormap.py:185-196).
+        let lut = cm.lut;
+        assert_eq!(cm.with_lut(lut).cursor_color, DEFAULT_CURSOR_COLOR);
+        let mut cm = Colormap::new(ColormapName::Inferno, 0.0, 1.0);
+        assert!(cm.set_lut(lut));
+        assert_eq!(cm.cursor_color, DEFAULT_CURSOR_COLOR);
+        // from_colors is a raw LUT from the start.
+        let cm = Colormap::from_colors(&[[1, 2, 3, 255]], 0.0, 1.0).expect("non-empty");
+        assert_eq!(cm.cursor_color, DEFAULT_CURSOR_COLOR);
+        // A registered LUT resolves the color registered alongside it.
+        register_colormap(
+            "test-cmap-cursor-carry",
+            &[[0, 0, 0, 255]],
+            Some([10, 20, 30, 255]),
+        );
+        let cm = Colormap::from_registered("test-cmap-cursor-carry", 0.0, 1.0).expect("registered");
+        assert_eq!(cm.cursor_color, [10, 20, 30, 255]);
     }
 }
