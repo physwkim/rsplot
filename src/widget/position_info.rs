@@ -14,17 +14,20 @@
 //! - Numeric converter results are formatted with `%.7g` (silx
 //!   `valueToString`, PositionInfo.py:315) via [`format_value`].
 //!
-//! The pure snapping kernel (PositionInfo.py:236-292) is provided by
-//! [`snap_to_nearest`] / [`SNAP_THRESHOLD_DIST`]: given the cursor and
-//! candidate data points already projected to pixel space, it returns the
-//! nearest point within the snap radius. Candidate *selection*
+//! The pure snapping kernels (PositionInfo.py:236-292) live here:
+//! [`snap_to_nearest`] / [`SNAP_THRESHOLD_DIST`] rank projected candidates by
+//! pixel distance, while the silx *engage* gates — each item's `pick()` — are
+//! [`pick_polyline_indices`] (the GLPlotCurve2D `±`[`PICK_OFFSET`] box pick,
+//! GLPlotCurve.py:1396-1494) and [`pick_filled_histogram`] (the filled-bar
+//! area pick, items/histogram.py:245-291). Candidate *selection*
 //! (`SNAPPING_CURVE`/`SNAPPING_SCATTER`/`SNAPPING_ACTIVE_ONLY`/…) is
-//! [`snapping_candidates`]. The two are wired against a live plot by
+//! [`snapping_candidates`]. All are wired against a live plot by
 //! [`PlotWidget::snap_cursor`](crate::widget::high_level::PlotWidget::snap_cursor),
-//! which builds the [`SnapItem`] list from the plot's items, projects each
-//! candidate curve's vertices through the cached display transform, and returns
-//! the [`Snap`]; the host then feeds `snap.data` to [`PositionInfo::ui_snapped`],
-//! which reddens the labels in the no-snap state (silx :200).
+//! which builds the [`SnapItem`] list from the plot's items, pick-gates each
+//! candidate item, projects the picked vertices through the cached display
+//! transform, and returns the [`Snap`]; the host then feeds `snap.data` to
+//! [`PositionInfo::ui_snapped`], which reddens the labels in the no-snap state
+//! (silx :200).
 
 /// A converter mapping cursor data coordinates `(x, y)` to a display string.
 ///
@@ -199,11 +202,183 @@ pub fn format_value(value: f64) -> String {
 /// [`snap_to_nearest`].
 pub const SNAP_THRESHOLD_DIST: f64 = 5.0;
 
+/// Pick-box half-extent in logical pixels — silx `BackendOpenGL._PICK_OFFSET`
+/// (BackendOpenGL.py:1267).
+///
+/// silx enlarges it per item to `max(offset, markerSize / 2, lineWidth / 2)`
+/// before building the pick box (`__pickCurves`, BackendOpenGL.py:1290-1304);
+/// unlike [`SNAP_THRESHOLD_DIST`] it is *not* scaled by the device-pixel
+/// ratio.
+pub const PICK_OFFSET: f64 = 3.0;
+
+/// Outcodes of silx's Cohen–Sutherland pick clipping (GLPlotCurve.py:1427-1447).
+const PICK_TOP: u8 = 1 << 3;
+const PICK_BOTTOM: u8 = 1 << 2;
+const PICK_RIGHT: u8 = 1 << 1;
+const PICK_LEFT: u8 = 1 << 0;
+
+/// Pick the vertices of a polyline against a data-space box, porting
+/// `GLPlotCurve2D.pick` (GLPlotCurve.py:1396-1494).
+///
+/// The box is `[x_min, x_max] × [y_min, y_max]` in *data* coordinates — silx
+/// converts the cursor's `±offset` pixel box corners through `pixelToData`
+/// and tests the raw data arrays (`__pickCurves`, BackendOpenGL.py:1306-1330),
+/// so log-axis quirks (segment crossings interpolated linearly in data space,
+/// not along the rendered pixel-space segment) are ported as-is.
+///
+/// Returns the sorted indices of the picked vertices:
+///
+/// - every finite vertex inside the box (a NaN coordinate compares false on
+///   every bound so its outcode is 0, but silx's `notNaN` mask drops it,
+///   :1434-1439);
+/// - with `has_line`, the *lower* endpoint of every segment that crosses the
+///   box with neither endpoint inside (:1441-1481) — silx tests the crossing
+///   Cohen–Sutherland-style against the bound flagged in the *second*
+///   endpoint's outcode only, and a segment touching a NaN vertex is never
+///   tested (the NaN's outcode 0 fails the both-outside precondition).
+///
+/// `has_line` is silx's `lineDashPattern is not None`: solid lines map to the
+/// empty tuple `()` (BackendOpenGL `_DASH_PATTERNS`, :885-893), so every
+/// line-styled curve takes the segment path while a marker-only curve
+/// (linestyle `' '`/`''` → `None`) tests bare vertices (:1483-1493). A curve
+/// with neither a line nor markers is unpickable in silx (:1409-1416) — the
+/// caller skips it before reaching here.
+pub fn pick_polyline_indices(
+    xs: &[f64],
+    ys: &[f64],
+    has_line: bool,
+    x_min: f64,
+    x_max: f64,
+    y_min: f64,
+    y_max: f64,
+) -> Vec<usize> {
+    let n = xs.len().min(ys.len());
+    // Outcode per vertex (GLPlotCurve.py:1427-1432); NaN compares false on
+    // every bound → code 0, excluded from the inside set by the finite test.
+    let codes: Vec<u8> = (0..n)
+        .map(|i| {
+            u8::from(ys[i] > y_max) << 3
+                | u8::from(ys[i] < y_min) << 2
+                | u8::from(xs[i] > x_max) << 1
+                | u8::from(xs[i] < x_min)
+        })
+        .collect();
+
+    let mut indices: Vec<usize> = (0..n)
+        .filter(|&i| codes[i] == 0 && xs[i].is_finite() && ys[i].is_finite())
+        .collect();
+
+    if has_line {
+        // Segments that might cross the box with no endpoint inside
+        // (GLPlotCurve.py:1441-1481).
+        for i in 0..n.saturating_sub(1) {
+            if codes[i] == 0 || codes[i + 1] == 0 || codes[i] & codes[i + 1] != 0 {
+                continue;
+            }
+            let (x0, y0, x1, y1) = (xs[i], ys[i], xs[i + 1], ys[i + 1]);
+            let code1 = codes[i + 1];
+
+            // Crossing with the horizontal bound flagged in code1 (y0 == y1
+            // cannot happen: both endpoints in one vertical band would share
+            // an outcode bit, silx :1455-1457).
+            let x = if code1 & PICK_TOP != 0 {
+                Some(x0 + (x1 - x0) * (y_max - y0) / (y1 - y0))
+            } else if code1 & PICK_BOTTOM != 0 {
+                Some(x0 + (x1 - x0) * (y_min - y0) / (y1 - y0))
+            } else {
+                None
+            };
+            if let Some(x) = x
+                && (x_min..=x_max).contains(&x)
+            {
+                indices.push(i);
+                continue;
+            }
+
+            // Otherwise the vertical bound flagged in code1 (silx :1468-1480).
+            let y = if code1 & PICK_RIGHT != 0 {
+                Some(y0 + (y1 - y0) * (x_max - x0) / (x1 - x0))
+            } else if code1 & PICK_LEFT != 0 {
+                Some(y0 + (y1 - y0) * (x_min - x0) / (x1 - x0))
+            } else {
+                None
+            };
+            if let Some(y) = y
+                && (y_min..=y_max).contains(&y)
+            {
+                indices.push(i);
+            }
+        }
+        indices.sort_unstable();
+    }
+    indices
+}
+
+/// Area-pick a filled histogram at a data-space cursor, porting
+/// `Histogram.__pickFilledHistogram` (items/histogram.py:245-291): any cursor
+/// between the baseline and a bar's value picks that bar's bin.
+///
+/// Returns the picked bin index, or `None` when the cursor is outside the
+/// histogram's bounds or the bar's `[baseline, value]` band. Ported quirks:
+///
+/// - The bounds gate is *strict* (`xmin < x < xmax`, :258-260) against the
+///   silx item bounds, whose y range always includes 0
+///   (`min(0, nanmin(values))` / `max(0, nanmax(values))`, :236-243) even
+///   when every count is positive.
+/// - The bin is `searchsorted(edges, x, side="left") - 1` clipped to a valid
+///   bin (:263-267), so a cursor exactly on an interior edge belongs to the
+///   bin *left* of that edge.
+/// - A downward bar (`value < baseline`) picks between `value` and
+///   `baseline` (:275-281).
+pub fn pick_filled_histogram(
+    edges: &[f64],
+    counts: &[f64],
+    baseline: f64,
+    x: f64,
+    y: f64,
+) -> Option<usize> {
+    if counts.is_empty() || edges.len() != counts.len() + 1 {
+        return None;
+    }
+    let nan_fold = |acc: (f64, f64), &v: &f64| {
+        if v.is_nan() {
+            acc
+        } else {
+            (acc.0.min(v), acc.1.max(v))
+        }
+    };
+    let (x_min, x_max) = edges
+        .iter()
+        .fold((f64::INFINITY, f64::NEG_INFINITY), nan_fold);
+    let (v_min, v_max) = counts
+        .iter()
+        .fold((f64::INFINITY, f64::NEG_INFINITY), nan_fold);
+    let (y_min, y_max) = (v_min.min(0.0), v_max.max(0.0));
+    if !(x_min < x && x < x_max && y_min < y && y < y_max) {
+        return None; // Outside bounding box (histogram.py:258-260)
+    }
+
+    // numpy.searchsorted(edges, x, side="left") - 1, clipped (:263-267).
+    let index = edges
+        .partition_point(|&e| e < x)
+        .saturating_sub(1)
+        .min(counts.len() - 1);
+
+    let value = counts[index];
+    ((baseline <= value && baseline <= y && y <= value)
+        || (value < baseline && value <= y && y <= baseline))
+        .then_some(index)
+}
+
 /// A successful snap: the nearest candidate within the snap radius.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Snap {
-    /// Index of the snapped point in the candidate slice passed to
-    /// [`snap_to_nearest`].
+    /// Index of the snapped point: for [`snap_to_nearest`], into the candidate
+    /// slice it was given; for
+    /// [`PlotWidget::snap_cursor`](crate::widget::high_level::PlotWidget::snap_cursor),
+    /// the vertex index within the snapped item's data arrays (a histogram's
+    /// picked *bin* index, silx `result.getIndices()[0]`,
+    /// PositionInfo.py:246-250).
     pub index: usize,
     /// The snapped data coordinate (the candidate's data position), to feed to
     /// [`PositionInfo::values`] in place of the raw cursor.
@@ -620,5 +795,130 @@ mod tests {
         assert!(!mode.contains(SnappingMode::SCATTER));
         // silx flag values: CURVE=1<<3, ACTIVE_ONLY=1<<1.
         assert_eq!(mode.bits(), (1 << 3) | (1 << 1));
+    }
+
+    // --- pick_polyline_indices (GLPlotCurve2D.pick port) ---
+
+    #[test]
+    fn pick_takes_vertices_inside_the_box() {
+        // Marker path (:1483-1493): bare vertex-in-box test, no segments.
+        let xs = [0.0, 5.0, 10.0];
+        let ys = [0.0, 5.0, 10.0];
+        assert_eq!(
+            pick_polyline_indices(&xs, &ys, false, 4.0, 6.0, 4.0, 6.0),
+            vec![1]
+        );
+        // Off-box cursor picks nothing even though a segment crosses the box.
+        assert_eq!(
+            pick_polyline_indices(&xs, &ys, false, 2.0, 3.0, 2.0, 3.0),
+            Vec::<usize>::new()
+        );
+    }
+
+    #[test]
+    fn pick_line_adds_the_lower_endpoint_of_a_crossing_segment() {
+        // Segment (0,0)-(10,10) crosses the box [2,3]×[2,3] with neither
+        // endpoint inside: the LOWER index is picked (GLPlotCurve.py:1441-1481).
+        let xs = [0.0, 10.0];
+        let ys = [0.0, 10.0];
+        assert_eq!(
+            pick_polyline_indices(&xs, &ys, true, 2.0, 3.0, 2.0, 3.0),
+            vec![0]
+        );
+        // Same geometry without a line: nothing picked.
+        assert_eq!(
+            pick_polyline_indices(&xs, &ys, false, 2.0, 3.0, 2.0, 3.0),
+            Vec::<usize>::new()
+        );
+        // A near-horizontal segment crossing left→right engages the
+        // vertical-bound branch (code1 & RIGHT, GLPlotCurve.py:1468-1480).
+        assert_eq!(
+            pick_polyline_indices(&[0.0, 10.0], &[2.5, 2.6], true, 2.0, 3.0, 2.0, 3.0),
+            vec![0]
+        );
+    }
+
+    #[test]
+    fn pick_line_skips_a_corner_missing_segment() {
+        // Both endpoints outside with disjoint single-bound outcodes (LEFT-only
+        // vs TOP-only) but the segment passes OUTSIDE the box: silx's
+        // bound-crossing test rejects it (x at y_max falls left of the box,
+        // and code1 sets no vertical flag).
+        let xs = [-10.0, 1.2];
+        let ys = [1.5, 20.0];
+        assert_eq!(
+            pick_polyline_indices(&xs, &ys, true, 1.0, 3.0, 1.0, 3.0),
+            Vec::<usize>::new()
+        );
+    }
+
+    #[test]
+    fn pick_excludes_nan_vertices_and_their_segments() {
+        // A NaN coordinate outcodes to 0 ("inside") but the finite mask drops
+        // it (silx notNaN, :1434-1439), and a segment touching a NaN vertex is
+        // never crossing-tested (outcode 0 fails the both-outside gate).
+        let xs = [0.0, f64::NAN, 10.0];
+        let ys = [0.0, f64::NAN, 10.0];
+        assert_eq!(
+            pick_polyline_indices(&xs, &ys, true, 2.0, 3.0, 2.0, 3.0),
+            Vec::<usize>::new()
+        );
+        // The finite vertex inside the box still picks.
+        assert_eq!(
+            pick_polyline_indices(&xs, &ys, true, -1.0, 1.0, -1.0, 1.0),
+            vec![0]
+        );
+    }
+
+    // --- pick_filled_histogram (Histogram.__pickFilledHistogram port) ---
+
+    #[test]
+    fn filled_histogram_picks_anywhere_inside_the_bar() {
+        // Cursor in the MIDDLE of the tall bar [4,6)×[0,9] — far from the
+        // apex — still picks bin 2 (histogram.py:262-291).
+        let edges = [0.0, 2.0, 4.0, 6.0, 8.0];
+        let counts = [1.0, 3.0, 9.0, 2.0];
+        assert_eq!(
+            pick_filled_histogram(&edges, &counts, 0.0, 5.0, 4.5),
+            Some(2)
+        );
+        // Above the bar's value: outside the [baseline, value] band.
+        assert_eq!(pick_filled_histogram(&edges, &counts, 0.0, 7.0, 4.5), None);
+    }
+
+    #[test]
+    fn filled_histogram_bounds_are_strict_and_include_zero() {
+        let edges = [0.0, 2.0, 4.0];
+        let counts = [3.0, 5.0];
+        // Exactly on the y bounds max (5.0) or the x edges: strict `<` gates
+        // (histogram.py:258-260).
+        assert_eq!(pick_filled_histogram(&edges, &counts, 0.0, 1.0, 5.0), None);
+        assert_eq!(pick_filled_histogram(&edges, &counts, 0.0, 0.0, 1.0), None);
+        assert_eq!(pick_filled_histogram(&edges, &counts, 0.0, 4.0, 1.0), None);
+    }
+
+    #[test]
+    fn filled_histogram_interior_edge_belongs_to_the_left_bin() {
+        // searchsorted(side="left") - 1: x exactly on an interior edge maps to
+        // the bin LEFT of it (histogram.py:263-267).
+        let edges = [0.0, 2.0, 4.0];
+        let counts = [3.0, 5.0];
+        assert_eq!(
+            pick_filled_histogram(&edges, &counts, 0.0, 2.0, 1.0),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn filled_histogram_downward_bar_picks_below_the_baseline() {
+        // value < baseline: the band is [value, baseline] (histogram.py:275-281),
+        // and the silx bounds include 0 via min(0, nanmin(values)).
+        let edges = [0.0, 2.0, 4.0];
+        let counts = [-4.0, 3.0];
+        assert_eq!(
+            pick_filled_histogram(&edges, &counts, 0.0, 1.0, -2.0),
+            Some(0)
+        );
+        assert_eq!(pick_filled_histogram(&edges, &counts, 0.0, 1.0, 1.0), None);
     }
 }

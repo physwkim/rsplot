@@ -612,6 +612,37 @@ Impact: fitting a zoomed-in peak fits the whole spectrum — numerically differe
 
 ### R2-9: PositionInfo snapping engage contract diverges — silx engages by item *pick* (filled-bar area / ±3 px polyline) with histogram priority-break and a DPR-scaled radius; siplot uses global-nearest apex within an unscaled 5 px
 
+**FIXED (stats/actions cluster):** `snap_cursor` now walks candidates in item
+order applying silx's per-item pick engagement. New pure kernels in
+`position_info.rs`: `pick_polyline_indices` (the GLPlotCurve2D box pick,
+GLPlotCurve.py:1396-1494 — data-space Cohen–Sutherland outcodes, inside
+vertices plus lower endpoints of crossing segments tested against the bound
+flagged in the *second* endpoint's outcode, NaN vertices masked, solid lines
+take the segment path because silx maps `'-'` to dash pattern `()`) and
+`pick_filled_histogram` (items/histogram.py:245-291 — strict bounds whose y
+range always includes 0, `searchsorted(side="left") - 1` so an interior edge
+belongs to the left bin, downward bars pick between value and baseline), plus
+`PICK_OFFSET = 3` (BackendOpenGL `_PICK_OFFSET`, :1267). The pick box is
+`±max(3, markerSize/2, lineWidth/2)` clipped into the plot area
+(`_mouseInPlotArea`, :1269-1304) and converted per item axis; items with
+neither line nor symbol are unpickable (GLPlotCurve.py:1409-1416). A picked
+histogram returns bin centre + count immediately (silx `break`,
+PositionInfo.py:246-258) — unconditional priority over nearer curve vertices;
+curve/scatter distances run over picked indices only, first-minimum per item
+(`nanargmin`), against the live radius `SNAP_THRESHOLD_DIST ×
+pixels_per_point` (the `devicePixelRatio` scaling, :229-237; captured per
+frame in `show`) shrinking to each accepted snap with ties to the later item
+(:286-292). The non-filled ±3 px step-polyline histogram pick has no
+reachable counterpart: siplot histograms are always filled by construction
+(`add_histogram_with_align` sets `fill = true`; `update_curve_spec` replaces
+retained histogram data with the curve form, so a non-filled histogram record
+cannot exist). Tests: 8 kernel unit tests (crossing/corner-miss/NaN/no-line
+boundaries; bar-interior/strict-bounds/edge-ownership/downward-bar) + 4
+integration tests (`filled_bar_interior_snaps_far_from_the_apex`,
+`picked_histogram_outranks_a_nearer_curve_vertex`,
+`vertex_within_radius_but_outside_the_pick_box_does_not_snap`,
+`snap_radius_scales_with_pixels_per_point` at pixels_per_point 2 vs 1).
+
 Severity: Medium
 
 Rust: `src/widget/high_level.rs:7213-7233` — `snap_cursor` feeds histogram `(centers, counts)` apex vertices (plus curve/scatter points) to `snap_to_nearest(..., SNAP_THRESHOLD_DIST)` (raw constant 5, `src/widget/position_info.rs:200`), picking the globally nearest vertex across all items; no `pixels_per_point`/DPR factor anywhere on the path.

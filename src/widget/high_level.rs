@@ -37,8 +37,8 @@ use crate::render::save::{SaveError, SaveFormat};
 use crate::widget::interaction::{DrawEvent, DrawMode, DrawParams, MouseButton, RoiDrawKind};
 use crate::widget::plot_widget::{PlotInteractionMode, PlotResponse, PlotView};
 use crate::widget::position_info::{
-    SNAP_THRESHOLD_DIST, Snap, SnapItem, SnapItemKind, SnappingMode, snap_to_nearest,
-    snapping_candidates,
+    PICK_OFFSET, SNAP_THRESHOLD_DIST, Snap, SnapItem, SnapItemKind, SnappingMode,
+    pick_filled_histogram, pick_polyline_indices, snapping_candidates,
 };
 
 /// Live profile extraction mode (silx profile toolbar).
@@ -3691,6 +3691,13 @@ pub struct PlotWidget {
     /// re-uploads keep it); [`Self::apply_median_filter_kernel`] restores it
     /// after its own replace (silx's disconnect/reconnect around `addImage`).
     median_filter_original: Option<(ItemHandle, Vec<f64>)>,
+    /// The `pixels_per_point` of the last rendered frame — the egui analog of
+    /// Qt's `devicePixelRatio()`, which silx multiplies into the snap radius
+    /// (`SNAP_THRESHOLD_DIST * ratio`, PositionInfo.py:229-237). Captured in
+    /// [`Self::show`] so query-time consumers ([`Self::snap_cursor`]) scale
+    /// like silx does; `1.0` before the first frame (where snapping already
+    /// returns `None` for lack of a cached transform).
+    last_pixels_per_point: f32,
 }
 
 impl PlotWidget {
@@ -3728,6 +3735,7 @@ impl PlotWidget {
             ruler_roi: None,
             ruler_prev_mode: None,
             median_filter_original: None,
+            last_pixels_per_point: 1.0,
         }
     }
 
@@ -3762,6 +3770,8 @@ impl PlotWidget {
         menu_ext: Option<&mut dyn FnMut(&mut egui::Ui)>,
     ) -> PlotResponse {
         let before = self.limits_snapshot();
+        // silx devicePixelRatio analog for the snap radius (PositionInfo.py:229-237).
+        self.last_pixels_per_point = ui.ctx().pixels_per_point();
         self.sync_active_axis_labels();
         let mut view = PlotView::new();
         if let Some(ext) = menu_ext {
@@ -7499,24 +7509,39 @@ impl PlotWidget {
     ///
     /// Builds a [`SnapItem`] per item (kind, `is_item_visible`, whether it shows
     /// a symbol, whether it is the active item), runs [`snapping_candidates`] to
-    /// pick the participating items for `mode`, projects every candidate's
-    /// retained vertices to pixels through the cached display transform
-    /// (axis-aware, so a y2 curve snaps in its own axis), and returns the
-    /// [`snap_to_nearest`] result within [`SNAP_THRESHOLD_DIST`] logical pixels —
-    /// its `data` is the snapped coordinate to show in a [`PositionInfo`](crate::PositionInfo), with a
-    /// `None` result meaning "no snap" (feed `false` to
-    /// [`PositionInfo::ui_snapped`](crate::widget::position_info::PositionInfo::ui_snapped)).
+    /// pick the participating items for `mode`, then walks the candidates in
+    /// item order applying silx's per-item *pick* engagement:
     ///
-    /// Curves, histograms, and scatters all participate: curves and plain
-    /// scatters snap to their retained `(x, y)` vertices, value scatters to
-    /// their `(x, y)` points, and histograms to their bin centre + count
-    /// (silx snaps a histogram pick to `0.5 * (edges[i] + edges[i+1])` and
-    /// `value[i]`, PositionInfo.py:246-258 — not to the step polyline). Items
-    /// whose data is not retained as vertices (images, triangles, shapes,
-    /// markers) classify as [`SnapItemKind::Other`] and are never candidates.
+    /// - A histogram engages by area pick — siplot histograms are always
+    ///   filled ([`Self::add_histogram`] sets `fill`), so silx's filled-bar
+    ///   pick applies: any cursor between the baseline and a bar's value picks
+    ///   that bin ([`pick_filled_histogram`], items/histogram.py:245-291) —
+    ///   and a picked histogram snaps to its bin centre + count with
+    ///   *unconditional priority* (silx `break`, PositionInfo.py:246-258),
+    ///   even over a nearer curve vertex.
+    /// - A curve or scatter engages through the `±`[`PICK_OFFSET`] pick box
+    ///   (enlarged to half the marker size / line width, silx `__pickCurves`,
+    ///   BackendOpenGL.py:1290-1330), clipped into the plot area and converted
+    ///   to its own axis' data space; only the picked vertices
+    ///   ([`pick_polyline_indices`]) compete on pixel distance. The nearest
+    ///   picked vertex (first minimum, silx `nanargmin`) must fall within the
+    ///   live radius — [`SNAP_THRESHOLD_DIST`]` × pixels_per_point` (the
+    ///   `devicePixelRatio` scaling of silx :229-237), shrinking to each
+    ///   accepted distance so later items must beat earlier ones (ties go to
+    ///   the later item, silx `<=` :286-292).
+    ///
+    /// The returned [`Snap`]'s `data` is the snapped coordinate to show in a
+    /// [`PositionInfo`](crate::PositionInfo) and its `index` the vertex (or
+    /// histogram bin) index within the snapped item; `None` means "no snap"
+    /// (feed `false` to
+    /// [`PositionInfo::ui_snapped`](crate::widget::position_info::PositionInfo::ui_snapped)).
+    /// Items whose data is not retained as vertices (images, triangles,
+    /// shapes, markers) classify as [`SnapItemKind::Other`] and are never
+    /// candidates; a candidate with neither a line nor a symbol is unpickable
+    /// (silx GLPlotCurve2D.pick guard, GLPlotCurve.py:1409-1416).
     ///
     /// Returns `None` when snapping is not engaged (no `CURVE`/`SCATTER` flag),
-    /// nothing is within the radius, or no frame has been rendered yet (the
+    /// nothing picks within the radius, or no frame has been rendered yet (the
     /// transform is uncached). The [`SnappingMode::CROSSHAIR`] gate is the
     /// caller's precondition (silx :198), as is the empty/`None`-cursor case.
     pub fn snap_cursor(&self, cursor: [f64; 2], mode: SnappingMode) -> Option<Snap> {
@@ -7540,43 +7565,123 @@ impl PlotWidget {
             return None;
         }
 
-        // Project every candidate curve's vertices to pixels, paired with their
-        // data coordinate (silx projects each item's points then snaps).
-        let mut points: Vec<([f64; 2], [f64; 2])> = Vec::new();
+        let cursor_px = self.data_to_pixel(cursor[0], cursor[1], YAxis::Left)?;
+        let (cx, cy) = (f64::from(cursor_px.x), f64::from(cursor_px.y));
+
+        // Live squared radius: (SNAP_THRESHOLD_DIST * devicePixelRatio)²
+        // (PositionInfo.py:229-237), shrunk to each accepted snap (:292).
+        let mut best_sq = (SNAP_THRESHOLD_DIST * f64::from(self.last_pixels_per_point)).powi(2);
+        let mut best: Option<Snap> = None;
+
         for &index in &candidates {
             let record = &self.item_records[index];
-            let axis = record
-                .curve_data
-                .as_ref()
-                .map_or(YAxis::Left, |curve| curve.y_axis);
-            // Per-kind snap vertices; items without retained vertices
-            // (images/shapes/markers) never reach here because they classify
-            // as SnapItemKind::Other.
-            let vertices: Option<(&[f64], &[f64])> = match &record.data {
-                Some(RetainedItemData::Curve { x, y }) => Some((x, y)),
-                // silx snaps a histogram to its bin centre and count value
-                // (PositionInfo.py:250-254).
-                Some(RetainedItemData::Histogram {
-                    centers, counts, ..
-                }) => Some((centers, counts)),
-                Some(RetainedItemData::Scatter { x, y, .. }) => Some((x, y)),
-                _ => None,
+            // Every snap-kind item is curve-backed; the visuals carry the
+            // pick inputs (axis, marker/line presence and sizes, baseline).
+            let Some(curve) = record.curve_data.as_ref() else {
+                continue;
             };
-            if let Some((xs, ys)) = vertices {
-                for (&dx, &dy) in xs.iter().zip(ys) {
-                    if let Some(px) = self.data_to_pixel(dx, dy, axis) {
-                        points.push(([px.x as f64, px.y as f64], [dx, dy]));
+            let axis = curve.y_axis;
+            match &record.data {
+                Some(RetainedItemData::Histogram {
+                    edges,
+                    counts,
+                    centers,
+                    ..
+                }) => {
+                    // silx histograms with a non-scalar baseline have no pick
+                    // semantics (the numpy comparison would raise); siplot
+                    // only ever constructs Scalar(0.0) for histograms.
+                    let Baseline::Scalar(baseline) = curve.baseline else {
+                        continue;
+                    };
+                    // The cursor in this item's axis data space — silx
+                    // `plot.pixelToData(x, y, axis=self.getYAxis())`
+                    // (histogram.py:257).
+                    let Some((hx, hy)) = self.pixel_to_data(cursor_px, axis) else {
+                        continue;
+                    };
+                    if let Some(bin) = pick_filled_histogram(edges, counts, baseline, hx, hy) {
+                        // Bin centre + count, unconditional priority (silx
+                        // `break`, PositionInfo.py:246-258).
+                        return Some(Snap {
+                            index: bin,
+                            data: [centers[bin], counts[bin]],
+                        });
                     }
                 }
+                Some(RetainedItemData::Curve { x, y })
+                | Some(RetainedItemData::Scatter { x, y, .. }) => {
+                    let has_line = curve.line_style != LineStyle::None;
+                    let has_symbol = curve.symbol.is_some();
+                    if !has_line && !has_symbol {
+                        continue; // Unpickable (GLPlotCurve.py:1409-1416).
+                    }
+                    // Pick-box half-extent: max(_PICK_OFFSET, markerSize / 2,
+                    // lineWidth / 2) (silx __pickCurves, BackendOpenGL.py:1290-1304).
+                    let mut offset = PICK_OFFSET;
+                    if has_symbol {
+                        offset = offset.max(f64::from(curve.marker_size) / 2.0);
+                    }
+                    if has_line {
+                        offset = offset.max(f64::from(curve.width) / 2.0);
+                    }
+                    // Box corners clipped into the plot area (silx
+                    // `_mouseInPlotArea`, BackendOpenGL.py:1269-1283), then
+                    // converted to this item's axis data space (:1306-1330).
+                    let corner = |px: f64, py: f64| {
+                        let p = match self.plot_bounds_in_pixels() {
+                            Some(rect) => egui::pos2(
+                                px.clamp(f64::from(rect.min.x), f64::from(rect.max.x) - 1.0) as f32,
+                                py.clamp(f64::from(rect.min.y), f64::from(rect.max.y) - 1.0) as f32,
+                            ),
+                            None => egui::pos2(px as f32, py as f32),
+                        };
+                        self.pixel_to_data(p, axis)
+                    };
+                    let (Some((bx0, by0)), Some((bx1, by1))) = (
+                        corner(cx - offset, cy - offset),
+                        corner(cx + offset, cy + offset),
+                    ) else {
+                        continue;
+                    };
+                    let picked = pick_polyline_indices(
+                        x,
+                        y,
+                        has_line,
+                        bx0.min(bx1),
+                        bx0.max(bx1),
+                        by0.min(by1),
+                        by0.max(by1),
+                    );
+
+                    // Nearest picked vertex: first minimum within the item
+                    // (silx nanargmin, PositionInfo.py:283-286), then the live
+                    // radius test with ties going to the later item (:286-292).
+                    let mut item_best: Option<(usize, f64)> = None;
+                    for &pi in &picked {
+                        let Some(p) = self.data_to_pixel(x[pi], y[pi], axis) else {
+                            continue;
+                        };
+                        let (dx, dy) = (f64::from(p.x) - cx, f64::from(p.y) - cy);
+                        let sq = dx * dx + dy * dy;
+                        if sq.is_finite() && item_best.is_none_or(|(_, b)| sq < b) {
+                            item_best = Some((pi, sq));
+                        }
+                    }
+                    if let Some((pi, sq)) = item_best
+                        && sq <= best_sq
+                    {
+                        best = Some(Snap {
+                            index: pi,
+                            data: [x[pi], y[pi]],
+                        });
+                        best_sq = sq;
+                    }
+                }
+                _ => {}
             }
         }
-
-        let cursor_px = self.data_to_pixel(cursor[0], cursor[1], YAxis::Left)?;
-        snap_to_nearest(
-            [cursor_px.x as f64, cursor_px.y as f64],
-            &points,
-            SNAP_THRESHOLD_DIST,
-        )
+        best
     }
 
     pub fn add_roi(&mut self, roi: Roi) -> usize {
