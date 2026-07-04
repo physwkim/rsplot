@@ -1079,6 +1079,25 @@ Impact: decade-boundary values format differently — `9999999.9` → siplot `10
 
 ### R2-26: `Roi::Line::contains` lacks silx's bounding-box gate — over-reports a strip up to 1 data-unit below/left of the segment
 
+**FIXED (roi cluster):** `Roi::Line::contains` now filters the position
+through the endpoints' inclusive axis-aligned bounding box before the
+unit-square test, exactly silx `LineROI.contains` (items/roi.py:314-332:
+`_BoundingBox.from_points(endpoints)` then `min_x <= x <= max_x &
+min_y <= y <= max_y`, image/_boundingbox.py:95-105,123-139). Without the
+gate, the unit square anchored at the query point's lower-left crossed the
+segment for points up to one unit below/left, past the endpoints. Anchor
+audit: `segment_intersects_unit_square` is called only from this one site
+(silx applies the bbox filter only in `LineROI.contains`; `HLine`/`VLine`
+use exact-coordinate equality, `Polygon` uses point-in-polygon, `Arc`/
+`Band` have their own containment — distinct). The cited Rust test
+`line_contains_unit_square_intersection` baked in the divergent `True` at
+`(4.0, 4.5)` for a horizontal `y=5` segment (endpoint bbox degenerate at
+`y∈[5,5]`): corrected to `False`. Added `line_contains_bbox_gate_trims_
+beyond_endpoint_strip` for a diagonal segment — `(1.5,1.5)` below-left of
+the start endpoint is now excluded (bbox `x,y < 2`) while the in-bbox
+upper-right tolerance band `(5.0,4.5)` and the on-segment `(5.0,5.0)` stay
+inside.
+
 Severity: Low
 
 Rust: `src/core/roi.rs:885` — `Roi::Line { .. } => segment_intersects_unit_square(*start, *end, pos)` with no pre-filter (the unit square is anchored at the query point's lower-left, so points just below/left of the segment still intersect).

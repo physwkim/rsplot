@@ -888,7 +888,22 @@ impl Roi {
             Roi::VLine { x: lx } => x == *lx,
             Roi::Point { x: px, y: py } => x == *px && y == *py,
             Roi::Cross { center } => x == center.0 || y == center.1,
-            Roi::Line { start, end } => segment_intersects_unit_square(*start, *end, pos),
+            Roi::Line { start, end } => {
+                // silx `LineROI.contains` first filters positions outside the
+                // segment endpoints' axis-aligned bounding box (inclusive on
+                // all four bounds — `_BoundingBox.from_points` +
+                // `min_x <= x <= max_x & min_y <= y <= max_y`,
+                // items/roi.py:314-332, image/_boundingbox.py:95-105), and only
+                // then runs the unit-square test. Without the gate the unit
+                // square anchored at the query point's lower-left still crosses
+                // the segment for points up to one unit below/left of it, past
+                // the endpoints.
+                let (bx0, bx1) = (start.0.min(end.0), start.0.max(end.0));
+                let (by0, by1) = (start.1.min(end.1), start.1.max(end.1));
+                (bx0..=bx1).contains(&x)
+                    && (by0..=by1).contains(&y)
+                    && segment_intersects_unit_square(*start, *end, pos)
+            }
             Roi::Polygon { vertices } => point_in_polygon(vertices, pos),
             Roi::Circle { center, radius } => {
                 let (dx, dy) = (x - center.0, y - center.1);
@@ -2438,22 +2453,47 @@ mod tests {
 
     #[test]
     fn line_contains_unit_square_intersection() {
-        // Horizontal segment along y=5 from x=2 to x=8 (silx LineROI semantics:
-        // a position is "inside" when the unit square at its lower-left corner
-        // is crossed by the segment).
+        // Horizontal segment along y=5 from x=2 to x=8. silx LineROI.contains:
+        // a position is "inside" when it is within the endpoints' bounding box
+        // (here x in [2,8], y in [5,5] — degenerate in y) AND the unit square
+        // at its lower-left corner is crossed by the segment.
         let roi = Roi::Line {
             start: (2.0, 5.0),
             end: (8.0, 5.0),
         };
-        // Corner (4, 4.5): unit square spans y in [4.5, 5.5], so y=5 crosses it.
-        assert!(roi.contains((4.0, 4.5)));
-        // Corner (4, 5): square y in [5, 6]; the segment lies on the bottom edge
-        // (a touching intersection is counted).
+        // Corner (4, 5): in the bbox; square y in [5, 6]; segment on the bottom
+        // edge (a touching intersection is counted).
         assert!(roi.contains((4.0, 5.0)));
+        // R2-26: Corner (4, 4.5) — the unit square y in [4.5, 5.5] would cross
+        // y=5, but 4.5 is below the endpoints' bbox (y in [5,5]); silx's gate
+        // excludes it. (This was the divergent True before the fix.)
+        assert!(!roi.contains((4.0, 4.5)));
         // Corner (4, 6): square y in [6, 7], entirely above the segment.
         assert!(!roi.contains((4.0, 6.0)));
-        // Corner far to the right in x: square x in [9, 10], past the segment end.
+        // Corner far to the right in x: square x in [9, 10], past the segment end
+        // AND outside the bbox (x > 8).
         assert!(!roi.contains((9.0, 4.5)));
+    }
+
+    #[test]
+    fn line_contains_bbox_gate_trims_beyond_endpoint_strip() {
+        // R2-26: for a diagonal segment (2,2)->(8,8) the endpoints' bbox is the
+        // full [2,8]×[2,8] rectangle, so the one-unit unit-square tolerance is
+        // trimmed only where it extends PAST an endpoint.
+        let roi = Roi::Line {
+            start: (2.0, 2.0),
+            end: (8.0, 8.0),
+        };
+        // (1.5, 1.5): the unit square [1.5,2.5]×[1.5,2.5] contains the start
+        // endpoint (2,2), so the raw unit-square test says "inside" — but the
+        // point is below-left of the start, outside the bbox (x,y < 2). silx's
+        // gate excludes it.
+        assert!(!roi.contains((1.5, 1.5)));
+        // (5.0, 5.0): on the segment and inside the bbox -> inside.
+        assert!(roi.contains((5.0, 5.0)));
+        // (5.0, 4.5): inside the bbox; unit square [5,6]×[4.5,5.5] is crossed by
+        // y=x (touches at (5,5)) -> inside (the upper-right tolerance band).
+        assert!(roi.contains((5.0, 4.5)));
     }
 
     // --- handle geometry tests (counts per ROI kind, translate invariant) ---
