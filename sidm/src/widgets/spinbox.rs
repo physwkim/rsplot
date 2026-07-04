@@ -4,11 +4,15 @@
 //! PV precision (`precision_changed` → `setDecimals`), whose min/max follow the
 //! control limits unless the user overrides them (`reset_limits` /
 //! `userDefinedLimits`), and which writes the entered value as a float on change
-//! (`send_value`). PyDM's `step_exponent` single-step is reproduced as a builder
-//! `step`, defaulting to `10^-precision` (one unit in the last displayed digit).
+//! (`send_value`). PyDM's `step_exponent` single-step is reproduced faithfully:
+//! the single step is `10^step_exponent` and `step_exponent` defaults to `0`
+//! (step = 1.0), independent of precision (`spinbox.py:35`); Ctrl+Left/Right
+//! adjust it (floored at `-decimals`, `spinbox.py:84-88`) and the `Step: 1E{n}`
+//! suffix shows it (`spinbox.py:143-145`).
 //!
 //! The range resolution is the pure
-//! [`control_range`]; the write is
+//! [`control_range`], the step-exponent clamp is the pure
+//! [`stepped_exponent`]; the write is
 //! [`SidmSpinbox::set_value`]; [`SidmSpinbox::show`] is a thin egui shell.
 
 use siplot::egui;
@@ -26,9 +30,18 @@ pub struct SidmSpinbox {
     /// Override the min/max instead of using the PV's control limits (PyDM
     /// `userDefinedLimits`).
     pub user_limits: Option<(f64, f64)>,
-    /// The single-step increment (PyDM `step_exponent` → `10^exp`); `None`
-    /// derives `10^-precision`.
-    pub step: Option<f64>,
+    /// The single-step exponent (PyDM `step_exponent`): the single step is
+    /// `10^step_exponent`. Defaults to `0` (step = 1.0), independent of
+    /// precision (`spinbox.py:35`); Ctrl+Left/Right adjust it in [`Self::show`].
+    pub step_exponent: i32,
+    /// Show the `Step: 1E{n}` suffix (PyDM `showStepExponent`, default `true`).
+    pub show_step_exponent: bool,
+}
+
+/// Clamp a step exponent to PyDM's floor of `-decimals` after a `delta` change
+/// (`spinbox.py:88`, `step_exponent = max(-decimals, step_exponent ± 1)`).
+pub fn stepped_exponent(step_exponent: i32, decimals: i32, delta: i32) -> i32 {
+    (step_exponent + delta).max(-decimals)
 }
 
 impl SidmSpinbox {
@@ -39,7 +52,8 @@ impl SidmSpinbox {
             base: ChannelBase::new(engine.connect(address)?).with_border_mode(BorderMode::Off),
             precision_override: None,
             user_limits: None,
-            step: None,
+            step_exponent: 0,
+            show_step_exponent: true,
         })
     }
 
@@ -55,10 +69,16 @@ impl SidmSpinbox {
         self
     }
 
-    /// Set the single-step increment (builder style).
-    pub fn with_step(mut self, step: f64) -> Self {
-        self.step = Some(step);
+    /// Set the single-step exponent (builder style): the single step becomes
+    /// `10^step_exponent` (PyDM `step_exponent`).
+    pub fn with_step_exponent(mut self, step_exponent: i32) -> Self {
+        self.step_exponent = step_exponent;
         self
+    }
+
+    /// The single step: `10^step_exponent` (PyDM `setSingleStep(10**exp)`).
+    pub fn single_step(&self) -> f64 {
+        10f64.powi(self.step_exponent)
     }
 
     /// Choose which severities draw a border (builder style;
@@ -95,7 +115,9 @@ impl SidmSpinbox {
     pub fn show(&mut self, ui: &mut egui::Ui) -> Option<PvValue> {
         let state = self.base.channel().state();
         let decimals = self.decimals(&state);
-        let step = self.step.unwrap_or_else(|| 10f64.powi(-decimals));
+        let step = self.single_step();
+        let show_step = self.show_step_exponent;
+        let step_exponent = self.step_exponent;
         let range = control_range(&state, self.user_limits);
         let mut value = state
             .value
@@ -103,20 +125,41 @@ impl SidmSpinbox {
             .and_then(PvValue::as_f64)
             .unwrap_or(0.0);
 
-        let changed = self
+        let response = self
             .base
             .framed(ui, &state, true, |ui| {
                 let mut drag = egui::DragValue::new(&mut value)
                     .speed(step)
                     .max_decimals(decimals.max(0) as usize);
+                if show_step {
+                    // PyDM's showStepExponent suffix (spinbox.py:143-145); with
+                    // units off it is " Step: 1E{n}".
+                    drag = drag.suffix(format!(" Step: 1E{step_exponent}"));
+                }
                 if let Some((lo, hi)) = range {
                     drag = drag.range(lo..=hi);
                 }
-                ui.add(drag).changed()
+                ui.add(drag)
             })
             .inner;
 
-        changed.then(|| self.set_value(value))
+        // Ctrl+Left/Right adjust the step exponent while the entry is focused
+        // (spinbox.py:84-88); each change is floored at -decimals.
+        if response.has_focus() {
+            let (left, right) = ui.input(|i| {
+                (
+                    i.modifiers.ctrl && i.key_pressed(egui::Key::ArrowLeft),
+                    i.modifiers.ctrl && i.key_pressed(egui::Key::ArrowRight),
+                )
+            });
+            if left {
+                self.step_exponent = stepped_exponent(self.step_exponent, decimals, 1);
+            } else if right {
+                self.step_exponent = stepped_exponent(self.step_exponent, decimals, -1);
+            }
+        }
+
+        response.changed().then(|| self.set_value(value))
     }
 }
 
@@ -152,6 +195,37 @@ mod tests {
         let engine = Engine::new();
         let spin = SidmSpinbox::new(&engine, address).expect("connect");
         (engine, spin)
+    }
+
+    #[test]
+    fn step_defaults_to_one_independent_of_precision() {
+        // PyDM's step_exponent defaults to 0 → single step 1.0, whatever the
+        // precision (spinbox.py:35); sidm previously used 10^-precision.
+        let (_e, spin) = spinbox("loc://spin_step_default");
+        assert_eq!(spin.step_exponent, 0);
+        assert_eq!(spin.single_step(), 1.0);
+        // decimals(state) has no bearing on the step: a PREC=3 PV still steps 1.0.
+        assert_eq!(spin.decimals(&state_with(Some(3), None)), 3);
+        assert_eq!(spin.single_step(), 1.0);
+    }
+
+    #[test]
+    fn with_step_exponent_sets_the_power_of_ten() {
+        let (_e, spin) = spinbox("loc://spin_step_exp");
+        assert_eq!(spin.with_step_exponent(-2).single_step(), 0.01);
+        let (_e, spin) = spinbox("loc://spin_step_exp2");
+        assert_eq!(spin.with_step_exponent(3).single_step(), 1000.0);
+    }
+
+    #[test]
+    fn stepped_exponent_floors_at_negative_decimals() {
+        // Ctrl+Left (+1) / Ctrl+Right (-1), floored at -decimals (spinbox.py:88).
+        assert_eq!(stepped_exponent(0, 3, 1), 1);
+        assert_eq!(stepped_exponent(0, 3, -1), -1);
+        // Already at the floor: Ctrl+Right cannot go below -decimals.
+        assert_eq!(stepped_exponent(-3, 3, -1), -3);
+        // Ctrl+Left from the floor moves up normally.
+        assert_eq!(stepped_exponent(-3, 3, 1), -2);
     }
 
     #[test]

@@ -1825,6 +1825,8 @@ Reference: `~/codes/pydm/pydm/widgets/spinbox.py:35,122-127` — `self.step_expo
 
 Impact: a stock spinbox on a PREC=3 PV steps by 0.001 in sidm vs 1.0 in PyDM — arrow/drag interactions produce different write payloads; PyDM's Ctrl+arrow exponent adjustment and the "Step: 1E{n}" suffix/tooltip (`spinbox.py:143-148`) have no counterpart.
 
+**FIXED (this session):** replaced the raw `step: Option<f64>` (default `10^-precision`) with PyDM's `step_exponent: i32` model — single step is `10^step_exponent`, defaulting to `0` (step = 1.0) independent of precision (spinbox.py:35). Added the pure `stepped_exponent` clamp (floors at `-decimals`, spinbox.py:88), wired Ctrl+Left/Right in `show` while the entry is focused (spinbox.py:84-88), and the `Step: 1E{n}` suffix via `show_step_exponent` (default true, spinbox.py:143-145). Builder `with_step` → `with_step_exponent`. Tests `step_defaults_to_one_independent_of_precision`, `with_step_exponent_sets_the_power_of_ten`, `stepped_exponent_floors_at_negative_decimals`.
+
 ### R2-55: Alarm-border default inverted for PushButton/Spinbox/Slider — PyDM ships these three with `alarmSensitiveBorder = False` (and the slider with `alarmSensitiveContent = True`)
 
 Severity: Medium
