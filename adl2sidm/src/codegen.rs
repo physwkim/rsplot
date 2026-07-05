@@ -1402,20 +1402,17 @@ fn emit_strip_chart(b: &mut Builder, widget: &MedmWidget, options: &Options, z: 
         return;
     }
 
-    // A pen's `limits {}` block (MEDM `parsePen` → `parseLimits`) is now retained
-    // by the parser's deep pass, so its range keys are visible here. MEDM scales
-    // EACH pen to its own `[lopr, hopr]` (medmStripChart.c:467-509 — per-pen
-    // normalised traces); SidmTimePlot draws every curve on one shared,
-    // auto-scaled y-axis and has no per-curve normalisation, so authored per-pen
-    // ranges cannot be reproduced. Warn rather than drop silently.
-    let ranged_pens = pens
-        .iter()
-        .filter(|pen| {
-            ["loprSrc", "hoprSrc", "loprDefault", "hoprDefault"]
-                .iter()
-                .any(|k| pen.contains_key(*k))
-        })
-        .count();
+    // A pen's `limits {}` block (MEDM `parsePen` → `parseLimits`) is retained by
+    // the parser's deep pass, so its range keys are visible here. MEDM scales
+    // EACH pen to its own `[lopr, hopr]` onto a shared axis (medmStripChart.c
+    // :1878-1898 — per-pen normalised traces). When any pen carries an authored
+    // range, emit every pen through `add_normalized_channel` so SidmTimePlot maps
+    // it onto the shared [0,1] axis (R3-18); a chart with no authored ranges stays
+    // on `add_channel`'s single auto-scaled axis (the common same-range case).
+    let normalized = pens.iter().any(|pen| {
+        let (lo, hi) = defaulted_limits(|k| pen.get(k));
+        lo.is_some() || hi.is_some()
+    });
 
     let mut adds = Vec::new();
     for pen in pens {
@@ -1427,22 +1424,38 @@ fn emit_strip_chart(b: &mut Builder, widget: &MedmWidget, options: &Options, z: 
             continue;
         };
         let addr = apply_protocol(chan, options);
-        adds.push(format!(
-            "add_channel(&engine, {}, {}, {}).expect({});",
-            medm_str(b, &addr),
-            record_color(pen.get("color")),
-            medm_str(b, chan),
-            rust_str(&format!("adl2sidm: add strip-chart curve {chan}")),
-        ));
+        if normalized {
+            let (lo, hi) = defaulted_limits(|k| pen.get(k));
+            adds.push(format!(
+                "add_normalized_channel(&engine, {}, {}, {}, {}, {}).expect({});",
+                medm_str(b, &addr),
+                record_color(pen.get("color")),
+                medm_str(b, chan),
+                opt_float_lit(lo),
+                opt_float_lit(hi),
+                rust_str(&format!("adl2sidm: add strip-chart pen {chan}")),
+            ));
+        } else {
+            adds.push(format!(
+                "add_channel(&engine, {}, {}, {}).expect({});",
+                medm_str(b, &addr),
+                record_color(pen.get("color")),
+                medm_str(b, chan),
+                rust_str(&format!("adl2sidm: add strip-chart curve {chan}")),
+            ));
+        }
     }
     if adds.is_empty() {
         return; // every pen lacked a channel; warnings already recorded
     }
-    if ranged_pens > 0 {
+    if normalized {
+        // The normalization (readability) is now applied; note only the residual
+        // fidelity gap so it is not a silent cap: MEDM draws a separate y-axis
+        // label column per pen range, whereas sidm shares one [0,1] axis.
         b.warnings.push(format!(
-            "line {}: strip chart has {ranged_pens} pen(s) with an authored `limits` range; \
-             MEDM normalises each pen to its own [lopr, hopr], but SidmTimePlot shares one \
-             auto-scaled y-axis (no per-pen normalisation) — the per-pen ranges are not applied",
+            "line {}: strip chart normalises each pen to its own [lopr, hopr] onto a shared \
+             [0,1] axis (MEDM per-pen normalisation); MEDM's separate per-range y-axis label \
+             columns are not reproduced",
             widget.line
         ));
     }
@@ -3189,28 +3202,45 @@ fn text_alignment(widget: &MedmWidget) -> Option<(&'static str, &'static str)> {
 /// nothing (both channel-driven). This closes the former all-or-nothing residual
 /// where a single-sided default was dropped to the channel and warned.
 fn user_defined_limits(widget: &MedmWidget) -> Option<String> {
-    let lo_default = widget.assignments.get("loprSrc").map(String::as_str) == Some("default");
-    let hi_default = widget.assignments.get("hoprSrc").map(String::as_str) == Some("default");
-    if !lo_default && !hi_default {
-        return None; // both channel-sourced
+    match defaulted_limits(|k| widget.assignments.get(k)) {
+        (None, None) => None, // both channel-sourced
+        (Some(lo), Some(hi)) => Some(format!(
+            ".with_limits({}, {})",
+            float_lit(lo),
+            float_lit(hi)
+        )),
+        (Some(lo), None) => Some(format!(".with_lower_limit({})", float_lit(lo))),
+        (None, Some(hi)) => Some(format!(".with_upper_limit({})", float_lit(hi))),
     }
-    let lo = widget
-        .assignments
-        .get("loprDefault")
-        .and_then(|s| s.parse::<f64>().ok())
-        .unwrap_or(0.0); // LOPR_DEFAULT
-    let hi = widget
-        .assignments
-        .get("hoprDefault")
-        .and_then(|s| s.parse::<f64>().ok())
-        .unwrap_or(1.0); // HOPR_DEFAULT
-    Some(if lo_default && hi_default {
-        format!(".with_limits({}, {})", float_lit(lo), float_lit(hi))
-    } else if lo_default {
-        format!(".with_lower_limit({})", float_lit(lo))
-    } else {
-        format!(".with_upper_limit({})", float_lit(hi))
-    })
+}
+
+/// Resolve each limit end from its OWN MEDM source (per-bound, R2-66) out of an
+/// arbitrary key block: an end is user-defined only when its `*Src == "default"`
+/// (`PV_LIMITS_DEFAULT`), its value falling to LOPR_DEFAULT `0.0` /
+/// HOPR_DEFAULT `1.0` when the `*Default` key is omitted (`medmWidget.h:55-56`;
+/// `writeDlLimits` omits each default at that value, `medmCommon.c:653-662`).
+/// Returns `(lo, hi)` where each end is `Some(value)` when default-sourced and
+/// `None` when channel-sourced. `get` looks a key up in the block — a widget's
+/// `assignments` for a control's own limits, or a strip-chart pen map for a pen
+/// range — so both share one resolver.
+fn defaulted_limits<'a>(get: impl Fn(&str) -> Option<&'a String>) -> (Option<f64>, Option<f64>) {
+    let end = |src: &str, default_key: &str, fallback: f64| {
+        (get(src).map(String::as_str) == Some("default")).then(|| {
+            get(default_key)
+                .and_then(|s| s.parse::<f64>().ok())
+                .unwrap_or(fallback)
+        })
+    };
+    (
+        end("loprSrc", "loprDefault", 0.0),
+        end("hoprSrc", "hoprDefault", 1.0),
+    )
+}
+
+/// Emit `Some(<float>)` / `None` for an optional normalization bound fed to
+/// `SidmTimePlot::add_normalized_channel`.
+fn opt_float_lit(v: Option<f64>) -> String {
+    v.map_or_else(|| "None".to_string(), |v| format!("Some({})", float_lit(v)))
 }
 
 /// A `.with_orientation(...)` builder from a MEDM `direction`, or `None` when the
@@ -7535,12 +7565,14 @@ composite {
     }
 
     #[test]
-    fn strip_chart_pen_limits_are_retained_and_warned_not_silently_dropped() {
+    fn strip_chart_pen_limits_normalize_each_pen_onto_the_shared_axis() {
         // R3-18: a pen's `limits {}` block used to vanish at the parser (level-0
-        // assignments only), so codegen could not even warn. The deep pass now
-        // retains it; codegen warns that MEDM's per-pen [lopr, hopr] normalisation
-        // is not reproduced on SidmTimePlot's single shared axis — and the pen's
-        // own chan/clr must still parse through the nested block.
+        // assignments only). The deep pass retains it, and now codegen APPLIES it:
+        // when any pen carries an authored range, every pen is emitted through
+        // `add_normalized_channel` so SidmTimePlot maps it onto the shared [0,1]
+        // axis (MEDM per-pen normalisation, medmStripChart.c:1878-1898). The real
+        // MEDM source token for a default-sourced end is "default"
+        // (stringValueTable[PV_LIMITS_DEFAULT], displayList.h:464).
         let adl = r#"
 "color map" {
 	colors {
@@ -7561,9 +7593,9 @@ composite {
 		chan="DEV:T"
 		clr=2
 		limits {
-			loprSrc="Default constant"
+			loprSrc="default"
 			loprDefault=0
-			hoprSrc="Default constant"
+			hoprSrc="default"
 			hoprDefault=300
 		}
 	}
@@ -7574,29 +7606,80 @@ composite {
 }
 "#;
         let g = generate(&parse(adl), &Options::default());
-        // Exactly one pen carried a range block → warn names the count and the
-        // reason, rather than dropping it silently.
+        // The authored [0,300] pen normalizes with its fixed bounds; the pen's own
+        // chan/clr must still parse through the nested block.
+        assert!(
+            g.source.contains(
+                "add_normalized_channel(&engine, \"ca://DEV:T\", \
+                 Color32::from_rgb(255, 0, 0), \"DEV:T\", Some(0.0), Some(300.0))"
+            ),
+            "authored-range pen must normalize with its fixed bounds:\n{}",
+            g.source
+        );
+        // The limitless pen normalizes too (channel-sourced ends → None), so both
+        // pens share the [0,1] axis rather than one staying on a raw auto-scale.
+        assert!(
+            g.source.contains(
+                "add_normalized_channel(&engine, \"ca://DEV:P\", \
+                 Color32::from_rgb(0, 255, 0), \"DEV:P\", None, None)"
+            ),
+            "limitless pen must normalize with channel-sourced bounds:\n{}",
+            g.source
+        );
+        // The residual fidelity gap (MEDM's per-range y-axis label columns) is
+        // noted, not silently dropped — but the ranges themselves are now applied.
         assert!(
             g.warnings
                 .iter()
-                .any(|w| w.contains("1 pen(s) with an authored `limits` range")
-                    && w.contains("not applied")),
-            "expected a per-pen-limits warning:\n{:?}",
+                .any(|w| w.contains("per-pen normalisation")
+                    && w.contains("per-range y-axis label columns are not reproduced")),
+            "expected the per-pen normalisation fidelity note:\n{:?}",
             g.warnings
         );
-        // The nested limits block must not corrupt the pen's own chan/clr parse.
         assert!(
-            g.source.contains(
-                "add_channel(&engine, \"ca://DEV:T\", Color32::from_rgb(255, 0, 0), \"DEV:T\")"
-            ),
-            "pen with a limits block lost its chan/clr:\n{}",
-            g.source
+            !g.warnings.iter().any(|w| w.contains("not applied")),
+            "the per-pen ranges must no longer be reported as unapplied:\n{:?}",
+            g.warnings
         );
+    }
+
+    #[test]
+    fn strip_chart_pen_with_one_authored_end_normalizes_per_bound() {
+        // R2-66 boundary on a pen: only the lower end is default-sourced, so it
+        // pins `Some(lo)` while the upper stays channel-sourced (`None`) — the
+        // single authored end still triggers normalisation for the whole chart.
+        let adl = r#"
+"color map" {
+	colors {
+		ffffff,
+		000000,
+		ff0000,
+	}
+}
+"strip chart" {
+	object {
+		x=0
+		y=0
+		width=100
+		height=100
+	}
+	pen[0] {
+		chan="DEV:T"
+		clr=2
+		limits {
+			loprSrc="default"
+			loprDefault=-5
+		}
+	}
+}
+"#;
+        let g = generate(&parse(adl), &Options::default());
         assert!(
             g.source.contains(
-                "add_channel(&engine, \"ca://DEV:P\", Color32::from_rgb(0, 255, 0), \"DEV:P\")"
+                "add_normalized_channel(&engine, \"ca://DEV:T\", \
+                 Color32::from_rgb(255, 0, 0), \"DEV:T\", Some(-5.0), None)"
             ),
-            "limitless pen dropped:\n{}",
+            "lower-only authored pen must pin Some(lo) with a channel-sourced hi:\n{}",
             g.source
         );
     }
@@ -7693,15 +7776,22 @@ display {
     }
 
     #[test]
-    fn strip_chart_without_pen_limits_does_not_warn() {
-        // The stock two-pen chart (no `limits`) must not trip the new warning.
+    fn strip_chart_without_pen_limits_stays_on_the_auto_scaled_axis() {
+        // R3-18: the stock two-pen chart (no authored `limits`) must NOT normalize
+        // — it keeps `add_channel` on the single auto-scaled axis (the common
+        // same-range case), and emits no per-pen normalisation note.
         let g = plots(&Options::default());
         assert!(
             !g.warnings
                 .iter()
-                .any(|w| w.contains("authored `limits` range")),
-            "no-limits strip chart must not warn:\n{:?}",
+                .any(|w| w.contains("per-pen normalisation")),
+            "no-range strip chart must not emit the normalisation note:\n{:?}",
             g.warnings
+        );
+        assert!(
+            !g.source.contains("add_normalized_channel"),
+            "no-range strip chart must stay on add_channel:\n{}",
+            g.source
         );
     }
 

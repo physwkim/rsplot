@@ -182,17 +182,70 @@ struct TimeCurve {
     feed: CurveFeed,
     handle: ItemHandle,
     style: CurveStyle,
+    /// Per-pen normalization onto the shared [0,1] axis (MEDM strip chart), or
+    /// `None` for a raw curve on the auto-scaled axis.
+    norm: Option<PenNorm>,
     xs: Vec<f64>,
     ys: Vec<f64>,
 }
 
+/// One end of a pen's normalization range. MEDM resolves each end independently
+/// (per-bound source, R2-66): an authored constant (`*Src="default"` →
+/// `*Default`) or the channel's own display limit (`PV_LIMITS_CHANNEL`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum NormBound {
+    /// An authored constant (MEDM `*Default`).
+    Fixed(f64),
+    /// Resolve from the channel's display limits at draw time, falling back to
+    /// 0.0 (lo) / 1.0 (hi) until they arrive — MEDM's unset-channel `[0,1]`
+    /// guard (`medmStripChart.c:1441-1443`).
+    Channel,
+}
+
+/// A pen's normalization onto the shared `[0,1]` axis (MEDM per-pen `[lopr,hopr]`
+/// mapping, `medmStripChart.c:1878-1898`): the displayed value is
+/// `(v - lopr) / (hopr - lopr)`, so pens with wildly different ranges (300 K vs
+/// 1e-6 Torr) become comparable traces.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct PenNorm {
+    lo: NormBound,
+    hi: NormBound,
+}
+
+/// The concrete `(lo, hi)` for a pen normalization: resolve each `Channel` end
+/// against `display_limits` (→ 0.0/1.0 when absent), then widen a degenerate
+/// range (`lo >= hi`) to `[lo, lo + 1]` — generalizing MEDM's both-zero
+/// `hopr += 1` nudge (`medmStripChart.c:1441-1443`), which otherwise divides by
+/// zero.
+fn norm_bounds(norm: PenNorm, display_limits: Option<(f64, f64)>) -> (f64, f64) {
+    let lo = match norm.lo {
+        NormBound::Fixed(v) => v,
+        NormBound::Channel => display_limits.map_or(0.0, |(lo, _)| lo),
+    };
+    let hi = match norm.hi {
+        NormBound::Fixed(v) => v,
+        NormBound::Channel => display_limits.map_or(1.0, |(_, hi)| hi),
+    };
+    if hi > lo { (lo, hi) } else { (lo, lo + 1.0) }
+}
+
 /// Redraw `curve` from its buffer, feeding siplot relative-time X (`t - t0`) so
 /// the GPU coordinates stay small (see the module docs on `f32` precision). The
-/// buffer keeps absolute epoch timestamps; only the render feed is offset.
+/// buffer keeps absolute epoch timestamps; only the render feed is offset. A
+/// normalized pen additionally maps each Y through `(v - lo) / (hi - lo)` onto
+/// the shared `[0,1]` axis (MEDM per-pen normalization); the buffer keeps the
+/// raw values.
 fn redraw_curve(plot: &mut Plot1D, curve: &mut TimeCurve, t0: f64) {
     curve.feed.buffer.ordered_into(&mut curve.xs, &mut curve.ys);
     for x in &mut curve.xs {
         *x -= t0;
+    }
+    if let Some(norm) = curve.norm {
+        let (lo, hi) = norm_bounds(norm, curve.channel.state().display_limits);
+        let base = hi - lo;
+        for y in &mut curve.ys {
+            *y = (*y - lo) / base;
+        }
     }
     plot.update_curve_spec(curve.handle, curve.style.to_spec(&curve.xs, &curve.ys));
 }
@@ -219,6 +272,11 @@ pub struct SidmTimePlot {
     time_zone: TimeZone,
     /// State for the pyqtgraph-style Y-axis context menu (auto-scale + range).
     y_menu: YAxisMenu,
+    /// Set once the first per-pen normalized curve is added
+    /// ([`SidmTimePlot::add_normalized_channel`]); the shared left axis is then
+    /// pinned to `[0,1]` and every normalized pen maps into it (MEDM strip
+    /// chart). Raw `add_channel` curves stay on the auto-scaled axis.
+    normalized: bool,
 }
 
 impl SidmTimePlot {
@@ -252,6 +310,7 @@ impl SidmTimePlot {
             // UTC if the local zone can't be resolved.
             time_zone: TimeZone::local().unwrap_or(TimeZone::Utc),
             y_menu: YAxisMenu::new(),
+            normalized: false,
         };
         // Set the X tick mode + label for the default (relative) axis.
         chart.apply_time_axis();
@@ -464,10 +523,44 @@ impl SidmTimePlot {
             feed: CurveFeed::new(self.buffer_size),
             handle,
             style: CurveStyle::line(color),
+            norm: None,
             xs: Vec::new(),
             ys: Vec::new(),
         });
         Ok(self.curves.len() - 1)
+    }
+
+    /// Connect `address` and add it as a pen **normalized** onto the shared
+    /// `[0,1]` axis (MEDM strip-chart per-pen `[lopr,hopr]` mapping,
+    /// `medmStripChart.c:1878-1898`): each Y is displayed as
+    /// `(v - lopr) / (hopr - lopr)`, so pens with different engineering ranges
+    /// stay readable on one axis. `lo`/`hi`: `Some(v)` pins that end (MEDM
+    /// `*Src="default"` → `*Default`); `None` resolves that end from the
+    /// channel's display limits at draw time (MEDM `PV_LIMITS_CHANNEL`), falling
+    /// back to 0.0/1.0 until they arrive. Adding the first normalized pen pins
+    /// the shared left axis to `[0,1]`. Returns the new curve's index.
+    pub fn add_normalized_channel(
+        &mut self,
+        engine: &Engine,
+        address: &str,
+        color: Color32,
+        legend: impl Into<String>,
+        lo: Option<f64>,
+        hi: Option<f64>,
+    ) -> Result<usize, EngineError> {
+        let index = self.add_channel(engine, address, color, legend)?;
+        self.curves[index].norm = Some(PenNorm {
+            lo: lo.map_or(NormBound::Channel, NormBound::Fixed),
+            hi: hi.map_or(NormBound::Channel, NormBound::Fixed),
+        });
+        if !self.normalized {
+            self.normalized = true;
+            // Pin the shared left axis to [0,1]; every normalized pen maps into
+            // it. `set_y_range` turns off Y autoscale so the pin survives the
+            // per-frame data updates.
+            set_y_range(&mut self.plot, 0.0, 1.0);
+        }
+        Ok(index)
     }
 
     /// Restyle curve `index` (PyDM `BasePlotCurveItem` properties: colour, line
@@ -652,5 +745,75 @@ mod tests {
         assert!(feed.ingest_fixed(2.0, &state(true, 2, Some(PvValue::Float(7.0))), true));
         assert_eq!(feed.buffer.newest(), Some((2.0, 7.0)));
         assert_eq!(feed.buffer.len(), 1);
+    }
+
+    /// Map a raw value through a resolved normalization, the way `redraw_curve`
+    /// feeds siplot: `(v - lo) / (hi - lo)` over `norm_bounds`.
+    fn normalize(norm: PenNorm, display_limits: Option<(f64, f64)>, v: f64) -> f64 {
+        let (lo, hi) = norm_bounds(norm, display_limits);
+        (v - lo) / (hi - lo)
+    }
+
+    #[test]
+    fn fixed_range_pen_normalizes_to_unit_axis() {
+        // R3-18: an authored [0,300] pen maps 0→0, 150→0.5, 300→1 with no clamp.
+        let n = PenNorm {
+            lo: NormBound::Fixed(0.0),
+            hi: NormBound::Fixed(300.0),
+        };
+        assert_eq!(normalize(n, None, 0.0), 0.0);
+        assert_eq!(normalize(n, None, 150.0), 0.5);
+        assert_eq!(normalize(n, None, 300.0), 1.0);
+        assert!((normalize(n, None, -30.0) - -0.1).abs() < 1e-12, "no clamp");
+    }
+
+    #[test]
+    fn mixed_range_pens_share_the_normalized_axis() {
+        // R3-18 (the readability goal): a 300 K pen and a 1e-6 Torr pen both land
+        // mid-axis at their mid-range value, so both traces are visible together.
+        let temp = PenNorm {
+            lo: NormBound::Fixed(0.0),
+            hi: NormBound::Fixed(300.0),
+        };
+        let press = PenNorm {
+            lo: NormBound::Fixed(0.0),
+            hi: NormBound::Fixed(1e-6),
+        };
+        assert_eq!(normalize(temp, None, 150.0), 0.5);
+        assert_eq!(normalize(press, None, 5e-7), 0.5);
+    }
+
+    #[test]
+    fn degenerate_range_is_widened_not_divided_by_zero() {
+        // R3-18: lopr == hopr would divide by zero; widen to [lo, lo+1].
+        let n = PenNorm {
+            lo: NormBound::Fixed(5.0),
+            hi: NormBound::Fixed(5.0),
+        };
+        assert_eq!(norm_bounds(n, None), (5.0, 6.0));
+        assert_eq!(normalize(n, None, 5.0), 0.0);
+        assert_eq!(normalize(n, None, 6.0), 1.0);
+        assert!(normalize(n, None, 5.5).is_finite());
+    }
+
+    #[test]
+    fn channel_sourced_ends_resolve_from_display_limits() {
+        // R3-18: a `Channel` end reads the channel's display limits; absent, it
+        // falls back to 0.0 (lo) / 1.0 (hi) — MEDM's unset-channel [0,1] guard.
+        let both = PenNorm {
+            lo: NormBound::Channel,
+            hi: NormBound::Channel,
+        };
+        assert_eq!(norm_bounds(both, Some((10.0, 20.0))), (10.0, 20.0));
+        assert_eq!(normalize(both, Some((10.0, 20.0)), 15.0), 0.5);
+        assert_eq!(norm_bounds(both, None), (0.0, 1.0));
+        assert_eq!(normalize(both, None, 0.25), 0.25);
+        // Per-end (R2-66): a fixed lo with a channel-sourced hi.
+        let mixed = PenNorm {
+            lo: NormBound::Fixed(0.0),
+            hi: NormBound::Channel,
+        };
+        assert_eq!(norm_bounds(mixed, Some((-999.0, 50.0))), (0.0, 50.0));
+        assert_eq!(normalize(mixed, Some((0.0, 50.0)), 25.0), 0.5);
     }
 }

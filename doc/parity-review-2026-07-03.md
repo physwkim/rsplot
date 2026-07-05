@@ -2935,21 +2935,46 @@ Impact: included content whose bbox min is not (0,0) — common, since child dis
 level-0 assignments only), so codegen could not even warn. `indexed_records`
 gained a `deep` flag; the `pen[` call now uses `locate_assignments_deep`, which
 flattens the nested `limits` keys (`loprSrc`/`hoprSrc`/`loprDefault`/… — they
-cannot collide with the pen's `chan`/`clr`) into the pen's IR map. `emit_strip_chart`
-now counts pens carrying an authored range and **warns** that MEDM normalises
-each pen to its own `[lopr, hopr]` (`medmStripChart.c:467-509`) but SidmTimePlot
-shares one auto-scaled y-axis, so the per-pen ranges are not applied — no longer
-a silent drop that bypasses the warn convention.
+cannot collide with the pen's `chan`/`clr`) into the pen's IR map — so the range
+survives to codegen. (This first R3 pass only *warned* that the ranges could not
+be applied; the per-pen-normalisation block below now **applies** them, so that
+interim warning is gone.)
 
-Tests: `strip_chart_pen_limits_are_retained_and_warned_not_silently_dropped`
-(one ranged pen → warn names count + reason; the nested block does not corrupt
-the pen's own `chan`/`clr`), `strip_chart_without_pen_limits_does_not_warn`.
+**FIXED (per-pen normalisation applied — "위에 3개 착수", 2026-07-06):** the
+deferred rendering half is now implemented. `SidmTimePlot` gained per-pen
+normalisation onto a shared `[0,1]` axis, reproducing MEDM's per-pen `[lopr,hopr]`
+mapping (`medmStripChart.c:1878-1898`, `norm = (value - lopr)/(hopr - lopr)`, no
+clamp):
 
-**DEFERRED (per-pen normalisation — a SidmTimePlot rendering feature):** actually
-reproducing MEDM's per-pen normalised traces needs a per-curve normalised y-axis,
-which SidmTimePlot (single shared `with_y_range`/`set_y_range`) does not have.
-That is a plotting-engine feature, not a converter change; documented, not taken
-unilaterally.
+- `TimeCurve.norm: Option<PenNorm>` where `PenNorm { lo, hi }` and
+  `enum NormBound { Fixed(f64), Channel }` resolve each end independently (R2-66):
+  an authored constant, or the channel's display limit at draw time (falling back
+  to 0.0/1.0 until it arrives — MEDM's unset-channel `[0,1]` guard,
+  `medmStripChart.c:1441-1443`). A degenerate range (`lo >= hi`) widens to
+  `[lo, lo+1]`, generalizing MEDM's both-zero `hopr += 1` nudge (no divide-by-zero).
+- `pub fn add_normalized_channel(engine, address, color, legend, lo, hi)` adds a
+  normalized pen; the first such pen pins the shared left axis to `[0,1]` via
+  `set_y_range` (Y autoscale off so the pin survives streaming updates). The raw
+  buffer keeps absolute values; only the render feed in `redraw_curve` maps
+  `(v - lo)/(hi - lo)` — the single mapping site, so it covers every redraw path.
+- `emit_strip_chart` emits `add_normalized_channel` per pen when **any** pen
+  carries an authored range (the `defaulted_limits` per-end resolver, now shared
+  with `user_defined_limits`); a chart with no authored range stays on
+  `add_channel`'s single auto-scaled axis (the common same-range case). The old
+  "ranges not applied" warning is replaced by a residual-fidelity note: MEDM's
+  separate per-range y-axis label columns are not reproduced (single `[0,1]` axis)
+  — noted, not a silent cap. The real MEDM source token is `"default"`
+  (`stringValueTable[PV_LIMITS_DEFAULT]`, `displayList.h:464`), not the fictitious
+  `"Default constant"` the earlier warn-only test fixture used.
+
+Tests: sidm `fixed_range_pen_normalizes_to_unit_axis` (0→0, 150→0.5, 300→1, no
+clamp), `mixed_range_pens_share_the_normalized_axis` (300 K + 1e-6 Torr both land
+mid-axis), `degenerate_range_is_widened_not_divided_by_zero`,
+`channel_sourced_ends_resolve_from_display_limits` (per-end fallback + fixed/channel
+mix); adl2sidm `strip_chart_pen_limits_normalize_each_pen_onto_the_shared_axis`
+(authored pen `Some(0.0),Some(300.0)` + limitless pen `None,None`, fidelity note,
+no "not applied"), `strip_chart_pen_with_one_authored_end_normalizes_per_bound`
+(lower-only `Some(-5.0),None`), `strip_chart_without_pen_limits_stays_on_the_auto_scaled_axis`.
 
 Severity: Medium
 
