@@ -811,7 +811,10 @@ impl Scene3dPipeline {
                 depth_stencil: Some(wgpu::DepthStencilState {
                     format: DEPTH_FORMAT,
                     depth_write_enabled: Some(true),
-                    depth_compare: Some(wgpu::CompareFunction::Less),
+                    // silx sets `glDepthFunc(GL_LEQUAL)` once for the whole 3D scene
+                    // (scene/viewport.py:360); LessEqual lets a fragment at exactly
+                    // the stored depth pass, matching silx for coplanar redraws.
+                    depth_compare: Some(wgpu::CompareFunction::LessEqual),
                     stencil: wgpu::StencilState::default(),
                     bias: wgpu::DepthBiasState::default(),
                 }),
@@ -885,7 +888,10 @@ impl Scene3dPipeline {
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: DEPTH_FORMAT,
                 depth_write_enabled: Some(true),
-                depth_compare: Some(wgpu::CompareFunction::Less),
+                // silx sets `glDepthFunc(GL_LEQUAL)` once for the whole 3D scene
+                // (scene/viewport.py:360); LessEqual lets a fragment at exactly
+                // the stored depth pass, matching silx for coplanar redraws.
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
@@ -958,7 +964,10 @@ impl Scene3dPipeline {
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: DEPTH_FORMAT,
                 depth_write_enabled: Some(true),
-                depth_compare: Some(wgpu::CompareFunction::Less),
+                // silx sets `glDepthFunc(GL_LEQUAL)` once for the whole 3D scene
+                // (scene/viewport.py:360); LessEqual lets a fragment at exactly
+                // the stored depth pass, matching silx for coplanar redraws.
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
@@ -1027,7 +1036,10 @@ impl Scene3dPipeline {
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: DEPTH_FORMAT,
                 depth_write_enabled: Some(true),
-                depth_compare: Some(wgpu::CompareFunction::Less),
+                // silx sets `glDepthFunc(GL_LEQUAL)` once for the whole 3D scene
+                // (scene/viewport.py:360); LessEqual lets a fragment at exactly
+                // the stored depth pass, matching silx for coplanar redraws.
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),

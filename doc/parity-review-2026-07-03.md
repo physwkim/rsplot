@@ -2644,6 +2644,15 @@ Impact: geometry drawn after the cut plane (the whole points channel, subsequent
 
 ### R3-10: R2-47 residual — all four scene pipelines use `CompareFunction::Less` where silx sets `glDepthFunc(GL_LEQUAL)` — (R2-47 residual)
 
+**FIXED (R3):** all four depth-tested scene3d pipelines (line, point, mesh,
+image) now use `CompareFunction::LessEqual`, matching silx's global
+`glDepthFunc(GL_LEQUAL)` set once for the whole 3D viewport
+(`plot3d/scene/viewport.py:360`). `rg 'CompareFunction::Less\b'` confirmed
+exactly these four `depth_compare` sites workspace-wide and no fifth scene3d
+depth pipeline; the blit pass is depth-off and unaffected. LessEqual lets a
+fragment at exactly the stored depth pass (coplanar redraws), which `Less`
+rejected.
+
 Severity: Low
 
 Rust: `src/render/gpu_scene3d.rs:814, 888, 961, 1030` — `depth_compare: Some(wgpu::CompareFunction::Less)` on the line/triangle, point, mesh, image pipelines. The R2-47 fix (ad2b7b0) aligned the blend state but not the depth function two lines below the cited block.
