@@ -2788,6 +2788,26 @@ Impact: an integer literal with `dtype=float` stays `IntArray` in sidm (float ar
 
 ### R3-16: Composite-file macros are merged with the parent's; MEDM replaces the table
 
+**FIXED (R3, structural — the cited `merged_macros` was a sample, not the whole
+family):** two paths let the parent's macros reach a `child.adl;M=2` subtree.
+(1) Convert time: `merged_macros` now **replaces** the table when the macro
+string is non-empty (parent macros dropped) and only **inherits** the parent's
+on an empty string, matching `compositeFileParse` (`medmComposite.c:659-668`,
+`if(*macroString)`). (2) Runtime: a `$(P)` that survives the replace table was
+still emitted as `__m.expand("…$(P)…")`, and the runtime `__m` carries the
+top-level `P=ioc1:` — so it re-injected the parent macro at runtime even after
+the convert-time fix. Added `Builder::seal_macros`, set for the duration of a
+replace-include subtree (and any nested include under it): `medm_str` and the
+related-display args path then emit a surviving `$(name)` as a **plain literal**
+(MEDM `getToken` passthrough — the replaced parent table is out of scope), not
+an `__m.expand`. The inherit case is unchanged: its surviving macros correctly
+defer to `__m`, tracking the parent's runtime binding.
+
+Tests: `embedded_macro_string_replaces_parent_table` (replace → `$(P)` emitted
+as a literal, never `__m.expand`, so it cannot resolve to `ioc1:` at runtime),
+`embedded_empty_macro_string_inherits_parent_table` (empty string → `$(P)`
+expands to the inherited `ioc1:`).
+
 Severity: Medium
 
 Rust: `adl2sidm/src/codegen.rs:2167-2171` — `merged_macros` builds the inlined subtree's table as `parse_embedded_macros(embedded)` then `extend_from_slice(parent)`; comment `:2109-2111` claims "embedded values winning over inherited" is MEDM behaviour; applied at `:2104-2112`.

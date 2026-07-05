@@ -204,6 +204,15 @@ struct Builder {
     /// `emit_ui` and the nested-children path in `emit_frame_container`) can read
     /// it without threading `Options` through every call.
     use_layout: bool,
+    /// When `true`, the subtree being emitted is inside a composite-file include
+    /// that **replaced** its macro table (a non-empty `;macros` string — MEDM
+    /// `compositeFileParse`, `medmComposite.c:659-668`). The parent's macros are
+    /// out of scope there, so a `$(name)` that survives the replace table is a
+    /// literal dead reference in MEDM (`getToken` passthrough), NOT a runtime
+    /// rebind: [`medm_str`] must emit it as a plain literal, not an `__m.expand`
+    /// against the parent's runtime table. Set (never cleared) for the duration
+    /// of a replace-include subtree, so nested inherit-includes stay sealed too.
+    seal_macros: bool,
 }
 
 impl Builder {
@@ -2049,8 +2058,10 @@ fn icon_color_exprs(widget: &MedmWidget) -> (String, String) {
 /// MEDM/PyDM load at run time; SiDM has no run-time display loader, so the
 /// faithful analogue is to read that file *now*, convert it, and emit its widgets
 /// into a `SidmFrame` at the embedded geometry — the same inlining `composite`
-/// uses, but sourced from an external file. The embedded `macros` extend (and
-/// override) the parent's for the inlined subtree.
+/// uses, but sourced from an external file. Per MEDM `compositeFileParse`, a
+/// non-empty `macros` string **replaces** the parent's table for the inlined
+/// subtree (an empty one inherits it) — see [`merged_macros`] and
+/// [`Builder::seal_macros`].
 ///
 /// Inlining needs the source directory ([`Options::source_dir`]); without it, or
 /// when the file is missing / forms an include cycle / exceeds
@@ -2099,20 +2110,31 @@ fn emit_embedded_display(b: &mut Builder, widget: &MedmWidget, options: &Options
 
     let mut target = parse(&text);
     // Resolve the target's channels in the embedded directory (so a nested
-    // embedded display resolves relative to *its* file), with the embedded macros
-    // taking precedence over the inherited ones.
+    // embedded display resolves relative to *its* file). Per MEDM
+    // `compositeFileParse`, a non-empty macro string on the `composite file`
+    // replaces the macro table (parent macros are dropped for this subtree);
+    // an empty one inherits the parent's (see [`merged_macros`]).
     let child_options = Options {
         macros: merged_macros(&macros, &options.macros),
         source_dir: canonical.parent().map(PathBuf::from),
         ..options.clone()
     };
     // Same parse→emit boundary as `generate`: bake this display's macros into its
-    // subtree before inlining (MEDM expands macros per display, embedded values
-    // winning over inherited via `merged_macros`).
+    // subtree before inlining (MEDM expands macros per display; the table is the
+    // embedded-or-inherited one resolved by `merged_macros`).
     expand_macros(&mut target.widgets, &child_options.macros);
     let addr = b.synthetic_addr("embed");
 
     b.embed_stack.push(canonical);
+    // A non-empty `;macros` string replaced the child's macro table (MEDM
+    // `compositeFileParse`): the parent's macros are out of scope for this
+    // subtree, so any `$(name)` that survived the replace table must stay
+    // literal rather than expand against the runtime `__m` (see
+    // [`Builder::seal_macros`]). Sealed for the whole subtree — including nested
+    // inherit-includes — and restored to the prior value on the way out (a
+    // replace-include nested inside another stays sealed regardless).
+    let prev_seal = b.seal_macros;
+    b.seal_macros = prev_seal || !macros.trim().is_empty();
     // The target's widgets are in its OWN screen coordinates (origin 0,0), so they
     // translate into the frame interior by (0, 0).
     emit_frame_container(
@@ -2126,6 +2148,7 @@ fn emit_embedded_display(b: &mut Builder, widget: &MedmWidget, options: &Options
         (0, 0),
         &child_options,
     );
+    b.seal_macros = prev_seal;
     b.embed_stack.pop();
     b.warnings.push(format!(
         "line {}: embedded display inlined {file} ({} widget(s))",
@@ -2161,13 +2184,18 @@ fn parse_embedded_macros(s: &str) -> Vec<(String, String)> {
         .collect()
 }
 
-/// The macros for an inlined subtree: the embedded display's own macros first
-/// (so they win on a key the parent also sets — [`substitute_macros`] applies the
-/// first match), then the inherited parent macros.
+/// The macros for an inlined subtree, matching MEDM `compositeFileParse`
+/// (`medmComposite.c:659-668`): a **non-empty** macro string **replaces** the
+/// macro table — the parent's macros are *not* consulted while parsing the
+/// included file — while an **empty** macro string keeps ("uses the existing")
+/// the parent's macros. So `child.adl;M=2` sees only `M=2` (a `$(P)` in the
+/// child stays literal, as in MEDM), whereas `child.adl` inherits the parent's.
 fn merged_macros(embedded: &str, parent: &[(String, String)]) -> Vec<(String, String)> {
-    let mut macros = parse_embedded_macros(embedded);
-    macros.extend_from_slice(parent);
-    macros
+    if embedded.trim().is_empty() {
+        parent.to_vec()
+    } else {
+        parse_embedded_macros(embedded)
+    }
 }
 
 /// A visible placeholder for an embedded display that could not be inlined (no
@@ -2447,12 +2475,15 @@ fn rd_click(b: &mut Builder, line: usize, e: &RdEntry) -> (String, String) {
     // the args string; macro references in it resolve against the *parent*
     // instance's table at click time (MEDM `performMacroSubstitutions` — no
     // implicit inheritance of unnamed parent macros).
-    let args_expr = if has_macro_ref(&e.args) {
+    let args_expr = if has_macro_ref(&e.args) && !b.seal_macros {
         b.needs_macros = true;
         format!("__m.expand({})", rust_str(&e.args))
     } else if e.args.is_empty() {
         "String::new()".to_string()
     } else {
+        // Grounded, or sealed inside a replaced composite-file table (see
+        // [`medm_str`]): a surviving `$(name)` stays literal in the click-time
+        // args string, matching MEDM's out-of-scope-parent behaviour.
         format!("{}.to_string()", rust_str(&e.args))
     };
     let p = b.rt_prefix();
@@ -3238,10 +3269,14 @@ pub(crate) fn has_macro_ref(s: &str) -> bool {
 /// `impl Into<String>`/`Into<WidgetText>`, `AsRef<OsStr>`); the expansion
 /// temporary lives to the end of the enclosing statement.
 fn medm_str(b: &mut Builder, s: &str) -> String {
-    if has_macro_ref(s) {
+    if has_macro_ref(s) && !b.seal_macros {
         b.needs_macros = true;
         format!("__m.expand({}).as_str()", rust_str(s))
     } else {
+        // Fully grounded, OR a macro that survived a replaced composite-file
+        // table (`b.seal_macros`): MEDM leaves such a `$(name)` literal (the
+        // parent table it would have resolved against is out of scope), so emit
+        // the string verbatim rather than deferring to the runtime `__m`.
         rust_str(s)
     }
 }
@@ -7986,6 +8021,136 @@ composite {
             g.warnings.iter().any(|w| w.contains("inlined child.adl")),
             "{:?}",
             g.warnings
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn embedded_macro_string_replaces_parent_table() {
+        // MEDM compositeFileParse (medmComposite.c:659-668): a NON-EMPTY macro
+        // string replaces the table, so the parent's macros are NOT visible in
+        // the child. `$(P)` stays literal; only the embedded `M=2` applies.
+        let dir = embed_tmpdir("replace");
+        std::fs::write(
+            dir.join("child.adl"),
+            r#"
+display {
+	object {
+		x=0
+		y=0
+		width=120
+		height=24
+	}
+	clr=1
+	bclr=0
+}
+"text update" {
+	object {
+		x=4
+		y=2
+		width=110
+		height=18
+	}
+	monitor {
+		chan="loc://$(P)_$(M)?type=int"
+		clr=1
+	}
+}
+"#,
+        )
+        .unwrap();
+        let parent = r#"
+composite {
+	object {
+		x=30
+		y=40
+		width=120
+		height=24
+	}
+	"composite file"="child.adl;M=2"
+}
+"#;
+        let options = Options {
+            source_dir: Some(dir.clone()),
+            macros: vec![("P".to_string(), "ioc1:".to_string())],
+            ..Options::default()
+        };
+        let g = generate(&parse(parent), &options);
+        // Embedded M=2 applied at convert time; parent P dropped from the table
+        // so `$(P)` survives — and, because the composite replaced the table, it
+        // is emitted as a PLAIN LITERAL, not `__m.expand(...)`. If it were
+        // deferred to the runtime `__m` (which carries the top-level P=ioc1:),
+        // the source would still read `$(P)_2` here but resolve to `ioc1:_2` at
+        // runtime — exactly the leak this finding is about.
+        assert!(
+            g.source
+                .contains(r#"SidmLabel::new(&engine, "ca://loc://$(P)_2?type=int")"#),
+            "replaced-table child channel must be a literal `$(P)`, not an \
+             `__m.expand` against the parent's runtime table:\n{}",
+            g.source
+        );
+        assert!(
+            !g.source.contains(r#"__m.expand("ca://loc://$(P)"#),
+            "the child's surviving `$(P)` must not defer to the runtime table:\n{}",
+            g.source
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn embedded_empty_macro_string_inherits_parent_table() {
+        // Empty macro string ("use the existing macros"): the parent's macros
+        // ARE inherited, so `$(P)` expands.
+        let dir = embed_tmpdir("inherit");
+        std::fs::write(
+            dir.join("child.adl"),
+            r#"
+display {
+	object {
+		x=0
+		y=0
+		width=120
+		height=24
+	}
+	clr=1
+	bclr=0
+}
+"text update" {
+	object {
+		x=4
+		y=2
+		width=110
+		height=18
+	}
+	monitor {
+		chan="loc://$(P)dev?type=int"
+		clr=1
+	}
+}
+"#,
+        )
+        .unwrap();
+        let parent = r#"
+composite {
+	object {
+		x=30
+		y=40
+		width=120
+		height=24
+	}
+	"composite file"="child.adl"
+}
+"#;
+        let options = Options {
+            source_dir: Some(dir.clone()),
+            macros: vec![("P".to_string(), "ioc1:".to_string())],
+            ..Options::default()
+        };
+        let g = generate(&parse(parent), &options);
+        assert!(
+            g.source.contains("loc://ioc1:dev?type=int"),
+            "empty macro string must inherit the parent's macros:\n{}",
+            g.source
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
