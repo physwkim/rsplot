@@ -2702,6 +2702,28 @@ Impact: the standard idiom (one widget declares `loc://x?type=int&init=5`, other
 
 ### R3-13: `calc://` array-valued children skip evaluation silently and permanently — the R2-59 fail-visible contract does not cover the bind path; PyDM evaluates ndarray children — (R2-59 residual)
 
+**FIXED (R3, minimal closure — the finding's endorsed scope):** `evaluate_evalexpr`
+now splits the bare `?` at `:367` into its two meanings. A child with **no value
+yet** returns `None` **silently** (legitimate skip; PyDM waits until every child
+has a value). A child whose value is **present but non-scalar** (a waveform:
+`pv_to_evalexpr` returns `None`) now **warns once** per connection, then skips —
+extending R2-59's fail-visible contract to the bind path, so the waveform case
+is no longer a permanently silent dead channel re-skipped every 50 ms. The
+module doc no longer describes the array case as a silent skip.
+
+Test: `array_child_warns_once_while_missing_value_stays_silent` — three
+boundaries on one flag: value-less child → `warned` stays false; waveform child
+→ `warned` true, result `None`; scalar child → binds and evaluates, `warned`
+false.
+
+**DEFERRED (full array binding — needs sign-off):** true parity (evaluating
+`A[0]`, `np.mean(A)`, bare `A` over ndarray children) requires reversing sidm's
+**documented scalar-only calc value model** and adding an evalexpr array
+vocabulary + `np`/`numpy` namespace — a feature-sized change that overturns an
+existing design decision. Surfaced for sign-off (batched with R3-7 / R3-11 /
+R3-12), held while the user is away rather than reversing the scope decision
+unilaterally.
+
 Severity: Medium
 
 Rust: `sidm/src/data_plugins/calc_plugin.rs:367` — `let var = value.as_ref().and_then(pv_to_evalexpr)?;` conflates "no value yet" (legitimate skip) with "value present but unbindable" — `pv_to_evalexpr` returns `None` for `FloatArray`/`IntArray`/`StrArray` (`:710`). R2-59's warn-once plumbing (`5207dc5`) fires only on `set_value` errors (`:369-373`) and eval errors (`:384-387`); the `?` at `:367` bypasses both, so a connected waveform child makes the calc channel a permanently dead silent channel (the 50 ms poll re-skips forever).

@@ -23,13 +23,17 @@
 //! `pi`, `floor(B)`, …) plus `epics_string` / `epics_unsigned`
 //! (`CalcThread.eval_env`, `calc_plugin.py:50-53`; the gaps — `np`, dotted
 //! `math.` spellings, Python builtins — are enumerated on that function). Only
-//! **scalar** children participate — an array-valued child leaves its variable
-//! unset, so an expression referencing it does not evaluate until/unless it
-//! carries a scalar — except a [`PvValue::Bytes`] char waveform, which binds as
+//! **scalar** children participate — a child with **no value yet** silently
+//! defers evaluation (PyDM waits until every child has a value), but a child
+//! that *is* connected with a **non-scalar (waveform) value** cannot bind (PyDM
+//! evaluates array children through its ndarray vocabulary; sidm's calc value
+//! model is scalar-only) and so **warns once**, then skips — fail-visible per
+//! the R2-59 contract, not the silent permanent dead channel a bare skip would
+//! leave. A [`PvValue::Bytes`] char waveform is the one exception that binds, as
 //! its NUL-terminated string (the `epics_string` transform). An expression that
-//! fails to evaluate publishes nothing and **warns once** per connection
-//! (PyDM `logger.exception`s every failure, `calc_plugin.py:174-179`; sidm's
-//! 50 ms poll would repeat the message indefinitely, so it logs once).
+//! fails to evaluate likewise publishes nothing and **warns once** per
+//! connection (PyDM `logger.exception`s every failure, `calc_plugin.py:174-179`;
+//! sidm's 50 ms poll would repeat the message indefinitely, so it logs once).
 //!
 //! # The MEDM CALC dialect (`?dialect=medm`)
 //!
@@ -348,12 +352,21 @@ fn evaluate(
 }
 
 /// Evaluate `expr` against the children's current scalar values plus `prev_res`,
-/// in the PyDM calc vocabulary ([`pydm_calc_context`]). Returns `None` (skip)
-/// when any variable lacks a bindable value — matching PyDM's "skip until all
-/// values set" — and `None` **with a warn-once log** when the expression itself
-/// fails, matching PyDM's `logger.exception` on an `eval` failure
-/// (`calc_plugin.py:174-179`; PyDM logs every failure, sidm once per connection
-/// — the 50 ms poll would otherwise repeat the same message indefinitely).
+/// in the PyDM calc vocabulary ([`pydm_calc_context`]). Returns `None` (skip) in
+/// three cases, two silent and one fail-visible:
+///
+/// - a child has **no value yet** — a silent skip, matching PyDM's "skip until
+///   all values set" (`calc_plugin.py:170-172`); it resolves once the child
+///   delivers a value;
+/// - a child has a **non-scalar (waveform) value** that sidm's scalar-only calc
+///   cannot bind — **warn-once**, then skip. PyDM evaluates array children; sidm
+///   does not, so R2-59's fail-visible contract turns what was a permanently
+///   silent dead channel (the old bare `?`) into a logged skip;
+/// - the **expression itself fails** — **warn-once**, matching PyDM's
+///   `logger.exception` on an `eval` failure (`calc_plugin.py:174-179`).
+///
+/// PyDM logs every failure; sidm logs once per connection (`warned_eval`) —
+/// the 50 ms poll would otherwise repeat the same message indefinitely.
 fn evaluate_evalexpr(
     id: &str,
     expr: &str,
@@ -364,7 +377,30 @@ fn evaluate_evalexpr(
     let mut ctx = pydm_calc_context();
     for (name, ch) in children {
         let value = ch.read(|s| s.value.clone());
-        let var = value.as_ref().and_then(pv_to_evalexpr)?;
+        let Some(value) = value else {
+            // No value yet — a legitimate skip (PyDM waits until every child has
+            // a value, calc_plugin.py:170-172). Silent: it resolves once the
+            // child delivers a value.
+            return None;
+        };
+        let Some(var) = pv_to_evalexpr(&value) else {
+            // Value present but not scalar-bindable — a waveform child
+            // (FloatArray/IntArray/StrArray; `pv_to_evalexpr` returns `None`).
+            // sidm's calc value model is scalar-only (a documented scope
+            // decision), so it cannot bind; PyDM would evaluate it through its
+            // ndarray vocabulary. Fail-visible per the R2-59 contract — warn
+            // once, then skip — instead of the bare `?`'s permanently silent
+            // dead channel that re-skipped every 50 ms poll.
+            if !*warned_eval {
+                *warned_eval = true;
+                log::warn!(
+                    "{id}: calc variable {name:?} has a non-scalar (waveform) value; \
+                     sidm's calc is scalar-only so it cannot bind — publishing nothing. \
+                     PyDM evaluates array children; full array binding is not ported."
+                );
+            }
+            return None;
+        };
         if let Err(err) = ctx.set_value(name.clone(), var) {
             if !*warned_eval {
                 *warned_eval = true;
@@ -1028,6 +1064,81 @@ mod tests {
             Some(PvValue::Int(2))
         );
         assert!(!warned);
+    }
+
+    /// A child channel whose state the caller sets directly (value-less until
+    /// posted). Dangling pool weak → the `Drop` prune is a no-op.
+    fn child_channel() -> (Channel, StateWriter) {
+        let (conn, writer, _writes, _cancel) = crate::channel::Connection::new(
+            PvAddress::parse("loc://calc_child"),
+            crate::channel::RepaintHook::default(),
+            std::sync::Weak::new(),
+            "loc://calc_child".to_owned(),
+        );
+        (Channel::new(conn), writer)
+    }
+
+    #[test]
+    fn array_child_warns_once_while_missing_value_stays_silent() {
+        // R3-13: distinguish "no value yet" (silent skip) from "value present
+        // but unbindable" (fail-visible warn-once). The old bare `?` conflated
+        // both into a permanently silent dead channel.
+
+        // No value yet → silent skip: PyDM waits until every child has a value.
+        let (absent, _w) = child_channel();
+        let mut warned = false;
+        assert_eq!(
+            evaluate_evalexpr(
+                "calc://t",
+                "A + 1.0",
+                &[("A".to_owned(), absent)],
+                None,
+                &mut warned,
+            ),
+            None
+        );
+        assert!(!warned, "a value-less child must skip silently");
+
+        // Waveform value → the scalar calc cannot bind it: fail-visible.
+        let (arr, arr_w) = child_channel();
+        arr_w.post_value(|s| {
+            s.connected = true;
+            s.value = Some(PvValue::FloatArray(Arc::from([1.0, 2.0, 3.0].as_slice())));
+        });
+        let mut warned = false;
+        assert_eq!(
+            evaluate_evalexpr(
+                "calc://t",
+                "A + 1.0",
+                &[("A".to_owned(), arr)],
+                None,
+                &mut warned,
+            ),
+            None
+        );
+        assert!(
+            warned,
+            "an unbindable waveform child must trip the warn-once flag"
+        );
+
+        // Scalar value → binds and evaluates as before (unchanged).
+        let (scalar, scalar_w) = child_channel();
+        scalar_w.post_value(|s| {
+            s.connected = true;
+            s.value = Some(PvValue::Float(4.0));
+        });
+        let mut warned = false;
+        assert_eq!(
+            evaluate_evalexpr(
+                "calc://t",
+                "A + 1.0",
+                &[("A".to_owned(), scalar)],
+                None,
+                &mut warned,
+            ),
+            Some(PvValue::Float(5.0))
+        );
+        assert!(!warned, "a bound scalar child must not warn");
     }
 
     #[test]
