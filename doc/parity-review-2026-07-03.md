@@ -2583,14 +2583,30 @@ Impact: pin `vmax=2.0` with data `[3,90]`, vmin auto: silx returns degenerate `(
 
 ### R3-7: 3D interactive-mode surface missing — button bindings match no silx composition, no Ctrl swap, doc misattributes them to RotateCameraControl
 
-**DEFERRED (R3 — sign-off required, feature/gesture-contract change):** closing this
-needs a new interactive-mode surface (`set_interactive_mode('rotate'|'pan'|None)`, silx
-`Plot3DWidget.py:178-219`) plus a Ctrl-modifier `FocusManager` swap
-(`interaction.py:435-441`) and a rebinding of Secondary — a state-machine/feature
-addition *and* a gesture-contract change (right-drag currently pans, which silx never
-does). That is beyond a patch and alters user-facing input, so it is held for batched
-plot3d sign-off; the fabricated module doc is corrected as part of that change, and it is
-then recorded in `doc/plot3d-parity-roadmap.md`. No code changed this round.
+**FIXED (R3 — user signed off "착수"):** added a `SceneInteractiveMode` enum
+(`Rotate` default / `Pan` / `Disabled`) mirroring silx `setInteractiveMode`, with
+`SceneWidget::set_interactive_mode`/`interactive_mode`. The left button now
+resolves its gesture once at press from `(mode, Ctrl)` via
+`SceneInteractiveMode::left_gesture` — `Rotate` orbits and Ctrl+left pans, `Pan`
+is the mirror, `Disabled` binds nothing — faithfully porting the silx
+`FocusManager` default/Ctrl handler swap (`interaction.py:435-441`); the choice
+is fixed for the drag's life, as silx keeps the focused handler. The Ctrl
+modifier is read as egui's `command` (Ctrl on Windows/Linux, ⌘ on macOS) to
+mirror Qt's default Ctrl↔Meta swap, matching the crate's 2D idiom
+(`mask_tools.rs`). The **Secondary (right) drag binding was removed** — silx
+binds RIGHT only in the separate two-button `CameraControl` that is not a string
+mode. The wheel is gated on `wheel_zooms()` so it zooms in `Rotate`/`Pan` but not
+`Disabled` (silx keeps `CameraWheel` in both handler sets of the string modes and
+has no handler for `None`). The fabricated module doc is corrected. Recorded in
+`doc/plot3d-parity-roadmap.md`.
+
+Tests: `rotate_mode_left_gesture_orbits_and_ctrl_pans`,
+`pan_mode_left_gesture_pans_and_ctrl_orbits`,
+`disabled_mode_binds_no_gesture_and_no_wheel`,
+`rotate_and_pan_modes_zoom_on_wheel`, `rotate_is_the_default_mode` (per-boundary
+over the `(mode × Ctrl)` matrix); the existing
+`scene_widget_renders_axes_and_orbits_on_drag` still passes (left-drag orbits in
+the default mode).
 
 Severity: Medium
 

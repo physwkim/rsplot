@@ -182,8 +182,8 @@ pub use crate::widget::scalar_field_view::{FieldPick, ScalarFieldView};
 pub use crate::widget::scatter_mask::{ScatterMaskWidget, point_in_polygon};
 pub use crate::widget::scene_position_info::ScenePositionInfo;
 pub use crate::widget::scene_widget::{
-    FogMode, PICK_LINE_TOLERANCE_PX, PICK_POINT_TOLERANCE_PX, ScenePick, ScenePickKind,
-    SceneWidget, viewpoint_menu,
+    FogMode, PICK_LINE_TOLERANCE_PX, PICK_POINT_TOLERANCE_PX, SceneInteractiveMode, ScenePick,
+    ScenePickKind, SceneWidget, viewpoint_menu,
 };
 pub use crate::widget::scene_window::SceneWindow;
 pub use crate::widget::stack_profile_window::StackProfileWindow;

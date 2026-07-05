@@ -8,10 +8,14 @@
 //!
 //! Port of silx `Plot3DWidget` + `SceneWidget`'s default `RotateCameraControl`
 //! (`orbitAroundCenter=False`, wheel mode `"position"`): left-drag orbits around
-//! the picked point under the press (scene centre on a miss), right-drag pans on
-//! the picked depth plane, and the wheel zooms keeping the picked pixel
+//! the picked point under the press (scene centre on a miss), Ctrl+left-drag pans
+//! on the picked depth plane, and the wheel zooms keeping the picked pixel
 //! invariant — each gesture anchors on [`SceneWidget::pick`], the CPU stand-in
-//! for silx's depth-buffer read.
+//! for silx's depth-buffer read. [`SceneWidget::set_interactive_mode`] selects the
+//! mode (silx `setInteractiveMode`): [`SceneInteractiveMode::Rotate`] (default),
+//! [`Pan`](SceneInteractiveMode::Pan) which swaps the orbit/pan bindings, or
+//! [`Disabled`](SceneInteractiveMode::Disabled) which takes no pointer
+//! interaction. The right button is unbound, as in silx's string modes.
 //! The scene chrome (bounding box + RGB axes) is generated from the bounds via
 //! [`Scene3dGeometry::add_bounding_box_with_axes`]; data-item geometry set with
 //! [`SceneWidget::set_geometry`] is merged in beneath the chrome (every channel,
@@ -62,6 +66,66 @@ pub enum FogMode {
     Linear,
 }
 
+/// The camera interaction mode, silx `Plot3DWidget.setInteractiveMode`
+/// (`Plot3DWidget.py:177-219`).
+///
+/// silx wires two-string modes plus `None`. [`Rotate`](Self::Rotate) (the
+/// default, silx `RotateCameraControl`, `interaction.py:448-469`) orbits on
+/// left-drag and pans on **Ctrl**+left-drag; [`Pan`](Self::Pan) (silx
+/// `PanCameraControl`, `interaction.py:472-491`) swaps those two;
+/// [`Disabled`](Self::Disabled) (silx `None`, `Plot3DWidget.py:186-187`) takes no
+/// pointer interaction at all. The wheel zooms in `Rotate`/`Pan` and is inert in
+/// `Disabled` — silx puts `CameraWheel` in *both* the default and the Ctrl
+/// handler set, so the modifier never gates it.
+///
+/// The right mouse button is unbound in every string mode: silx binds it only in
+/// the separate two-button `CameraControl` (`interaction.py:494-511`), which is
+/// passed as a `StateMachine` instance rather than a string mode and is not
+/// exposed here.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SceneInteractiveMode {
+    /// Left-drag orbits, Ctrl+left-drag pans (silx `RotateCameraControl`).
+    #[default]
+    Rotate,
+    /// Left-drag pans, Ctrl+left-drag orbits (silx `PanCameraControl`).
+    Pan,
+    /// No pointer interaction (silx `setInteractiveMode(None)`).
+    Disabled,
+}
+
+/// Which camera gesture the left button drives for a given mode + modifier.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LeftGesture {
+    Orbit,
+    Pan,
+}
+
+impl SceneInteractiveMode {
+    /// The gesture the left button performs given whether **Ctrl** is held.
+    ///
+    /// silx's `FocusManager` swaps its default handler set for the Ctrl set on
+    /// key-press and back on key-release (`interaction.py:435-441`); the drag that
+    /// begins under the active set keeps that handler for its whole life. So the
+    /// choice is made once, at press: `Rotate` orbits (pans under Ctrl), `Pan`
+    /// pans (orbits under Ctrl), `Disabled` does nothing.
+    fn left_gesture(self, ctrl: bool) -> Option<LeftGesture> {
+        match (self, ctrl) {
+            (SceneInteractiveMode::Rotate, false) | (SceneInteractiveMode::Pan, true) => {
+                Some(LeftGesture::Orbit)
+            }
+            (SceneInteractiveMode::Pan, false) | (SceneInteractiveMode::Rotate, true) => {
+                Some(LeftGesture::Pan)
+            }
+            (SceneInteractiveMode::Disabled, _) => None,
+        }
+    }
+
+    /// Whether the wheel zooms in this mode (every mode but `Disabled`).
+    fn wheel_zooms(self) -> bool {
+        !matches!(self, SceneInteractiveMode::Disabled)
+    }
+}
+
 /// An interactive 3D scene widget. Construct with [`SceneWidget::new`], optionally
 /// set the data bounds and content geometry, then call [`SceneWidget::show`] each
 /// frame.
@@ -88,9 +152,14 @@ pub struct SceneWidget {
     /// Data-item geometry (excludes the box/axes chrome, which is regenerated
     /// from `bounds` on every upload). Empty until [`SceneWidget::set_geometry`].
     content: Scene3dGeometry,
-    /// In-progress orbit drag (left button), if any.
+    /// Current camera interaction mode (silx `Plot3DWidget.setInteractiveMode`);
+    /// `Rotate` by default, matching silx's default `RotateCameraControl`.
+    interaction_mode: SceneInteractiveMode,
+    /// In-progress orbit drag, if any. Driven by the left button whenever the
+    /// active [`SceneInteractiveMode`] + Ctrl resolves to [`LeftGesture::Orbit`].
     orbit: Option<OrbitDrag>,
-    /// In-progress pan drag (right button), if any.
+    /// In-progress pan drag, if any. Driven by the left button whenever the active
+    /// [`SceneInteractiveMode`] + Ctrl resolves to [`LeftGesture::Pan`].
     pan: Option<PanDrag>,
 }
 
@@ -131,6 +200,7 @@ impl SceneWidget {
             light_shininess: 0.0,
             orientation_indicator: true,
             content: Scene3dGeometry::new(),
+            interaction_mode: SceneInteractiveMode::default(),
             orbit: None,
             pan: None,
         };
@@ -320,6 +390,22 @@ impl SceneWidget {
         self.camera.adjust_depth_extent(self.bounds);
     }
 
+    /// Set the camera interaction mode (silx `Plot3DWidget.setInteractiveMode`,
+    /// `Plot3DWidget.py:177-219`): `Rotate` (default) orbits on left-drag and pans
+    /// on Ctrl+left-drag, `Pan` swaps those, `Disabled` takes no pointer
+    /// interaction. Any drag in progress is cancelled so the new binding takes
+    /// effect on the next press rather than mid-gesture.
+    pub fn set_interactive_mode(&mut self, mode: SceneInteractiveMode) {
+        self.interaction_mode = mode;
+        self.orbit = None;
+        self.pan = None;
+    }
+
+    /// The current camera interaction mode.
+    pub fn interactive_mode(&self) -> SceneInteractiveMode {
+        self.interaction_mode
+    }
+
     /// Orbit the scene about its centre around the vertical axis by
     /// `angle_degrees` (positive = the silx "left" orbit direction). Port of
     /// silx `RotateViewpoint`'s per-frame `viewport.orbitCamera("left", angle)`;
@@ -439,47 +525,58 @@ impl SceneWidget {
         // press origin keeps that threshold travel from being silently dropped.
         let press_origin = ui.ctx().input(|i| i.pointer.press_origin());
 
-        // Orbit — left drag. Pivot on the picked object point under the press
-        // (silx CameraSelectRotate.beginDrag with orbitAroundCenter=False,
-        // interaction.py:150-161), falling back to the scene centre on a miss.
+        // Left drag — orbit or pan, chosen once at press from the interaction
+        // mode and the Ctrl modifier. silx's FocusManager selects its default or
+        // Ctrl handler set at press and keeps that handler for the whole drag
+        // (interaction.py:435-441), so the gesture never switches mid-drag even if
+        // Ctrl is toggled. `Rotate` orbits (pans under Ctrl), `Pan` pans (orbits
+        // under Ctrl), `Disabled` binds nothing. The modifier is read as egui's
+        // `command` (Ctrl on Windows/Linux, ⌘ on macOS) to mirror Qt's default
+        // Ctrl↔Meta swap that makes silx's "Ctrl" the ⌘ key on macOS.
+        //
+        // Orbit pivots on the picked object point under the press (silx
+        // CameraSelectRotate.beginDrag, orbitAroundCenter=False,
+        // interaction.py:150-161), a miss falling back to the scene centre; the
+        // pan plane sits at the picked depth (silx CameraSelectPan.beginDrag:
+        // `ndcZ = _pickNdcZGL(x, y)`, interaction.py:226-235), a miss reading the
+        // cleared depth buffer — the far plane (NDC z = 1). The right button is
+        // unbound in every string mode, as silx (it binds RIGHT only in the
+        // separate two-button CameraControl, interaction.py:494-511).
         if response.drag_started_by(PointerButton::Primary)
             && let Some(p) = press_origin
         {
+            let ctrl = ui.ctx().input(|i| i.modifiers.command);
             let win = to_local(p);
-            let pivot = self
-                .pick(window_to_ndc(win, size_px))
-                .map_or(center, |hit| hit.position);
-            self.orbit = Some(OrbitDrag::begin(&self.camera, win, pivot));
+            match self.interaction_mode.left_gesture(ctrl) {
+                Some(LeftGesture::Orbit) => {
+                    let pivot = self
+                        .pick(window_to_ndc(win, size_px))
+                        .map_or(center, |hit| hit.position);
+                    self.orbit = Some(OrbitDrag::begin(&self.camera, win, pivot));
+                }
+                Some(LeftGesture::Pan) => {
+                    let plane_z = self
+                        .pick(window_to_ndc(win, size_px))
+                        .map_or(1.0, |hit| hit.ndc_depth);
+                    self.pan = Some(PanDrag::begin(win, size_px, plane_z));
+                }
+                None => {}
+            }
         }
         if response.dragged_by(PointerButton::Primary)
-            && let (Some(orbit), Some(p)) = (self.orbit, response.interact_pointer_pos())
+            && let Some(p) = response.interact_pointer_pos()
         {
-            orbit.update(&mut self.camera, to_local(p), size_px);
+            let local = to_local(p);
+            if let Some(orbit) = self.orbit {
+                orbit.update(&mut self.camera, local, size_px);
+            }
+            if let Some(mut pan) = self.pan {
+                pan.update(&mut self.camera, local, size_px);
+                self.pan = Some(pan);
+            }
         }
         if response.drag_stopped_by(PointerButton::Primary) {
             self.orbit = None;
-        }
-
-        // Pan — right drag. The pan plane sits at the picked depth under the
-        // press (silx CameraSelectPan.beginDrag: `ndcZ = _pickNdcZGL(x, y)`,
-        // interaction.py:226-235); a miss reads the cleared depth buffer, i.e.
-        // the far plane (NDC z = 1).
-        if response.drag_started_by(PointerButton::Secondary)
-            && let Some(p) = press_origin
-        {
-            let win = to_local(p);
-            let plane_z = self
-                .pick(window_to_ndc(win, size_px))
-                .map_or(1.0, |hit| hit.ndc_depth);
-            self.pan = Some(PanDrag::begin(win, size_px, plane_z));
-        }
-        if response.dragged_by(PointerButton::Secondary)
-            && let (Some(mut pan), Some(p)) = (self.pan, response.interact_pointer_pos())
-        {
-            pan.update(&mut self.camera, to_local(p), size_px);
-            self.pan = Some(pan);
-        }
-        if response.drag_stopped_by(PointerButton::Secondary) {
             self.pan = None;
         }
 
@@ -497,7 +594,12 @@ impl SceneWidget {
         // notch, frame-rate-dependent). Same per-notch family as the 2D
         // calibration (R1-8), but the exponential composition trick does not
         // apply here because silx's 3D step does not scale with the angle.
-        if let Some(p) = response.hover_pos() {
+        // silx keeps `CameraWheel` in both the default and the Ctrl handler set
+        // for `Rotate`/`Pan` but has no handler at all for `None`, so the wheel
+        // zooms in every mode except `Disabled`.
+        if self.interaction_mode.wheel_zooms()
+            && let Some(p) = response.hover_pos()
+        {
             let steps = ui.input(|i| wheel_zoom_steps(&i.events));
             let ndc = window_to_ndc(to_local(p), size_px);
             for zoom_in in steps {
@@ -871,6 +973,51 @@ mod tests {
         assert_eq!(
             wheel_zoom_steps(&[wheel(MouseWheelUnit::Line, 2.0, 0.0)]),
             Vec::<bool>::new()
+        );
+    }
+
+    #[test]
+    fn rotate_mode_left_gesture_orbits_and_ctrl_pans() {
+        // R3-7: silx RotateCameraControl — default handler set orbits on the left
+        // button, the Ctrl handler set pans (interaction.py:448-469).
+        let m = SceneInteractiveMode::Rotate;
+        assert_eq!(m.left_gesture(false), Some(LeftGesture::Orbit));
+        assert_eq!(m.left_gesture(true), Some(LeftGesture::Pan));
+    }
+
+    #[test]
+    fn pan_mode_left_gesture_pans_and_ctrl_orbits() {
+        // R3-7: silx PanCameraControl is the mirror image — pan by default, orbit
+        // under Ctrl (interaction.py:472-491).
+        let m = SceneInteractiveMode::Pan;
+        assert_eq!(m.left_gesture(false), Some(LeftGesture::Pan));
+        assert_eq!(m.left_gesture(true), Some(LeftGesture::Orbit));
+    }
+
+    #[test]
+    fn disabled_mode_binds_no_gesture_and_no_wheel() {
+        // R3-7: silx setInteractiveMode(None) drops the event handler entirely
+        // (Plot3DWidget.py:186-187), so neither the left button nor the wheel act.
+        let m = SceneInteractiveMode::Disabled;
+        assert_eq!(m.left_gesture(false), None);
+        assert_eq!(m.left_gesture(true), None);
+        assert!(!m.wheel_zooms());
+    }
+
+    #[test]
+    fn rotate_and_pan_modes_zoom_on_wheel() {
+        // silx keeps CameraWheel in both the default and the Ctrl handler set for
+        // the two string modes, so the wheel zooms regardless of the modifier.
+        assert!(SceneInteractiveMode::Rotate.wheel_zooms());
+        assert!(SceneInteractiveMode::Pan.wheel_zooms());
+    }
+
+    #[test]
+    fn rotate_is_the_default_mode() {
+        // silx's default interactive mode is 'rotate' (RotateCameraControl).
+        assert_eq!(
+            SceneInteractiveMode::default(),
+            SceneInteractiveMode::Rotate
         );
     }
 }

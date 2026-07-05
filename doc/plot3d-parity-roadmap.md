@@ -59,6 +59,19 @@ Legend: ✅ done · ◐ partial · ☐ not started
 | P0.2 | wgpu line/triangle pipeline + offscreen depth render + blit callback | (siplot infra) | ✅ |
 | P0.3 | `SceneWidget` + orbit/pan/zoom interaction + bounding box + axes | scene/interaction.py, primitives.py (Lines/Box/Axes/BoxWithAxes), viewport.py, SceneWidget.py | ✅ |
 
+P0.3 notes (interactive mode, R3-7): `SceneWidget::set_interactive_mode` ports
+silx `Plot3DWidget.setInteractiveMode` with `SceneInteractiveMode`
+(`Rotate` default / `Pan` / `Disabled`). The left button resolves its gesture
+once at press from `(mode, Ctrl)` — `Rotate` orbits and Ctrl+left pans, `Pan` is
+the mirror, `Disabled` binds nothing — porting the silx `FocusManager`
+default/Ctrl handler swap (`interaction.py:435-441`); the choice holds for the
+drag's life, as silx keeps the focused handler. `Ctrl` is read as egui `command`
+(⌘ on macOS) to mirror Qt's Ctrl↔Meta swap. The right button is unbound in every
+string mode, as silx (it binds RIGHT only in the separate two-button
+`CameraControl`, not exposed as a string mode). The wheel zooms in `Rotate`/`Pan`
+and is inert in `Disabled`. The two-button `CameraControl` composition and silx's
+`orbitAroundCenter=True` variant are the documented tail, not wired.
+
 ### Phase 1 — basic 3D items
 
 | Wave | Item | silx source | Status |
