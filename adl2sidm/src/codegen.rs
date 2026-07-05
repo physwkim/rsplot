@@ -1508,6 +1508,29 @@ fn emit_cartesian_plot(b: &mut Builder, widget: &MedmWidget, options: &Options, 
     for (i, trace) in traces.iter().enumerate() {
         let legend = format!("curve {}", i + 1);
         let color = record_color(trace.get("color"));
+        // MEDM binds each trace to Y1 (yaxis=0) or Y2 (yaxis=1) and to a left/right
+        // yside at execute time (medmMonitor.c:346-358; writeDlTrace writes yaxis
+        // unconditionally). sidm's cartesian plot has a single y-axis (its
+        // user-specified y2_axis range is already warned unsupported), so a trace
+        // asking for Y2 / a non-default side cannot be honoured — warn rather than
+        // silently plot it against Y1.
+        let yaxis = trace
+            .get("yaxis")
+            .and_then(|v| v.parse::<i64>().ok())
+            .unwrap_or(0);
+        let yside = trace
+            .get("yside")
+            .and_then(|v| v.parse::<i64>().ok())
+            .unwrap_or(0);
+        if yaxis != 0 || yside != 0 {
+            b.warnings.push(format!(
+                "line {}: cartesian plot trace {} is assigned to a secondary y-axis \
+                 (yaxis={yaxis}, yside={yside}); sidm has a single y-axis, so it is \
+                 plotted against Y1",
+                widget.line,
+                i + 1
+            ));
+        }
         let xdata = trace
             .get("xdata")
             .filter(|c| !c.is_empty())
@@ -7764,6 +7787,57 @@ display {
                 .any(|w| w.contains("trigger") || w.contains("count PV")),
             "faithful trigger/count must stay silent: {:?}",
             g2.warnings
+        );
+    }
+
+    #[test]
+    fn cartesian_plot_trace_on_secondary_y_axis_warns() {
+        // R3-21: a trace with yaxis=1 (Y2) cannot be honoured on sidm's single
+        // y-axis; it must warn, not silently plot against Y1. A yaxis=0 trace is
+        // faithful and stays silent.
+        let adl = r#"
+"color map" {
+	colors {
+		ffffff,
+		ff0000,
+		00ff00,
+	}
+}
+"cartesian plot" {
+	object {
+		x=0
+		y=0
+		width=300
+		height=150
+	}
+	style="line plot"
+	erase_oldest="plot last n pts"
+	trace[0] {
+		ydata="DEV:CURRENT"
+		data_clr=1
+		yaxis=0
+	}
+	trace[1] {
+		ydata="DEV:PRESSURE"
+		data_clr=2
+		yaxis=1
+	}
+}
+"#;
+        let g = generate(&parse(adl), &Options::default());
+        assert!(
+            g.warnings.iter().any(|w| w.contains("trace 2")
+                && w.contains("secondary y-axis")
+                && w.contains("yaxis=1")),
+            "Y2 trace must warn: {:?}",
+            g.warnings
+        );
+        assert!(
+            !g.warnings
+                .iter()
+                .any(|w| w.contains("trace 1") && w.contains("secondary y-axis")),
+            "the Y1 trace must not warn about the axis: {:?}",
+            g.warnings
         );
     }
 

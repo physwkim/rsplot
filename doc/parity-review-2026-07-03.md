@@ -2942,6 +2942,17 @@ Impact: legal MEDM screens referencing a shared `cmap` file (older/site-standard
 
 ### R3-21: Per-trace `yaxis`/`yside` ignored — Y2 traces plot against Y1 with no warning
 
+**FIXED (R3, warn-convention closure):** the trace loop in `emit_cartesian_plot`
+now reads each trace's `yaxis`/`yside` (parsed by the shallow pass, level-0 keys)
+and warns when a trace is assigned to a secondary y-axis (`yaxis != 0`) or a
+non-default side. sidm's cartesian plot has a single y-axis — its user-specified
+`y2_axis` range is already warned unsupported (`plot_style_builders`) — so a Y2
+trace cannot be honoured; it is plotted against Y1, no longer silently. A `yaxis=0`
+trace is faithful and stays silent.
+
+Test: `cartesian_plot_trace_on_secondary_y_axis_warns` (a `yaxis=1` trace warns
+naming `trace 2` / `secondary y-axis` / `yaxis=1`; the `yaxis=0` trace does not).
+
 Severity: Low
 
 Rust: `adl2sidm/src/codegen.rs:1455-1511` — the trace loop reads only `color`/`xdata`/`ydata`; `yaxis`/`yside` are never consulted and produce no warning.
