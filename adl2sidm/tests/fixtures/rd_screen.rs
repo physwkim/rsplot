@@ -296,7 +296,7 @@ pub mod __rd_rd_child {
                         spacing.button_padding = egui::Vec2::ZERO;
                         if ui.button("Back").on_hover_text(__m.expand("open rd_parent.adl (macros: P=$(P))").as_str()).clicked() {
                             let __rd_ctx = ui.ctx().clone();
-                            let __rd_args = __m.expand("P=$(P)");
+                            let __rd_args = __m.expand_args("P=$(P)");
                             super::OpenDisplay::open_or_focus(__open, &__rd_ctx, ("", __rd_args.clone()), "rd_parent.adl", egui::vec2(300.0, 120.0), || {
                                 Box::new(super::Screen::new_in(&__rd_ctx, __rs.as_ref(), super::parse_macro_args(&__rd_args)))
                             });
@@ -347,18 +347,54 @@ pub mod __rd_rd_child {
             });
     }
 
-    /// A display instance's macro table (MEDM `performMacroSubstitutions`):
-    /// substitutes `$(name)`/`${name}`, leaving unknown references in place
-    /// exactly as MEDM's lexer does (medm/medmCommon.c `getToken`).
+    /// A display instance's macro table. `expand` follows MEDM's lexer `getToken`
+    /// (child screens re-parsing their own file — an unknown `$(name)` stays
+    /// literal); `expand_args` follows MEDM `performMacroSubstitutions` (the
+    /// related-display `args` path — an unknown `$(name)` is dropped).
     pub struct MacroTable(pub Vec<(String, String)>);
 
     impl MacroTable {
+        /// Substitute `$(name)`/`${name}` for a defined macro, leaving an unknown
+        /// reference in place exactly as MEDM's lexer does (medm/medmCommon.c
+        /// `getToken`).
         fn expand(&self, s: &str) -> String {
             let mut out = s.to_string();
             for (name, value) in &self.0 {
                 out = out.replace(&format!("$({name})"), value);
                 out = out.replace(&format!("${{{name}}}"), value);
             }
+            out
+        }
+
+        /// Substitute `$(name)` for a defined macro and *drop* an undefined one
+        /// (`$(X)` with X unbound becomes empty, not literal), MEDM
+        /// `performMacroSubstitutions` (medm/utils.c:3444-3459). Only the `$(...)`
+        /// form is a macro here — a `$` not opening `(` is copied verbatim, exactly as
+        /// MEDM's byte scanner does.
+        fn expand_args(&self, s: &str) -> String {
+            let mut out = String::with_capacity(s.len());
+            let mut rest = s;
+            while let Some(d) = rest.find('$') {
+                out.push_str(&rest[..d]);
+                let after = &rest[d + 1..];
+                if let Some(tail) = after.strip_prefix('(') {
+                    // MEDM reads to the ')' or, if none, to end-of-string, then
+                    // substitutes the defined value or drops the reference.
+                    let (name, next) = match tail.find(')') {
+                        Some(end) => (&tail[..end], &tail[end + 1..]),
+                        None => (tail, ""),
+                    };
+                    if let Some((_, value)) = self.0.iter().find(|(n, _)| n == name) {
+                        out.push_str(value);
+                    }
+                    rest = next;
+                } else {
+                    // `$` not opening `(` -> verbatim (includes `${...}`).
+                    out.push('$');
+                    rest = after;
+                }
+            }
+            out.push_str(rest);
             out
         }
     }

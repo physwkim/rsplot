@@ -173,8 +173,18 @@ struct Builder {
     /// Whether any emitted string still carries a `$(macro)` reference after the
     /// convert-time `--macro` baking — it then expands at runtime against the
     /// screen instance's macro table (`__m`), so the `MacroTable` helper and the
-    /// `__m` field are emitted.
+    /// `__m` field are emitted. Set alongside whichever of the two method flags
+    /// below applies (so `needs_macros == needs_macro_expand || needs_macro_args`).
     needs_macros: bool,
+    /// Whether the emitted `MacroTable` needs its `expand` method — the child-screen
+    /// string path (MEDM `getToken`: an undefined `$(name)` stays literal). Set by
+    /// [`medm_str`].
+    needs_macro_expand: bool,
+    /// Whether the emitted `MacroTable` needs its `expand_args` method — the
+    /// related-display `args` path (MEDM `performMacroSubstitutions`: an undefined
+    /// `$(name)` is *dropped*). Set by [`rd_click`]. Emitted separately from
+    /// `expand` so neither method is dead when a screen uses only one path.
+    needs_macro_args: bool,
     /// Whether any emitted ctor needs the wgpu render state (plots), so `new_in`
     /// must unwrap its `render_state` parameter.
     needs_render_state: bool,
@@ -2593,11 +2603,15 @@ fn rd_click(b: &mut Builder, line: usize, e: &RdEntry) -> (String, String) {
     let hover = medm_str(b, &hover);
     // The (module, args) dedup key and the child's macro table both come from
     // the args string; macro references in it resolve against the *parent*
-    // instance's table at click time (MEDM `performMacroSubstitutions` — no
-    // implicit inheritance of unnamed parent macros).
+    // instance's table at click time (MEDM `performMacroSubstitutions`,
+    // utils.c:3444-3459). Unlike the child-string path (`medm_str`/`expand`), an
+    // undefined `$(name)` here is *dropped*, not left literal — hence the separate
+    // `expand_args` method, so `args="P=$(X)"` with X unbound yields `P=` (as MEDM
+    // does), never `P=$(X)`.
     let args_expr = if has_macro_ref(&e.args) && !b.seal_macros {
         b.needs_macros = true;
-        format!("__m.expand({})", rust_str(&e.args))
+        b.needs_macro_args = true;
+        format!("__m.expand_args({})", rust_str(&e.args))
     } else if e.args.is_empty() {
         "String::new()".to_string()
     } else {
@@ -3433,14 +3447,18 @@ pub(crate) fn has_macro_ref(s: &str) -> bool {
 /// The Rust expression for an MEDM string consumed at runtime: a plain literal
 /// when fully grounded, or an expansion against the screen instance's macro
 /// table when a `$(macro)` survived convert-time baking (the related-display
-/// child path, where macro values only exist at runtime — MEDM
-/// `performMacroSubstitutions`). Emitted as `.as_str()` so the expression is a
-/// `&str` in every context a literal fits (`&str` params, `Some(...)`,
-/// `impl Into<String>`/`Into<WidgetText>`, `AsRef<OsStr>`); the expansion
-/// temporary lives to the end of the enclosing statement.
+/// child path, where macro values only exist at runtime). This is the child
+/// screen re-parsing its own file, so it uses MEDM's lexer `getToken`
+/// (`medm/medmCommon.c:1455-1462`) semantics — an undefined `$(name)` stays
+/// literal — via `MacroTable::expand`, *not* the `args`-only
+/// `performMacroSubstitutions` path (see [`rd_click`]). Emitted as `.as_str()` so
+/// the expression is a `&str` in every context a literal fits (`&str` params,
+/// `Some(...)`, `impl Into<String>`/`Into<WidgetText>`, `AsRef<OsStr>`); the
+/// expansion temporary lives to the end of the enclosing statement.
 fn medm_str(b: &mut Builder, s: &str) -> String {
     if has_macro_ref(s) && !b.seal_macros {
         b.needs_macros = true;
+        b.needs_macro_expand = true;
         format!("__m.expand({}).as_str()", rust_str(s))
     } else {
         // Fully grounded, OR a macro that survived a replaced composite-file
@@ -3519,7 +3537,7 @@ fn assemble(b: &Builder, screen: &MedmScreen) -> String {
 
     emit_place_helper(&mut s, b.use_layout);
     if b.needs_macros {
-        s.push_str(MACRO_TABLE_HELPER);
+        emit_macro_table(&mut s, b);
     }
     // The shared runtime items live once at the output file's top level; child
     // `pub mod`s reference them through `super::` (the recursive driver appends
@@ -3541,14 +3559,23 @@ fn assemble(b: &Builder, screen: &MedmScreen) -> String {
 
 /// The runtime macro table emitted into screens whose strings still carry
 /// `$(macro)` references after convert-time baking (related-display children,
-/// whose macro values only exist at runtime).
-const MACRO_TABLE_HELPER: &str = r#"
-/// A display instance's macro table (MEDM `performMacroSubstitutions`):
-/// substitutes `$(name)`/`${name}`, leaving unknown references in place
-/// exactly as MEDM's lexer does (medm/medmCommon.c `getToken`).
+/// whose macro values only exist at runtime). Assembled from the three parts
+/// below by [`emit_macro_table`], so a screen carries only the method(s) it uses.
+const MACRO_TABLE_HEAD: &str = r#"
+/// A display instance's macro table. `expand` follows MEDM's lexer `getToken`
+/// (child screens re-parsing their own file — an unknown `$(name)` stays
+/// literal); `expand_args` follows MEDM `performMacroSubstitutions` (the
+/// related-display `args` path — an unknown `$(name)` is dropped).
 pub struct MacroTable(pub Vec<(String, String)>);
 
-impl MacroTable {
+impl MacroTable {"#;
+
+/// `MacroTable::expand` — the child-string path (MEDM `getToken`, unknown refs
+/// left literal). Emitted when [`Builder::needs_macro_expand`] is set.
+const MACRO_TABLE_EXPAND: &str = r#"
+    /// Substitute `$(name)`/`${name}` for a defined macro, leaving an unknown
+    /// reference in place exactly as MEDM's lexer does (medm/medmCommon.c
+    /// `getToken`).
     fn expand(&self, s: &str) -> String {
         let mut out = s.to_string();
         for (name, value) in &self.0 {
@@ -3557,8 +3584,63 @@ impl MacroTable {
         }
         out
     }
-}
 "#;
+
+/// `MacroTable::expand_args` — the related-display `args` path (MEDM
+/// `performMacroSubstitutions`, unknown refs dropped). Emitted when
+/// [`Builder::needs_macro_args`] is set.
+const MACRO_TABLE_EXPAND_ARGS: &str = r#"
+    /// Substitute `$(name)` for a defined macro and *drop* an undefined one
+    /// (`$(X)` with X unbound becomes empty, not literal), MEDM
+    /// `performMacroSubstitutions` (medm/utils.c:3444-3459). Only the `$(...)`
+    /// form is a macro here — a `$` not opening `(` is copied verbatim, exactly as
+    /// MEDM's byte scanner does.
+    fn expand_args(&self, s: &str) -> String {
+        let mut out = String::with_capacity(s.len());
+        let mut rest = s;
+        while let Some(d) = rest.find('$') {
+            out.push_str(&rest[..d]);
+            let after = &rest[d + 1..];
+            if let Some(tail) = after.strip_prefix('(') {
+                // MEDM reads to the ')' or, if none, to end-of-string, then
+                // substitutes the defined value or drops the reference.
+                let (name, next) = match tail.find(')') {
+                    Some(end) => (&tail[..end], &tail[end + 1..]),
+                    None => (tail, ""),
+                };
+                if let Some((_, value)) = self.0.iter().find(|(n, _)| n == name) {
+                    out.push_str(value);
+                }
+                rest = next;
+            } else {
+                // `$` not opening `(` -> verbatim (includes `${...}`).
+                out.push('$');
+                rest = after;
+            }
+        }
+        out.push_str(rest);
+        out
+    }
+"#;
+
+/// The closing brace of the emitted `impl MacroTable`.
+const MACRO_TABLE_TAIL: &str = "}\n";
+
+/// Emit the `MacroTable` struct plus only the method(s) this screen actually
+/// uses — `expand` for the child-string path, `expand_args` for the
+/// related-display `args` path — so neither is dead code. At least one is set
+/// whenever `needs_macros` is (both flags are raised alongside it at their use
+/// sites), so the `impl` is never empty.
+fn emit_macro_table(s: &mut String, b: &Builder) {
+    s.push_str(MACRO_TABLE_HEAD);
+    if b.needs_macro_expand {
+        s.push_str(MACRO_TABLE_EXPAND);
+    }
+    if b.needs_macro_args {
+        s.push_str(MACRO_TABLE_EXPAND_ARGS);
+    }
+    s.push_str(MACRO_TABLE_TAIL);
+}
 
 /// The shared `PlotId` allocator, emitted once at the output file's top level
 /// when any screen in it carries plots (strip charts, cartesian plots): siplot
@@ -9549,12 +9631,15 @@ composite {
             ..Options::default()
         };
         let g = generate(&parse(RESOLVED_RD), &options);
-        // The entry's args carry an unbound $(P): expanded at click time
-        // against the parent instance's table, then both the dedup key and the
+        // R3-24: the entry's args carry an unbound $(P): expanded at click time
+        // against the parent instance's table via `expand_args` (MEDM
+        // `performMacroSubstitutions` — an undefined macro is *dropped*, not left
+        // literal like the child-string `expand` path). Both the dedup key and the
         // child's macro table come from that string.
         assert!(
-            g.source.contains("let __rd_args = __m.expand(\"P=$(P)\");"),
-            "{}",
+            g.source
+                .contains("let __rd_args = __m.expand_args(\"P=$(P)\");"),
+            "args must use the drop-undefined expand_args, not expand:\n{}",
             g.source
         );
         assert!(
@@ -9591,6 +9676,54 @@ composite {
             g.related_targets == vec!["child.adl".to_string()],
             "{:?}",
             g.related_targets
+        );
+        // The args carry a macro, so the click-time hover ("open ... (macros:
+        // P=$(P))") does too — the child-string `expand` is emitted alongside
+        // `expand_args`, and both live in the one MacroTable.
+        assert!(g.source.contains("fn expand_args("), "{}", g.source);
+        assert!(g.source.contains("fn expand("), "{}", g.source);
+    }
+
+    #[test]
+    fn macro_table_omits_expand_args_when_no_related_display_args_use_macros() {
+        // R3-24 dead-code avoidance: `expand` (child strings, getToken) and
+        // `expand_args` (related-display args, performMacroSubstitutions) are
+        // emitted independently. A screen expanding a runtime macro only in its own
+        // strings — here a static-text label carrying an unbaked $(P) — carries
+        // `expand` but must NOT carry the unused `expand_args`.
+        let adl = r#"
+"color map" {
+	colors {
+		ffffff,
+	}
+}
+text {
+	object {
+		x=0
+		y=0
+		width=80
+		height=20
+	}
+	textix="$(P)label"
+}
+"#;
+        // Generate with no `--macro` baking, so $(P) survives to runtime.
+        let g = generate(&parse(adl), &Options::default());
+        assert!(
+            g.source
+                .contains(r#"egui::RichText::new(__m.expand("$(P)label").as_str())"#),
+            "the label must expand its runtime macro via expand:\n{}",
+            g.source
+        );
+        assert!(
+            g.source.contains("fn expand("),
+            "child-string path needs expand:\n{}",
+            g.source
+        );
+        assert!(
+            !g.source.contains("fn expand_args("),
+            "expand_args must not be emitted (dead) when no args use macros:\n{}",
+            g.source
         );
     }
 

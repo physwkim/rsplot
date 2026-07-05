@@ -3015,6 +3015,25 @@ Impact: a related display with several named targets but zero/one per-entry labe
 
 ### R3-24: Runtime `MacroTable::expand` leaves undefined macros literal in related-display args; MEDM drops them
 
+**FIXED (R3):** the two runtime-expansion roles are now separate methods with the
+right MEDM semantics. The related-display **args** path (`rd_click`) uses a new
+`MacroTable::expand_args`, a faithful port of `performMacroSubstitutions`
+(`utils.c:3444-3459`): a defined `$(name)` expands, an **undefined** one is *dropped*
+(`args="P=$(X)"` with X unbound → `P=`, not `P=$(X)`), and only the `$(...)` form is a
+macro (a `$` not opening `(` is copied verbatim). The child-**string** path
+(`medm_str`) keeps `MacroTable::expand` — MEDM's lexer `getToken`
+(`medmCommon.c:1455-1462`), where an undefined reference stays literal (the child
+re-parses its own file) — and its doc no longer mis-cites `performMacroSubstitutions`.
+The two methods are emitted independently (`needs_macro_expand` / `needs_macro_args`,
+assembled by `emit_macro_table`) so neither is dead when a screen uses only one path.
+Convert-time `substitute_macros` (the parse/`getToken` path) is correct and untouched.
+
+Golden `rd_screen.rs` regenerated: the child→parent args line becomes
+`__m.expand_args("P=$(P)")`; the child-string/hover `__m.expand(...)` calls are
+unchanged. Tests: `resolved_related_display_opens_the_converted_module` now asserts
+the args use `expand_args`; `macro_table_omits_expand_args_when_no_related_display_args_use_macros`
+verifies the dead-code-avoidance gating.
+
 Severity: Low
 
 Rust: `adl2sidm/src/codegen.rs:3340-3356` — the generated `MacroTable::expand` substitutes known names and leaves unknown `$(name)` in place (its doc cites `performMacroSubstitutions` but describes `getToken` passthrough); used at `:2450-2452` to expand a related-display entry's `args` at click time, feeding both the dedup key and the child's macro table.
