@@ -1,20 +1,18 @@
 //! [`ScenePositionInfo`] — a cursor position/value readout for a 3D scalar field.
 //!
 //! Port of silx `silx.gui.plot3d.tools.PositionInfoWidget.PositionInfoWidget`:
-//! a small panel showing the **X / Y / Z** scene coordinates and the **Data**
-//! value of the item picked under the cursor (silx fields `_xLabel`/`_yLabel`/
-//! `_zLabel`/`_dataLabel`), each `-` when nothing is picked. silx drives it from
-//! the cursor position (`updateInfo` → `pick(x, y)`); here the owner
-//! ([`crate::SceneWindow`]) feeds it the pick result of
+//! a small panel showing the **X / Y / Z** scene coordinates, the **Data** value,
+//! and the **Item** of the thing picked under the cursor (silx fields
+//! `_xLabel`/`_yLabel`/`_zLabel`/`_dataLabel`/`_itemLabel`, in that layout order,
+//! `PositionInfoWidget.py:56-60`), each `-`/empty when nothing is picked. silx
+//! drives it from the cursor position (`updateInfo` → `pick(x, y)`); here the
+//! owner ([`crate::SceneWindow`]) feeds it the pick result of
 //! [`crate::ScalarFieldView::pick`] each frame.
 //!
-//! silx has a fifth field `_itemLabel` ("Item", `PositionInfoWidget.py:60`) that
-//! shows `item.getLabel()` of the picked item so an isosurface hit reads
-//! differently from a cut-plane hit. It is **not yet ported**: siplot's
-//! [`FieldPick`] carries no source tag and the 3D items ([`ScalarField3D`]'s
-//! isosurfaces / cut plane) have no label, so the field needs a data-model
-//! extension across the pick pipeline. Deferred pending sign-off (R3-11); the
-//! four coordinate/value fields below are complete.
+//! The Item field shows the picked item's `getLabel()`
+//! (`PositionInfoWidget.py:201`) — silx `Item3D`'s default label is its class
+//! name (`items/core.py:99`), so an iso-surface hit reads "Isosurface" and a
+//! cut-plane hit "CutPlane" ([`crate::FieldPickItem::label`]).
 //!
 //! The Qt picking-mode toggle action is not ported (interactive-mode toolbars
 //! are Qt shell, like the rest of the `SceneWindow` chrome the roadmap lists as
@@ -55,8 +53,9 @@ impl ScenePositionInfo {
         self.last
     }
 
-    /// Draw the X / Y / Z / Data fields in one row, showing `-` for any field
-    /// without a value (silx lays them out as `label: value` pairs).
+    /// Draw the X / Y / Z / Data / Item fields in one row (silx layout order,
+    /// `PositionInfoWidget.py:56-60`), showing `-` for any field without a value
+    /// (silx lays them out as `label: value` pairs).
     pub fn ui(&self, ui: &mut Ui) {
         let (x, y, z) = match self.last {
             Some(p) => (g(p.position.x), g(p.position.y), g(p.position.z)),
@@ -64,6 +63,12 @@ impl ScenePositionInfo {
         };
         let data = match self.last.and_then(|p| p.value) {
             Some(v) => g(v),
+            None => dash(),
+        };
+        // The Item field: the picked item's silx label, or `-` when nothing is
+        // picked (silx leaves `_itemLabel` at its cleared `-`).
+        let item = match self.last {
+            Some(p) => p.item.label().to_string(),
             None => dash(),
         };
         ui.horizontal(|ui| {
@@ -74,6 +79,8 @@ impl ScenePositionInfo {
             ui.label(format!("Z: {z}"));
             ui.separator();
             ui.label(format!("Data: {data}"));
+            ui.separator();
+            ui.label(format!("Item: {item}"));
         });
     }
 }

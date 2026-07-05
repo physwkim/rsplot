@@ -6,7 +6,8 @@
 //! geometry at construction; `pick` reads the view's own camera + field.
 
 use egui_kittest::wgpu::{create_render_state, default_wgpu_setup};
-use siplot::{CameraFace, ScalarFieldView, Vec3};
+use siplot::egui::Color32;
+use siplot::{CameraFace, FieldPickItem, ScalarFieldView, Vec3};
 
 const N: usize = 5;
 
@@ -78,6 +79,33 @@ fn pick_hits_the_visible_cut_plane_and_samples_its_value() {
         (value - 2.0).abs() < 1e-4,
         "ramp value on the z = 2.5 slice is 2.0, got {value}"
     );
+    // R3-11: the readout names the picked item — a cut-plane hit is "CutPlane"
+    // (silx PositionInfoWidget Item field, the item's class-name label).
+    assert_eq!(pick.item, FieldPickItem::CutPlane);
+    assert_eq!(pick.item.label(), "CutPlane");
+}
+
+#[test]
+fn pick_on_an_isosurface_reports_the_isosurface_item() {
+    // R3-11: with the cut plane hidden and a single iso-surface at level 2 over
+    // the z-ramp, the front-view centre ray crosses the surface, so the pick
+    // names the Isosurface item — the other silx Item-field label.
+    let rs = create_render_state(default_wgpu_setup());
+    let mut view = ScalarFieldView::new(&rs, 40);
+    assert!(
+        view.set_data(&rs, &ramp_z(), N, N, N),
+        "5³ ramp is valid data"
+    );
+    view.field_mut().cut_plane_mut().set_visible(false);
+    view.add_isosurface(&rs, 2.0, Color32::from_rgb(255, 215, 0));
+    view.scene_mut().set_viewpoint(CameraFace::Front);
+    view.scene_mut().camera_mut().set_size((200.0, 200.0));
+
+    let pick = view
+        .pick((0.0, 0.0))
+        .expect("centre ray crosses the level-2 iso-surface");
+    assert_eq!(pick.item, FieldPickItem::Isosurface);
+    assert_eq!(pick.item.label(), "Isosurface");
 }
 
 #[test]

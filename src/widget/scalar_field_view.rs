@@ -31,7 +31,7 @@ use crate::core::scene3d::mat4::Vec3;
 use crate::core::scene3d::pick::picking_segment;
 use crate::render::gpu_scene3d::{Scene3dGeometry, Scene3dId};
 use crate::render::scene3d_items::ScalarField3D;
-use crate::widget::scene_widget::SceneWidget;
+use crate::widget::scene_widget::{ScenePickKind, SceneWidget};
 
 /// The result of picking a [`ScalarFieldView`] at a screen position: the nearest
 /// hit's world-space position and the field value sampled there (`None` when the
@@ -45,6 +45,36 @@ pub struct FieldPick {
     /// Field value at the hit, sampled through the cut plane's interpolation, or
     /// `None` if the position is outside the field box.
     pub value: Option<f32>,
+    /// Which item the ray hit — silx `PositionInfoWidget`'s Item field shows the
+    /// picked item's `getLabel()` (`PositionInfoWidget.py:201`), the item's class
+    /// name by default. For a scalar-field view that is either an iso-surface or
+    /// the cut plane.
+    pub item: FieldPickItem,
+}
+
+/// The item a [`FieldPick`] landed on. A [`ScalarFieldView`]'s scene holds only
+/// iso-surfaces and the single cut plane, so the picked item is one of these two;
+/// its [`label`](FieldPickItem::label) is the silx class name shown in the
+/// PositionInfoWidget Item field (silx `Item3D` default label = class name,
+/// `items/core.py:99`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FieldPickItem {
+    /// An iso-surface hit (silx `volume.Isosurface`).
+    Isosurface,
+    /// The cut plane (silx `volume.CutPlane`).
+    CutPlane,
+}
+
+impl FieldPickItem {
+    /// The item's silx label — its class name (`items/core.py:99`,
+    /// `str(self.__class__.__name__)`; neither `volume.Isosurface` nor
+    /// `volume.CutPlane` overrides it, so no index is appended).
+    pub fn label(self) -> &'static str {
+        match self {
+            FieldPickItem::Isosurface => "Isosurface",
+            FieldPickItem::CutPlane => "CutPlane",
+        }
+    }
 }
 
 /// An interactive 3D view of one [`ScalarField3D`] (iso-surfaces + a cut plane).
@@ -257,26 +287,35 @@ impl ScalarFieldView {
         let camera = self.scene.camera();
         let mvp = camera.matrix();
 
-        // Nearest data surface / scatter point, by NDC depth.
-        let mut best: Option<(f32, Vec3)> = None;
+        // Nearest data surface / cut plane, by NDC depth, tracking which item won
+        // so the readout can name it (silx PositionInfoWidget Item field). The
+        // scene channel holds the iso-surface triangles (`Surface`) and the cut
+        // plane's colormapped slice (`TexturedSurface`); everything else that
+        // could appear is an iso-surface for a scalar field.
+        let mut best: Option<(f32, Vec3, FieldPickItem)> = None;
         if let Some(hit) = self.scene.pick(ndc) {
-            best = Some((hit.ndc_depth, hit.position));
+            let item = match hit.kind {
+                ScenePickKind::TexturedSurface { .. } => FieldPickItem::CutPlane,
+                _ => FieldPickItem::Isosurface,
+            };
+            best = Some((hit.ndc_depth, hit.position, item));
         }
-        // The cut plane (textured mesh, not in the triangle channel) is picked
-        // against the field directly.
+        // The cut plane is also picked against the field directly (its exact
+        // slice geometry), competing on depth with the scene channels above.
         if let Some(segment) = picking_segment(camera, ndc)
             && let Some(pos) = self.field.pick_cut_plane(segment)
         {
             let depth = mvp.transform_point(pos, true).z;
-            if best.is_none_or(|(d, _)| depth < d) {
-                best = Some((depth, pos));
+            if best.is_none_or(|(d, _, _)| depth < d) {
+                best = Some((depth, pos, FieldPickItem::CutPlane));
             }
         }
 
-        let (_, position) = best?;
+        let (_, position, item) = best?;
         Some(FieldPick {
             position,
             value: self.field.value_at(position),
+            item,
         })
     }
 

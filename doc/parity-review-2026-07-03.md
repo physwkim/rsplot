@@ -2688,24 +2688,32 @@ Impact: coincident-fragment policy inverted — silx lets the later-drawn primit
 
 ### R3-11: ScenePositionInfo drops the Item field and its `%g` claim is wrong
 
-**PARTIALLY FIXED (R3):** The `%g` correctness half is fixed. `fn g` now formats
-via `format_g_python(f64::from(v), 6)` — CPython `"%g"` with the default 6
+**FIXED (R3 — user signed off "착수"):** both halves closed.
+
+*`%g` half (already fixed earlier this round):* `fn g` formats via
+`format_g_python(f64::from(v), 6)` — CPython `"%g"` with the default 6
 significant digits (`PositionInfoWidget.py:205-215`), replacing Rust's default
 `Display` (which prints the shortest round-trippable form, diverging for
 >6-sig-digit values, e.g. `0.12345679` → silx `0.123457`). The `fn g` doc no
 longer claims `Display ≡ %g`. silx's array `"%.3g"` path is N/A: siplot's
 `FieldPick::value` is a single scalar. Test:
 `g_rounds_to_six_significant_digits_like_python_g` (+ `g_drops_trailing_zeros_…`).
-The module doc now states the four coordinate/value fields are complete and the
-fifth `_itemLabel` ("Item") field is not yet ported.
 
-**DEFERRED (Item field, pending sign-off):** silx's fifth `_itemLabel` shows the
-picked item's `getLabel()` so an isosurface hit reads differently from a
-cut-plane hit. Porting it is a data-model extension across the pick pipeline —
-`FieldPick` carries no source tag and the 3D items (`Isosurface`/`CutPlane`) have
-no label — i.e. a feature-sized change on a Low finding. Surfaced for sign-off
-(batched with R3-7); the user was away at ask time, so it is held rather than
-implemented unilaterally.
+*Item field (this commit):* `FieldPick` gained an `item: FieldPickItem`
+(`Isosurface` | `CutPlane`). `ScalarFieldView::pick` now tracks which channel
+won alongside the depth — the scene channel's `TexturedSurface` kind (the
+cut-plane slice) → `CutPlane`, any other scene kind → `Isosurface`, and the
+direct `pick_cut_plane` channel → `CutPlane` — and `FieldPickItem::label`
+returns the silx class-name label ("Isosurface"/"CutPlane"; silx `Item3D`'s
+default label is `str(self.__class__.__name__)`, `items/core.py:99`, and neither
+`volume.Isosurface` nor `volume.CutPlane` overrides it, so no index is appended).
+`ScenePositionInfo` renders the fifth **Item** field last, in silx's layout order
+(X/Y/Z/Data/Item, `PositionInfoWidget.py:56-60`), showing `-` when nothing is
+picked. Module doc corrected (no longer claims four fields are the whole
+surface). Tests: `pick_on_an_isosurface_reports_the_isosurface_item` (isosurface
+channel → "Isosurface") and a `CutPlane` assertion added to the existing
+`pick_hits_the_visible_cut_plane_and_samples_its_value` (cut-plane channel →
+"CutPlane").
 
 Severity: Low
 
