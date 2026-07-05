@@ -404,16 +404,26 @@ impl StateWriter {
     /// an alarm-only or metadata-only update refreshes the snapshot via
     /// [`update`](Self::update) and appends no sample.
     pub fn post_value(&self, f: impl FnOnce(&mut ChannelState)) {
-        let value = {
+        {
             let mut state = self.shared.state.write().expect("channel state poisoned");
             f(&mut state);
             state.stamp = state.stamp.wrapping_add(1);
-            state.value.clone()
-        };
-        self.shared.repaint.notify();
-        if let Some(value) = value {
-            self.shared.publish_value(value);
+            // Fan the event out to the *current* subscribers while the write
+            // lock is still held, so the snapshot write and the emission are
+            // atomic. Were the publish moved after the lock releases (its own
+            // statement), a reader could observe `state.value` in the window
+            // between the release and the publish, subscribe there, and then
+            // receive this already-past value — violating the
+            // [`Channel::subscribe_values`] "values before subscribing are not
+            // replayed" contract and leaking a spurious strip-chart sample.
+            // Holding the lock across the publish makes "value observable in the
+            // snapshot ⟹ its event was already fanned out to exactly the
+            // then-current subscribers" true by construction, not by timing.
+            if let Some(value) = state.value.clone() {
+                self.shared.publish_value(value);
+            }
         }
+        self.shared.repaint.notify();
     }
 
     /// Read the current published state — the same snapshot the GUI-side
@@ -739,5 +749,57 @@ mod tests {
         assert_eq!(drain_values(&sub), Vec::<f64>::new());
         writer.post_value(|s| s.value = Some(PvValue::Float(2.0)));
         assert_eq!(drain_values(&sub), vec![2.0]);
+    }
+
+    #[test]
+    fn value_visible_in_snapshot_is_never_replayed_to_a_concurrent_late_subscriber() {
+        // Concurrency regression guard for the `post_value` atomicity fix. The
+        // single-threaded `values_posted_before_subscribing_are_not_replayed`
+        // above cannot catch the real defect, which is an *interleaving*: pre-
+        // fix, `post_value` released the state write lock and only then
+        // published the event, so a reader could observe `state.value` in the
+        // window between the release and the publish, subscribe there, and
+        // receive the already-past value — a spurious strip-chart sample and a
+        // `subscribe_values` "not replayed" contract violation. That window is
+        // exactly what made `ca_property_event_refreshes_metadata_live` flake
+        // under concurrent nextest load. The fix publishes under the write lock,
+        // so "value observable in the snapshot ⟹ its event was already fanned
+        // out" holds by construction. Spinning a reader against a concurrent
+        // poster exercises the interleaving; under the fix it can never leak.
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        for _ in 0..2000 {
+            let (channel, writer) = channel_pair();
+            let armed = Arc::new(AtomicBool::new(false));
+            let poster = {
+                let armed = armed.clone();
+                std::thread::spawn(move || {
+                    // Arm, then post the single initial value; the reader is
+                    // already spinning to catch the release→publish window.
+                    armed.store(true, Ordering::SeqCst);
+                    writer.post_value(|s| {
+                        s.connected = true;
+                        s.value = Some(PvValue::Float(1.0));
+                    });
+                })
+            };
+            while !armed.load(Ordering::SeqCst) {
+                std::hint::spin_loop();
+            }
+            // Subscribe the instant the value becomes observable in the snapshot.
+            let sub = loop {
+                if channel.read(|s| s.value.is_some()) {
+                    break channel.subscribe_values(16);
+                }
+                std::hint::spin_loop();
+            };
+            poster.join().expect("poster thread");
+            // The value was posted before this subscription existed, so it must
+            // never be replayed into it.
+            assert!(
+                drain_values(&sub).is_empty(),
+                "a value observable before subscribe leaked into the new subscriber"
+            );
+        }
     }
 }
