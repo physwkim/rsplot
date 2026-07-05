@@ -10,7 +10,7 @@
 //! Run with: `cargo run --example aspect_ratio`
 
 use eframe::egui;
-use siplot::{CurveData, Plot, PlotView, install, set_curve};
+use rsplot::{CurveData, Plot, PlotView, install, set_curve};
 
 fn build_circle() -> CurveData {
     let n = 256usize;
@@ -65,7 +65,7 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
     eframe::run_native(
-        "siplot · aspect ratio",
+        "rsplot · aspect ratio",
         options,
         Box::new(|cc| Ok(Box::new(AspectApp::new(cc)) as Box<dyn eframe::App>)),
     )

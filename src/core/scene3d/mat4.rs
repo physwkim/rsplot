@@ -2,7 +2,7 @@
 //!
 //! A direct port of silx `silx.gui.plot3d.scene.transform` (the matrix
 //! constructors) onto a hand-rolled `f32` linear-algebra type — no new
-//! dependency, mirroring siplot's no-extra-crate stance for the 2D core.
+//! dependency, mirroring rsplot's no-extra-crate stance for the 2D core.
 //!
 //! ## Conventions (must match silx for the port to stay verifiable)
 //!

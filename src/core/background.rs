@@ -215,7 +215,7 @@ pub fn snip_background(y: &[f64], snip_width: usize) -> Vec<f64> {
 /// whereas a single snip over the whole array would strip `n-2`.
 ///
 /// `SmoothingFlag` is `False` by default, so no Savitzky-Golay pre-smoothing is
-/// applied here; siplot exposes no anchor list, so the implicit `[0, len-1]`
+/// applied here; rsplot exposes no anchor list, so the implicit `[0, len-1]`
 /// split is the only case.
 pub fn snip_background_theory(y: &[f64], snip_width: usize) -> Vec<f64> {
     let n = y.len();

@@ -1,7 +1,7 @@
 //! Printer-selection dialog for the toolbar Print action.
 //!
 //! silx's `PrintAction` opens Qt's `QPrintDialog`, where the user picks a
-//! system printer (or "Print to File"). [`PrintDialog`] is the siplot
+//! system printer (or "Print to File"). [`PrintDialog`] is the rsplot
 //! analogue: a small window listing the system printers with the default
 //! preselected, a Print button, and a "Save to file…" button that diverts to
 //! the figure save dialog (format choice — PNG/JPEG/TIFF/PDF/… — happens in
@@ -62,7 +62,7 @@ impl PrintDialog {
             printer_names: Vec::new(),
             selected: 0,
             win: crate::widget::detached::DetachedWindow::new(
-                egui::Id::new("siplot_print_dialog"),
+                egui::Id::new("rsplot_print_dialog"),
                 vec2(300.0, 110.0),
             ),
         }

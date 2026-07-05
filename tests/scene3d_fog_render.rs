@@ -7,8 +7,8 @@
 //! `snapshot_scene3d_with` readback (no egui harness needed).
 
 use egui_kittest::wgpu::{create_render_state, default_wgpu_setup};
-use siplot::egui::Color32;
-use siplot::{
+use rsplot::egui::Color32;
+use rsplot::{
     Camera, Scene3dFog, Scene3dGeometry, Scene3dShading, Vec3, install_scene3d, set_scene3d,
     snapshot_scene3d, snapshot_scene3d_with,
 };

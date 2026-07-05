@@ -336,29 +336,29 @@ pub struct CurvePipeline {
 impl CurvePipeline {
     pub fn new(device: &wgpu::Device, target_format: wgpu::TextureFormat) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("siplot curve"),
+            label: Some("rsplot curve"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shaders/curve.wgsl").into()),
         });
         let marker_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("siplot markers"),
+            label: Some("rsplot markers"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shaders/markers.wgsl").into()),
         });
         let caps_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("siplot line caps"),
+            label: Some("rsplot line caps"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shaders/linecaps.wgsl").into()),
         });
         let fill_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("siplot fill"),
+            label: Some("rsplot fill"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shaders/fill.wgsl").into()),
         });
         let errorbar_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("siplot errorbars"),
+            label: Some("rsplot errorbars"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shaders/errorbars.wgsl").into()),
         });
 
         let bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("siplot curve bgl"),
+                label: Some("rsplot curve bgl"),
                 entries: &[
                     wgpu::BindGroupLayoutEntry {
                         binding: 0,
@@ -415,7 +415,7 @@ impl CurvePipeline {
             });
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("siplot curve layout"),
+            label: Some("rsplot curve layout"),
             bind_group_layouts: &[Some(&bind_group_layout)],
             immediate_size: 0,
         });
@@ -426,7 +426,7 @@ impl CurvePipeline {
         // size or carry dead curve-only bindings.
         let marker_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("siplot marker bgl"),
+                label: Some("rsplot marker bgl"),
                 entries: &[
                     wgpu::BindGroupLayoutEntry {
                         binding: 0,
@@ -470,13 +470,13 @@ impl CurvePipeline {
             });
         let marker_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("siplot marker layout"),
+                label: Some("rsplot marker layout"),
                 bind_group_layouts: &[Some(&marker_bind_group_layout)],
                 immediate_size: 0,
             });
 
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("siplot curve pipeline"),
+            label: Some("rsplot curve pipeline"),
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &shader,
@@ -506,7 +506,7 @@ impl CurvePipeline {
 
         // Marker pipeline: its own minimal layout, one quad (6 vertices) per point.
         let marker_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("siplot marker pipeline"),
+            label: Some("rsplot marker pipeline"),
             layout: Some(&marker_pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &marker_shader,
@@ -535,7 +535,7 @@ impl CurvePipeline {
         // (same bindings: uniform + points + per-vertex colors) and pipeline
         // layout, but the AA disc shader instead of the symbol shader.
         let caps_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("siplot line caps pipeline"),
+            label: Some("rsplot line caps pipeline"),
             layout: Some(&marker_pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &caps_shader,
@@ -564,7 +564,7 @@ impl CurvePipeline {
         // 1, the baseline at 2). Two data-space triangles per segment.
         let fill_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("siplot fill bgl"),
+                label: Some("rsplot fill bgl"),
                 entries: &[
                     wgpu::BindGroupLayoutEntry {
                         binding: 0,
@@ -604,12 +604,12 @@ impl CurvePipeline {
                 ],
             });
         let fill_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("siplot fill layout"),
+            label: Some("rsplot fill layout"),
             bind_group_layouts: &[Some(&fill_bind_group_layout)],
             immediate_size: 0,
         });
         let fill_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("siplot fill pipeline"),
+            label: Some("rsplot fill pipeline"),
             layout: Some(&fill_pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &fill_shader,
@@ -638,7 +638,7 @@ impl CurvePipeline {
         // endpoints at 1). Two triangles (6 vertices) per segment, like the line.
         let errorbar_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("siplot errorbar bgl"),
+                label: Some("rsplot errorbar bgl"),
                 entries: &[
                     wgpu::BindGroupLayoutEntry {
                         binding: 0,
@@ -671,12 +671,12 @@ impl CurvePipeline {
             });
         let errorbar_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("siplot errorbar layout"),
+                label: Some("rsplot errorbar layout"),
                 bind_group_layouts: &[Some(&errorbar_bind_group_layout)],
                 immediate_size: 0,
             });
         let errorbar_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("siplot errorbar pipeline"),
+            label: Some("rsplot errorbar pipeline"),
             layout: Some(&errorbar_pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &errorbar_shader,
@@ -952,7 +952,7 @@ impl GpuCurve {
         // skipped (count < 2) so nothing is rendered.
         let capacity = positions.len().max(1) as u32;
         let points = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("siplot curve points"),
+            label: Some("rsplot curve points"),
             size: (capacity as usize * std::mem::size_of::<[f32; 2]>()) as u64,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
@@ -967,7 +967,7 @@ impl GpuCurve {
         let vertex_color = curve.colors.is_some();
         let colors_capacity = if vertex_color { capacity } else { 0 };
         let vcolors = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("siplot curve colors"),
+            label: Some("rsplot curve colors"),
             size: (colors_capacity.max(1) as usize * std::mem::size_of::<[f32; 4]>()) as u64,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
@@ -986,21 +986,21 @@ impl GpuCurve {
         let dashed = curve.line_style.dash_spec(curve.width).is_some();
         let arclen_capacity = if dashed { capacity } else { 0 };
         let arclen = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("siplot curve arclen"),
+            label: Some("rsplot curve arclen"),
             size: (arclen_capacity.max(1) as usize * std::mem::size_of::<f32>()) as u64,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
 
         let params = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("siplot curve params"),
+            label: Some("rsplot curve params"),
             size: std::mem::size_of::<CurveParams>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
 
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("siplot curve bg"),
+            label: Some("rsplot curve bg"),
             layout: &pipeline.bind_group_layout,
             entries: &[
                 wgpu::BindGroupEntry {
@@ -1024,13 +1024,13 @@ impl GpuCurve {
 
         // Marker uniform + bind group: same layout, sharing the points buffer.
         let marker_params = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("siplot marker params"),
+            label: Some("rsplot marker params"),
             size: std::mem::size_of::<MarkerParams>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         let marker_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("siplot marker bg"),
+            label: Some("rsplot marker bg"),
             layout: &pipeline.marker_bind_group_layout,
             entries: &[
                 wgpu::BindGroupEntry {
@@ -1055,13 +1055,13 @@ impl GpuCurve {
         // sharing the points buffer (binding 1) and the per-vertex color buffer
         // (binding 2, so a join takes its own vertex's color).
         let caps_params = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("siplot line caps params"),
+            label: Some("rsplot line caps params"),
             size: std::mem::size_of::<MarkerParams>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         let caps_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("siplot line caps bg"),
+            label: Some("rsplot line caps bg"),
             layout: &pipeline.marker_bind_group_layout,
             entries: &[
                 wgpu::BindGroupEntry {
@@ -1084,7 +1084,7 @@ impl GpuCurve {
         // creation, else a 1-element placeholder.
         let baseline_capacity = if curve.fill { capacity } else { 0 };
         let baseline_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("siplot curve baseline"),
+            label: Some("rsplot curve baseline"),
             size: (baseline_capacity.max(1) as usize * std::mem::size_of::<f32>()) as u64,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
@@ -1096,13 +1096,13 @@ impl GpuCurve {
             }
         }
         let fill_params = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("siplot fill params"),
+            label: Some("rsplot fill params"),
             size: std::mem::size_of::<FillParams>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         let fill_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("siplot fill bg"),
+            label: Some("rsplot fill bg"),
             layout: &pipeline.fill_bind_group_layout,
             entries: &[
                 wgpu::BindGroupEntry {
@@ -1132,7 +1132,7 @@ impl GpuCurve {
         let errorbar_capacity = segs.len() as u32;
         let errorbar_count = (segs.len() / 2) as u32;
         let errorbar_segs = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("siplot curve errorbar segs"),
+            label: Some("rsplot curve errorbar segs"),
             size: (errorbar_capacity.max(1) as usize * std::mem::size_of::<[f32; 4]>()) as u64,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
@@ -1141,13 +1141,13 @@ impl GpuCurve {
             queue.write_buffer(&errorbar_segs, 0, bytemuck::cast_slice(&segs));
         }
         let errorbar_params = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("siplot errorbar params"),
+            label: Some("rsplot errorbar params"),
             size: std::mem::size_of::<ErrorBarParams>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         let errorbar_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("siplot errorbar bg"),
+            label: Some("rsplot errorbar bg"),
             layout: &pipeline.errorbar_bind_group_layout,
             entries: &[
                 wgpu::BindGroupEntry {

@@ -6,7 +6,7 @@
 //! `setOrientationIndicatorVisible` (`:320-336`).
 
 use egui_kittest::wgpu::{create_render_state, default_wgpu_setup};
-use siplot::{OVERVIEW_SIZE_PX, SceneWidget};
+use rsplot::{OVERVIEW_SIZE_PX, SceneWidget};
 
 const W: u32 = 300;
 const H: u32 = 240;

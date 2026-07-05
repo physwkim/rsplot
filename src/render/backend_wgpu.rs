@@ -56,12 +56,12 @@ impl WgpuResources {
     /// allocated lazily by `WgpuResources::get_or_insert_plot`.
     pub fn new(device: &wgpu::Device, target_format: wgpu::TextureFormat) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("siplot clear"),
+            label: Some("rsplot clear"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shaders/clear.wgsl").into()),
         });
 
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("siplot clear bgl"),
+            label: Some("rsplot clear bgl"),
             entries: &[wgpu::BindGroupLayoutEntry {
                 binding: 0,
                 visibility: wgpu::ShaderStages::FRAGMENT,
@@ -75,13 +75,13 @@ impl WgpuResources {
         });
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("siplot clear layout"),
+            label: Some("rsplot clear layout"),
             bind_group_layouts: &[Some(&bind_group_layout)],
             immediate_size: 0,
         });
 
         let clear_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("siplot clear pipeline"),
+            label: Some("rsplot clear pipeline"),
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &shader,
@@ -124,13 +124,13 @@ impl WgpuResources {
     ) -> &mut PlotGpuData {
         if !self.plots.contains_key(&plot_id) {
             let color_uniform = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("siplot clear color"),
+                label: Some("rsplot clear color"),
                 size: 16,
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
             let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("siplot clear bg"),
+                label: Some("rsplot clear bg"),
                 layout: &self.bind_group_layout,
                 entries: &[wgpu::BindGroupEntry {
                     binding: 0,
@@ -191,7 +191,7 @@ impl WgpuResources {
             depth_or_array_layers: 1,
         };
         let target = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("siplot offscreen target"),
+            label: Some("rsplot offscreen target"),
             size: extent,
             mip_level_count: 1,
             sample_count: 1,
@@ -225,7 +225,7 @@ impl WgpuResources {
             device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
         {
             let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("siplot offscreen pass"),
+                label: Some("rsplot offscreen pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
                     depth_slice: None,
@@ -271,7 +271,7 @@ impl WgpuResources {
         // Copy the target into a readback buffer with a padded row stride.
         let bpr = padded_bytes_per_row(w);
         let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("siplot readback"),
+            label: Some("rsplot readback"),
             size: (bpr as u64) * (h as u64),
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
@@ -1193,7 +1193,7 @@ pub fn set_images(render_state: &RenderState, plot_id: PlotId, images: &[ImageDa
     let res: &mut WgpuResources = renderer
         .callback_resources
         .get_mut()
-        .expect("WgpuResources not installed — call siplot::install() first");
+        .expect("WgpuResources not installed — call rsplot::install() first");
     let gpu_images: Vec<GpuImage> = images
         .iter()
         .map(|image| {
@@ -1224,7 +1224,7 @@ pub fn set_curves(render_state: &RenderState, plot_id: PlotId, curves: &[CurveDa
     let res: &mut WgpuResources = renderer
         .callback_resources
         .get_mut()
-        .expect("WgpuResources not installed — call siplot::install() first");
+        .expect("WgpuResources not installed — call rsplot::install() first");
     let gpu_curves: Vec<GpuCurve> = curves
         .iter()
         .map(|curve| {
@@ -1257,7 +1257,7 @@ pub fn update_image_region(
     let res: &WgpuResources = renderer
         .callback_resources
         .get()
-        .expect("WgpuResources not installed — call siplot::install() first");
+        .expect("WgpuResources not installed — call rsplot::install() first");
     if let Some(plot_data) = res.plots.get(&plot_id)
         && let Some(image) = plot_data.images.first()
     {
@@ -1286,7 +1286,7 @@ pub fn update_curve_at(
     let res: &mut WgpuResources = renderer
         .callback_resources
         .get_mut()
-        .expect("WgpuResources not installed — call siplot::install() first");
+        .expect("WgpuResources not installed — call rsplot::install() first");
     // Try in-place update first (needs mutable access to the existing curve).
     let fits = res
         .plots
@@ -1330,7 +1330,7 @@ impl egui_wgpu::CallbackTrait for ClearCallback {
     ) -> Vec<wgpu::CommandBuffer> {
         let res: &mut WgpuResources = resources
             .get_mut()
-            .expect("WgpuResources not installed — call siplot::install() at startup");
+            .expect("WgpuResources not installed — call rsplot::install() at startup");
         let plot_data = res.get_or_insert_plot(device, self.plot_id);
         queue.write_buffer(&plot_data.color_uniform, 0, bytemuck::bytes_of(&self.color));
         Vec::new()
@@ -1344,7 +1344,7 @@ impl egui_wgpu::CallbackTrait for ClearCallback {
     ) {
         let res: &WgpuResources = resources
             .get()
-            .expect("WgpuResources not installed — call siplot::install() at startup");
+            .expect("WgpuResources not installed — call rsplot::install() at startup");
         if let Some(plot_data) = res.plots.get(&self.plot_id) {
             render_pass.set_pipeline(&res.clear_pipeline);
             render_pass.set_bind_group(0, &plot_data.bind_group, &[]);
@@ -1375,7 +1375,7 @@ impl egui_wgpu::CallbackTrait for ImageCallback {
     ) -> Vec<wgpu::CommandBuffer> {
         let res: &WgpuResources = resources
             .get()
-            .expect("WgpuResources not installed — call siplot::install() at startup");
+            .expect("WgpuResources not installed — call rsplot::install() at startup");
         if let Some(plot_data) = res.plots.get(&self.plot_id) {
             for image in &plot_data.images {
                 image.write_uniforms(queue, self.ortho, self.axis_log);
@@ -1392,7 +1392,7 @@ impl egui_wgpu::CallbackTrait for ImageCallback {
     ) {
         let res: &WgpuResources = resources
             .get()
-            .expect("WgpuResources not installed — call siplot::install() at startup");
+            .expect("WgpuResources not installed — call rsplot::install() at startup");
         if let Some(plot_data) = res.plots.get(&self.plot_id) {
             for image in &plot_data.images {
                 image.draw(render_pass, &res.image_pipeline);
@@ -1460,7 +1460,7 @@ impl egui_wgpu::CallbackTrait for CurveCallback {
     ) -> Vec<wgpu::CommandBuffer> {
         let res: &mut WgpuResources = resources
             .get_mut()
-            .expect("WgpuResources not installed — call siplot::install() at startup");
+            .expect("WgpuResources not installed — call rsplot::install() at startup");
         let (x_min, x_max) = self.x_window;
         if let Some(plot_data) = res.plots.get_mut(&self.plot_id) {
             for curve in &mut plot_data.curves {
@@ -1484,7 +1484,7 @@ impl egui_wgpu::CallbackTrait for CurveCallback {
     ) {
         let res: &WgpuResources = resources
             .get()
-            .expect("WgpuResources not installed — call siplot::install() at startup");
+            .expect("WgpuResources not installed — call rsplot::install() at startup");
         // Fills first (behind), then error bars, then lines, then markers, so
         // each stroke sits on top of its own fill, the line sits on top of its
         // error bars, and markers sit on top of every line.

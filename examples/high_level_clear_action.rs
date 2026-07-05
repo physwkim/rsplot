@@ -6,7 +6,7 @@
 //! Run with: `cargo run --example high_level_clear_action`
 
 use eframe::egui;
-use siplot::{GraphGrid, Plot1D, PlotWidget};
+use rsplot::{GraphGrid, Plot1D, PlotWidget};
 
 struct ClearActionApp {
     plot: Plot1D,
@@ -83,7 +83,7 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
     eframe::run_native(
-        "siplot - high-level clear action",
+        "rsplot - high-level clear action",
         options,
         Box::new(|cc| Ok(Box::new(ClearActionApp::new(cc)) as Box<dyn eframe::App>)),
     )

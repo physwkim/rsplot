@@ -8,7 +8,7 @@
 //! Run with: `cargo run --example image`
 
 use eframe::egui;
-use siplot::{Colormap, ImageData, Plot, PlotView, install, set_image};
+use rsplot::{Colormap, ImageData, Plot, PlotView, install, set_image};
 
 const WIDTH: u32 = 256;
 const HEIGHT: u32 = 192;
@@ -67,7 +67,7 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
     eframe::run_native(
-        "siplot · image",
+        "rsplot · image",
         options,
         Box::new(|cc| Ok(Box::new(ImageApp::new(cc)) as Box<dyn eframe::App>)),
     )

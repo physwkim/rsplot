@@ -11,7 +11,7 @@
 //! Run with: `cargo run --example scene3d_scatter`
 
 use eframe::egui;
-use siplot::{Colormap, ColormapName, PointMarker, Scatter3D, Scene3dGeometry, SceneWidget, Vec3};
+use rsplot::{Colormap, ColormapName, PointMarker, Scatter3D, Scene3dGeometry, SceneWidget, Vec3};
 
 const N: usize = 1000;
 
@@ -84,7 +84,7 @@ impl Lcg {
 
 fn main() -> eframe::Result {
     eframe::run_native(
-        "siplot: 3D scatter",
+        "rsplot: 3D scatter",
         eframe::NativeOptions {
             renderer: eframe::Renderer::Wgpu,
             ..Default::default()

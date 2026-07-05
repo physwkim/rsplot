@@ -2,16 +2,16 @@
 //!
 //! Click "Save PNG" to render the data layer (background + curve) for the
 //! current limits into an offscreen target, read it back, and write it to
-//! `siplot-graph.png` in the working directory. Pan/zoom first to change
+//! `rsplot-graph.png` in the working directory. Pan/zoom first to change
 //! what gets saved (`doc/design.md` §13 E1).
 //!
 //! Run with: `cargo run --example save_graph`
 
 use eframe::egui;
 use egui::Color32;
-use siplot::{CurveData, Plot, PlotView, install, save_graph, set_curve};
+use rsplot::{CurveData, Plot, PlotView, install, save_graph, set_curve};
 
-const OUT_PATH: &str = "siplot-graph.png";
+const OUT_PATH: &str = "rsplot-graph.png";
 const SAVE_SIZE: (u32, u32) = (800, 600);
 
 fn build_points() -> (Vec<f64>, Vec<f64>) {
@@ -76,7 +76,7 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
     eframe::run_native(
-        "siplot · save_graph",
+        "rsplot · save_graph",
         options,
         Box::new(|cc| Ok(Box::new(SaveApp::new(cc)) as Box<dyn eframe::App>)),
     )

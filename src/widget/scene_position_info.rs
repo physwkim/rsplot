@@ -94,7 +94,7 @@ fn dash() -> String {
 /// significant digits (`PositionInfoWidget.py:205-215`, `"%g" % x`), **not**
 /// Rust's default float `Display`. `Display` prints the shortest round-trippable
 /// form (`0.123456789` in full), whereas silx `%g` rounds to 6 sig digits
-/// (`0.123457`). silx uses `"%.3g"` for array-valued data, but siplot's
+/// (`0.123457`). silx uses `"%.3g"` for array-valued data, but rsplot's
 /// [`FieldPick::value`] is a single scalar, so only the scalar `%g` path applies.
 fn g(v: f32) -> String {
     format_g_python(f64::from(v), 6)

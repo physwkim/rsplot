@@ -1,6 +1,6 @@
 //! Median-filter original capture (R2-7): silx `MedianFilterDialog` keeps
 //! `_originalImage` and refilters IT on every kernel change
-//! (medfilt.py:83-102), so repeated Apply never compounds. siplot mirrors
+//! (medfilt.py:83-102), so repeated Apply never compounds. rsplot mirrors
 //! that with a per-handle capture that survives the filter's own replace and
 //! colormap-only re-uploads, and is dropped when the pixels really change.
 //!
@@ -8,8 +8,8 @@
 //! rendered — mirrors `tests/alpha_slider_binding.rs`.
 
 use egui_kittest::wgpu::{create_render_state, default_wgpu_setup};
-use siplot::actions::analysis::median_filter_2d;
-use siplot::{AutoscaleMode, Colormap, ImageSpec, ItemHandle, PlotWidget};
+use rsplot::actions::analysis::median_filter_2d;
+use rsplot::{AutoscaleMode, Colormap, ImageSpec, ItemHandle, PlotWidget};
 
 const W: usize = 5;
 const H: usize = 5;
@@ -26,7 +26,7 @@ fn hot_pixel_data() -> Vec<f64> {
 
 fn plot_with_image(data: &[f64]) -> (PlotWidget, ItemHandle) {
     let rs = create_render_state(default_wgpu_setup());
-    siplot::install(&rs);
+    rsplot::install(&rs);
     let mut plot = PlotWidget::new(&rs, 0);
     let pixels: Vec<f32> = data.iter().map(|&v| v as f32).collect();
     let spec = ImageSpec::scalar(W as u32, H as u32, &pixels, Colormap::viridis(0.0, 100.0));

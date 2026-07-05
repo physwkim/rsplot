@@ -5,7 +5,7 @@
 //! The histogram axes track the image limits via SyncAxes.
 //!
 //! The side colorbar is the interactive pyqtgraph-`HistogramLUTItem`-style
-//! [`siplot::HistogramColorBar`] (enabled via `set_interactive_colorbar(true)`):
+//! [`rsplot::HistogramColorBar`] (enabled via `set_interactive_colorbar(true)`):
 //! it draws the image's value-distribution histogram beside the gradient with
 //! two draggable handles. Drag a handle to adjust the colormap `vmin`/`vmax` and
 //! the image contrast updates live; right-click the colorbar for "Auto range"
@@ -15,7 +15,7 @@
 //! Run with: `cargo run --example high_level_image_view`
 
 use eframe::egui;
-use siplot::{Colormap, ImageView};
+use rsplot::{Colormap, ImageView};
 
 const WIDTH: u32 = 128;
 const HEIGHT: u32 = 96;
@@ -63,7 +63,7 @@ fn build_image() -> Vec<f32> {
 
 fn main() -> eframe::Result {
     eframe::run_native(
-        "siplot: image view",
+        "rsplot: image view",
         eframe::NativeOptions {
             renderer: eframe::Renderer::Wgpu,
             ..Default::default()

@@ -21,9 +21,9 @@
 
 use egui_kittest::Harness;
 use egui_kittest::wgpu::{WgpuTestRenderer, create_render_state, default_wgpu_setup};
-use siplot::egui::{self, Color32};
-use siplot::egui_wgpu::RenderState;
-use siplot::{
+use rsplot::egui::{self, Color32};
+use rsplot::egui_wgpu::RenderState;
+use rsplot::{
     Camera, ImageInterpolation, Scene3dGeometry, Scene3dTexturedMesh, Vec3, install_scene3d,
     paint_scene3d, set_scene3d,
 };

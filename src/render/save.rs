@@ -966,7 +966,7 @@ fn push_ascii_hex(s: &mut String, data: &[u8]) {
 /// PostScript (EPS) byte stream embedding the raster (alpha dropped).
 ///
 /// Like [`encode_svg`], this is the faithful raster-embedding substitute for
-/// silx's matplotlib-only vector EPS (siplot has no matplotlib dependency): a
+/// silx's matplotlib-only vector EPS (rsplot has no matplotlib dependency): a
 /// minimal EPSF-3.0 document whose body is a single `colorimage` operator. The
 /// `[W 0 0 -H 0 H]` image matrix flips Y so the first scanline (top of the
 /// image) maps to the top of the page, and the RGB samples are fed as
@@ -997,7 +997,7 @@ pub fn encode_eps(rgba: &[u8], width: u32, height: u32) -> Vec<u8> {
 /// embedding the raster (alpha dropped).
 ///
 /// Like [`encode_eps`], this is the faithful raster-embedding substitute for
-/// silx's matplotlib-only vector PDF (siplot has no matplotlib dependency): a
+/// silx's matplotlib-only vector PDF (rsplot has no matplotlib dependency): a
 /// minimal PDF-1.4 file with a catalog, one page sized to the image, and a
 /// `/DeviceRGB` `/ASCIIHexDecode` image XObject drawn by a content stream whose
 /// `cm` matrix scales the unit image to the page. PDF image space puts the
@@ -1185,7 +1185,7 @@ pub fn render_plot_rgba(
     let res: &WgpuResources = renderer
         .callback_resources
         .get()
-        .expect("WgpuResources not installed — call siplot::install() first");
+        .expect("WgpuResources not installed — call rsplot::install() first");
     res.render_to_rgba(
         &render_state.device,
         &render_state.queue,
@@ -1313,7 +1313,7 @@ mod tests {
 
     fn temp_h5(tag: &str) -> std::path::PathBuf {
         let mut path = std::env::temp_dir();
-        path.push(format!("siplot_image_h5_{}_{}.h5", tag, std::process::id()));
+        path.push(format!("rsplot_image_h5_{}_{}.h5", tag, std::process::id()));
         let _ = std::fs::remove_file(&path);
         path
     }

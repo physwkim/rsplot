@@ -10,10 +10,10 @@
 
 use egui_kittest::Harness;
 use egui_kittest::wgpu::{WgpuTestRenderer, create_render_state, default_wgpu_setup};
-use siplot::egui;
-use siplot::egui::Color32;
-use siplot::egui_wgpu::RenderState;
-use siplot::{Box3D, Scene3dGeometry, SceneWidget, Vec3};
+use rsplot::egui;
+use rsplot::egui::Color32;
+use rsplot::egui_wgpu::RenderState;
+use rsplot::{Box3D, Scene3dGeometry, SceneWidget, Vec3};
 use std::cell::RefCell;
 use std::rc::Rc;
 

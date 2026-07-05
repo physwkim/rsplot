@@ -10,7 +10,7 @@
 //! Run with: `cargo run --example log_axis`
 
 use eframe::egui;
-use siplot::{CurveData, Plot, PlotView, Scale, install, set_curve};
+use rsplot::{CurveData, Plot, PlotView, Scale, install, set_curve};
 
 fn build_curve() -> CurveData {
     // Power law y = 10^(x/12): a straight line on a log10 Y axis.
@@ -63,7 +63,7 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
     eframe::run_native(
-        "siplot · log axis",
+        "rsplot · log axis",
         options,
         Box::new(|cc| Ok(Box::new(LogAxisApp::new(cc)) as Box<dyn eframe::App>)),
     )

@@ -11,8 +11,8 @@
 //! Run with: `cargo run --example scene3d_image`
 
 use eframe::egui;
-use siplot::egui::Color32;
-use siplot::{
+use rsplot::egui::Color32;
+use rsplot::{
     Colormap, ColormapName, HeightMapData, ImageData3D, ImageRgba3D, Scene3dGeometry, SceneWidget,
     Vec3,
 };
@@ -102,7 +102,7 @@ fn gradient() -> Vec<Color32> {
 
 fn main() -> eframe::Result {
     eframe::run_native(
-        "siplot: 3D image & height map",
+        "rsplot: 3D image & height map",
         eframe::NativeOptions {
             renderer: eframe::Renderer::Wgpu,
             ..Default::default()

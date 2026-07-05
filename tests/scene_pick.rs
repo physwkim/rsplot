@@ -6,8 +6,8 @@
 //! the pick lands where the geometry is.
 
 use egui_kittest::wgpu::{create_render_state, default_wgpu_setup};
-use siplot::egui::Color32;
-use siplot::{
+use rsplot::egui::Color32;
+use rsplot::{
     CameraFace, ImageInterpolation, PointMarker, Scatter2D, Scatter2DVisualization, Scatter3D,
     Scene3dGeometry, Scene3dImageLayer, Scene3dTexturedMesh, ScenePickKind, SceneWidget, Vec3,
 };

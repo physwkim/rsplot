@@ -19,7 +19,7 @@
 
 use eframe::egui;
 use egui::Color32;
-use siplot::{
+use rsplot::{
     CurveSpec, GraphGrid, ItemHandle, LineStyle, PlotInteractionMode, PlotWidget, Symbol,
 };
 
@@ -40,7 +40,7 @@ impl CurveLegendApp {
         let mut plot = PlotWidget::new(render_state, 0);
         plot.set_graph_title("CurveLegendWidgets demo");
         plot.set_graph_x_label("X");
-        plot.set_graph_y_label("Y", siplot::YAxis::Left);
+        plot.set_graph_y_label("Y", rsplot::YAxis::Left);
         plot.set_graph_cursor(true);
         plot.set_graph_grid_mode(GraphGrid::MajorAndMinor);
         plot.set_interaction_mode(PlotInteractionMode::Zoom);
@@ -153,7 +153,7 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
     eframe::run_native(
-        "siplot - curve legend icons",
+        "rsplot - curve legend icons",
         options,
         Box::new(|cc| Ok(Box::new(CurveLegendApp::new(cc)) as Box<dyn eframe::App>)),
     )

@@ -1,4 +1,4 @@
-# siplot — 설계 문서 (Design Doc v0)
+# rsplot — 설계 문서 (Design Doc v0)
 
 egui + wgpu 위에 silx 스타일의 과학 시각화 라이브러리를 만든다. silx가
 `BackendBase`(추상) ↔ `BackendOpenGL`/`BackendPygfx`(구현)로 렌더러를 갈아끼우듯,
@@ -18,7 +18,7 @@ wgpu 렌더러를 `egui_wgpu` paint callback 안에 끼워 넣는다.
 
 ## 0. 용어와 역할 매핑
 
-| silx (Python/Qt/pygfx) | siplot (Rust/egui/wgpu) |
+| silx (Python/Qt/pygfx) | rsplot (Rust/egui/wgpu) |
 |---|---|
 | `PlotWidget` / `Plot1D` / `Plot2D` (고수준) | `Plot` + `PlotWidget` (egui widget) |
 | `BackendBase` (추상 렌더 프리미티브) | `trait Backend` |
@@ -61,7 +61,7 @@ callback_resources에서 id로 조회한다.
 ```
 
 처음엔 단일 크레이트 내부 모듈(`core`/`render`/`widget`)로 두고, API가 안정되면
-`siplot-core` / `siplot-wgpu` / `siplot` 로 분리한다. `Backend`를 trait로
+`rsplot-core` / `rsplot-wgpu` / `rsplot` 로 분리한다. `Backend`를 trait로
 두는 이유는 silx와 동일: 고수준 API를 고정한 채 렌더러(테스트용 CPU mock, 다른
 백엔드)를 갈아끼우기 위함이다.
 
@@ -363,7 +363,7 @@ silx의 frame은 screen-space로 그려진다(`_PlotFrameCore`, `BackendPygfx`
 ## 9. 크레이트 구조 (초기: 단일 크레이트, 모듈 분리)
 
 ```
-siplot/
+rsplot/
   Cargo.toml            # egui/eframe/egui-wgpu = 0.34, wgpu = 29, bytemuck
   src/
     lib.rs

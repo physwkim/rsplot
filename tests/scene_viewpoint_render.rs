@@ -12,9 +12,9 @@
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
 use egui_kittest::wgpu::{WgpuTestRenderer, create_render_state, default_wgpu_setup};
-use siplot::egui;
-use siplot::egui_wgpu::RenderState;
-use siplot::{CameraFace, SceneWidget, Vec3, viewpoint_menu};
+use rsplot::egui;
+use rsplot::egui_wgpu::RenderState;
+use rsplot::{CameraFace, SceneWidget, Vec3, viewpoint_menu};
 use std::cell::RefCell;
 use std::rc::Rc;
 

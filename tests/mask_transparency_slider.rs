@@ -13,8 +13,8 @@ use std::rc::Rc;
 
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
-use siplot::MaskToolsWidget;
-use siplot::egui;
+use rsplot::MaskToolsWidget;
+use rsplot::egui;
 
 #[test]
 fn dragging_the_transparency_slider_lowers_the_overlay_alpha() {

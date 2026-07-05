@@ -2,7 +2,7 @@
 //! **round caps** (silx's pygfx `LineMaterial` default), not the bare butt caps
 //! the per-segment quads give on their own.
 //!
-//! siplot draws a polyline as independent butt-capped segment quads, so a sharp
+//! rsplot draws a polyline as independent butt-capped segment quads, so a sharp
 //! turn leaves a wedge-shaped gap on the outer side of the join and the two ends
 //! are flat. `GpuCurve::draw_caps` stamps an antialiased disc of the line width
 //! at every vertex; the union with the segment quads is a round-joined,
@@ -15,8 +15,8 @@ use std::rc::Rc;
 
 use egui_kittest::Harness;
 use egui_kittest::wgpu::{WgpuTestRenderer, create_render_state, default_wgpu_setup};
-use siplot::egui::{self, Color32, Pos2};
-use siplot::{CurveSpec, PlotWidget, YAxis};
+use rsplot::egui::{self, Color32, Pos2};
+use rsplot::{CurveSpec, PlotWidget, YAxis};
 
 const W: usize = 400;
 const H: usize = 300;
@@ -36,7 +36,7 @@ fn is_red(px: [u8; 4]) -> bool {
 /// `probe` data point (the cached display transform after rendering).
 fn render_curve(x: &[f64], y: &[f64], probes: &[(f64, f64)]) -> (Vec<u8>, Vec<Pos2>) {
     let rs = create_render_state(default_wgpu_setup());
-    siplot::install(&rs);
+    rsplot::install(&rs);
 
     let mut plot = PlotWidget::new(&rs, 0);
     let mut spec = CurveSpec::new(x, y, Color32::RED);

@@ -5,18 +5,18 @@ All notable changes to this workspace are documented here. The format follows
 pre-1.0 [Semantic Versioning](https://semver.org/) (a `0.x` minor bump may carry
 breaking changes).
 
-This is a workspace of three crates released together: **siplot** (the plotting
-library), **sidm** (a PyDM-style EPICS display layer built on siplot), and
-**adl2sidm** (a MEDM `.adl` → SiDM-Rust-source converter).
+This is a workspace of three crates released together: **rsplot** (the plotting
+library), **rsdm** (a PyDM-style EPICS display layer built on rsplot), and
+**adl2rsdm** (a MEDM `.adl` → RsDM-Rust-source converter).
 
 ## [Unreleased]
 
 ## [0.4.2] - 2026-07-02
 
-Follow-up patch refining the 0.4.1 trackpad-momentum fix. `siplot` only; `sidm`
-and `adl2sidm` are re-released in lockstep (no functional change).
+Follow-up patch refining the 0.4.1 trackpad-momentum fix. `rsplot` only; `rsdm`
+and `adl2rsdm` are re-released in lockstep (no functional change).
 
-### Added — `siplot`
+### Added — `rsplot`
 
 - **`Plot::scroll_zoom` flag (default `true`)** to disable wheel/trackpad zoom
   per plot. When `false` the whole wheel handler is skipped — no scroll is read,
@@ -24,7 +24,7 @@ and `adl2sidm` are re-released in lockstep (no functional change).
   Home/Zoom buttons, and the context menu are unaffected. A consumer that finds
   wheel zoom troublesome can opt out with `plot.plot_mut().scroll_zoom = false`.
 
-### Fixed — `siplot`
+### Fixed — `rsplot`
 
 - **Wheel-zoom no longer stops working on plots that refit to data on every
   update.** The 0.4.1 momentum guard was armed inside the low-level
@@ -48,10 +48,10 @@ and `adl2sidm` are re-released in lockstep (no functional change).
 ## [0.4.1] - 2026-07-02
 
 A single-fix patch release: the macOS trackpad-momentum reset bounce-back in
-`siplot` (below). `sidm` and `adl2sidm` are re-released in lockstep (no
+`rsplot` (below). `rsdm` and `adl2rsdm` are re-released in lockstep (no
 functional change).
 
-### Fixed — `siplot`
+### Fixed — `rsplot`
 
 - **Reset Zoom / Zoom Back no longer bounces back under macOS trackpad momentum.**
   A view reset (right-click *Reset Zoom*, *Zoom Back*, or reset-to-data) restores
@@ -71,12 +71,12 @@ functional change).
 
 Post-`0.3.0` deep-audit pass over the `silx.gui.plot` fit subsystem and marker
 set: completes every silx `FitManager` fit theory and the last missing marker
-glyph. `siplot` only; `sidm` and `adl2sidm` are re-released in lockstep (no
+glyph. `rsplot` only; `rsdm` and `adl2rsdm` are re-released in lockstep (no
 functional change).
 
-### Added — `siplot` fit theories (silx `FitManager` parity)
+### Added — `rsplot` fit theories (silx `FitManager` parity)
 
-A FitWidget audit found siplot exposed only **8 of silx's 19 `FitManager`
+A FitWidget audit found rsplot exposed only **8 of silx's 19 `FitManager`
 theories** (`silx/math/fit/fittheories.py`). The missing 11 are now ported,
 byte-faithful to silx `funs.c`, each a new `PeakModel` + `FitModelChoice`
 variant fitted through the existing iterative path. **All 19 silx fit theories
@@ -93,9 +93,9 @@ are now implemented.**
   terms (`tail_flags = 15`, silx's default `HypermetTails`). Tail ratios seed to
   silx's `Initial*` CONFIG values; silx's per-tail `CFIXED`/`CQUOTED` defaults
   are reachable through the existing per-parameter constraint UI (consistent with
-  siplot's all-`Free` default-constraint invariant).
+  rsplot's all-`Free` default-constraint invariant).
 
-### Added — `siplot` markers
+### Added — `rsplot` markers
 
 - **Heart** (`♥`) marker glyph (silx `HEART`), a cardioid SDF in the marker
   shader plus the CPU legend icon — completing all 18 silx marker symbols.
@@ -106,9 +106,9 @@ This release completes the `silx.gui.plot` 2D parity port (the queue is now
 exhausted save for a handful of documented platform/perf residuals) and adds a
 full true-3D scene subsystem ported from `silx.gui.plot3d`.
 
-### Added — `siplot` 3D scene subsystem (`silx.gui.plot3d` port)
+### Added — `rsplot` 3D scene subsystem (`silx.gui.plot3d` port)
 
-A full true-3D scene stack ported from `silx.gui.plot3d` onto siplot's
+A full true-3D scene stack ported from `silx.gui.plot3d` onto rsplot's
 wgpu/egui infrastructure, rendered through an offscreen depth-tested pass that
 blits into egui's color-only render pass. Tracked wave by wave in
 `doc/plot3d-parity-roadmap.md`.
@@ -150,7 +150,7 @@ blits into egui's color-only render pass. Tracked wave by wave in
   beyond world position + sampled value) and its generic `plot3d._model`
   scene-graph tree editor are deferred, noted in the roadmap rather than stubbed.
 
-### Added — `siplot` 2D plotting completions (`silx.gui.plot` parity)
+### Added — `rsplot` 2D plotting completions (`silx.gui.plot` parity)
 
 The remaining `silx.gui.plot` gaps were closed, finishing the parity port begun
 in 0.1.0 / 0.2.0. Tracked row by row in `doc/parity-roadmap.md`.
@@ -187,7 +187,7 @@ in 0.1.0 / 0.2.0. Tracked row by row in `doc/parity-roadmap.md`.
 - **Colormap registry**: `register_colormap` for named LUTs and colormap-state
   serialization round-trips.
 
-### Changed — `siplot`
+### Changed — `rsplot`
 
 - New optional-feature-free dependencies scoped to the mask/alignment work:
   `tiff` and the pure-Rust `rust-hdf5` (mask TIFF/HDF5 save/load) and `lowe-sift`
@@ -203,29 +203,29 @@ GPU stats/histogram (CPU equivalents are complete), the mid-gesture
 `sigInteractiveRoiCreated` signal (immediate-mode emits `DrawingProgress`
 instead), runtime matplotlib-dynamic colormap loading (needs a Python
 dependency), a native print dialog/printer submission (OS-native; the preview is
-ported), and an OpenGL backend selector (N/A — siplot is wgpu-only).
+ported), and an OpenGL backend selector (N/A — rsplot is wgpu-only).
 
 ## [0.2.0] - 2026-06-13
 
-The headline of this release is two new crates — **sidm** and **adl2sidm** —
-alongside a large expansion of siplot. siplot 0.1.0 was the plotting library
+The headline of this release is two new crates — **rsdm** and **adl2rsdm** —
+alongside a large expansion of rsplot. rsplot 0.1.0 was the plotting library
 alone; 0.2.0 turns the workspace into a full EPICS display stack and a MEDM
 screen converter on top of it.
 
-### Added — `sidm` 0.2.0 (new crate)
+### Added — `rsdm` 0.2.0 (new crate)
 
-A PyDM-style EPICS display layer ported from `pydm` onto siplot + epics-rs.
+A PyDM-style EPICS display layer ported from `pydm` onto rsplot + epics-rs.
 
 - A headless data **`Engine`** owning a tokio runtime, with channel addresses
   over `ca://` (Channel Access), `pva://` (pvAccess), `calc://` (a pure-Rust
   derived-channel expression evaluator), and the IOC-free `loc://` / `fake://`
   schemes. The EPICS backends are feature-gated (`ca`, `pva`, `calc`, all
   default-on); `--no-default-features` gives the dependency-light core.
-- The PyDM widget set: `SidmLabel`, `SidmLineEdit`, `SidmEnumComboBox`,
-  `SidmEnumButton`, `SidmPushButton`, `SidmSlider`, `SidmSpinbox`,
-  `SidmByteIndicator`, `SidmScaleIndicator`, `SidmDrawing`, `SidmImage`,
-  `SidmImageView`, `SidmFrame`, and the siplot-backed plots `SidmTimePlot`,
-  `SidmWaveformPlot`, `SidmScatterPlot`.
+- The PyDM widget set: `RsdmLabel`, `RsdmLineEdit`, `RsdmEnumComboBox`,
+  `RsdmEnumButton`, `RsdmPushButton`, `RsdmSlider`, `RsdmSpinbox`,
+  `RsdmByteIndicator`, `RsdmScaleIndicator`, `RsdmDrawing`, `RsdmImage`,
+  `RsdmImageView`, `RsdmFrame`, and the rsplot-backed plots `RsdmTimePlot`,
+  `RsdmWaveformPlot`, `RsdmScatterPlot`.
 - MEDM/PyDM display fidelity: display-format and precision handling, alarm
   severity colouring with selectable MEDM/PyDM palettes, a disconnect-only
   border mode, justified MEDM-cell geometry with vertical/horizontal centering,
@@ -236,15 +236,15 @@ A PyDM-style EPICS display layer ported from `pydm` onto siplot + epics-rs.
   busy record can never stall a writer; discarded/failed writes log through the
   `log` facade.
 
-### Added — `adl2sidm` 0.2.0 (new crate)
+### Added — `adl2rsdm` 0.2.0 (new crate)
 
 A converter mirroring `adl2pydm`, but emitting **compile-checked Rust source**
 instead of Qt `.ui` XML.
 
-- Parses a MEDM `.adl` screen into a widget IR and emits a self-contained SiDM
-  `Screen` module; the generated code is compile-gated against the real `sidm`
+- Parses a MEDM `.adl` screen into a widget IR and emits a self-contained RsDM
+  `Screen` module; the generated code is compile-gated against the real `rsdm`
   API (a fidelity check `adl2pydm` cannot do against Qt).
-- Every MEDM widget maps to a real SiDM widget, including arc/polygon/polyline
+- Every MEDM widget maps to a real RsDM widget, including arc/polygon/polyline
   shapes, static images, byte/bar/indicator/meter monitors, and the plots.
 - Structural z-order: decoration behind, controls on top, pinned by `egui::Order`
   and emitted one placement per child layer so a composite reproduces MEDM
@@ -258,9 +258,9 @@ instead of Qt `.ui` XML.
   converted child screen in an egui viewport, with runtime macro tables built at
   click time (MEDM `relatedDisplayCreateNewDisplay` semantics).
 - A `clap` CLI (`--protocol` / `--macro` / `--out` / `--absolute` /
-  `--use-scatterplot`) and an installable `adl2sidm` binary.
+  `--use-scatterplot`) and an installable `adl2rsdm` binary.
 
-### Added — `siplot` 0.2.0
+### Added — `rsplot` 0.2.0
 
 - **Interactive histogram colorbar** with draggable vmin/vmax handles, an
   auto-range context menu, and an in-chrome gutter rendering for `ImageView` /
@@ -288,13 +288,13 @@ instead of Qt `.ui` XML.
 
 ### Changed
 
-- siplot is now the root of a three-crate workspace; `sidm` reaches egui/wgpu
-  through `siplot::egui` to keep a single egui/wgpu in the tree.
+- rsplot is now the root of a three-crate workspace; `rsdm` reaches egui/wgpu
+  through `rsplot::egui` to keep a single egui/wgpu in the tree.
 
-[Unreleased]: https://github.com/physwkim/siplot/compare/v0.4.2...HEAD
-[0.4.2]: https://github.com/physwkim/siplot/compare/v0.4.1...v0.4.2
-[0.4.1]: https://github.com/physwkim/siplot/compare/v0.4.0...v0.4.1
-[0.4.0]: https://github.com/physwkim/siplot/compare/v0.3.0...v0.4.0
-[0.3.0]: https://github.com/physwkim/siplot/compare/v0.2.0...v0.3.0
-[0.2.0]: https://github.com/physwkim/siplot/compare/v0.1.0...v0.2.0
-[0.1.0]: https://github.com/physwkim/siplot/releases/tag/v0.1.0
+[Unreleased]: https://github.com/physwkim/rsplot/compare/v0.4.2...HEAD
+[0.4.2]: https://github.com/physwkim/rsplot/compare/v0.4.1...v0.4.2
+[0.4.1]: https://github.com/physwkim/rsplot/compare/v0.4.0...v0.4.1
+[0.4.0]: https://github.com/physwkim/rsplot/compare/v0.3.0...v0.4.0
+[0.3.0]: https://github.com/physwkim/rsplot/compare/v0.2.0...v0.3.0
+[0.2.0]: https://github.com/physwkim/rsplot/compare/v0.1.0...v0.2.0
+[0.1.0]: https://github.com/physwkim/rsplot/releases/tag/v0.1.0

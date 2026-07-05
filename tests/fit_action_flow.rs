@@ -7,11 +7,11 @@
 //! Needs a GPU (real or software); mirrors `tests/limits_history_lifecycle.rs`.
 
 use egui_kittest::wgpu::{create_render_state, default_wgpu_setup};
-use siplot::egui::Color32;
-use siplot::{FitWidget, Plot1D};
+use rsplot::egui::Color32;
+use rsplot::{FitWidget, Plot1D};
 
 /// A plot showing a straight line over x = 0..100, zoomed to [20, 40].
-fn zoomed_line_plot(rs: &egui_wgpu::RenderState) -> (Plot1D, siplot::ItemHandle) {
+fn zoomed_line_plot(rs: &egui_wgpu::RenderState) -> (Plot1D, rsplot::ItemHandle) {
     let mut plot = Plot1D::new(rs, 0);
     let x: Vec<f64> = (0..=100).map(f64::from).collect();
     let y: Vec<f64> = x.iter().map(|&x| 2.0 * x + 1.0).collect();
@@ -23,7 +23,7 @@ fn zoomed_line_plot(rs: &egui_wgpu::RenderState) -> (Plot1D, siplot::ItemHandle)
 #[test]
 fn fit_target_seeds_range_from_visible_x_window() {
     let rs = create_render_state(default_wgpu_setup());
-    siplot::install(&rs);
+    rsplot::install(&rs);
     let (plot, handle) = zoomed_line_plot(&rs);
     let mut fit = FitWidget::new(&rs, 1);
 
@@ -46,7 +46,7 @@ fn fit_target_seeds_range_from_visible_x_window() {
 #[test]
 fn fit_overlay_appears_updates_in_place_and_hides_without_result() {
     let rs = create_render_state(default_wgpu_setup());
-    siplot::install(&rs);
+    rsplot::install(&rs);
     let (mut plot, handle) = zoomed_line_plot(&rs);
     let mut fit = FitWidget::new(&rs, 1);
 

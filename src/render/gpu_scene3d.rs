@@ -725,28 +725,28 @@ struct Scene3dPipeline {
 impl Scene3dPipeline {
     fn new(device: &wgpu::Device, target_format: wgpu::TextureFormat) -> Self {
         let scene_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("siplot scene3d"),
+            label: Some("rsplot scene3d"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shaders/scene3d.wgsl").into()),
         });
         let blit_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("siplot scene3d blit"),
+            label: Some("rsplot scene3d blit"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shaders/scene3d_blit.wgsl").into()),
         });
         let point_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("siplot scene3d points"),
+            label: Some("rsplot scene3d points"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shaders/scene3d_points.wgsl").into()),
         });
         let mesh_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("siplot scene3d mesh"),
+            label: Some("rsplot scene3d mesh"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shaders/scene3d_mesh.wgsl").into()),
         });
         let image_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("siplot scene3d image"),
+            label: Some("rsplot scene3d image"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shaders/scene3d_image.wgsl").into()),
         });
 
         let scene_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("siplot scene3d scene bgl"),
+            label: Some("rsplot scene3d scene bgl"),
             entries: &[wgpu::BindGroupLayoutEntry {
                 binding: 0,
                 // The fragment stage reads the fog uniform (silx applies fog
@@ -762,7 +762,7 @@ impl Scene3dPipeline {
         });
 
         let scene_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("siplot scene3d scene layout"),
+            label: Some("rsplot scene3d scene layout"),
             bind_group_layouts: &[Some(&scene_bgl)],
             immediate_size: 0,
         });
@@ -825,17 +825,17 @@ impl Scene3dPipeline {
         };
 
         let line_pipeline =
-            make_scene_pipeline(wgpu::PrimitiveTopology::LineList, "siplot scene3d lines");
+            make_scene_pipeline(wgpu::PrimitiveTopology::LineList, "rsplot scene3d lines");
         let tri_pipeline = make_scene_pipeline(
             wgpu::PrimitiveTopology::TriangleList,
-            "siplot scene3d triangles",
+            "rsplot scene3d triangles",
         );
 
         // Point sprites: their own uniform (MVP + fog + viewport) and an
         // instanced billboard pipeline with premultiplied-alpha blending so the
         // antialiased marker edges composite over the opaque scene behind them.
         let point_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("siplot scene3d point bgl"),
+            label: Some("rsplot scene3d point bgl"),
             entries: &[wgpu::BindGroupLayoutEntry {
                 binding: 0,
                 // Fragment stage reads the fog uniform.
@@ -851,12 +851,12 @@ impl Scene3dPipeline {
             }],
         });
         let point_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("siplot scene3d point layout"),
+            label: Some("rsplot scene3d point layout"),
             bind_group_layouts: &[Some(&point_bgl)],
             immediate_size: 0,
         });
         let point_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("siplot scene3d points"),
+            label: Some("rsplot scene3d points"),
             layout: Some(&point_layout),
             vertex: wgpu::VertexState {
                 module: &point_shader,
@@ -904,7 +904,7 @@ impl Scene3dPipeline {
         // shininess) and a depth-tested, premultiplied-alpha-blended, double-sided
         // triangle pipeline with headlight lighting in the fragment shader.
         let mesh_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("siplot scene3d mesh bgl"),
+            label: Some("rsplot scene3d mesh bgl"),
             entries: &[wgpu::BindGroupLayoutEntry {
                 binding: 0,
                 // Fragment stage reads the fog + shininess uniforms.
@@ -920,12 +920,12 @@ impl Scene3dPipeline {
             }],
         });
         let mesh_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("siplot scene3d mesh layout"),
+            label: Some("rsplot scene3d mesh layout"),
             bind_group_layouts: &[Some(&mesh_bgl)],
             immediate_size: 0,
         });
         let mesh_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("siplot scene3d mesh"),
+            label: Some("rsplot scene3d mesh"),
             layout: Some(&mesh_layout),
             vertex: wgpu::VertexState {
                 module: &mesh_shader,
@@ -980,7 +980,7 @@ impl Scene3dPipeline {
         // the per-image texture + sampler. Depth-tested, premultiplied-alpha
         // blended (opaque images write fully; RGBA images composite).
         let image_tex_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("siplot scene3d image tex bgl"),
+            label: Some("rsplot scene3d image tex bgl"),
             entries: &[
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
@@ -1001,12 +1001,12 @@ impl Scene3dPipeline {
             ],
         });
         let image_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("siplot scene3d image layout"),
+            label: Some("rsplot scene3d image layout"),
             bind_group_layouts: &[Some(&scene_bgl), Some(&image_tex_bgl)],
             immediate_size: 0,
         });
         let image_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("siplot scene3d image"),
+            label: Some("rsplot scene3d image"),
             layout: Some(&image_layout),
             vertex: wgpu::VertexState {
                 module: &image_shader,
@@ -1048,7 +1048,7 @@ impl Scene3dPipeline {
             cache: None,
         });
         let image_sampler_nearest = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("siplot scene3d image sampler (nearest)"),
+            label: Some("rsplot scene3d image sampler (nearest)"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
             address_mode_v: wgpu::AddressMode::ClampToEdge,
             address_mode_w: wgpu::AddressMode::ClampToEdge,
@@ -1058,7 +1058,7 @@ impl Scene3dPipeline {
             ..Default::default()
         });
         let image_sampler_linear = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("siplot scene3d image sampler (linear)"),
+            label: Some("rsplot scene3d image sampler (linear)"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
             address_mode_v: wgpu::AddressMode::ClampToEdge,
             address_mode_w: wgpu::AddressMode::ClampToEdge,
@@ -1069,7 +1069,7 @@ impl Scene3dPipeline {
         });
 
         let blit_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("siplot scene3d blit bgl"),
+            label: Some("rsplot scene3d blit bgl"),
             entries: &[
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
@@ -1091,13 +1091,13 @@ impl Scene3dPipeline {
         });
 
         let blit_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("siplot scene3d blit layout"),
+            label: Some("rsplot scene3d blit layout"),
             bind_group_layouts: &[Some(&blit_bgl)],
             immediate_size: 0,
         });
 
         let blit_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("siplot scene3d blit pipeline"),
+            label: Some("rsplot scene3d blit pipeline"),
             layout: Some(&blit_layout),
             vertex: wgpu::VertexState {
                 module: &blit_shader,
@@ -1122,7 +1122,7 @@ impl Scene3dPipeline {
         });
 
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("siplot scene3d blit sampler"),
+            label: Some("rsplot scene3d blit sampler"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
             address_mode_v: wgpu::AddressMode::ClampToEdge,
             address_mode_w: wgpu::AddressMode::ClampToEdge,
@@ -1204,13 +1204,13 @@ struct Scene3dGpu {
 impl Scene3dGpu {
     fn new(device: &wgpu::Device, pipeline: &Scene3dPipeline) -> Self {
         let params_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("siplot scene3d params"),
+            label: Some("rsplot scene3d params"),
             size: std::mem::size_of::<Scene3dParams>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         let scene_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("siplot scene3d scene bind group"),
+            label: Some("rsplot scene3d scene bind group"),
             layout: &pipeline.scene_bgl,
             entries: &[wgpu::BindGroupEntry {
                 binding: 0,
@@ -1218,13 +1218,13 @@ impl Scene3dGpu {
             }],
         });
         let point_params_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("siplot scene3d point params"),
+            label: Some("rsplot scene3d point params"),
             size: std::mem::size_of::<Scene3dPointParams>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         let point_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("siplot scene3d point bind group"),
+            label: Some("rsplot scene3d point bind group"),
             layout: &pipeline.point_bgl,
             entries: &[wgpu::BindGroupEntry {
                 binding: 0,
@@ -1232,13 +1232,13 @@ impl Scene3dGpu {
             }],
         });
         let mesh_params_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("siplot scene3d mesh params"),
+            label: Some("rsplot scene3d mesh params"),
             size: std::mem::size_of::<Scene3dMeshParams>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         let mesh_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("siplot scene3d mesh bind group"),
+            label: Some("rsplot scene3d mesh bind group"),
             layout: &pipeline.mesh_bgl,
             entries: &[wgpu::BindGroupEntry {
                 binding: 0,
@@ -1277,16 +1277,16 @@ impl Scene3dGpu {
         pipeline: &Scene3dPipeline,
         geometry: &Scene3dGeometry,
     ) {
-        self.line_vbuf = make_vertex_buffer(device, queue, &geometry.lines, "siplot scene3d lines");
+        self.line_vbuf = make_vertex_buffer(device, queue, &geometry.lines, "rsplot scene3d lines");
         self.line_count = geometry.lines.len() as u32;
         self.tri_vbuf =
-            make_vertex_buffer(device, queue, &geometry.triangles, "siplot scene3d tris");
+            make_vertex_buffer(device, queue, &geometry.triangles, "rsplot scene3d tris");
         self.tri_count = geometry.triangles.len() as u32;
         self.point_vbuf =
-            make_vertex_buffer(device, queue, &geometry.points, "siplot scene3d points");
+            make_vertex_buffer(device, queue, &geometry.points, "rsplot scene3d points");
         self.point_count = geometry.points.len() as u32;
         self.mesh_vbuf =
-            make_vertex_buffer(device, queue, &geometry.meshes, "siplot scene3d meshes");
+            make_vertex_buffer(device, queue, &geometry.meshes, "rsplot scene3d meshes");
         self.mesh_count = geometry.meshes.len() as u32;
         // Image quads and textured meshes both upload to a `Scene3dImageGpu`
         // (texture + vertex buffer) and draw through the one textured pipeline;
@@ -1322,7 +1322,7 @@ impl Scene3dGpu {
             depth_or_array_layers: 1,
         };
         let color = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("siplot scene3d color"),
+            label: Some("rsplot scene3d color"),
             size: extent,
             mip_level_count: 1,
             sample_count: 1,
@@ -1332,7 +1332,7 @@ impl Scene3dGpu {
             view_formats: &[],
         });
         let depth = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("siplot scene3d depth"),
+            label: Some("rsplot scene3d depth"),
             size: extent,
             mip_level_count: 1,
             sample_count: 1,
@@ -1344,7 +1344,7 @@ impl Scene3dGpu {
         let color_view = color.create_view(&wgpu::TextureViewDescriptor::default());
         let depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
         let blit_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("siplot scene3d blit bind group"),
+            label: Some("rsplot scene3d blit bind group"),
             layout: &pipeline.blit_bgl,
             entries: &[
                 wgpu::BindGroupEntry {
@@ -1377,7 +1377,7 @@ impl Scene3dGpu {
         background: [f32; 4],
     ) {
         let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("siplot scene3d offscreen pass"),
+            label: Some("rsplot scene3d offscreen pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: color_view,
                 depth_slice: None,
@@ -1514,7 +1514,7 @@ impl Scene3dGpu {
         if let (Some(buf), true) = (&self.point_vbuf, self.point_count > 0) {
             let mut rp = begin_overview_pass(
                 encoder,
-                "siplot scene3d overview disc pass",
+                "rsplot scene3d overview disc pass",
                 color_view,
                 depth_view,
                 origin,
@@ -1529,7 +1529,7 @@ impl Scene3dGpu {
         if let (Some(buf), true) = (&self.line_vbuf, self.line_count > 0) {
             let mut rp = begin_overview_pass(
                 encoder,
-                "siplot scene3d overview axes pass",
+                "rsplot scene3d overview axes pass",
                 color_view,
                 depth_view,
                 origin,
@@ -1599,7 +1599,7 @@ fn build_image_texture_bind_group(
         depth_or_array_layers: 1,
     };
     let texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("siplot scene3d image texture"),
+        label: Some("rsplot scene3d image texture"),
         size: extent,
         mip_level_count: 1,
         sample_count: 1,
@@ -1631,7 +1631,7 @@ fn build_image_texture_bind_group(
         ImageInterpolation::Linear => &pipeline.image_sampler_linear,
     };
     Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("siplot scene3d image bind group"),
+        label: Some("rsplot scene3d image bind group"),
         layout: &pipeline.image_tex_bgl,
         entries: &[
             wgpu::BindGroupEntry {
@@ -1736,7 +1736,7 @@ fn build_image_gpu(
         v(x1, y1, 1.0, 1.0),
         v(ox, y1, 0.0, 1.0),
     ];
-    let vbuf = make_vertex_buffer(device, queue, &verts, "siplot scene3d image quad")?;
+    let vbuf = make_vertex_buffer(device, queue, &verts, "rsplot scene3d image quad")?;
     Some(Scene3dImageGpu {
         vbuf,
         bind_group,
@@ -1775,7 +1775,7 @@ fn build_textured_mesh_gpu(
         .zip(&mesh.uvs)
         .map(|(&pos, &uv)| Scene3dImageVertex { pos, uv })
         .collect();
-    let vbuf = make_vertex_buffer(device, queue, &verts, "siplot scene3d textured mesh")?;
+    let vbuf = make_vertex_buffer(device, queue, &verts, "rsplot scene3d textured mesh")?;
     Some(Scene3dImageGpu {
         vbuf,
         bind_group,
@@ -1858,7 +1858,7 @@ impl Scene3dResources {
             depth_or_array_layers: 1,
         };
         let color = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("siplot scene3d snapshot color"),
+            label: Some("rsplot scene3d snapshot color"),
             size: extent,
             mip_level_count: 1,
             sample_count: 1,
@@ -1868,7 +1868,7 @@ impl Scene3dResources {
             view_formats: &[],
         });
         let depth = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("siplot scene3d snapshot depth"),
+            label: Some("rsplot scene3d snapshot depth"),
             size: extent,
             mip_level_count: 1,
             sample_count: 1,
@@ -1881,7 +1881,7 @@ impl Scene3dResources {
         let depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
 
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("siplot scene3d snapshot"),
+            label: Some("rsplot scene3d snapshot"),
         });
         scene.encode_offscreen(
             &mut encoder,
@@ -1900,7 +1900,7 @@ impl Scene3dResources {
         // Copy the target into a readback buffer with a padded row stride.
         let bpr = padded_bytes_per_row(w);
         let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("siplot scene3d snapshot readback"),
+            label: Some("rsplot scene3d snapshot readback"),
             size: (bpr as u64) * (h as u64),
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
@@ -1982,7 +1982,7 @@ pub fn set_scene3d(render_state: &RenderState, id: Scene3dId, geometry: &Scene3d
     let res: &mut Scene3dResources = renderer
         .callback_resources
         .get_mut()
-        .expect("Scene3dResources not installed — call siplot::install_scene3d() first");
+        .expect("Scene3dResources not installed — call rsplot::install_scene3d() first");
     let Scene3dResources { pipeline, scenes } = res;
     let scene = scenes
         .entry(id)
@@ -2383,7 +2383,7 @@ impl egui_wgpu::CallbackTrait for Scene3dCallback {
     ) -> Vec<wgpu::CommandBuffer> {
         let res: &mut Scene3dResources = resources
             .get_mut()
-            .expect("Scene3dResources not installed — call siplot::install_scene3d() at startup");
+            .expect("Scene3dResources not installed — call rsplot::install_scene3d() at startup");
         res.prepare_scene(device, queue, egui_encoder, &self.frame);
         Vec::new()
     }
@@ -2396,7 +2396,7 @@ impl egui_wgpu::CallbackTrait for Scene3dCallback {
     ) {
         let res: &Scene3dResources = resources
             .get()
-            .expect("Scene3dResources not installed — call siplot::install_scene3d() at startup");
+            .expect("Scene3dResources not installed — call rsplot::install_scene3d() at startup");
         if let Some(scene) = res.scenes.get(&self.frame.id)
             && let Some(blit_bind_group) = &scene.blit_bind_group
         {

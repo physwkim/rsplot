@@ -10,7 +10,7 @@
 //! Run with: `cargo run --example high_level_sync_axes`
 
 use eframe::egui;
-use siplot::{Colormap, ColormapName, Plot2D, SyncAxes};
+use rsplot::{Colormap, ColormapName, Plot2D, SyncAxes};
 use std::f64::consts::PI;
 
 const W: u32 = 80;
@@ -95,7 +95,7 @@ impl eframe::App for SyncAxesApp {
 
 fn main() -> eframe::Result {
     eframe::run_native(
-        "siplot: synchronized axes",
+        "rsplot: synchronized axes",
         eframe::NativeOptions {
             renderer: eframe::Renderer::Wgpu,
             ..Default::default()

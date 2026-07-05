@@ -13,8 +13,8 @@
 //! Run with: `cargo run --example scalar_field_view`
 
 use eframe::egui;
-use siplot::egui::Color32;
-use siplot::{ScalarFieldView, mean_plus_std};
+use rsplot::egui::Color32;
+use rsplot::{ScalarFieldView, mean_plus_std};
 
 /// Volume grid size per axis (silx uses 64).
 const N: usize = 64;
@@ -69,7 +69,7 @@ fn sinc_volume() -> Vec<f32> {
 
 fn main() -> eframe::Result {
     eframe::run_native(
-        "siplot: scalar field view",
+        "rsplot: scalar field view",
         eframe::NativeOptions {
             renderer: eframe::Renderer::Wgpu,
             ..Default::default()

@@ -6,7 +6,7 @@
 //! Run with: `cargo run --example high_level_items_selector`
 
 use eframe::egui;
-use siplot::{Colormap, GraphGrid, ItemHandle, PlotItemKind, PlotWidget};
+use rsplot::{Colormap, GraphGrid, ItemHandle, PlotItemKind, PlotWidget};
 
 struct ItemRow {
     handle: ItemHandle,
@@ -140,7 +140,7 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
     eframe::run_native(
-        "siplot - high-level item selector",
+        "rsplot - high-level item selector",
         options,
         Box::new(|cc| Ok(Box::new(ItemsSelectorApp::new(cc)) as Box<dyn eframe::App>)),
     )

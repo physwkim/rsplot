@@ -1803,9 +1803,9 @@ pub fn atan_stepup_model(x: &[f64], params: &[f64]) -> Vec<f64> {
 /// - long tail: identical to the short tail with the `lt_*` ratios;
 /// - step: `step_height_r * height * 0.5 * erfc((x-pos)/sigma_sqrt2)`.
 ///
-/// The trailing constant `background` is siplot's per-model baseline (silx keeps
+/// The trailing constant `background` is rsplot's per-model baseline (silx keeps
 /// the baseline in a separate background theory). Returns a flat `background`
-/// line when `sigma == 0` (matching siplot's other edge models, which contribute
+/// line when `sigma == 0` (matching rsplot's other edge models, which contribute
 /// nothing when their width collapses).
 pub fn hypermet_model(x: &[f64], params: &[f64]) -> Vec<f64> {
     let area = params[0];
@@ -2173,7 +2173,7 @@ pub fn estimate_slit(x: &[f64], y: &[f64]) -> Option<Vec<f64>> {
 /// `MinGaussArea4LongTail = 1000`, `MinGaussHeight4StepTail = 5000`) and
 /// otherwise `CQUOTED`s the ratios to their `[Min, Max]` CONFIG bounds — so its
 /// tail activation is inseparable from that default constraint set. Per
-/// siplot's project-wide fit invariant (estimators seed parameters only; the
+/// rsplot's project-wide fit invariant (estimators seed parameters only; the
 /// fit defaults to all-[`Constraint::Free`]; per-parameter constraints are
 /// applied through the `FitWidget`), the tails are instead seeded active and
 /// free so the unconstrained fit is non-degenerate at the seed. Apply
@@ -2911,7 +2911,7 @@ pub struct BackgroundPeakFit {
 /// the analytic-background coefficients (Constant / Linear / Polynomial) are
 /// refined *simultaneously* with the peak. Here the background is estimated once
 /// and held fixed while the peak is fitted on the residual. A simultaneous
-/// refinement is blocked by siplot's single-peak [`PeakModel`]s baking in their
+/// refinement is blocked by rsplot's single-peak [`PeakModel`]s baking in their
 /// own trailing constant-background parameter: a free analytic-background
 /// constant would be collinear with it (singular covariance). Removing that
 /// baked-in constant is a [`PeakModel`] redesign tracked separately.

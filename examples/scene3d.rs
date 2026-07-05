@@ -10,8 +10,8 @@
 //! Run with: `cargo run --example scene3d`
 
 use eframe::egui;
-use siplot::egui::Color32;
-use siplot::{
+use rsplot::egui::Color32;
+use rsplot::{
     Colormap, Mesh3D, MeshColor, MeshDrawMode, PointMarker, Scatter3D, Scene3dGeometry,
     SceneWidget, Vec3,
 };
@@ -107,7 +107,7 @@ fn saddle() -> Mesh3D {
 
 fn main() -> eframe::Result {
     eframe::run_native(
-        "siplot: 3D scene",
+        "rsplot: 3D scene",
         eframe::NativeOptions {
             renderer: eframe::Renderer::Wgpu,
             ..Default::default()

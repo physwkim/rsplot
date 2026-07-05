@@ -22,8 +22,8 @@ use std::rc::Rc;
 
 use egui_kittest::Harness;
 use egui_kittest::wgpu::{WgpuTestRenderer, create_render_state, default_wgpu_setup};
-use siplot::egui;
-use siplot::{Colormap, ImageSpec, PlotWidget, YAxis};
+use rsplot::egui;
+use rsplot::{Colormap, ImageSpec, PlotWidget, YAxis};
 
 const W: usize = 400;
 const H: usize = 300;
@@ -71,7 +71,7 @@ fn render(alpha_map: Option<Vec<f32>>) -> (u32, u32) {
 /// detector is unchanged and only the alpha map's survival is under test).
 fn render_after(alpha_map: Option<Vec<f32>>, relevel: Option<(f64, f64)>) -> (u32, u32) {
     let rs = create_render_state(default_wgpu_setup());
-    siplot::install(&rs);
+    rsplot::install(&rs);
 
     let mut plot = PlotWidget::new(&rs, 0);
 

@@ -5,12 +5,12 @@
 //! and restores the originals when toggled off.
 //!
 //! Demonstrates `show_toolbar_with` for injecting application-specific actions
-//! into the standard siplot toolbar.
+//! into the standard rsplot toolbar.
 //!
 //! Run with: `cargo run --example high_level_fft_action`
 
 use eframe::egui;
-use siplot::{CurveData, ItemHandle, Plot1D, YAxis};
+use rsplot::{CurveData, ItemHandle, Plot1D, YAxis};
 use std::f64::consts::PI;
 
 const N: usize = 256;
@@ -130,7 +130,7 @@ fn dft_amplitude(signal: &[f64], sample_rate: f64) -> (Vec<f64>, Vec<f64>) {
 
 fn main() -> eframe::Result {
     eframe::run_native(
-        "siplot: FFT action",
+        "rsplot: FFT action",
         eframe::NativeOptions {
             renderer: eframe::Renderer::Wgpu,
             ..Default::default()

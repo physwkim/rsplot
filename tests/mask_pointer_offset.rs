@@ -16,8 +16,8 @@
 
 use egui_kittest::Harness;
 use egui_kittest::wgpu::{WgpuTestRenderer, create_render_state, default_wgpu_setup};
-use siplot::egui_wgpu::RenderState;
-use siplot::{Colormap, MaskTool, MaskToolsWidget, Plot2D, PlotInteractionMode, Transform, egui};
+use rsplot::egui_wgpu::RenderState;
+use rsplot::{Colormap, MaskTool, MaskToolsWidget, Plot2D, PlotInteractionMode, Transform, egui};
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -144,7 +144,7 @@ fn pencil_paints_under_the_click_not_left_of_it() {
 
 fn run_case(ppp: f32) {
     let rs = create_render_state(default_wgpu_setup());
-    siplot::install(&rs);
+    rsplot::install(&rs);
 
     let app = Rc::new(RefCell::new(App::new(&rs)));
     let renderer = WgpuTestRenderer::from_render_state(rs);
@@ -284,7 +284,7 @@ fn overlay_aligns_with_chrome_in_mirror_of_example() {
     // ppp != 1.0 in the toolbar-overflow regime.
     let ppp = 2.0f32;
     let rs = create_render_state(default_wgpu_setup());
-    siplot::install(&rs);
+    rsplot::install(&rs);
 
     let app = Rc::new(RefCell::new(MirrorApp::new(&rs)));
     let renderer = WgpuTestRenderer::from_render_state(rs);
@@ -382,7 +382,7 @@ fn overlay_aligns_with_chrome_in_mirror_of_example() {
 #[test]
 fn rectangle_tool_masks_the_dragged_region() {
     let rs = create_render_state(default_wgpu_setup());
-    siplot::install(&rs);
+    rsplot::install(&rs);
 
     let app = Rc::new(RefCell::new(App::new(&rs)));
     app.borrow_mut().mask.active_tool = MaskTool::Rectangle;

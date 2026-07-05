@@ -8,10 +8,10 @@
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
 use egui_kittest::wgpu::{WgpuTestRenderer, create_render_state, default_wgpu_setup};
-use siplot::SceneWindow;
-use siplot::egui;
-use siplot::egui::Color32;
-use siplot::egui_wgpu::RenderState;
+use rsplot::SceneWindow;
+use rsplot::egui;
+use rsplot::egui::Color32;
+use rsplot::egui_wgpu::RenderState;
 use std::cell::RefCell;
 use std::rc::Rc;
 

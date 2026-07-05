@@ -18,8 +18,8 @@ use std::rc::Rc;
 
 use egui_kittest::Harness;
 use egui_kittest::wgpu::{WgpuTestRenderer, create_render_state, default_wgpu_setup};
-use siplot::egui::{self, Color32, Pos2};
-use siplot::{PlotWidget, Symbol, YAxis};
+use rsplot::egui::{self, Color32, Pos2};
+use rsplot::{PlotWidget, Symbol, YAxis};
 
 const W: usize = 400;
 const H: usize = 300;
@@ -37,7 +37,7 @@ fn is_red(px: [u8; 4]) -> bool {
 /// transform after rendering).
 fn render_markers(markers: &[(Symbol, f64, f64)]) -> (Vec<u8>, Vec<Pos2>) {
     let rs = create_render_state(default_wgpu_setup());
-    siplot::install(&rs);
+    rsplot::install(&rs);
 
     let mut plot = PlotWidget::new(&rs, 0);
     for &(symbol, x, y) in markers {

@@ -11,7 +11,7 @@
 //! Run with: `cargo run --example high_level_colormap`
 
 use eframe::egui;
-use siplot::{Colormap, ColormapName, ImageSpec, ItemHandle, Normalization, Plot2D};
+use rsplot::{Colormap, ColormapName, ImageSpec, ItemHandle, Normalization, Plot2D};
 
 const W: u32 = 128;
 const H: u32 = 128;
@@ -160,7 +160,7 @@ fn build_image() -> Vec<f32> {
 
 fn main() -> eframe::Result {
     eframe::run_native(
-        "siplot: interactive colormap",
+        "rsplot: interactive colormap",
         eframe::NativeOptions {
             renderer: eframe::Renderer::Wgpu,
             ..Default::default()

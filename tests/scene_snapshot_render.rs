@@ -7,9 +7,9 @@
 //! buffer, proving the camera aspect tracks the requested pixel size.
 
 use egui_kittest::wgpu::{create_render_state, default_wgpu_setup};
-use siplot::ScalarFieldView;
-use siplot::egui::Color32;
-use siplot::encode_png;
+use rsplot::ScalarFieldView;
+use rsplot::egui::Color32;
+use rsplot::encode_png;
 
 fn blob() -> Vec<f32> {
     let mut data = vec![0.0f32; 125];

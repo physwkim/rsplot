@@ -6,8 +6,8 @@
 //! geometry at construction; `pick` reads the view's own camera + field.
 
 use egui_kittest::wgpu::{create_render_state, default_wgpu_setup};
-use siplot::egui::Color32;
-use siplot::{CameraFace, FieldPickItem, ScalarFieldView, Vec3};
+use rsplot::egui::Color32;
+use rsplot::{CameraFace, FieldPickItem, ScalarFieldView, Vec3};
 
 const N: usize = 5;
 

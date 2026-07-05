@@ -10,7 +10,7 @@
 
 use eframe::egui;
 use egui::Color32;
-use siplot::{CurveData, ErrorBars, Plot, PlotView, Symbol, install, set_curves};
+use rsplot::{CurveData, ErrorBars, Plot, PlotView, Symbol, install, set_curves};
 
 fn build() -> Vec<CurveData> {
     let x: Vec<f64> = (0..9).map(|i| i as f64).collect();
@@ -81,7 +81,7 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
     eframe::run_native(
-        "siplot · error_bars",
+        "rsplot · error_bars",
         options,
         Box::new(|cc| Ok(Box::new(ErrorBarsApp::new(cc)) as Box<dyn eframe::App>)),
     )

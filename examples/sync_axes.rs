@@ -6,8 +6,8 @@
 //! Run with: `cargo run --example sync_axes`
 
 use eframe::egui;
-use siplot::CurveData;
-use siplot::{Plot, PlotView, SyncAxes, install, set_curve};
+use rsplot::CurveData;
+use rsplot::{Plot, PlotView, SyncAxes, install, set_curve};
 
 struct SyncAxesApp {
     plot_a: Plot,
@@ -79,7 +79,7 @@ impl eframe::App for SyncAxesApp {
 
 fn main() -> eframe::Result {
     eframe::run_native(
-        "siplot: synchronized axes",
+        "rsplot: synchronized axes",
         eframe::NativeOptions {
             renderer: eframe::Renderer::Wgpu,
             ..Default::default()

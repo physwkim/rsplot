@@ -3,7 +3,7 @@
 //!
 //! silx's print preview lets the user drop the plot onto a printable page and
 //! interactively MOVE and RESIZE it (a `QGraphicsScene` holding a movable,
-//! corner-resizable item) before printing. [`PrintPreview`] is the siplot
+//! corner-resizable item) before printing. [`PrintPreview`] is the rsplot
 //! analogue: a detachable window showing a white page on a gray backdrop, onto
 //! which a plot snapshot (any RGBA8 image, e.g. from
 //! [`crate::render::save::render_plot_rgba`]) is placed via
@@ -221,7 +221,7 @@ impl PrintPreview {
             selected: None,
             view_scale: 0.5,
             open: false,
-            win: DetachedWindow::new(egui::Id::new("siplot_print_preview"), vec2(480.0, 640.0)),
+            win: DetachedWindow::new(egui::Id::new("rsplot_print_preview"), vec2(480.0, 640.0)),
             drag: None,
         }
     }
@@ -447,7 +447,7 @@ impl PrintPreview {
                     &it.rgba,
                 );
                 it.texture = Some(ui.ctx().load_texture(
-                    "siplot_print_item",
+                    "rsplot_print_item",
                     img,
                     egui::TextureOptions::LINEAR,
                 ));

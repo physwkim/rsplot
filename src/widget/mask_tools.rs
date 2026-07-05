@@ -50,7 +50,7 @@ pub(crate) const PENCIL_PREVIEW_SEGMENTS: usize = 13;
 /// `DrawFreeHand`'s `_circle` (`PlotInteraction.py:996-998`): 13 points on a
 /// circle of radius `pencil width * 0.5`, painted unfilled at the cursor. The
 /// mask brush paints a disk of `brush_size / 2` cells, so a `radius` of
-/// `brush_size / 2` (siplot masks in data==cell space) matches the
+/// `brush_size / 2` (rsplot masks in data==cell space) matches the
 /// footprint.
 pub(crate) fn pencil_preview_circle(
     center: (f64, f64),
@@ -1899,7 +1899,7 @@ impl MaskToolsWidget {
     }
 }
 
-/// The mask file formats siplot can encode/decode — the full silx
+/// The mask file formats rsplot can encode/decode — the full silx
 /// `MaskToolsWidget` set: NumPy `.npy`, ESRF `.edf`, `.tif`/`.tiff`, HDF5 (via
 /// the pure-Rust `rust-hdf5` crate), and Andy Hammersley fit2d `.msk` (binary).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1912,7 +1912,7 @@ enum MaskFileFormat {
 }
 
 /// Map a (case-insensitive) file extension to its [`MaskFileFormat`], or `None`
-/// for an extension siplot cannot handle. Single owner of the extension→format
+/// for an extension rsplot cannot handle. Single owner of the extension→format
 /// mapping shared by the save and load dialogs (silx dispatches the same way via
 /// `os.path.splitext(filename).lower()`).
 fn mask_format_for_ext(ext: &str) -> Option<MaskFileFormat> {
@@ -1936,7 +1936,7 @@ fn resolve_mask_save_format(path: &std::path::Path) -> io::Result<MaskFileFormat
         Some(ext) => mask_format_for_ext(ext).ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
-                format!("unsupported mask format: .{ext} (siplot writes .npy/.edf/.tif/.h5/.msk)"),
+                format!("unsupported mask format: .{ext} (rsplot writes .npy/.edf/.tif/.h5/.msk)"),
             )
         }),
     }
@@ -1952,7 +1952,7 @@ fn resolve_mask_load_format(path: &std::path::Path) -> io::Result<MaskFileFormat
         .ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "unsupported mask format (siplot reads .npy/.edf/.tif/.h5/.msk)",
+                "unsupported mask format (rsplot reads .npy/.edf/.tif/.h5/.msk)",
             )
         })
 }
@@ -3142,7 +3142,7 @@ mod tests {
         src.mask = vec![0, 1, 2, 200, 254, 255];
 
         let mut path = std::env::temp_dir();
-        path.push(format!("siplot_mask_roundtrip_{}.npy", std::process::id()));
+        path.push(format!("rsplot_mask_roundtrip_{}.npy", std::process::id()));
         let path_str = path.to_str().expect("utf-8 temp path").to_string();
 
         src.save_mask_npy(&path_str).expect("save");
@@ -3264,7 +3264,7 @@ mod tests {
 
     fn h5_temp_path(tag: &str) -> String {
         let mut path = std::env::temp_dir();
-        path.push(format!("siplot_mask_h5_{}_{}.h5", tag, std::process::id()));
+        path.push(format!("rsplot_mask_h5_{}_{}.h5", tag, std::process::id()));
         // save_h5 opens in append mode (silx "a"); start from a clean file so a
         // stale dataset from a previous run cannot shadow this test.
         let _ = std::fs::remove_file(&path);
@@ -3466,7 +3466,7 @@ mod tests {
         src.mask = vec![0, 1, 2, 200, 254, 255];
 
         let mut path = std::env::temp_dir();
-        path.push(format!("siplot_mask_roundtrip_{}.edf", std::process::id()));
+        path.push(format!("rsplot_mask_roundtrip_{}.edf", std::process::id()));
         let path_str = path.to_str().expect("utf-8 temp path").to_string();
 
         src.save_mask_edf(&path_str).expect("save");

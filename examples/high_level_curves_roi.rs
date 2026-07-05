@@ -7,7 +7,7 @@
 //! Run with: `cargo run --example high_level_curves_roi`
 
 use eframe::egui;
-use siplot::{CurvesRoiWidget, ManagedRoi, Plot1D, PlotWidget, Roi};
+use rsplot::{CurvesRoiWidget, ManagedRoi, Plot1D, PlotWidget, Roi};
 
 const N: usize = 400;
 
@@ -101,7 +101,7 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
     eframe::run_native(
-        "siplot - high-level curve ROI stats",
+        "rsplot - high-level curve ROI stats",
         options,
         Box::new(|cc| Ok(Box::new(CurvesRoiApp::new(cc)) as Box<dyn eframe::App>)),
     )

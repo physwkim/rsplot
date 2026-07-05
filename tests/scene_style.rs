@@ -6,8 +6,8 @@
 //! foreground/text-colour setters.
 
 use egui_kittest::wgpu::{create_render_state, default_wgpu_setup};
-use siplot::SceneWidget;
-use siplot::egui::Color32;
+use rsplot::SceneWidget;
+use rsplot::egui::Color32;
 
 #[test]
 fn default_style_matches_silx() {

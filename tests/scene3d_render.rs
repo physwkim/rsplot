@@ -22,9 +22,9 @@
 
 use egui_kittest::Harness;
 use egui_kittest::wgpu::{WgpuTestRenderer, create_render_state, default_wgpu_setup};
-use siplot::egui::{self, Color32};
-use siplot::egui_wgpu::RenderState;
-use siplot::{Camera, Scene3dGeometry, Vec3, install_scene3d, paint_scene3d, set_scene3d};
+use rsplot::egui::{self, Color32};
+use rsplot::egui_wgpu::RenderState;
+use rsplot::{Camera, Scene3dGeometry, Vec3, install_scene3d, paint_scene3d, set_scene3d};
 use std::cell::RefCell;
 use std::rc::Rc;
 

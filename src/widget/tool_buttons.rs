@@ -208,10 +208,10 @@ impl SymbolToolButton {
 /// [`Self::set_scale`] (silx `sigScaleChanged → _connectPlot` tracking).
 ///
 /// silx's menus offer a third state, `asinh` — NOT offered here: the OpenGL
-/// backend siplot ports raises `NotImplementedError` for asinh axis scales
+/// backend rsplot ports raises `NotImplementedError` for asinh axis scales
 /// (`BackendOpenGL.py:1555-1571`; only the matplotlib backend implements
 /// them), so the entry would be a guaranteed error on the reference backend
-/// and siplot's axis [`Scale`] is `Linear`/`Log10` accordingly (R2-16).
+/// and rsplot's axis [`Scale`] is `Linear`/`Log10` accordingly (R2-16).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AxisScaleToolButton {
     /// `true` drives the Y axis (silx `YAxisScaleToolButton`), `false` the X.
@@ -317,7 +317,7 @@ impl AxisScaleToolButton {
 /// distance-label formatter (silx `buildDistanceText`) — and leaves the host to
 /// drive the line ROI: when [`is_active`](Self::is_active) the caller enters a
 /// line-ROI draw and names the drawn ROI with [`distance_text`](Self::distance_text).
-/// silx's `_RulerROI` maps onto siplot's existing line-ROI draw; siplot has no
+/// silx's `_RulerROI` maps onto rsplot's existing line-ROI draw; rsplot has no
 /// live-updating ROI format-function, so the host recomputes the label.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RulerToolButton {

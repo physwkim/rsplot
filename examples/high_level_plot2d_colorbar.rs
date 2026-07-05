@@ -8,7 +8,7 @@
 //!
 //! Drag a handle — or right-click the colorbar and pick "Auto range" (reset to
 //! the data extremes, pyqtgraph `autoLevel`): [`Plot2D::show`] returns the new
-//! levels via [`siplot::PlotResponse::colorbar_dragged_levels`]; the owner
+//! levels via [`rsplot::PlotResponse::colorbar_dragged_levels`]; the owner
 //! applies them with [`Plot2D::set_active_image_levels`] and the image contrast
 //! updates live. (Off by default; silx adjusts levels through a separate
 //! `ColormapDialog`.)
@@ -16,7 +16,7 @@
 //! Run with: `cargo run --example high_level_plot2d_colorbar`
 
 use eframe::egui;
-use siplot::{Colormap, Plot2D};
+use rsplot::{Colormap, Plot2D};
 
 const WIDTH: u32 = 192;
 const HEIGHT: u32 = 144;
@@ -48,7 +48,7 @@ impl App {
         // the value-distribution histogram is drawn beside the gradient.
         plot.set_colorbar_value_range(Some((dmin as f64, dmax as f64)));
         let data: Vec<f64> = image.iter().map(|&v| v as f64).collect();
-        plot.set_colorbar_histogram(siplot::core::histogram::compute_histogram(
+        plot.set_colorbar_histogram(rsplot::core::histogram::compute_histogram(
             &data, None, false,
         ));
 
@@ -101,7 +101,7 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
     eframe::run_native(
-        "siplot - Plot2D interactive colorbar",
+        "rsplot - Plot2D interactive colorbar",
         options,
         Box::new(|cc| Ok(Box::new(App::new(cc)) as Box<dyn eframe::App>)),
     )

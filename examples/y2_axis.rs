@@ -10,7 +10,7 @@
 //! Run with: `cargo run --example y2_axis`
 
 use eframe::egui;
-use siplot::{CurveData, Plot, PlotView, YAxis, install, set_curves};
+use rsplot::{CurveData, Plot, PlotView, YAxis, install, set_curves};
 
 const N: usize = 400;
 
@@ -72,7 +72,7 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
     eframe::run_native(
-        "siplot · y2 axis",
+        "rsplot · y2 axis",
         options,
         Box::new(|cc| Ok(Box::new(Y2App::new(cc)) as Box<dyn eframe::App>)),
     )

@@ -11,8 +11,8 @@
 //! Run with: `cargo run --example scene3d_mesh`
 
 use eframe::egui;
-use siplot::egui::Color32;
-use siplot::{
+use rsplot::egui::Color32;
+use rsplot::{
     Box3D, Colormap, ColormapMesh3D, ColormapName, Cylinder3D, Hexagon3D, MeshDrawMode,
     Scene3dGeometry, SceneWidget, Vec3,
 };
@@ -116,7 +116,7 @@ fn cylindrical_volumes(geometry: &mut Scene3dGeometry) {
 
 fn main() -> eframe::Result {
     eframe::run_native(
-        "siplot: 3D mesh & volumes",
+        "rsplot: 3D mesh & volumes",
         eframe::NativeOptions {
             renderer: eframe::Renderer::Wgpu,
             ..Default::default()

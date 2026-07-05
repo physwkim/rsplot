@@ -42,7 +42,7 @@ impl AxisConstraints {
     /// position window is clamped.
     ///
     /// Mirrors silx `ViewConstraints` (`_utils/panzoom.py`) with
-    /// `allow_scaling=True` — the only mode siplot uses, since [`apply`]
+    /// `allow_scaling=True` — the only mode rsplot uses, since [`apply`]
     /// runs after every pan/zoom. Two silx mechanisms are reproduced:
     ///
     /// - The `update` sanity check (panzoom.py:297-305): when `max_range`,
@@ -523,7 +523,7 @@ pub struct Plot {
     /// Defaults to [`TimeZone::Utc`], matching the previous UTC-only behavior.
     x_time_zone: TimeZone,
     /// Epoch offset added to X tick *values* before they are formatted as
-    /// date-times under [`TickMode::TimeSeries`] (siplot extension, no silx
+    /// date-times under [`TickMode::TimeSeries`] (rsplot extension, no silx
     /// counterpart). The stored X data values are interpreted as
     /// `epoch - x_time_offset`, so a caller can upload small relative
     /// coordinates — an `f32`-safe GPU vertex range — while the time ticks still
@@ -551,7 +551,7 @@ pub struct Plot {
     zoom_x_enabled: bool,
     /// Whether a box zoom changes the (left) Y axis (silx
     /// `Zoom.enabledAxes.yaxis`). Defaults to `true`. silx also tracks the right
-    /// (y2) axis here, but siplot's box zoom operates on the left axes only, so
+    /// (y2) axis here, but rsplot's box zoom operates on the left axes only, so
     /// there is no y2 counterpart.
     zoom_y_enabled: bool,
 }
@@ -911,7 +911,7 @@ impl Plot {
         self.x_time_zone = tz;
     }
 
-    /// The X-axis epoch offset applied to date-time tick labels (siplot
+    /// The X-axis epoch offset applied to date-time tick labels (rsplot
     /// extension; see the `x_time_offset` field docs).
     pub fn x_time_offset(&self) -> f64 {
         self.x_time_offset
@@ -1043,7 +1043,7 @@ impl Plot {
     /// silx `checkAxisLimits` repair first, then the data margins
     /// (`PlotWidget.py:2705-2716`).
     ///
-    /// siplot's `y2 == None` means "no right axis displayed" (silx always has
+    /// rsplot's `y2 == None` means "no right axis displayed" (silx always has
     /// one), so the y2 range is written only when a right axis already exists
     /// or right-axis data is present; a `None` y2 on a y2-less plot stays
     /// `None` rather than conjuring an axis.
@@ -1127,7 +1127,7 @@ impl Plot {
         self.force_reset_zoom_to_data_range(data);
 
         // Restore the saved range on pinned axes (silx resetZoom:3385-3395;
-        // silx's y2 restore rides the left-Y autoscale flag, and siplot's
+        // silx's y2 restore rides the left-Y autoscale flag, and rsplot's
         // separate `y2_autoscale` extension generalizes that per axis).
         // Restored values are `_checkLimits`-repaired but get no margins,
         // matching silx restoring through `Axis.setLimits`.

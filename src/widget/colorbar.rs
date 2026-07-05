@@ -431,7 +431,7 @@ fn optimal_nb_ticks(length: f64, density: f64) -> usize {
 
 /// The UNCLAMPED bar fraction for a tick value — silx
 /// `_TickBar._getRelativePosition` (ColorBar.py:808-820), `1 - relativePos`
-/// in siplot's frac convention (0 at `vmin`, 1 at `vmax`).
+/// in rsplot's frac convention (0 at `vmin`, 1 at `vmax`).
 ///
 /// Distinct by design from [`Colormap::normalize`], the shader mirror that
 /// clamps into `[0, 1]` for color lookup: a tick outside `[vmin, vmax]` (the

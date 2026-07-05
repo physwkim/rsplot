@@ -89,7 +89,7 @@ fn method_label(method: ProfileMethod) -> &'static str {
 }
 
 /// silx `_alignedFullProfile` integration band for a whole-image aligned
-/// profile (`core.py:222-235`), in pixel indices under siplot's identity image
+/// profile (`core.py:222-235`), in pixel indices under rsplot's identity image
 /// geometry: the profile line at `position` on the axis of length `size`,
 /// integrated over `line_width` pixels. Returns `(lo, hi)` = the reported band
 /// bounds `min(area)`, `max(area) − 1` (silx `core.py:380,398`).
@@ -176,7 +176,7 @@ fn line_profile_desc(start: (f64, f64), end: (f64, f64)) -> (String, String) {
 
 /// The silx `createProfile` title + X-label templates (`{xlabel}`/`{ylabel}`
 /// tokens unfilled) for the image profile `roi` at band `line_width`, over a
-/// `width`×`height` image under siplot's identity geometry. Returns `None` for
+/// `width`×`height` image under rsplot's identity geometry. Returns `None` for
 /// a ROI kind that yields no profile (matching [`profiles_for_roi`]).
 fn image_profile_desc(
     roi: &Roi,
@@ -220,7 +220,7 @@ fn image_profile_desc(
         Roi::Line { start, end } => Some(line_profile_desc(*start, *end)),
         Roi::Cross { center } => {
             // silx renders a cross as two separate profile windows
-            // (ProfileImageCrossROI: an hline + a vline sub-ROI). siplot merges
+            // (ProfileImageCrossROI: an hline + a vline sub-ROI). rsplot merges
             // both curves into one window, so the title names the crossing
             // pixel and the X label follows the horizontal (column) sub-profile.
             let (cx, cy) = *center;

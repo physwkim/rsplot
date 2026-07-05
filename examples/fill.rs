@@ -10,7 +10,7 @@
 
 use eframe::egui;
 use egui::Color32;
-use siplot::{Baseline, CurveData, Plot, PlotView, install, set_curves};
+use rsplot::{Baseline, CurveData, Plot, PlotView, install, set_curves};
 
 const T_MAX: f64 = std::f64::consts::TAU;
 
@@ -90,7 +90,7 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
     eframe::run_native(
-        "siplot · fill",
+        "rsplot · fill",
         options,
         Box::new(|cc| Ok(Box::new(FillApp::new(cc)) as Box<dyn eframe::App>)),
     )

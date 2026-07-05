@@ -11,7 +11,7 @@
 
 use eframe::egui;
 use egui::Color32;
-use siplot::{Colormap, Plot2D, PlotInteractionMode, Roi, RoiManagerWidget};
+use rsplot::{Colormap, Plot2D, PlotInteractionMode, Roi, RoiManagerWidget};
 
 const WIDTH: u32 = 128;
 const HEIGHT: u32 = 96;
@@ -102,7 +102,7 @@ fn build_image() -> Vec<f32> {
 
 fn main() -> eframe::Result {
     eframe::run_native(
-        "siplot: ROI Manager",
+        "rsplot: ROI Manager",
         eframe::NativeOptions {
             renderer: eframe::Renderer::Wgpu,
             ..Default::default()

@@ -12,7 +12,7 @@
 //!   range, an autoscale-over-the-volume button (silx autoscales the cut-plane
 //!   colormap), and a [`ColorBarWidget`] showing the colormap (the 3D colorbar:
 //!   silx's `plot3d` package ships no colorbar of its own, so this reuses the 2D
-//!   one — a siplot convenience, not silx parity).
+//!   one — a rsplot convenience, not silx parity).
 //! - **Iso-surfaces** — per-surface level + colour, a remove button, and an add
 //!   button (silx `addIsosurface` / `removeIsosurface`).
 //!

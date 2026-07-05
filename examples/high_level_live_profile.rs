@@ -16,7 +16,7 @@
 //! Run with: `cargo run --example high_level_live_profile`
 
 use eframe::egui;
-use siplot::{Colormap, CurveData, ItemHandle, Plot1D, Plot2D, ProfileMode, YAxis};
+use rsplot::{Colormap, CurveData, ItemHandle, Plot1D, Plot2D, ProfileMode, YAxis};
 
 const WIDTH: u32 = 128;
 const HEIGHT: u32 = 96;
@@ -158,7 +158,7 @@ fn build_image() -> Vec<f32> {
 
 fn main() -> eframe::Result {
     eframe::run_native(
-        "siplot: live profile toolbar",
+        "rsplot: live profile toolbar",
         eframe::NativeOptions {
             renderer: eframe::Renderer::Wgpu,
             ..Default::default()

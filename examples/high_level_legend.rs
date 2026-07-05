@@ -6,7 +6,7 @@
 //! Run with: `cargo run --example high_level_legend`
 
 use eframe::egui;
-use siplot::{
+use rsplot::{
     Colormap, GraphGrid, ImageGeometry, LineStyle, PlotEvent, PlotInteractionMode, PlotItemKind,
     PlotWidget, ShapeSpec, Symbol, YAxis,
 };
@@ -126,7 +126,7 @@ impl LegendDemoApp {
         let shape = plot.add_shape(ShapeSpec {
             x: &[2.4, 4.2],
             y: &[2.8, 4.1],
-            kind: siplot::ShapeKind::Rectangle,
+            kind: rsplot::ShapeKind::Rectangle,
             color: egui::Color32::from_rgb(255, 140, 70),
             fill: false,
             overlay: false,
@@ -291,7 +291,7 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
     eframe::run_native(
-        "siplot - high-level legend",
+        "rsplot - high-level legend",
         options,
         Box::new(|cc| Ok(Box::new(LegendDemoApp::new(cc)) as Box<dyn eframe::App>)),
     )

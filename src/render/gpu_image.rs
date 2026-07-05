@@ -362,17 +362,17 @@ pub struct ImagePipeline {
 impl ImagePipeline {
     pub fn new(device: &wgpu::Device, target_format: wgpu::TextureFormat) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("siplot image"),
+            label: Some("rsplot image"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shaders/image.wgsl").into()),
         });
         let rgba_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("siplot image rgba"),
+            label: Some("rsplot image rgba"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shaders/image_rgba.wgsl").into()),
         });
 
         let bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("siplot image bgl"),
+                label: Some("rsplot image bgl"),
                 entries: &[
                     // 0: params uniform (used by both stages)
                     wgpu::BindGroupLayoutEntry {
@@ -439,13 +439,13 @@ impl ImagePipeline {
             });
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("siplot image layout"),
+            label: Some("rsplot image layout"),
             bind_group_layouts: &[Some(&bind_group_layout)],
             immediate_size: 0,
         });
 
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("siplot image pipeline"),
+            label: Some("rsplot image pipeline"),
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &shader,
@@ -477,7 +477,7 @@ impl ImagePipeline {
         // filterable format, so this needs no extra wgpu feature.
         let rgba_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("siplot image rgba bgl"),
+                label: Some("rsplot image rgba bgl"),
                 entries: &[
                     wgpu::BindGroupLayoutEntry {
                         binding: 0,
@@ -513,12 +513,12 @@ impl ImagePipeline {
                 ],
             });
         let rgba_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("siplot image rgba layout"),
+            label: Some("rsplot image rgba layout"),
             bind_group_layouts: &[Some(&rgba_bind_group_layout)],
             immediate_size: 0,
         });
         let rgba_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("siplot image rgba pipeline"),
+            label: Some("rsplot image rgba pipeline"),
             layout: Some(&rgba_pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &rgba_shader,
@@ -544,7 +544,7 @@ impl ImagePipeline {
         });
 
         let data_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("siplot image data sampler"),
+            label: Some("rsplot image data sampler"),
             mag_filter: wgpu::FilterMode::Nearest,
             min_filter: wgpu::FilterMode::Nearest,
             ..Default::default()
@@ -554,14 +554,14 @@ impl ImagePipeline {
         // nearest texel — `min(floor(coord·256), 255)` with ClampToEdge — instead
         // of blending between entries. Matches the CPU `Colormap::lut_index`.
         let lut_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("siplot image lut sampler"),
+            label: Some("rsplot image lut sampler"),
             mag_filter: wgpu::FilterMode::Nearest,
             min_filter: wgpu::FilterMode::Nearest,
             ..Default::default()
         });
         // LINEAR sampler for the direct-RGBA image path's bilinear interpolation.
         let linear_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("siplot image linear sampler"),
+            label: Some("rsplot image linear sampler"),
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
@@ -571,7 +571,7 @@ impl ImagePipeline {
         // without a per-pixel alpha map (the shader gates it off via
         // `has_alpha_map == 0`, so its value is never actually read).
         let dummy_alpha = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("siplot image dummy alpha"),
+            label: Some("rsplot image dummy alpha"),
             size: wgpu::Extent3d {
                 width: 1,
                 height: 1,
@@ -725,7 +725,7 @@ impl GpuImage {
                     depth_or_array_layers: 1,
                 };
                 let lut_texture = device.create_texture(&wgpu::TextureDescriptor {
-                    label: Some("siplot image lut"),
+                    label: Some("rsplot image lut"),
                     size: lut_size,
                     mip_level_count: 1,
                     sample_count: 1,
@@ -760,7 +760,7 @@ impl GpuImage {
                             depth_or_array_layers: 1,
                         };
                         let data_texture = device.create_texture(&wgpu::TextureDescriptor {
-                            label: Some("siplot image tile"),
+                            label: Some("rsplot image tile"),
                             size: tile_size,
                             mip_level_count: 1,
                             sample_count: 1,
@@ -796,7 +796,7 @@ impl GpuImage {
                         // local view need not outlive this closure.
                         let alpha_view = image.alpha_map.as_ref().map(|alpha| {
                             let alpha_texture = device.create_texture(&wgpu::TextureDescriptor {
-                                label: Some("siplot image tile alpha"),
+                                label: Some("rsplot image tile alpha"),
                                 size: tile_size,
                                 mip_level_count: 1,
                                 sample_count: 1,
@@ -828,13 +828,13 @@ impl GpuImage {
                             alpha_view.as_ref().unwrap_or(&pipeline.dummy_alpha_view);
 
                         let params = device.create_buffer(&wgpu::BufferDescriptor {
-                            label: Some("siplot image tile params"),
+                            label: Some("rsplot image tile params"),
                             size: std::mem::size_of::<ImageParams>() as u64,
                             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                             mapped_at_creation: false,
                         });
                         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                            label: Some("siplot image tile bg"),
+                            label: Some("rsplot image tile bg"),
                             layout: &pipeline.bind_group_layout,
                             entries: &[
                                 wgpu::BindGroupEntry {
@@ -909,7 +909,7 @@ impl GpuImage {
                             depth_or_array_layers: 1,
                         };
                         let data_texture = device.create_texture(&wgpu::TextureDescriptor {
-                            label: Some("siplot image rgba tile"),
+                            label: Some("rsplot image rgba tile"),
                             size: tile_size,
                             mip_level_count: 1,
                             sample_count: 1,
@@ -939,13 +939,13 @@ impl GpuImage {
                             data_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
                         let params = device.create_buffer(&wgpu::BufferDescriptor {
-                            label: Some("siplot image rgba tile params"),
+                            label: Some("rsplot image rgba tile params"),
                             size: std::mem::size_of::<ImageRgbaParams>() as u64,
                             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                             mapped_at_creation: false,
                         });
                         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                            label: Some("siplot image rgba tile bg"),
+                            label: Some("rsplot image rgba tile bg"),
                             layout: &pipeline.rgba_bind_group_layout,
                             entries: &[
                                 wgpu::BindGroupEntry {

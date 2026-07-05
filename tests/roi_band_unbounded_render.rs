@@ -25,8 +25,8 @@ use std::rc::Rc;
 
 use egui_kittest::Harness;
 use egui_kittest::wgpu::{WgpuTestRenderer, create_render_state, default_wgpu_setup};
-use siplot::egui::{self, Color32};
-use siplot::{ManagedRoi, PlotWidget, Roi, RoiInteractionMode, YAxis};
+use rsplot::egui::{self, Color32};
+use rsplot::{ManagedRoi, PlotWidget, Roi, RoiInteractionMode, YAxis};
 
 const W: usize = 400;
 const H: usize = 300;
@@ -52,7 +52,7 @@ fn red_columns(raw: &[u8]) -> Vec<u32> {
 /// edge. Leftmost is `W` (sentinel, past the right edge) when nothing qualifies.
 fn render(mode: RoiInteractionMode) -> (usize, u32) {
     let rs = create_render_state(default_wgpu_setup());
-    siplot::install(&rs);
+    rsplot::install(&rs);
 
     let mut plot = PlotWidget::new(&rs, 0);
     // Anchor the view to x∈[0,10] y∈[0,10] with a non-red (blue) curve at the

@@ -1,4 +1,4 @@
-//! siplot — silx-style scientific plotting on top of egui + wgpu.
+//! rsplot — silx-style scientific plotting on top of egui + wgpu.
 //!
 //! See `doc/design.md` for the design. The layering mirrors silx's
 //! `BackendBase ↔ BackendPygfx`:

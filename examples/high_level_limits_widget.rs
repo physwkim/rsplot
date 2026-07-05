@@ -5,7 +5,7 @@
 //! Run with: `cargo run --example high_level_limits_widget`
 
 use eframe::egui;
-use siplot::{Colormap, LimitsWidget, Plot2D};
+use rsplot::{Colormap, LimitsWidget, Plot2D};
 
 const WIDTH: u32 = 128;
 const HEIGHT: u32 = 96;
@@ -72,7 +72,7 @@ fn build_image() -> Vec<f32> {
 
 fn main() -> eframe::Result {
     eframe::run_native(
-        "siplot: Limits Widget",
+        "rsplot: Limits Widget",
         eframe::NativeOptions {
             renderer: eframe::Renderer::Wgpu,
             ..Default::default()

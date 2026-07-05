@@ -14,13 +14,13 @@ use std::rc::Rc;
 
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
-use siplot::MaskToolsWidget;
-use siplot::egui;
+use rsplot::MaskToolsWidget;
+use rsplot::egui;
 
 fn temp_h5(tag: &str) -> std::path::PathBuf {
     let mut path = std::env::temp_dir();
     path.push(format!(
-        "siplot_h5_picker_{}_{}.h5",
+        "rsplot_h5_picker_{}_{}.h5",
         tag,
         std::process::id()
     ));

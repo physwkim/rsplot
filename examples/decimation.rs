@@ -10,7 +10,7 @@
 
 use eframe::egui;
 use egui::Color32;
-use siplot::{CurveData, Plot, PlotView, install, set_curve};
+use rsplot::{CurveData, Plot, PlotView, install, set_curve};
 
 const N: usize = 500_000;
 
@@ -69,7 +69,7 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
     eframe::run_native(
-        "siplot · decimation",
+        "rsplot · decimation",
         options,
         Box::new(|cc| Ok(Box::new(DecimationApp::new(cc)) as Box<dyn eframe::App>)),
     )

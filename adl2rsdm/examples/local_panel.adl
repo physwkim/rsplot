@@ -1,0 +1,214 @@
+file {
+	name="local_panel.adl"
+	version=030107
+}
+"color map" {
+	colors {
+		ffffff,
+		000000,
+		00ff00,
+		0000ff,
+		c0c0c0,
+		ff0000,
+	}
+}
+display {
+	object {
+		x=0
+		y=0
+		width=360
+		height=460
+	}
+	clr=1
+	bclr=0
+}
+text {
+	object {
+		x=10
+		y=10
+		width=320
+		height=22
+	}
+	"basic attribute" {
+		clr=1
+	}
+	textix="RsDM panel from .adl (no IOC)"
+}
+"text update" {
+	object {
+		x=10
+		y=42
+		width=150
+		height=20
+	}
+	monitor {
+		chan="fake://temperature?wave=sine&period=8&rate=20&min=20&max=80"
+		clr=1
+	}
+	limits {
+		precSrc="default"
+		precDefault=1
+	}
+}
+"strip chart" {
+	object {
+		x=10
+		y=70
+		width=340
+		height=120
+	}
+	period=20
+	units="second"
+	pen[0] {
+		chan="fake://temperature?wave=sine&period=8&rate=20&min=20&max=80"
+		clr=3
+	}
+}
+rectangle {
+	object {
+		x=6
+		y=200
+		width=348
+		height=160
+	}
+	"basic attribute" {
+		clr=4
+		fill="outline"
+		width=2
+	}
+}
+"text entry" {
+	object {
+		x=20
+		y=214
+		width=140
+		height=22
+	}
+	control {
+		chan="loc://setpoint?type=float&init=5&precision=2"
+	}
+}
+"text update" {
+	object {
+		x=170
+		y=214
+		width=120
+		height=20
+	}
+	monitor {
+		chan="loc://setpoint?type=float&init=5&precision=2"
+		clr=1
+	}
+	limits {
+		precSrc="default"
+		precDefault=2
+	}
+}
+valuator {
+	object {
+		x=20
+		y=246
+		width=320
+		height=24
+	}
+	control {
+		chan="loc://setpoint?type=float&init=5&precision=2"
+	}
+	dPrecision=2.000000
+	loprSrc="default"
+	loprDefault=0.000000
+	hoprSrc="default"
+	hoprDefault=10.000000
+}
+byte {
+	object {
+		x=20
+		y=300
+		width=140
+		height=20
+	}
+	monitor {
+		chan="loc://flags?type=int&init=170"
+	}
+	sbit=0
+	ebit=7
+}
+"text entry" {
+	object {
+		x=170
+		y=300
+		width=120
+		height=22
+	}
+	control {
+		chan="loc://flags?type=int&init=170"
+	}
+}
+"shell command" {
+	object {
+		x=20
+		y=332
+		width=130
+		height=22
+	}
+	label="Echo"
+	command[0] {
+		name="echo"
+		args="hello from adl2rsdm"
+	}
+}
+"shell command" {
+	object {
+		x=170
+		y=332
+		width=170
+		height=22
+	}
+	command[0] {
+		label="Date"
+		name="date"
+	}
+	command[1] {
+		label="Uptime"
+		name="uptime"
+	}
+}
+"related display" {
+	object {
+		x=20
+		y=366
+		width=130
+		height=22
+	}
+	display[0] {
+		label="Detail"
+		name="detail.adl"
+	}
+}
+"related display" {
+	object {
+		x=170
+		y=366
+		width=170
+		height=22
+	}
+	label="Screens"
+	display[0] {
+		label="Overview"
+		name="overview.adl"
+	}
+	display[1] {
+		label="Tuning"
+		name="tuning.adl"
+		args="P=DMM1:"
+	}
+}
+composite {
+	object {
+		x=20
+		y=400
+		width=160
+		height=40
+	}
+	"composite file"="embed_child.adl;EMB=embcount"
+}

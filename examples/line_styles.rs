@@ -10,7 +10,7 @@
 
 use eframe::egui;
 use egui::Color32;
-use siplot::{CurveData, LineStyle, Plot, PlotView, Symbol, install, set_curves};
+use rsplot::{CurveData, LineStyle, Plot, PlotView, Symbol, install, set_curves};
 
 const T_MAX: f64 = std::f64::consts::TAU;
 
@@ -96,7 +96,7 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
     eframe::run_native(
-        "siplot · line_styles",
+        "rsplot · line_styles",
         options,
         Box::new(|cc| Ok(Box::new(LineStylesApp::new(cc)) as Box<dyn eframe::App>)),
     )

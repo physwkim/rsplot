@@ -1,5 +1,5 @@
 //! Interaction check for the enriched ROI manager panel
-//! (`PlotWidget::show_roi_manager`), the siplot port of silx
+//! (`PlotWidget::show_roi_manager`), the rsplot port of silx
 //! `RegionOfInterestTableWidget`. The panel renders one row per ROI — an
 //! editable name, the geometry shown as a make-current selector, and a remove
 //! button — plus the add / clear-all controls.
@@ -21,8 +21,8 @@ use std::rc::Rc;
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
 use egui_kittest::wgpu::{WgpuTestRenderer, create_render_state, default_wgpu_setup};
-use siplot::egui;
-use siplot::{PlotWidget, Roi};
+use rsplot::egui;
+use rsplot::{PlotWidget, Roi};
 
 const W: f32 = 360.0;
 const H: f32 = 300.0;
@@ -40,7 +40,7 @@ fn rect_desc(x: (f64, f64), y: (f64, f64)) -> String {
 #[test]
 fn roi_manager_table_renders_rows_and_click_makes_current() {
     let rs = create_render_state(default_wgpu_setup());
-    siplot::install(&rs);
+    rsplot::install(&rs);
 
     // Two ROIs at distinct positions → distinct geometry labels, so each row's
     // make-current selector is uniquely addressable by accesskit label.

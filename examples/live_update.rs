@@ -13,7 +13,7 @@
 use std::f64::consts::TAU;
 
 use eframe::egui;
-use siplot::{
+use rsplot::{
     Colormap, CurveData, ImageData, Plot, PlotView, install, set_curve, set_image, update_curve,
     update_image_region,
 };
@@ -148,7 +148,7 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
     eframe::run_native(
-        "siplot · live update",
+        "rsplot · live update",
         options,
         Box::new(|cc| Ok(Box::new(LiveApp::new(cc)) as Box<dyn eframe::App>)),
     )

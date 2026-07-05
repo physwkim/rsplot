@@ -9,7 +9,7 @@
 //! Run with: `cargo run --example high_level_stack_view`
 
 use eframe::egui;
-use siplot::{Colormap, StackView};
+use rsplot::{Colormap, StackView};
 
 // Volume dimensions as [d0, d1, d2]: d0 = depth (Z), d1 = height (Y), d2 = width
 // (X). With the default Axis0 perspective each frame is (d1, d2) = (Y, X).
@@ -80,7 +80,7 @@ fn build_volume() -> Vec<f32> {
 
 fn main() -> eframe::Result {
     eframe::run_native(
-        "siplot: stack view",
+        "rsplot: stack view",
         eframe::NativeOptions {
             renderer: eframe::Renderer::Wgpu,
             ..Default::default()

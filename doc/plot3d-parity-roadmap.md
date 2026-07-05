@@ -1,8 +1,8 @@
-# siplot 3D — `silx.gui.plot3d` parity roadmap
+# rsplot 3D — `silx.gui.plot3d` parity roadmap
 
 Tracking doc for the port of silx's true-3D scene subsystem
 (`silx.gui.plot3d`, ~26k lines / 64 files of OpenGL scene-graph code) onto
-siplot's wgpu/egui infrastructure. This is a sibling effort to the 2D
+rsplot's wgpu/egui infrastructure. This is a sibling effort to the 2D
 `doc/parity-roadmap.md` (which covers `silx.gui.plot`); the 2D roadmap's scope
 line deliberately excluded plot3d, and this doc owns it.
 
@@ -16,9 +16,9 @@ cut plane), and the surrounding tools/window. Built wave by wave; each wave is
 gated (fmt/clippy/nextest per touched crate) and committed one feature at a
 time, mirroring the 2D port's cadence.
 
-### N/A (siplot-specific deviations, like the 2D OpenGL/Matplotlib backend split)
+### N/A (rsplot-specific deviations, like the 2D OpenGL/Matplotlib backend split)
 
-- **The Pygfx alternate backend (`*Pygfx` classes).** siplot has one GPU
+- **The Pygfx alternate backend (`*Pygfx` classes).** rsplot has one GPU
   backend (wgpu); silx's OpenGL/Pygfx duality has no analogue here.
 - **Qt `ParamTreeView` / `_model.py` tree model.** Replaced by an egui
   immediate-mode parameter panel (no retained Qt item model).
@@ -56,7 +56,7 @@ Legend: ✅ done · ◐ partial · ☐ not started
 | Wave | Item | silx source | Status |
 |---|---|---|---|
 | P0.1 | `Mat4`/`Vec3` + camera math (look-at, perspective, ortho, rotate, orbit, resetCamera) | scene/transform.py, scene/camera.py | ✅ |
-| P0.2 | wgpu line/triangle pipeline + offscreen depth render + blit callback | (siplot infra) | ✅ |
+| P0.2 | wgpu line/triangle pipeline + offscreen depth render + blit callback | (rsplot infra) | ✅ |
 | P0.3 | `SceneWidget` + orbit/pan/zoom interaction + bounding box + axes | scene/interaction.py, primitives.py (Lines/Box/Axes/BoxWithAxes), viewport.py, SceneWidget.py | ✅ |
 
 P0.3 notes (interactive mode, R3-7): `SceneWidget::set_interactive_mode` ports
@@ -236,7 +236,7 @@ the LUT in place keeping the value range), value range, autoscale-over-the-volum
 (`addIsosurface`/`removeIsosurface`). The **3D colorbar** reuses the existing 2D
 `ColorBarWidget` driven by the cut-plane colormap; silx's `plot3d` package ships
 **no** colorbar of its own (verified — nothing matches `colorbar` under
-`gui/plot3d/`), so this is a siplot convenience, not silx parity, and is labelled
+`gui/plot3d/`), so this is a rsplot convenience, not silx parity, and is labelled
 as such. Verified through an AccessKit harness (`tests/scalar_field_properties_render.rs`):
 the Visible checkbox shows the cut plane, Autoscale fits `[5,10] → [0,1]`, and Add
 appends an iso-surface at the data-range midpoint. **Deferred (documented):** silx's
@@ -314,7 +314,7 @@ ray-geometry intersection**, no GPU readback. `PickContext.getPickingSegment`
 NDC z-range (`viewport.pick` is a no-op stub), and each item's `_pickFull`
 runs `segmentTrianglesIntersection` (signed-tetrahedron volumes,
 Kensler–Shirley 2006), `segmentVolumeIntersect`, or a segment/plane test —
-all on CPU geometry siplot already holds. Phase 4 ports that; no GPU-picking
+all on CPU geometry rsplot already holds. Phase 4 ports that; no GPU-picking
 pass exists to defer.
 
 PK1 notes: `core::scene3d::pick` (`src/core/scene3d/pick.rs`) is the pure CPU
@@ -366,7 +366,7 @@ trade-off). **N/A (Qt chrome):** silx's interactive picking-mode toggle action i
 Qt-shell, like the rest of the `SceneWindow` toolbars. **Remaining tail
 (documented, not blocking):** silx's per-item `_pickFull` returns richer payloads
 than world-position + sampled value — data-index/bin resolution for scatter, image
-pixel indices for `ImageData3D`, marching-cubes bin for iso-surfaces. siplot's
+pixel indices for `ImageData3D`, marching-cubes bin for iso-surfaces. rsplot's
 pick returns world position + field value + point index, which is exactly what the
 `PositionInfoWidget` consumes; the richer per-item index payloads are a later
 enhancement, not a separate "GPU picking" effort. Verified

@@ -12,7 +12,7 @@
 //! Run with: `cargo run --example high_level_y2_axis`
 
 use eframe::egui;
-use siplot::{CurveData, Plot1D, YAxis};
+use rsplot::{CurveData, Plot1D, YAxis};
 
 const N: usize = 400;
 
@@ -69,7 +69,7 @@ impl eframe::App for Y2App {
 
 fn main() -> eframe::Result {
     eframe::run_native(
-        "siplot: dual Y-axis",
+        "rsplot: dual Y-axis",
         eframe::NativeOptions {
             renderer: eframe::Renderer::Wgpu,
             ..Default::default()

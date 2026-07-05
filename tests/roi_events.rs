@@ -5,7 +5,7 @@
 //! API and the events it pushes are asserted.
 
 use egui_kittest::wgpu::{create_render_state, default_wgpu_setup};
-use siplot::{PlotEvent, PlotWidget, Roi, RoiInteractionMode};
+use rsplot::{PlotEvent, PlotWidget, Roi, RoiInteractionMode};
 
 fn rect(x: f64) -> Roi {
     Roi::Rect {
@@ -78,7 +78,7 @@ fn save_then_load_round_trips_rois_through_the_widget() {
     plot.drain_events();
 
     // Unique per-test path (nextest runs each test in its own process).
-    let path = std::env::temp_dir().join("siplot_roi_events_round_trip.rois");
+    let path = std::env::temp_dir().join("rsplot_roi_events_round_trip.rois");
     plot.save_rois_to_path(&path)
         .expect("save_rois_to_path writes");
 

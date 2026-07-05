@@ -15,8 +15,8 @@ use std::rc::Rc;
 
 use egui_kittest::Harness;
 use egui_kittest::wgpu::{WgpuTestRenderer, create_render_state, default_wgpu_setup};
-use siplot::egui::{self, Color32};
-use siplot::{AxisSide, Plot1D, YAxis};
+use rsplot::egui::{self, Color32};
+use rsplot::{AxisSide, Plot1D, YAxis};
 
 fn count_red(raw: &[u8]) -> u32 {
     raw.chunks_exact(4)
@@ -30,7 +30,7 @@ fn count_red(raw: &[u8]) -> u32 {
 /// Returns the red pixel count.
 fn render(bind_extra: bool) -> u32 {
     let rs = create_render_state(default_wgpu_setup());
-    siplot::install(&rs);
+    rsplot::install(&rs);
 
     let mut plot = Plot1D::new(&rs, 0);
     // Deterministic view: pin every axis, no auto reset-zoom.
@@ -70,7 +70,7 @@ fn render(bind_extra: bool) -> u32 {
 #[test]
 fn extra_axis_api_autoscales_and_toggles() {
     let rs = create_render_state(default_wgpu_setup());
-    siplot::install(&rs);
+    rsplot::install(&rs);
     let mut plot = Plot1D::new(&rs, 0);
 
     let idx = plot.add_extra_y_axis(AxisSide::Right);

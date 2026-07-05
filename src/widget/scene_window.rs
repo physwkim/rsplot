@@ -3,7 +3,7 @@
 //! Port of silx `plot3d.SceneWindow.SceneWindow`, which is a `QMainWindow`
 //! composing a `SceneWidget` (central) with a viewpoint toolbar, an interactive
 //! mode toolbar, a `GroupPropertiesWidget` dock, a `ParamTreeView` dock, and a
-//! `PositionInfoWidget`. The siplot analogue composes the parts that are ported:
+//! `PositionInfoWidget`. The rsplot analogue composes the parts that are ported:
 //!
 //! - the [`viewpoint_menu`] drop-down (silx `ViewpointToolBar`) in a toolbar row,
 //! - a [`ScalarFieldView`] as the central scene,

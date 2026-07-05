@@ -419,7 +419,7 @@ fn axis_ticks(axis: &Axis, max_ticks: usize) -> Vec<(f64, String)> {
 /// linear/numeric axis); a log axis falls back to the numeric decade ticks.
 /// `tz` is ignored outside the TimeSeries-on-linear path.
 ///
-/// `time_offset` is the epoch corresponding to axis value `0` (siplot extension;
+/// `time_offset` is the epoch corresponding to axis value `0` (rsplot extension;
 /// see [`Plot::set_x_time_offset`](crate::Plot::set_x_time_offset)): under
 /// TimeSeries the ticks are laid out over the absolute-epoch window
 /// `[min + time_offset, max + time_offset]` and labeled as wall-clock, then each

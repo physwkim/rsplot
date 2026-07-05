@@ -96,7 +96,7 @@ impl CameraExtrinsic {
     /// `(side, up, direction)` basis. `None` keeps the current vector.
     ///
     /// Returns `false` and leaves the orientation unchanged when `direction` and
-    /// `up` are parallel (silx raises `RuntimeError`; siplot no-ops so the
+    /// `up` are parallel (silx raises `RuntimeError`; rsplot no-ops so the
     /// interactive widget cannot crash at the gimbal pole).
     pub fn set_orientation(&mut self, direction: Option<Vec3>, up: Option<Vec3>) -> bool {
         let direction = match direction {

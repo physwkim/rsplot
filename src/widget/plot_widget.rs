@@ -148,11 +148,11 @@ impl PlotInteractionMode {
     /// `tools/roi.py:1101-1175`). Returns `Some("Select {name}s ({n} selected)")`
     /// while a [`RoiCreate`](Self::RoiCreate) kind is armed, else `None`.
     ///
-    /// siplot models neither silx's exec/started lifecycle (creation re-arms
+    /// rsplot models neither silx's exec/started lifecycle (creation re-arms
     /// continuously while the mode is set, so there is no "Done"/"Use ... edition
     /// mode" phase) nor a max-ROI limit or Enter-validation, so only silx's
     /// unlimited branch (`max_ is None`) is produced; the other branches have no
-    /// siplot analogue and collapse to `None`/this single message.
+    /// rsplot analogue and collapse to `None`/this single message.
     pub fn roi_creation_message(self, roi_count: usize) -> Option<String> {
         match self {
             PlotInteractionMode::RoiCreate(kind) => Some(format!(
@@ -1371,7 +1371,7 @@ fn apply_interaction(
 
     // Right-click context menu (silx `PlotWidget.contextMenuEvent`): a secondary
     // *click* opens a zoom menu. silx's default menu carries `Zoom Back`;
-    // siplot adds `Reset Zoom` to absorb the view reset (silx binds reset to
+    // rsplot adds `Reset Zoom` to absorb the view reset (silx binds reset to
     // the toolbar/home, never to a double-click, so the former double-click reset
     // is relocated here). A secondary *drag* still pans — egui opens the menu on a
     // click, not a drag — and the `mouseClicked "right"` event still fires

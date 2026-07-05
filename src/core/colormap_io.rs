@@ -2,14 +2,14 @@
 //! `Colormap.saveState`/`restoreState` (`silx.gui.colors`, :985-1078) — the
 //! round-trip Qt persists into a `QByteArray` via `QDataStream`.
 //!
-//! siplot has no serde dependency, so this is a hand-written, line-oriented
+//! rsplot has no serde dependency, so this is a hand-written, line-oriented
 //! encoder/decoder over a fixed schema — the same manual-serialization approach
 //! as [`crate::core::roi_io`] and the `.npy` mask path. The pure
 //! [`encode_colormap`]/[`decode_colormap`] functions are headlessly testable;
 //! [`save_colormap`]/[`load_colormap`] are the thin filesystem wrappers.
 //!
 //! Unlike silx — which serializes the colormap *name* and rebuilds the LUT from
-//! the (registered) name on restore — siplot's [`Colormap`] stores a resolved
+//! the (registered) name on restore — rsplot's [`Colormap`] stores a resolved
 //! 256-entry LUT and keeps no name (`Colormap::set_name` rewrites the LUT in
 //! place). The state therefore serializes the LUT itself, so the round-trip is
 //! lossless (`decode_colormap(&encode_colormap(c)) == c`) regardless of whether
@@ -19,7 +19,7 @@
 //! Format (version 1):
 //!
 //! ```text
-//! siplot-colormap 1
+//! rsplot-colormap 1
 //! vmin <number>
 //! vmax <number>
 //! normalization <linear | log | sqrt | gamma | arcsinh>
@@ -42,13 +42,13 @@
 
 use crate::core::colormap::{Colormap, Normalization};
 
-/// Magic + version header of a siplot colormap-state file.
-const COLORMAP_IO_HEADER: &str = "siplot-colormap 1";
+/// Magic + version header of a rsplot colormap-state file.
+const COLORMAP_IO_HEADER: &str = "rsplot-colormap 1";
 
-/// An error decoding a siplot colormap-state text blob.
+/// An error decoding a rsplot colormap-state text blob.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ColormapIoError {
-    /// Missing or wrong `siplot-colormap <version>` header line.
+    /// Missing or wrong `rsplot-colormap <version>` header line.
     BadHeader,
     /// The required `lut` line was absent.
     MissingField(&'static str),
@@ -70,8 +70,8 @@ impl std::fmt::Display for ColormapIoError {
 
 impl std::error::Error for ColormapIoError {}
 
-/// Serialize `colormap` to the siplot colormap-state text format (silx
-/// `Colormap.saveState`). All of siplot's colormap state — LUT, value range,
+/// Serialize `colormap` to the rsplot colormap-state text format (silx
+/// `Colormap.saveState`). All of rsplot's colormap state — LUT, value range,
 /// normalization, gamma, NaN color, autoscale percentiles, and the editable
 /// flag — is persisted, so the round-trip is lossless.
 #[must_use]
@@ -104,7 +104,7 @@ pub fn encode_colormap(colormap: &Colormap) -> String {
     out
 }
 
-/// Parse a siplot colormap-state text blob back into a [`Colormap`] (silx
+/// Parse a rsplot colormap-state text blob back into a [`Colormap`] (silx
 /// `Colormap.restoreState`). The `lut` line is required; every other field
 /// falls back to the [`Colormap::new`] default when absent.
 pub fn decode_colormap(text: &str) -> Result<Colormap, ColormapIoError> {
@@ -168,7 +168,7 @@ pub fn decode_colormap(text: &str) -> Result<Colormap, ColormapIoError> {
     Ok(cm)
 }
 
-/// Write `colormap` to `path` in the siplot colormap-state text format (silx
+/// Write `colormap` to `path` in the rsplot colormap-state text format (silx
 /// `Colormap.saveState` persisted to a file).
 pub fn save_colormap(
     path: impl AsRef<std::path::Path>,
@@ -329,7 +329,7 @@ mod tests {
 
     #[test]
     fn missing_lut_is_an_error() {
-        let text = "siplot-colormap 1\nvmin 0\nvmax 1\n";
+        let text = "rsplot-colormap 1\nvmin 0\nvmax 1\n";
         assert_eq!(
             decode_colormap(text),
             Err(ColormapIoError::MissingField("lut"))
@@ -344,7 +344,7 @@ mod tests {
         // nameless colormap to "black", math/colormap.py:185-196), not to the
         // Gray base's pink.
         let base = Colormap::new(ColormapName::Gray, 0.0, 1.0);
-        let text = format!("siplot-colormap 1\nlut {}\n", lut_to_hex(&base.lut));
+        let text = format!("rsplot-colormap 1\nlut {}\n", lut_to_hex(&base.lut));
         let cm = decode_colormap(&text).unwrap();
         assert_eq!(cm.cursor_color, [0, 0, 0, 255]);
         assert_eq!(
@@ -373,7 +373,7 @@ mod tests {
             decode_colormap(&broken),
             Err(ColormapIoError::BadValue("normalization"))
         );
-        let short_lut = "siplot-colormap 1\nlut abcd\n";
+        let short_lut = "rsplot-colormap 1\nlut abcd\n";
         assert_eq!(
             decode_colormap(short_lut),
             Err(ColormapIoError::BadValue("lut"))

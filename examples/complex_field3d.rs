@@ -13,9 +13,9 @@
 //! Run with: `cargo run --example complex_field3d`
 
 use eframe::egui;
-use siplot::egui::Color32;
-use siplot::egui_wgpu::RenderState;
-use siplot::{ComplexField3D, ComplexMode, Scene3dGeometry, SceneWidget, mean_plus_std};
+use rsplot::egui::Color32;
+use rsplot::egui_wgpu::RenderState;
+use rsplot::{ComplexField3D, ComplexMode, Scene3dGeometry, SceneWidget, mean_plus_std};
 
 const N: usize = 40;
 const ISO_COLOR: Color32 = Color32::from_rgb(255, 0, 255);
@@ -125,7 +125,7 @@ fn plane_wave() -> (Vec<f32>, Vec<f32>) {
 
 fn main() -> eframe::Result {
     eframe::run_native(
-        "siplot: complex field 3D",
+        "rsplot: complex field 3D",
         eframe::NativeOptions {
             renderer: eframe::Renderer::Wgpu,
             ..Default::default()

@@ -1,7 +1,7 @@
 //! Hand-written baseline JPEG (JFIF) encoder, no external dependency.
 //!
 //! Same approach as the other hand-written codecs in this crate (TIFF, EPS,
-//! PDF, EDF, npy): the subset siplot needs, written against the spec — here
+//! PDF, EDF, npy): the subset rsplot needs, written against the spec — here
 //! ITU-T T.81 baseline sequential DCT, 8-bit, three components, **4:4:4** (no
 //! chroma subsampling), with the standard Annex K quantization and Huffman
 //! tables. silx saves JPEG through matplotlib/PIL; the on-disk container is
@@ -14,7 +14,7 @@
 //! row/column (standard edge padding, keeps edge gradients flat).
 
 /// Fixed encode quality (IJG 1–100 scale; 50 = Annex K tables unscaled).
-/// PIL's default is 75; siplot uses 90 for crisper plot text at a small file
+/// PIL's default is 75; rsplot uses 90 for crisper plot text at a small file
 /// cost. Not configurable — the save path has no quality UI (like DPI, a
 /// constant until a real need appears).
 pub const JPEG_QUALITY: u8 = 90;

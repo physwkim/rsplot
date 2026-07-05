@@ -5,7 +5,7 @@
 //! Run with: `cargo run --example bootstrap`
 
 use eframe::egui;
-use siplot::{Plot, PlotView, install};
+use rsplot::{Plot, PlotView, install};
 
 struct BootstrapApp {
     plot: Plot,
@@ -39,7 +39,7 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
     eframe::run_native(
-        "siplot · bootstrap",
+        "rsplot · bootstrap",
         options,
         Box::new(|cc| Ok(Box::new(BootstrapApp::new(cc)) as Box<dyn eframe::App>)),
     )

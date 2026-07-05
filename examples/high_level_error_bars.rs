@@ -11,7 +11,7 @@
 //! Run with: `cargo run --example high_level_error_bars`
 
 use eframe::egui;
-use siplot::{CurveData, ErrorBars, Plot1D, Symbol};
+use rsplot::{CurveData, ErrorBars, Plot1D, Symbol};
 
 struct ErrorBarsApp {
     plot: Plot1D,
@@ -76,7 +76,7 @@ impl eframe::App for ErrorBarsApp {
 
 fn main() -> eframe::Result {
     eframe::run_native(
-        "siplot: error bars",
+        "rsplot: error bars",
         eframe::NativeOptions {
             renderer: eframe::Renderer::Wgpu,
             ..Default::default()

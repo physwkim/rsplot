@@ -10,7 +10,7 @@
 //! Run with: `cargo run --example plot_markers`
 
 use eframe::egui;
-use siplot::{LineStyle, Marker, Plot, PlotView, Symbol, install};
+use rsplot::{LineStyle, Marker, Plot, PlotView, Symbol, install};
 
 struct MarkerApp {
     plot: Plot,
@@ -82,7 +82,7 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
     eframe::run_native(
-        "siplot · plot_markers",
+        "rsplot · plot_markers",
         options,
         Box::new(|cc| Ok(Box::new(MarkerApp::new(cc)) as Box<dyn eframe::App>)),
     )

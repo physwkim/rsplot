@@ -180,7 +180,7 @@ fn constraint_kind(constraint: Constraint) -> ConstraintKind {
 
 /// The constraint codes offered in the editor combo — silx
 /// `Parameters.code_options` minus the group-management `ADD`/`SHOW` pseudo-codes
-/// and `IGNORE`. siplot fits a single model (one parameter group), so there is
+/// and `IGNORE`. rsplot fits a single model (one parameter group), so there is
 /// no redundant grouped parameter for `IGNORE` to drop, and no second group for
 /// `ADD`; the remaining seven are the per-parameter constraints
 /// `core::fitting::leastsq_constrained` enforces.

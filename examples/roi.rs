@@ -11,7 +11,7 @@
 
 use eframe::egui;
 use egui::{Align2, Color32, FontId, pos2};
-use siplot::{CurveData, ManagedRoi, Plot, PlotView, Roi, install, set_curve};
+use rsplot::{CurveData, ManagedRoi, Plot, PlotView, Roi, install, set_curve};
 
 const N: usize = 200;
 
@@ -132,7 +132,7 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
     eframe::run_native(
-        "siplot · roi",
+        "rsplot · roi",
         options,
         Box::new(|cc| Ok(Box::new(RoiApp::new(cc)) as Box<dyn eframe::App>)),
     )

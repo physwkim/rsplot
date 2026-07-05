@@ -13,15 +13,15 @@ use std::rc::Rc;
 
 use egui_kittest::Harness;
 use egui_kittest::wgpu::{WgpuTestRenderer, create_render_state, default_wgpu_setup};
-use siplot::egui;
-use siplot::{PlotInteractionMode, PlotWidget, Roi, RoiDrawKind, RulerToolButton, YAxis};
+use rsplot::egui;
+use rsplot::{PlotInteractionMode, PlotWidget, Roi, RoiDrawKind, RulerToolButton, YAxis};
 
 /// Build a harness around a bare `PlotWidget` with a fixed data range
 /// (x,y ∈ [0,10]) so data↔pixel mapping is deterministic, render two frames so
 /// the transform is cached, and return the shared widget + harness.
 fn harness() -> (Rc<RefCell<PlotWidget>>, Harness<'static>) {
     let rs = create_render_state(default_wgpu_setup());
-    siplot::install(&rs);
+    rsplot::install(&rs);
 
     let mut plot = PlotWidget::new(&rs, 0);
     let x: Vec<f64> = (0..=10).map(|i| i as f64).collect();

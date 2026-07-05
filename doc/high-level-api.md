@@ -1,6 +1,6 @@
 # High-level Plot APIs
 
-`siplot` exposes two plotting layers:
+`rsplot` exposes two plotting layers:
 
 - `PlotView`: stateless chrome and interaction around a `Plot` model. Existing
   low-level examples use this when they want direct control of GPU item uploads.
@@ -10,7 +10,7 @@
 
 The high-level examples mirror common silx examples from `silx/examples/`:
 
-| silx example | siplot example | Covered APIs |
+| silx example | rsplot example | Covered APIs |
 | --- | --- | --- |
 | `plotWidget.py` | `cargo run --example high_level_plot_widget` | toolbar, image, scatter, histogram, legend, active stats |
 | `plotLegendsWidget.py` | `cargo run --example high_level_legend`, `high_level_plot_widget`, and `high_level_plot1d` | silx-like legend rows, legend labels, legend selection, item lookup by legend |

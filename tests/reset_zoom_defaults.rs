@@ -9,13 +9,13 @@
 //! Needs a GPU (real or software); mirrors `tests/roi_events.rs`' harness.
 
 use egui_kittest::wgpu::{create_render_state, default_wgpu_setup};
-use siplot::egui::Color32;
-use siplot::{Plot1D, YAxis};
+use rsplot::egui::Color32;
+use rsplot::{Plot1D, YAxis};
 
 #[test]
 fn right_axis_only_plot_refits_on_reset() {
     let rs = create_render_state(default_wgpu_setup());
-    siplot::install(&rs);
+    rsplot::install(&rs);
     let mut plot = Plot1D::new(&rs, 0);
 
     let xs: Vec<f64> = (0..=10).map(|i| i as f64).collect();
@@ -40,7 +40,7 @@ fn right_axis_only_plot_refits_on_reset() {
 #[test]
 fn itemless_reset_lands_on_silx_home_view() {
     let rs = create_render_state(default_wgpu_setup());
-    siplot::install(&rs);
+    rsplot::install(&rs);
     let mut plot = Plot1D::new(&rs, 0);
 
     plot.plot_mut().limits = (3.0, 7.0, 2.0, 8.0);

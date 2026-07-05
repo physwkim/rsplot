@@ -7,7 +7,7 @@
 //! Run with: `cargo run --example high_level_roi_profile`
 
 use eframe::egui;
-use siplot::{Colormap, Plot2D, ProfileMode, ProfileWindow, Roi};
+use rsplot::{Colormap, Plot2D, ProfileMode, ProfileWindow, Roi};
 
 const WIDTH: u32 = 128;
 const HEIGHT: u32 = 96;
@@ -148,7 +148,7 @@ fn build_image() -> Vec<f32> {
 
 fn main() -> eframe::Result {
     eframe::run_native(
-        "siplot: ROI Profile Window",
+        "rsplot: ROI Profile Window",
         eframe::NativeOptions {
             renderer: eframe::Renderer::Wgpu,
             ..Default::default()

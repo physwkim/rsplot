@@ -10,13 +10,13 @@
 //! Needs a GPU (real or software); mirrors `tests/roi_events.rs`' harness.
 
 use egui_kittest::wgpu::{create_render_state, default_wgpu_setup};
-use siplot::Plot1D;
-use siplot::egui::Color32;
+use rsplot::Plot1D;
+use rsplot::egui::Color32;
 
 #[test]
 fn y_log_toggle_snaps_to_positive_data_range() {
     let rs = create_render_state(default_wgpu_setup());
-    siplot::install(&rs);
+    rsplot::install(&rs);
     let mut plot = Plot1D::new(&rs, 0);
 
     // ys spans [-5, 5]; the strictly positive ys are {1..5}.
@@ -37,7 +37,7 @@ fn y_log_toggle_snaps_to_positive_data_range() {
 #[test]
 fn x_log_toggle_with_no_positive_data_lands_on_1_100() {
     let rs = create_render_state(default_wgpu_setup());
-    siplot::install(&rs);
+    rsplot::install(&rs);
     let mut plot = Plot1D::new(&rs, 0);
 
     // All xs non-positive: no positive X data exists.
@@ -54,7 +54,7 @@ fn x_log_toggle_with_no_positive_data_lands_on_1_100() {
 #[test]
 fn keep_aspect_toggle_forces_reset_zoom_once() {
     let rs = create_render_state(default_wgpu_setup());
-    siplot::install(&rs);
+    rsplot::install(&rs);
     let mut plot = Plot1D::new(&rs, 0);
 
     let xs: Vec<f64> = (0..=10).map(|i| i as f64).collect();

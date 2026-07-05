@@ -1,6 +1,6 @@
 //! Live-updating 3D scatter example.
 //!
-//! The siplot analogue of silx `examples/plot3dUpdateScatterFromThread.py`: a 3D
+//! The rsplot analogue of silx `examples/plot3dUpdateScatterFromThread.py`: a 3D
 //! scatter whose geometry is rebuilt every frame (here a double helix spun about
 //! the vertical axis), re-uploaded through [`SceneWidget::set_geometry`] and kept
 //! animating with `ctx.request_repaint()`. silx pushes new data from a worker
@@ -12,8 +12,8 @@
 //! Run with: `cargo run --example scene3d_update`
 
 use eframe::egui;
-use siplot::egui_wgpu::RenderState;
-use siplot::{Colormap, PointMarker, Scatter3D, Scene3dGeometry, SceneWidget, Vec3};
+use rsplot::egui_wgpu::RenderState;
+use rsplot::{Colormap, PointMarker, Scatter3D, Scene3dGeometry, SceneWidget, Vec3};
 
 const N: usize = 300;
 
@@ -78,7 +78,7 @@ impl eframe::App for UpdateApp {
 
 fn main() -> eframe::Result {
     eframe::run_native(
-        "siplot: live 3D scatter",
+        "rsplot: live 3D scatter",
         eframe::NativeOptions {
             renderer: eframe::Renderer::Wgpu,
             ..Default::default()

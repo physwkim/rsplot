@@ -1,13 +1,13 @@
-# sidm's widget render tests spin up a real wgpu device (egui_kittest's
+# rsdm's widget render tests spin up a real wgpu device (egui_kittest's
 # `WgpuTestRenderer`) to read pixels back. On macOS Metal the device/queue
 # teardown is deferred and, under nextest's parallel load, can outlive the
 # default 100ms leak-detection grace — surfacing as a non-deterministic `LEAK`
 # warning on whichever GPU test happens to clean up slowest (the test itself
 # still passes). nextest's `leak-timeout` is exactly for correct-but-slow
-# teardown: widen it for the sidm GPU tests so a clean exit is observed instead
+# teardown: widen it for the rsdm GPU tests so a clean exit is observed instead
 # of being misread as a leaked handle. Fast non-GPU tests exit immediately, so
 # the wider grace is a no-op for them; this only changes how long nextest waits
 # before declaring a leak, never a test's pass/fail.
 [[profile.default.overrides]]
-filter = 'package(sidm)'
+filter = 'package(rsdm)'
 leak-timeout = "2s"

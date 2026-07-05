@@ -17,8 +17,8 @@ use std::rc::Rc;
 
 use egui_kittest::Harness;
 use egui_kittest::wgpu::{WgpuTestRenderer, create_render_state, default_wgpu_setup};
-use siplot::egui;
-use siplot::{PlotWidget, SnappingMode};
+use rsplot::egui;
+use rsplot::{PlotWidget, SnappingMode};
 
 /// A `PlotWidget` populated by `build`, rendered twice through the kittest+wgpu
 /// harness so the display transform is cached (snapping projects data→pixel
@@ -37,7 +37,7 @@ fn plot_rendered_at(
     build: impl FnOnce(&mut PlotWidget),
 ) -> (Rc<RefCell<PlotWidget>>, Harness<'static>) {
     let rs = create_render_state(default_wgpu_setup());
-    siplot::install(&rs);
+    rsplot::install(&rs);
     let mut plot = PlotWidget::new(&rs, 0);
     build(&mut plot);
 
@@ -65,7 +65,7 @@ fn cursor_at_pixel_offset(
     offset_px: f32,
 ) -> [f64; 2] {
     let v = plot
-        .data_to_pixel(at[0], at[1], siplot::YAxis::Left)
+        .data_to_pixel(at[0], at[1], rsplot::YAxis::Left)
         .expect("cached transform");
     let norm = (dir_px[0] * dir_px[0] + dir_px[1] * dir_px[1]).sqrt();
     let p = egui::pos2(
@@ -73,7 +73,7 @@ fn cursor_at_pixel_offset(
         v.y + dir_px[1] / norm * offset_px,
     );
     let (x, y) = plot
-        .pixel_to_data(p, siplot::YAxis::Left)
+        .pixel_to_data(p, rsplot::YAxis::Left)
         .expect("cached transform");
     [x, y]
 }
@@ -257,8 +257,8 @@ fn vertex_within_radius_but_outside_the_pick_box_does_not_snap() {
     let plot = plot.borrow();
 
     // Pixel-space direction of the line at (5, 5), and its perpendicular.
-    let p5 = plot.data_to_pixel(5.0, 5.0, siplot::YAxis::Left).unwrap();
-    let p6 = plot.data_to_pixel(6.0, 6.0, siplot::YAxis::Left).unwrap();
+    let p5 = plot.data_to_pixel(5.0, 5.0, rsplot::YAxis::Left).unwrap();
+    let p6 = plot.data_to_pixel(6.0, 6.0, rsplot::YAxis::Left).unwrap();
     let dir = [p6.x - p5.x, p6.y - p5.y];
     let perp = [-dir[1], dir[0]];
 
@@ -297,8 +297,8 @@ fn snap_radius_scales_with_pixels_per_point() {
 
     let (plot, _harness) = plot_rendered_at(2.0, build);
     let plot = plot.borrow();
-    let p5 = plot.data_to_pixel(5.0, 5.0, siplot::YAxis::Left).unwrap();
-    let p6 = plot.data_to_pixel(6.0, 6.0, siplot::YAxis::Left).unwrap();
+    let p5 = plot.data_to_pixel(5.0, 5.0, rsplot::YAxis::Left).unwrap();
+    let p6 = plot.data_to_pixel(6.0, 6.0, rsplot::YAxis::Left).unwrap();
     let dir = [p6.x - p5.x, p6.y - p5.y];
     let cursor = cursor_at_pixel_offset(&plot, [5.0, 5.0], dir, 7.0);
     let snap = plot
@@ -313,8 +313,8 @@ fn snap_radius_scales_with_pixels_per_point() {
 
     let (plot, _harness) = plot_rendered_at(1.0, build);
     let plot = plot.borrow();
-    let p5 = plot.data_to_pixel(5.0, 5.0, siplot::YAxis::Left).unwrap();
-    let p6 = plot.data_to_pixel(6.0, 6.0, siplot::YAxis::Left).unwrap();
+    let p5 = plot.data_to_pixel(5.0, 5.0, rsplot::YAxis::Left).unwrap();
+    let p6 = plot.data_to_pixel(6.0, 6.0, rsplot::YAxis::Left).unwrap();
     let dir = [p6.x - p5.x, p6.y - p5.y];
     let cursor = cursor_at_pixel_offset(&plot, [5.0, 5.0], dir, 7.0);
     assert!(
@@ -328,7 +328,7 @@ fn uncached_transform_yields_no_snap() {
     // A widget that has never rendered has no cached transform, so data→pixel
     // projection fails and snapping returns None rather than panicking.
     let rs = create_render_state(default_wgpu_setup());
-    siplot::install(&rs);
+    rsplot::install(&rs);
     let mut plot = PlotWidget::new(&rs, 0);
     let xs: Vec<f64> = (0..=10).map(|i| i as f64).collect();
     let ys = xs.clone();

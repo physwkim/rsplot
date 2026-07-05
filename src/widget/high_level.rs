@@ -151,7 +151,7 @@ impl ValueStats {
     /// Deliberately finite-filtered, UNLIKE the silx stats-table engine
     /// ([`crate::core::stats::Stats`]) which propagates NaN through
     /// mean/sum/std exactly as numpy does (R2-11). `ValueStats` feeds the
-    /// items-panel summary labels — a siplot-side readout where a single NaN
+    /// items-panel summary labels — a rsplot-side readout where a single NaN
     /// sample must not blank the whole line — so it keeps its own finite
     /// aggregation loop instead of delegating to the parity engine.
     pub fn from_f64(values: &[f64]) -> Self {
@@ -336,7 +336,7 @@ pub enum PlotEvent {
     /// A new ROI was created at `index` by an on-plot draw in
     /// [`PlotInteractionMode::RoiCreate`] (silx `sigInteractiveRoiFinalized`:
     /// the interactive draw gesture finished). Read its geometry with
-    /// `plot().rois[index].roi`. siplot builds the ROI only on draw-finish (no
+    /// `plot().rois[index].roi`. rsplot builds the ROI only on draw-finish (no
     /// mid-draw ROI object), so silx's separate `sigInteractiveRoiCreated`
     /// (mid-gesture) collapses into this finish event.
     RoiCreated { index: usize },
@@ -420,7 +420,7 @@ pub enum PlotEvent {
     /// `label` its name, `x`/`y` the data-space cursor position, `xpixel`/`ypixel`
     /// the pixel cursor position, and `draggable` whether the item can be dragged
     /// (true only for a draggable marker). silx's `selectable` flag is omitted: in
-    /// siplot every pickable item is set active on click, so the flag would be
+    /// rsplot every pickable item is set active on click, so the flag would be
     /// a constant `true` carrying no information.
     ItemHovered {
         handle: ItemHandle,
@@ -631,7 +631,7 @@ fn force_odd(n: usize) -> usize {
 /// (or a copy in flight) do not collide. Pure (no filesystem touch), so the
 /// naming is unit-testable; the actual write + printer submit are the shims.
 fn print_temp_png_path(dir: &Path, pid: u32) -> PathBuf {
-    dir.join(format!("siplot-print-{pid}.png"))
+    dir.join(format!("rsplot-print-{pid}.png"))
 }
 
 fn validate_image_len(width: u32, height: u32, actual: usize) -> Result<usize, PlotDataError> {
@@ -1427,7 +1427,7 @@ pub enum ProfileMethod {
 /// With `horizontal == true` the profile runs along X (one sample per column) and
 /// `position` is the Y (row) of the line; the band spans `roi_width` rows. With
 /// `horizontal == false` the profile runs along Y (one sample per row) and
-/// `position` is the X (column); the band spans `roi_width` columns. siplot's
+/// `position` is the X (column); the band spans `roi_width` columns. rsplot's
 /// ImageView uses identity geometry (origin `(0, 0)`, scale `(1, 1)`), so
 /// `position` is already in image pixels.
 ///
@@ -1744,7 +1744,7 @@ fn aligned_partial_profile(
 /// plot-axis coordinate**, not arc distance (`core.py:529-563`): a row-aligned
 /// line runs over its column coordinates (`arange + startCol`), a column-aligned
 /// line over its row coordinates (`arange + startRow`), and a diagonal line over
-/// `linspace(x0, x1, len)` in X data coordinates. siplot's image geometry is
+/// `linspace(x0, x1, len)` in X data coordinates. rsplot's image geometry is
 /// identity (origin `(0, 0)`, scale `(1, 1)`), so `scale`/`origin` drop out.
 /// The computed profile title and axis labels remain a separate concern.
 pub fn free_line_profile(
@@ -5480,7 +5480,7 @@ impl PlotWidget {
     /// Set the default line style of every curve, mirroring silx
     /// `PlotWidget.setDefaultPlotLines`: `true` applies a solid line (silx
     /// `"-"`), `false` removes the line (silx `" "`). Like silx, this resets the
-    /// line style of all existing curves (silx iterates `getAllCurves`; siplot
+    /// line style of all existing curves (silx iterates `getAllCurves`; rsplot
     /// iterates [`PlotItemKind::Curve`] items, the equivalent set — histograms
     /// and scatters are excluded). Returns the number of curves whose line style
     /// actually changed.
@@ -5631,7 +5631,7 @@ impl PlotWidget {
     }
 
     /// Handles of every curve-like item that carries retained [`CurveData`]
-    /// (curve, histogram, scatter) — the siplot equivalent of the silx
+    /// (curve, histogram, scatter) — the rsplot equivalent of the silx
     /// `SymbolMixIn` items a `SymbolToolButton` iterates over.
     fn symbol_bearing_handles(&self) -> Vec<ItemHandle> {
         self.item_records
@@ -5667,7 +5667,7 @@ impl PlotWidget {
     /// Set the marker size (logical points) of every curve-like item, mirroring
     /// silx `SymbolToolButton` / `_SymbolToolButtonBase._sizeChanged`, which
     /// calls `setSymbolSize` on every single-symbol-size `SymbolMixIn` item.
-    /// siplot curves carry one size per item (no per-point sizes), so every
+    /// rsplot curves carry one size per item (no per-point sizes), so every
     /// curve-like item qualifies. Returns the number of items whose size
     /// actually changed.
     pub fn set_all_symbol_sizes(&mut self, size: f32) -> usize {
@@ -6216,8 +6216,8 @@ impl PlotWidget {
     /// `FitStarted`/`FitFailed` → `setVisible(False)`. Call each frame (or
     /// after [`FitWidget::perform_fit_choice`]) with the fitted item's handle.
     /// Returns the overlay's handle when one exists. The overlay is red — the
-    /// fit-curve colour used throughout siplot's [`FitWidget`] (silx lets the
-    /// default palette pick the next colour; siplot has no palette cycle).
+    /// fit-curve colour used throughout rsplot's [`FitWidget`] (silx lets the
+    /// default palette pick the next colour; rsplot has no palette cycle).
     ///
     /// [`FitWidget`]: crate::FitWidget
     /// [`FitWidget::perform_fit_choice`]: crate::FitWidget::perform_fit_choice
@@ -6515,7 +6515,7 @@ impl PlotWidget {
         }
         // Zoom-axes menu (silx `ZoomEnabledAxesMenu`): choose which axes a box
         // zoom affects. Both checked by default; unchecking one keeps that
-        // axis's range when a box zoom is applied. siplot's box zoom is left-axis
+        // axis's range when a box zoom is applied. rsplot's box zoom is left-axis
         // only, so there is no y2 entry (unlike silx's three).
         let mut zoom_x = self.plot().zoom_x_enabled();
         let mut zoom_y = self.plot().zoom_y_enabled();
@@ -7562,7 +7562,7 @@ impl PlotWidget {
     /// pick the participating items for `mode`, then walks the candidates in
     /// item order applying silx's per-item *pick* engagement:
     ///
-    /// - A histogram engages by area pick — siplot histograms are always
+    /// - A histogram engages by area pick — rsplot histograms are always
     ///   filled ([`Self::add_histogram`] sets `fill`), so silx's filled-bar
     ///   pick applies: any cursor between the baseline and a bar's value picks
     ///   that bin ([`pick_filled_histogram`], items/histogram.py:245-291) —
@@ -7639,7 +7639,7 @@ impl PlotWidget {
                     ..
                 }) => {
                     // silx histograms with a non-scalar baseline have no pick
-                    // semantics (the numpy comparison would raise); siplot
+                    // semantics (the numpy comparison would raise); rsplot
                     // only ever constructs Scalar(0.0) for histograms.
                     let Baseline::Scalar(baseline) = curve.baseline else {
                         continue;
@@ -8214,7 +8214,7 @@ impl PlotWidget {
         self.save_to_path(&path, size)
     }
 
-    /// Save the current ROIs to `path` in the siplot ROI text format (silx
+    /// Save the current ROIs to `path` in the rsplot ROI text format (silx
     /// `CurvesROIWidget.save(filename)`) via [`crate::save_rois`]. The encoder
     /// is unit-tested (`core::roi_io`); this is the widget-level wrapper.
     pub fn save_rois_to_path(&self, path: impl AsRef<std::path::Path>) -> std::io::Result<()> {
@@ -8243,7 +8243,7 @@ impl PlotWidget {
     /// dialog is a native shim; the save logic it calls is unit-tested.
     pub fn save_rois_dialog(&self) -> std::io::Result<bool> {
         let Some(path) = rfd::FileDialog::new()
-            .add_filter("siplot ROIs", &["rois", "txt"])
+            .add_filter("rsplot ROIs", &["rois", "txt"])
             .save_file()
         else {
             return Ok(false);
@@ -8258,7 +8258,7 @@ impl PlotWidget {
     /// `Ok(false)` on cancel. The dialog is a native shim.
     pub fn load_rois_dialog(&mut self) -> std::io::Result<bool> {
         let Some(path) = rfd::FileDialog::new()
-            .add_filter("siplot ROIs", &["rois", "txt"])
+            .add_filter("rsplot ROIs", &["rois", "txt"])
             .pick_file()
         else {
             return Ok(false);
@@ -8285,7 +8285,7 @@ impl PlotWidget {
         // Render the figure to a temp PNG, then read it back. save_graph is the
         // only public figure-encoding entry point (it writes a PNG file).
         let mut path = std::env::temp_dir();
-        path.push(format!("siplot-copy-{}.png", std::process::id()));
+        path.push(format!("rsplot-copy-{}.png", std::process::id()));
         self.save_graph(&path, size)?;
         let png = std::fs::read(&path)?;
         let _ = std::fs::remove_file(&path);
@@ -8366,7 +8366,7 @@ impl PlotWidget {
     }
 
     fn apply_auto_limits(&mut self) {
-        // Content-change guard (siplot's `auto_reset_zoom` extension — silx
+        // Content-change guard (rsplot's `auto_reset_zoom` extension — silx
         // has no refit-on-content-change): with no data at all, adding or
         // removing items does not snap the view to the silx (1, 100) empty
         // home. The explicit reset verbs (`reset_zoom_to_data`, the context
@@ -9057,7 +9057,7 @@ pub enum CompareAlignment {
 }
 
 /// Colour of the matched-keypoint scatter overlay (silx renders the keypoints
-/// with a dedicated colormap; siplot uses one conspicuous colour).
+/// with a dedicated colormap; rsplot uses one conspicuous colour).
 const KEYPOINT_COLOR: Color32 = Color32::from_rgb(255, 0, 255);
 
 /// A retained widget that displays two co-registered images with a draggable
@@ -9096,7 +9096,7 @@ pub struct CompareImages {
     cursor: Option<[f64; 2]>,
     /// Handle of the on-plot draggable split separator (silx `__vline`/`__hline`),
     /// or `None` when the current mode shows no separator. silx keeps both markers
-    /// and toggles `setVisible`; siplot markers carry no visibility flag, so the
+    /// and toggles `setVisible`; rsplot markers carry no visibility flag, so the
     /// separator is recreated when its orientation must change and removed when no
     /// split is shown.
     separator: Option<ItemHandle>,
@@ -9224,7 +9224,7 @@ impl CompareImages {
     ///
     /// silx populates the transform *only* from the `AUTO`/SIFT path
     /// (`__createSiftData`); `getTransformation` is `None` for ORIGIN/CENTER/
-    /// STRETCH. siplot matches this: the value is `Some` exactly while
+    /// STRETCH. rsplot matches this: the value is `Some` exactly while
     /// [`CompareAlignment::Auto`] registration has succeeded (it is cleared when
     /// the mode changes or registration fails), so it reads as `None` in every
     /// non-SIFT mode.
@@ -9400,7 +9400,7 @@ impl CompareImages {
             // AUTO alignment runs the (expensive) SIFT registration here, only
             // when something changed, and caches it for build_composite /
             // raw_pixel_data. On too few keypoints silx falls back to the default
-            // alignment mode (`__setDefaultAlignmentMode`); siplot falls back to
+            // alignment mode (`__setDefaultAlignmentMode`); rsplot falls back to
             // ORIGIN so the images still display.
             if self.alignment == CompareAlignment::Auto {
                 self.auto = self.compute_auto_alignment();
@@ -9786,7 +9786,7 @@ fn margin_image(
 /// with the four-tap bilinear weights of silx's `c_funct` (indices clamped into
 /// the image — silx clamps the coordinate to `[0, dim - 1]`). A destination
 /// extent of 1 along an axis maps to source index 0 there (silx's `0/0` would be
-/// NaN; siplot samples the first line instead). `src` is row-major
+/// NaN; rsplot samples the first line instead). `src` is row-major
 /// `src_w × src_h`. Pure, so the resampling is unit-testable.
 fn rescale_array(src: &[f32], src_w: usize, src_h: usize, dst_w: usize, dst_h: usize) -> Vec<f32> {
     let mut out = vec![0.0f32; dst_w * dst_h];
@@ -9885,7 +9885,7 @@ fn align_compare_images(
 ///   is scaled by the per-axis size ratio, `x_b = x * w_b / w_a`,
 ///   `y_b = y * h_b / h_a`. (silx's source writes `y2 = x * w2 / w1` here, a
 ///   transcription typo that uses the column coordinate and width ratio for the
-///   row; siplot uses the row mapping so the readout matches the displayed
+///   row; rsplot uses the row mapping so the readout matches the displayed
 ///   stretched pixel.)
 ///
 /// Pure, so the per-mode remap is unit-testable.
@@ -9981,7 +9981,7 @@ fn align_summary(t: &AffineTransformation) -> String {
 /// `CompareImagesStatusBar` (`Translation x/y` in px, `Scale x/y`, `Rotation`
 /// in degrees), one line per component that differs from identity, or
 /// `"No transformation"` when none do. silx gates the `Translation x` line on
-/// `ty` — a transcription slip; siplot gates it on `tx` so the x line tracks the
+/// `ty` — a transcription slip; rsplot gates it on `tx` so the x line tracks the
 /// x translation.
 fn align_tooltip(t: &AffineTransformation) -> String {
     let mut lines = Vec::new();
@@ -10054,7 +10054,7 @@ fn seal_compare_colormap(base: &Colormap, data1: &[f32], data2: &[f32]) -> Color
 /// `b` for B — the same `normalize`→byte step silx applies). The non-negative
 /// mode puts A in red, B in blue, and their half-sum (`a/2 + b/2`) in green; the
 /// negative mode inverts each channel (`255 - …`). `data_a` and `data_b` are
-/// row-major and the same length (siplot uploads both together). Pure, so the
+/// row-major and the same length (rsplot uploads both together). Pure, so the
 /// channel layout is unit-testable without a GPU.
 fn red_blue_gray_composite(
     data_a: &[f32],
@@ -10504,7 +10504,7 @@ fn image_row_sums(pixels: &[f32], w: usize, h: usize) -> Vec<f64> {
 
 /// The `(col, row, value)` triple silx `ImageView.valueChanged` emits for a
 /// cursor at data coordinates `(x, y)` over the active image
-/// (`ImageView._imagePlotCB`, ImageView.py:585-601). siplot's ImageView uses
+/// (`ImageView._imagePlotCB`, ImageView.py:585-601). rsplot's ImageView uses
 /// identity image geometry (origin `(0, 0)`, scale `(1, 1)`), so a pixel index
 /// is the truncated coordinate. Returns `None` — silx emits nothing — when the
 /// cursor is left of / below the origin or outside the pixel grid, or when no
@@ -11063,7 +11063,7 @@ impl ImageView {
                 }
                 // silx `_BaseMaskToolsWidget` "Set min-max from colormap"
                 // (MaskToolsWidget override :883-892): copy the colormap's value
-                // range into the threshold fields. siplot's `colormap.vmin/vmax`
+                // range into the threshold fields. rsplot's `colormap.vmin/vmax`
                 // already hold the effective (post-autoscale) range after upload,
                 // so this is the faithful equivalent of silx's vmin/vmax-or-auto.
                 if ui
@@ -11358,7 +11358,7 @@ impl ImageView {
     /// `DrawFreeHand.updatePencilShape` (`PlotInteraction.py:1011-1017`,
     /// `fill="none"`), shown both while hovering and while painting (silx draws
     /// it from `Idle.onMove` and `Select.onMove`). The mask brush paints a disk
-    /// of `brush_size / 2` cells (siplot masks in data==cell space), so the
+    /// of `brush_size / 2` cells (rsplot masks in data==cell space), so the
     /// circle marks the exact footprint. Painted on a foreground layer clipped
     /// to the image area.
     fn draw_brush_preview(&self, ui: &egui::Ui, plot_response: &PlotResponse) {
@@ -14875,9 +14875,9 @@ mod tests {
     fn print_temp_png_path_is_process_unique_under_dir() {
         // The print shim rasterizes into this temp path before submitting to the
         // printer; the GPU readback + submit are shims, but the naming is pure.
-        let dir = Path::new("/tmp/siplot-test");
+        let dir = Path::new("/tmp/rsplot-test");
         let p = print_temp_png_path(dir, 4242);
-        assert_eq!(p, Path::new("/tmp/siplot-test/siplot-print-4242.png"));
+        assert_eq!(p, Path::new("/tmp/rsplot-test/rsplot-print-4242.png"));
         // Always under the requested dir, always a .png, with the pid embedded so
         // concurrent plots / a copy in flight do not collide.
         assert!(p.starts_with(dir));

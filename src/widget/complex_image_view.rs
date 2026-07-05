@@ -147,7 +147,7 @@ pub const DEFAULT_AMPLITUDE_DELTA: f32 = 2.0;
 /// The amplitude is taken to `a = log10(|z| + 1e-20)`, shifted so the maximum
 /// maps to `delta` (silx `a -= a.max() - dlogs`), then normalized to `a / delta`
 /// clamped to `[0, 1]`. Like [`amplitude_phase_rgba`], that normalized amplitude
-/// drives the HSV *value* channel (siplot's opaque-RGBA convention) rather than
+/// drives the HSV *value* channel (rsplot's opaque-RGBA convention) rather than
 /// silx's alpha channel; the clamping + log-window normalization is the faithful
 /// silx port. Hue is the phase, saturation `1`, alpha opaque. Empty data yields
 /// an empty vector. Uniform-amplitude data maps every pixel to full value (the

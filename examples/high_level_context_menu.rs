@@ -12,7 +12,7 @@
 use std::path::PathBuf;
 
 use eframe::egui;
-use siplot::{GraphGrid, PlotWidget};
+use rsplot::{GraphGrid, PlotWidget};
 
 struct ContextMenuApp {
     plot: PlotWidget,
@@ -40,7 +40,7 @@ impl ContextMenuApp {
 
         Self {
             plot,
-            save_path: PathBuf::from("siplot-context-menu.png"),
+            save_path: PathBuf::from("rsplot-context-menu.png"),
             status: "right-click the plot".to_owned(),
         }
     }
@@ -97,7 +97,7 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
     eframe::run_native(
-        "siplot - high-level context menu",
+        "rsplot - high-level context menu",
         options,
         Box::new(|cc| Ok(Box::new(ContextMenuApp::new(cc)) as Box<dyn eframe::App>)),
     )

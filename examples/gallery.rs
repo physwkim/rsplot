@@ -3,7 +3,7 @@
 //! Renders a curated set of the high-level widgets to PNG files in
 //! `doc/images/`, used by the README "Gallery" section. Capture is fully
 //! headless: it uses `egui_kittest`'s wgpu test renderer to draw each scene
-//! (full egui chrome plus siplot's `egui_wgpu` data-layer paint callbacks)
+//! (full egui chrome plus rsplot's `egui_wgpu` data-layer paint callbacks)
 //! into an offscreen texture and reads it back — no window is opened.
 //!
 //! The scenes mirror the matching `high_level_*` examples so the gallery
@@ -15,8 +15,8 @@
 
 use egui_kittest::Harness;
 use egui_kittest::wgpu::{WgpuTestRenderer, create_render_state, default_wgpu_setup};
-use siplot::egui_wgpu::RenderState;
-use siplot::{
+use rsplot::egui_wgpu::RenderState;
+use rsplot::{
     Box3D, Colormap, ColormapMesh3D, ColormapName, CompareImages, Cylinder3D, FitModelChoice,
     FitWidget, GraphGrid, Hexagon3D, ImageGeometry, ImageView, MeshDrawMode, Plot2D,
     PlotInteractionMode, PlotWidget, PointMarker, Roi, ScalarFieldView, Scatter3D, ScatterView,
@@ -37,7 +37,7 @@ fn capture(
     // A fresh device + installed WgpuResources per scene keeps plot ids and GPU
     // state independent across captures.
     let render_state = create_render_state(default_wgpu_setup());
-    siplot::install(&render_state);
+    rsplot::install(&render_state);
 
     let mut scene = build(&render_state);
 

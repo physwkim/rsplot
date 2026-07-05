@@ -1037,11 +1037,11 @@ pub enum CursorShape {
     SizeVer,
     /// Diagonal resize along the ↘↖ axis: top-left ↔ bottom-right corner (Qt
     /// `SizeFDiagCursor`). silx maps all corner handles to `CURSOR_SIZE_ALL`;
-    /// siplot uses egui's native diagonal cursor for Rect corners, matching
+    /// rsplot uses egui's native diagonal cursor for Rect corners, matching
     /// egui's own window-corner resize affordance.
     SizeNwse,
     /// Diagonal resize along the ↗↙ axis: top-right ↔ bottom-left corner (Qt
-    /// `SizeBDiagCursor`); the siplot Rect-corner counterpart of `SizeNwse`.
+    /// `SizeBDiagCursor`); the rsplot Rect-corner counterpart of `SizeNwse`.
     SizeNesw,
     /// Move in both axes (silx `CURSOR_SIZE_ALL`, Qt `SizeAllCursor`).
     SizeAll,
@@ -1261,7 +1261,7 @@ pub fn roi_draw_mode(kind: RoiDrawKind) -> DrawMode {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RoiKeyAction {
     /// Return/Enter: finish/validate the in-progress drawing (silx `quit()` in
-    /// `ENTER` / `AUTO_ENTER` validation mode; siplot uses it to close a
+    /// `ENTER` / `AUTO_ENTER` validation mode; rsplot uses it to close a
     /// polygon at its committed vertices, the `validate` path).
     Validate,
     /// Delete / Backspace / Ctrl+Z: remove the most recently added ROI (silx
@@ -1426,7 +1426,7 @@ pub fn arc_from_two_points(point0: (f64, f64), point1: (f64, f64)) -> Roi {
 ///   `start`/`mid` (silx `_ArcGeometry.createCircle`): center at the
 ///   `start`–`mid` midpoint, swept the full `2π` from `start`'s angle.
 /// - `start`, `mid`, `end` collinear (`|cross| < 1e-5`) → silx builds a
-///   center-less "rect" intermediate, which siplot's [`Roi::Arc`] (always
+///   center-less "rect" intermediate, which rsplot's [`Roi::Arc`] (always
 ///   centered) cannot represent; this falls back to a degenerate zero-radius arc
 ///   at the `start`–`end` midpoint. The transient rect editing shape is not
 ///   modeled (deviation noted on the roadmap row).

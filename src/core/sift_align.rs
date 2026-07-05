@@ -23,7 +23,7 @@
 //! image `(x, y)` end to end (estimation, warp, decomposition); silx instead
 //! swaps to `(y, x)` for its OpenCL warp kernel and decomposes in that order,
 //! an addressing artefact of the GPU kernel rather than a semantic difference,
-//! so siplot's `sx`/`sy`/`rotation` read out in the natural image-axis order.
+//! so rsplot's `sx`/`sy`/`rotation` read out in the natural image-axis order.
 
 use lowe_sift::{Feature, GrayImage, Sift, estimate_affine_from_pairs};
 
@@ -257,7 +257,7 @@ fn median(values: &mut [f64]) -> f64 {
 /// median keypoint translation `(median(bx − ax), median(by − ay))`. Robust to
 /// the outliers a 3–17-pair least-squares fit would chase into spurious
 /// scale/rotation. (silx computes the median in `(y, x)` for its GPU kernel;
-/// siplot stays in image `(x, y)` end to end, per this module's convention.)
+/// rsplot stays in image `(x, y)` end to end, per this module's convention.)
 fn shift_only_transform(matches: &[MatchedKeypoint]) -> ([[f64; 2]; 2], (f64, f64)) {
     let mut dxs: Vec<f64> = matches.iter().map(|m| (m.bx - m.ax) as f64).collect();
     let mut dys: Vec<f64> = matches.iter().map(|m| (m.by - m.ay) as f64).collect();

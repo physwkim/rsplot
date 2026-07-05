@@ -10,7 +10,7 @@
 
 use eframe::egui;
 use egui::Color32;
-use siplot::{CurveData, Plot, PlotView, install, set_curve};
+use rsplot::{CurveData, Plot, PlotView, install, set_curve};
 
 const T_MAX: f64 = std::f64::consts::TAU;
 
@@ -63,7 +63,7 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
     eframe::run_native(
-        "siplot · labels",
+        "rsplot · labels",
         options,
         Box::new(|cc| Ok(Box::new(LabelsApp::new(cc)) as Box<dyn eframe::App>)),
     )

@@ -144,7 +144,7 @@ pub enum ColormapName {
 
     // Additional `colorous` gradients (the d3-scale-chromatic / ColorBrewer set
     // that overlaps matplotlib's catalog). silx exposes all matplotlib maps
-    // dynamically; siplot cannot load matplotlib at runtime, so it ships the
+    // dynamically; rsplot cannot load matplotlib at runtime, so it ships the
     // colorous equivalents statically. Sequential single-hue:
     Blues,
     Greens,
@@ -616,7 +616,7 @@ struct RegisteredColormap {
     cursor_color: [u8; 4],
 }
 
-/// Process-global registry of custom named colormap LUTs — the siplot analogue
+/// Process-global registry of custom named colormap LUTs — the rsplot analogue
 /// of silx's module-level `_AVAILABLE_LUTS` / `_COLORMAP_CACHE`. A `BTreeMap`
 /// keeps [`registered_colormaps`] deterministic; the `RwLock` allows concurrent
 /// name resolution. Lazily initialised on first use.
@@ -754,7 +754,7 @@ impl Colormap {
 
     /// Rebuild the LUT from a catalog `name`, keeping the value range,
     /// normalization, gamma, and the other settings (silx `Colormap.setName`).
-    /// siplot stores the LUT rather than the name, so this replaces the 256
+    /// rsplot stores the LUT rather than the name, so this replaces the 256
     /// entries in place, and re-derives
     /// [`cursor_color`](Self::cursor_color) from the new name as silx's
     /// name-keyed `cursorColorForColormap` lookup would.

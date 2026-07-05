@@ -67,7 +67,7 @@ pub struct Shape {
     /// layer on top of the chrome (like an ROI), `false` in the base data layer
     /// under the overlay items (ROIs, markers, crosshair). Defaults to `true`
     /// (the port's historical behavior); silx's `_OverlayItem` defaults to
-    /// `False`, but siplot's shape constructors are used as on-top annotations,
+    /// `False`, but rsplot's shape constructors are used as on-top annotations,
     /// so the default is kept and callers opt into the data layer via
     /// [`Shape::with_overlay`].
     pub is_overlay: bool,

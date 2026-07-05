@@ -9,7 +9,7 @@
 //! Run with: `cargo run --example shapes`
 
 use eframe::egui;
-use siplot::{LineStyle, Plot, PlotView, Shape, install};
+use rsplot::{LineStyle, Plot, PlotView, Shape, install};
 
 struct ShapeApp {
     plot: Plot,
@@ -82,7 +82,7 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
     eframe::run_native(
-        "siplot · shapes",
+        "rsplot · shapes",
         options,
         Box::new(|cc| Ok(Box::new(ShapeApp::new(cc)) as Box<dyn eframe::App>)),
     )

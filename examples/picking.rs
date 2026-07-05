@@ -10,7 +10,7 @@
 
 use eframe::egui;
 use egui::{Align2, Color32, FontId, Stroke, vec2};
-use siplot::{CurveData, Plot, PlotView, Symbol, install, nearest_point, set_curve};
+use rsplot::{CurveData, Plot, PlotView, Symbol, install, nearest_point, set_curve};
 
 const N: usize = 24;
 
@@ -81,7 +81,7 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
     eframe::run_native(
-        "siplot · picking",
+        "rsplot · picking",
         options,
         Box::new(|cc| Ok(Box::new(PickingApp::new(cc)) as Box<dyn eframe::App>)),
     )

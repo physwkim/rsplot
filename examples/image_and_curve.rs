@@ -9,7 +9,7 @@
 //! Run with: `cargo run --example image_and_curve`
 
 use eframe::egui;
-use siplot::{Colormap, CurveData, PlotWidget};
+use rsplot::{Colormap, CurveData, PlotWidget};
 
 const WIDTH: u32 = 256;
 const HEIGHT: u32 = 192;
@@ -81,7 +81,7 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
     eframe::run_native(
-        "siplot · image + curve",
+        "rsplot · image + curve",
         options,
         Box::new(|cc| Ok(Box::new(ImageCurveApp::new(cc)) as Box<dyn eframe::App>)),
     )

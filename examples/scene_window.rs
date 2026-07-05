@@ -6,7 +6,7 @@
 //! colormap, hosted in the composed window:
 //!
 //! - a **View** toolbar (viewpoint presets) + a Properties toggle,
-//! - the [`ScalarFieldView`](siplot::ScalarFieldView) scene,
+//! - the [`ScalarFieldView`](rsplot::ScalarFieldView) scene,
 //! - a `ScalarFieldProperties` side panel (cut-plane visibility / colormap /
 //!   value range / autoscale, per-iso level/colour/add/remove), and
 //! - a **position/value readout** along the bottom (silx `PositionInfoWidget`):
@@ -15,9 +15,9 @@
 //! Run with: `cargo run --example scene_window`
 
 use eframe::egui;
-use siplot::egui::Color32;
-use siplot::egui_wgpu::RenderState;
-use siplot::{Colormap, ColormapName, SceneWindow, Vec3};
+use rsplot::egui::Color32;
+use rsplot::egui_wgpu::RenderState;
+use rsplot::{Colormap, ColormapName, SceneWindow, Vec3};
 
 /// Volume grid size per axis (silx uses 64).
 const N: usize = 64;
@@ -91,7 +91,7 @@ fn sinc_volume() -> Vec<f32> {
 
 fn main() -> eframe::Result {
     eframe::run_native(
-        "siplot: scene window",
+        "rsplot: scene window",
         eframe::NativeOptions {
             renderer: eframe::Renderer::Wgpu,
             ..Default::default()

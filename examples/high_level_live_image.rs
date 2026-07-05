@@ -7,7 +7,7 @@
 //! Run with: `cargo run --example high_level_live_image`
 
 use eframe::egui;
-use siplot::{Colormap, ItemHandle, Plot2D};
+use rsplot::{Colormap, ItemHandle, Plot2D};
 
 const WIDTH: u32 = 128;
 const HEIGHT: u32 = 96;
@@ -111,7 +111,7 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
     eframe::run_native(
-        "siplot - high-level live image",
+        "rsplot - high-level live image",
         options,
         Box::new(|cc| Ok(Box::new(LiveImageApp::new(cc)) as Box<dyn eframe::App>)),
     )

@@ -7,12 +7,12 @@
 //! Needs a GPU (real or software); mirrors `tests/roi_events.rs`' harness.
 
 use egui_kittest::wgpu::{create_render_state, default_wgpu_setup};
-use siplot::{Plot1D, PlotInteractionMode};
+use rsplot::{Plot1D, PlotInteractionMode};
 
 #[test]
 fn entering_zoom_mode_clears_limits_history() {
     let rs = create_render_state(default_wgpu_setup());
-    siplot::install(&rs);
+    rsplot::install(&rs);
     let mut plot = Plot1D::new(&rs, 0);
 
     plot.plot_mut().push_limits();

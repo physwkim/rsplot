@@ -1,20 +1,20 @@
 [package]
-name = "siplot"
-version = "0.4.2"
+name = "rsplot"
+version = "0.5.0"
 edition = "2024"
 rust-version = "1.92"
 license = "MIT OR Apache-2.0"
 description = "silx-style scientific plotting for egui, rendered with wgpu"
-repository = "https://github.com/physwkim/siplot"
+repository = "https://github.com/physwkim/rsplot"
 readme = "README.md"
 
 [workspace]
-# siplot is the root package and an implicit member; `sidm` (the PyDM-style
-# EPICS display layer, ported from ~/codes/pydm onto siplot + epics-rs) is the
-# second member; `adl2sidm` (a MEDM `.adl` -> SiDM Rust-source converter,
+# rsplot is the root package and an implicit member; `rsdm` (the PyDM-style
+# EPICS display layer, ported from ~/codes/pydm onto rsplot + epics-rs) is the
+# second member; `adl2rsdm` (a MEDM `.adl` -> RsDM Rust-source converter,
 # mirroring ~/codes/adl2pydm) is the third. Resolver 3 matches the edition 2024
 # packages.
-members = ["sidm", "adl2sidm"]
+members = ["rsdm", "adl2rsdm"]
 resolver = "3"
 
 # The library itself does not depend on eframe (windowing). It works purely as
@@ -58,7 +58,7 @@ medians = "3.0.12"
 # of Lowe's SIFT (DoG scale space, 128-d descriptors, the distance-ratio
 # matcher) plus `geometry::estimate_affine_from_pairs` — the same 6-param affine
 # least squares silx solves in `matching_correction`. `default-features = false`
-# drops its optional `image`-crate conversion helpers; siplot feeds raw `f32`
+# drops its optional `image`-crate conversion helpers; rsplot feeds raw `f32`
 # pixels through `GrayImage::new`, so no extra dependency is pulled.
 lowe-sift = { version = "0.2", default-features = false }
 # IANA tz database for DST-aware named-zone offsets on date-time axes (silx

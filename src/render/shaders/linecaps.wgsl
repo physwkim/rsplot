@@ -1,7 +1,7 @@
 // Round line joins and caps: a filled, antialiased disc of the line's width
 // centred on every polyline vertex.
 //
-// siplot's polyline is drawn as independent butt-capped segment quads
+// rsplot's polyline is drawn as independent butt-capped segment quads
 // (`curve.wgsl`), so a sharp turn leaves a wedge-shaped gap on the outer side of
 // the join and the two endpoints are flat. Stamping a disc of radius
 // `half_width_px` at each vertex fills that wedge (a round join) and extends the

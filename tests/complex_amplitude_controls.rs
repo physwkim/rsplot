@@ -16,8 +16,8 @@ use std::rc::Rc;
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
 use egui_kittest::wgpu::{WgpuTestRenderer, create_render_state, default_wgpu_setup};
-use siplot::egui;
-use siplot::{ComplexImageView, ComplexMode};
+use rsplot::egui;
+use rsplot::{ComplexImageView, ComplexMode};
 
 /// A `ComplexImageView` over a 2×2 complex field whose maximum modulus is
 /// exactly 5.0 (the `(3, 4)` point), in the log-amplitude/phase mode, rendered
@@ -26,7 +26,7 @@ use siplot::{ComplexImageView, ComplexMode};
 /// rect is not needed (widgets are queried by accesskit).
 fn view_harness() -> (Rc<RefCell<ComplexImageView>>, Harness<'static>) {
     let rs = create_render_state(default_wgpu_setup());
-    siplot::install(&rs);
+    rsplot::install(&rs);
     let mut view = ComplexImageView::new(&rs, 0);
     // max |z| = |(3,4)| = 5.0; the rest are smaller.
     let data = [(3.0f32, 4.0f32), (1.0, 0.0), (0.0, 1.0), (2.0, 0.0)];

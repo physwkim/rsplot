@@ -275,7 +275,7 @@ impl Roi {
             // Four mid-edge handles (one axis each) plus four corner handles
             // (both axes) so the rectangle resizes left/right, up/down, and
             // diagonally. silx `RectangleROI` exposes the corners; the mid-edge
-            // handles are an siplot addition that preserves single-axis
+            // handles are an rsplot addition that preserves single-axis
             // resize alongside the diagonal corners.
             Roi::Rect { .. } => vec![
                 RoiEdge::Left,
@@ -613,7 +613,7 @@ impl Roi {
             // opposite therefore flips (the rectangle stays non-degenerate and
             // keeps following the cursor) instead of collapsing to zero size.
             // The bound being moved keeps its old opposite as the anchor; one
-            // uniform rule for corners and siplot's extra side handles, so no
+            // uniform rule for corners and rsplot's extra side handles, so no
             // boundary is special-cased.
             Roi::Rect { x, y } => {
                 let (x0, x1, y0, y1) = (x.0, x.1, y.0, y.1);

@@ -2,7 +2,7 @@
 //! markers + `__separatorConstraint`/`__separatorMoved`).
 //!
 //! silx exposes the split position as a draggable line marker over the plot, not
-//! a slider; siplot keeps the slider as a convenience but adds the faithful
+//! a slider; rsplot keeps the slider as a convenience but adds the faithful
 //! separator. These tests drive the separator the way a user would — pressing on
 //! the line and dragging it — and assert the drag folds back into `split()`
 //! (silx `__separatorMoved`). Building a `CompareImages` needs a wgpu render
@@ -14,8 +14,8 @@ use std::rc::Rc;
 
 use egui_kittest::Harness;
 use egui_kittest::wgpu::{WgpuTestRenderer, create_render_state, default_wgpu_setup};
-use siplot::egui;
-use siplot::{Colormap, CompareImages, CompareMode, YAxis};
+use rsplot::egui;
+use rsplot::{Colormap, CompareImages, CompareMode, YAxis};
 
 /// Build a harness around a `CompareImages` in the given mode, render two frames
 /// so the transform/composite are cached, and return the shared widget + harness.
@@ -25,7 +25,7 @@ use siplot::{Colormap, CompareImages, CompareMode, YAxis};
 /// do not matter — only that the separator maps to `split`.
 fn harness_for(mode: CompareMode) -> (Rc<RefCell<CompareImages>>, Harness<'static>) {
     let rs = create_render_state(default_wgpu_setup());
-    siplot::install(&rs);
+    rsplot::install(&rs);
 
     let mut view = CompareImages::new(&rs, 0);
     let data_a = vec![0.2f32; 8 * 8];

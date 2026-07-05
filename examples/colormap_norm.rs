@@ -11,7 +11,7 @@
 
 use eframe::egui;
 use egui::Key;
-use siplot::{Colormap, ImageData, Normalization, Plot, PlotView, install, set_image};
+use rsplot::{Colormap, ImageData, Normalization, Plot, PlotView, install, set_image};
 
 const WIDTH: u32 = 256;
 const HEIGHT: u32 = 192;
@@ -131,7 +131,7 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
     eframe::run_native(
-        "siplot · colormap_norm",
+        "rsplot · colormap_norm",
         options,
         Box::new(|cc| Ok(Box::new(NormApp::new(cc)) as Box<dyn eframe::App>)),
     )

@@ -1,8 +1,8 @@
-# siplot
+# rsplot
 
 **silx-style scientific plotting for [egui](https://github.com/emilk/egui), rendered with [wgpu](https://github.com/gfx-rs/wgpu).**
 
-`siplot` is a Rust port of [silx](https://www.silx.org/)'s `silx.gui.plot`
+`rsplot` is a Rust port of [silx](https://www.silx.org/)'s `silx.gui.plot`
 scientific plotting toolkit, rebuilt as an immediate-mode egui widget with a
 wgpu data layer. It pairs GPU-rendered data items (colormapped images,
 polyline curves, scatter clouds, triangle meshes) with egui-drawn chrome
@@ -93,10 +93,10 @@ There are two API layers:
 ## Requirements
 
 - A recent Rust toolchain (edition 2024; `rust-version = 1.92`).
-- An egui application running on the **wgpu** renderer — `siplot` renders
+- An egui application running on the **wgpu** renderer — `rsplot` renders
   through an `egui_wgpu` paint callback and needs the wgpu `RenderState`.
-- egui / egui-wgpu **0.34**. `siplot` re-exports `egui` and `egui_wgpu`
-  (`siplot::egui`, `siplot::egui_wgpu`) so downstreams can stay on the same
+- egui / egui-wgpu **0.34**. `rsplot` re-exports `egui` and `egui_wgpu`
+  (`rsplot::egui`, `rsplot::egui_wgpu`) so downstreams can stay on the same
   versions without skew.
 
 ## Quick start
@@ -106,7 +106,7 @@ wgpu renderer:
 
 ```rust
 use eframe::egui;
-use siplot::{Plot1D, PlotWidget};
+use rsplot::{Plot1D, PlotWidget};
 
 struct DemoApp {
     plot: Plot1D,
@@ -121,7 +121,7 @@ impl DemoApp {
             .expect("eframe must use the wgpu renderer (NativeOptions.renderer = Wgpu)");
 
         let mut plot = Plot1D::new(rs, 0);
-        plot.set_graph_title("siplot demo");
+        plot.set_graph_title("rsplot demo");
 
         let x: Vec<f64> = (0..400).map(|i| i as f64 * 0.025).collect();
         let y: Vec<f64> = x.iter().map(|v| v.sin()).collect();
@@ -142,7 +142,7 @@ impl eframe::App for DemoApp {
 
 fn main() -> eframe::Result {
     eframe::run_native(
-        "siplot demo",
+        "rsplot demo",
         eframe::NativeOptions {
             renderer: eframe::Renderer::Wgpu,
             ..Default::default()
@@ -214,7 +214,7 @@ mapping.
 
 ## Relationship to silx
 
-`siplot` ports `silx.gui.plot` (and adjacent `silx.gui` features) to Rust,
+`rsplot` ports `silx.gui.plot` (and adjacent `silx.gui` features) to Rust,
 following the upstream behaviour to fine UX detail. silx itself is the
 reference; throughout the code and docs, bare `silx` refers to the upstream
 Python project, not to this crate.

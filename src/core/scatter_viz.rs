@@ -27,7 +27,7 @@
 //! [`regular_grid_pick`] (REGULAR_GRID) and [`BinnedStatistic::pick`]
 //! (BINNED_STATISTIC). POINTS/SOLID use plain nearest-point picking (silx's
 //! default `super().pick()`); IRREGULAR_GRID has no 1:1 cell→point mapping in
-//! siplot's interpolated-image render (silx picks Delaunay triangles), so it is
+//! rsplot's interpolated-image render (silx picks Delaunay triangles), so it is
 //! intentionally not covered here.
 
 use egui::Color32;
@@ -781,7 +781,7 @@ fn grid_cell(
 /// major order, and `point_count` the number of scatter points. The picked image
 /// cell `(row, col)` maps to a source index by the major order — `row * cols +
 /// col` for [`GridMajorOrder::Row`], `row + col * rows` for
-/// [`GridMajorOrder::Column`] (siplot stores column-major points transposed into
+/// [`GridMajorOrder::Column`] (rsplot stores column-major points transposed into
 /// the row-major image, so this inverts that placement). Returns `None` when the
 /// cursor is off the grid, or when the cell maps past the last point (silx: "image
 /// can be larger than scatter").

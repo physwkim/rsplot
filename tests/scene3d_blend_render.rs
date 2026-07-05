@@ -1,7 +1,7 @@
 //! Headless GPU checks for the R2-47 scene blending port: silx enables
 //! `GL_BLEND` (`SRC_ALPHA, ONE_MINUS_SRC_ALPHA`) for the whole scene
 //! (`viewport.py:356-357`), so translucent lines/triangles and lit meshes
-//! composite over what is behind them. siplot's line/triangle and mesh pipelines
+//! composite over what is behind them. rsplot's line/triangle and mesh pipelines
 //! were opaque (blend `None`), dropping iso-surface / `Mesh3D` alpha and the
 //! 60 %-alpha axis tick lines.
 //!
@@ -11,8 +11,8 @@
 //! through. Under an opaque write the green would be fully replaced by blue.
 
 use egui_kittest::wgpu::{create_render_state, default_wgpu_setup};
-use siplot::egui::Color32;
-use siplot::{Camera, Scene3dGeometry, Vec3, install_scene3d, set_scene3d, snapshot_scene3d};
+use rsplot::egui::Color32;
+use rsplot::{Camera, Scene3dGeometry, Vec3, install_scene3d, set_scene3d, snapshot_scene3d};
 
 const SIZE: (u32, u32) = (100, 100);
 

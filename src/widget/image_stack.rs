@@ -718,7 +718,7 @@ impl ImageStack {
     /// normalization / gamma are honored — the value range is re-derived from
     /// each frame's own data by [`Self::rebuild_image`], matching silx's
     /// default autoscale (`vmin`/`vmax = None`). Pinning an explicit range is
-    /// the per-bound-autoscale surface silx exposes but siplot does not yet.
+    /// the per-bound-autoscale surface silx exposes but rsplot does not yet.
     pub fn set_colormap(&mut self, colormap: Colormap) {
         self.colormap = colormap;
         self.image_handle = None;
@@ -1354,7 +1354,7 @@ mod tests {
     fn temp_h5(tag: &str) -> std::path::PathBuf {
         let mut path = std::env::temp_dir();
         path.push(format!(
-            "siplot_image_stack_h5_{}_{}.h5",
+            "rsplot_image_stack_h5_{}_{}.h5",
             tag,
             std::process::id()
         ));
@@ -1416,7 +1416,7 @@ mod tests {
         // Well-formed but missing file -> read fails -> None.
         assert!(
             Hdf5FrameLoader
-                .load("/nonexistent/siplot_missing.h5::/img")
+                .load("/nonexistent/rsplot_missing.h5::/img")
                 .is_none()
         );
     }

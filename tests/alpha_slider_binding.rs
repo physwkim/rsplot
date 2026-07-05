@@ -22,8 +22,8 @@ use std::rc::Rc;
 
 use egui_kittest::Harness;
 use egui_kittest::wgpu::{WgpuTestRenderer, create_render_state, default_wgpu_setup};
-use siplot::egui;
-use siplot::{
+use rsplot::egui;
+use rsplot::{
     ActiveImageAlphaSlider, AutoscaleMode, Colormap, ImageSpec, ItemHandle, NamedItemAlphaSlider,
     PlotWidget,
 };
@@ -34,7 +34,7 @@ use siplot::{
 /// the GPU upload, not the transform.
 fn plot_with_image(alpha0: f32, legend: Option<&str>) -> (PlotWidget, ItemHandle) {
     let rs = create_render_state(default_wgpu_setup());
-    siplot::install(&rs);
+    rsplot::install(&rs);
     let mut plot = PlotWidget::new(&rs, 0);
     let pixels = [1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0];
     let mut spec = ImageSpec::scalar(3, 2, &pixels, Colormap::viridis(0.0, 6.0));
@@ -135,7 +135,7 @@ type ActiveSliderBundle = (
 /// frames so the plot transform is cached.
 fn active_slider_harness(alpha0: f32, with_image: bool) -> ActiveSliderBundle {
     let rs = create_render_state(default_wgpu_setup());
-    siplot::install(&rs);
+    rsplot::install(&rs);
     let mut plot = PlotWidget::new(&rs, 0);
     if with_image {
         let pixels = [1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0];
@@ -147,7 +147,7 @@ fn active_slider_harness(alpha0: f32, with_image: bool) -> ActiveSliderBundle {
 
     let plot = Rc::new(RefCell::new(plot));
     let slider = Rc::new(RefCell::new(
-        ActiveImageAlphaSlider::new().with_orientation(siplot::AlphaSliderOrientation::Vertical),
+        ActiveImageAlphaSlider::new().with_orientation(rsplot::AlphaSliderOrientation::Vertical),
     ));
     let track = Rc::new(Cell::new(egui::Rect::NOTHING));
 
@@ -234,7 +234,7 @@ fn dragging_the_active_image_slider_writes_alpha_back_to_the_image() {
 #[test]
 fn named_item_slider_binds_by_legend_and_disables_for_unknown() {
     let rs = create_render_state(default_wgpu_setup());
-    siplot::install(&rs);
+    rsplot::install(&rs);
     let mut plot = PlotWidget::new(&rs, 0);
     let pixels = [1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0];
     let mut spec = ImageSpec::scalar(3, 2, &pixels, Colormap::viridis(0.0, 6.0));

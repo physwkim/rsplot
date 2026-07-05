@@ -18,8 +18,8 @@ use std::time::{Duration, Instant};
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
 use egui_kittest::wgpu::{WgpuTestRenderer, create_render_state, default_wgpu_setup};
-use siplot::egui;
-use siplot::{Frame, FrameLoader, ImageStack};
+use rsplot::egui;
+use rsplot::{Frame, FrameLoader, ImageStack};
 
 /// Synthesise a `width×height` ramp frame from a `"WxH"` source string, or
 /// `None` if the source does not parse (the loader's failure path).
@@ -95,7 +95,7 @@ fn harness_lazy(
     sources: Vec<String>,
 ) -> (Rc<RefCell<ImageStack>>, Harness<'static>) {
     let rs = create_render_state(default_wgpu_setup());
-    siplot::install(&rs);
+    rsplot::install(&rs);
 
     let mut stack = ImageStack::new(&rs, 0);
     stack.set_loader(loader);
@@ -191,7 +191,7 @@ fn lazy_load_failure_is_terminal_and_not_retried() {
 fn prefetch_loads_neighbours_without_navigating() {
     let loader = Arc::new(CountingLoader::new());
     let rs = create_render_state(default_wgpu_setup());
-    siplot::install(&rs);
+    rsplot::install(&rs);
 
     let mut stack = ImageStack::new(&rs, 0);
     stack.set_loader(loader.clone());
@@ -235,7 +235,7 @@ fn prefetch_loads_neighbours_without_navigating() {
 #[test]
 fn lazy_table_shows_urls_and_remove_realigns() {
     let rs = create_render_state(default_wgpu_setup());
-    siplot::install(&rs);
+    rsplot::install(&rs);
 
     let mut stack = ImageStack::new(&rs, 0);
     // No loader installed: slots stay empty and the table rows show their URLs.

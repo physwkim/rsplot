@@ -8,7 +8,7 @@
 //! Run with: `cargo run --example thick_lines`
 
 use eframe::egui;
-use siplot::{CurveData, Plot, PlotView, install, set_curves};
+use rsplot::{CurveData, Plot, PlotView, install, set_curves};
 
 const N: usize = 300;
 
@@ -64,7 +64,7 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
     eframe::run_native(
-        "siplot · thick lines",
+        "rsplot · thick lines",
         options,
         Box::new(|cc| Ok(Box::new(ThickLinesApp::new(cc)) as Box<dyn eframe::App>)),
     )

@@ -3,7 +3,7 @@
 //! `silx.io.dictdump`, `CurvesROIWidget.py:889-918`, each ROI a keyed record
 //! with `type`/`name`/geometry — `ROI.toDict`/`_fromDict`, :1140-1169).
 //!
-//! siplot has no serde dependency, so this is a hand-written, line-oriented
+//! rsplot has no serde dependency, so this is a hand-written, line-oriented
 //! encoder/decoder over a fixed schema — the same manual-serialization approach
 //! as the `.npy` mask path ([`crate::widget::mask_tools`] `read_npy`). The pure
 //! [`encode_rois`]/[`decode_rois`] functions are headlessly testable;
@@ -13,7 +13,7 @@
 //! Format (version 1):
 //!
 //! ```text
-//! siplot-roi 1
+//! rsplot-roi 1
 //! roi <type>
 //! name <display name — the rest of the line>
 //! color <RRGGBBAA hex | none>
@@ -33,13 +33,13 @@ use egui::Color32;
 
 use crate::core::roi::{ManagedRoi, Roi, RoiLineStyle};
 
-/// Magic + version header of a siplot ROI file.
-const ROI_IO_HEADER: &str = "siplot-roi 1";
+/// Magic + version header of a rsplot ROI file.
+const ROI_IO_HEADER: &str = "rsplot-roi 1";
 
-/// An error decoding a siplot ROI text blob.
+/// An error decoding a rsplot ROI text blob.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RoiIoError {
-    /// Missing or wrong `siplot-roi <version>` header line.
+    /// Missing or wrong `rsplot-roi <version>` header line.
     BadHeader,
     /// A record was missing a required field (e.g. the `geom` line, or a
     /// field line appeared before any `roi <type>` line).
@@ -69,7 +69,7 @@ impl std::fmt::Display for RoiIoError {
 
 impl std::error::Error for RoiIoError {}
 
-/// Serialize `rois` to the siplot ROI text format (silx `CurvesROIWidget.save`
+/// Serialize `rois` to the rsplot ROI text format (silx `CurvesROIWidget.save`
 /// dict-dump). Geometry, name, per-ROI color, outline width/style, gap color,
 /// and fill are persisted; the transient `selected` highlight and `visible`
 /// flag are not.
@@ -99,7 +99,7 @@ pub fn encode_rois(rois: &[ManagedRoi]) -> String {
     out
 }
 
-/// Parse a siplot ROI text blob back into [`ManagedRoi`]s (silx
+/// Parse a rsplot ROI text blob back into [`ManagedRoi`]s (silx
 /// `CurvesROIWidget.load`). Missing optional appearance fields fall back to
 /// [`ManagedRoi::new`]'s silx defaults; a record needs at least its
 /// `roi <type>` line and a `geom` line.
@@ -133,7 +133,7 @@ pub fn decode_rois(text: &str) -> Result<Vec<ManagedRoi>, RoiIoError> {
     Ok(rois)
 }
 
-/// Write `rois` to `path` in the siplot ROI text format (silx
+/// Write `rois` to `path` in the rsplot ROI text format (silx
 /// `CurvesROIWidget.save(filename)`).
 pub fn save_rois(path: impl AsRef<std::path::Path>, rois: &[ManagedRoi]) -> std::io::Result<()> {
     std::fs::write(path, encode_rois(rois))
@@ -514,8 +514,8 @@ mod tests {
 
     #[test]
     fn empty_list_round_trips_to_header_only() {
-        assert_eq!(encode_rois(&[]), "siplot-roi 1\n");
-        assert_eq!(decode_rois("siplot-roi 1\n").expect("decodes"), vec![]);
+        assert_eq!(encode_rois(&[]), "rsplot-roi 1\n");
+        assert_eq!(decode_rois("rsplot-roi 1\n").expect("decodes"), vec![]);
     }
 
     #[test]
@@ -535,7 +535,7 @@ mod tests {
 
     #[test]
     fn unknown_type_rejected() {
-        let text = "siplot-roi 1\nroi blob\ngeom 0 0\n";
+        let text = "rsplot-roi 1\nroi blob\ngeom 0 0\n";
         assert_eq!(
             decode_rois(text),
             Err(RoiIoError::UnknownType("blob".to_string()))
@@ -545,20 +545,20 @@ mod tests {
     #[test]
     fn wrong_geometry_arity_rejected() {
         // A rect needs 4 numbers.
-        let text = "siplot-roi 1\nroi rect\ngeom 0 1 2\n";
+        let text = "rsplot-roi 1\nroi rect\ngeom 0 1 2\n";
         assert_eq!(decode_rois(text), Err(RoiIoError::BadGeometry));
     }
 
     #[test]
     fn bad_color_rejected() {
-        let text = "siplot-roi 1\nroi point\ncolor xyz\ngeom 0 0\n";
+        let text = "rsplot-roi 1\nroi point\ncolor xyz\ngeom 0 0\n";
         assert_eq!(decode_rois(text), Err(RoiIoError::BadValue("color")));
     }
 
     #[test]
     fn unknown_keys_are_tolerated() {
-        // A forward-compat field siplot does not know is ignored, not an error.
-        let text = "siplot-roi 1\nroi point\nfuture_field whatever\ngeom 3 4\n";
+        // A forward-compat field rsplot does not know is ignored, not an error.
+        let text = "rsplot-roi 1\nroi point\nfuture_field whatever\ngeom 3 4\n";
         let decoded = decode_rois(text).expect("tolerates unknown key");
         assert_eq!(
             decoded,

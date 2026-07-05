@@ -7,7 +7,7 @@
 //! Run with: `cargo run --example high_level_plot2d`
 
 use eframe::egui;
-use siplot::{Colormap, ImageGeometry, Plot2D, ValueStats};
+use rsplot::{Colormap, ImageGeometry, Plot2D, ValueStats};
 
 const WIDTH: u32 = 192;
 const HEIGHT: u32 = 144;
@@ -174,7 +174,7 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
     eframe::run_native(
-        "siplot - high-level Plot2D",
+        "rsplot - high-level Plot2D",
         options,
         Box::new(|cc| Ok(Box::new(Plot2dApp::new(cc)) as Box<dyn eframe::App>)),
     )

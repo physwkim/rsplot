@@ -8,7 +8,7 @@
 //! and [`NamedItemAlphaSlider`] (silx `NamedImageAlphaSlider`, an image by
 //! legend) drive a [`PlotWidget`]'s image alpha through its retained
 //! [`set_image_alpha`](PlotWidget::set_image_alpha) path. silx's curve/scatter
-//! named bindings are not mirrored: siplot retains a re-applicable per-item
+//! named bindings are not mirrored: rsplot retains a re-applicable per-item
 //! alpha only for scalar images (a curve bakes opacity into its color and a
 //! scatter retains no data), so those sliders would have nothing to drive — the
 //! bindings disable when the named item is absent or carries no addressable
@@ -199,7 +199,7 @@ impl ActiveImageAlphaSlider {
 /// `AlphaSlider.py:196-285`).
 ///
 /// silx's `NamedItemAlphaSlider` is addressed by `(kind, legend)` and can target
-/// an image, scatter, or curve. siplot retains a re-applicable per-item alpha
+/// an image, scatter, or curve. rsplot retains a re-applicable per-item alpha
 /// only for scalar images, so this binds to the image carrying `legend`
 /// (silx `NamedImageAlphaSlider`); the scatter/curve named bindings are deferred
 /// (those items carry no addressable per-item alpha here). The slider disables

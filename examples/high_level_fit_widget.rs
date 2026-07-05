@@ -13,7 +13,7 @@
 //! Run with: `cargo run --example high_level_fit_widget`
 
 use eframe::egui;
-use siplot::{
+use rsplot::{
     FitWidget, ItemHandle, ItemsSelectionDialog, Plot1D, PlotItemKind, SelectableItem,
     SelectionMode,
 };
@@ -166,7 +166,7 @@ impl eframe::App for FitApp {
 
 fn main() -> eframe::Result {
     eframe::run_native(
-        "siplot: Fit Widget",
+        "rsplot: Fit Widget",
         eframe::NativeOptions {
             renderer: eframe::Renderer::Wgpu,
             ..Default::default()

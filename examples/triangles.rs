@@ -10,7 +10,7 @@
 //! Run with: `cargo run --example triangles`
 
 use eframe::egui;
-use siplot::{Plot, PlotView, Triangles, install};
+use rsplot::{Plot, PlotView, Triangles, install};
 
 const NX: usize = 8;
 const NY: usize = 6;
@@ -78,7 +78,7 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
     eframe::run_native(
-        "siplot · triangles",
+        "rsplot · triangles",
         options,
         Box::new(|cc| Ok(Box::new(TriApp::new(cc)) as Box<dyn eframe::App>)),
     )

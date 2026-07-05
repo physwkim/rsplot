@@ -7,13 +7,13 @@
 //! Run with: `cargo run --example high_level_plot1d`
 
 use eframe::egui;
-use siplot::{CurveSpec, GraphGrid, Plot1D, PlotEvent};
+use rsplot::{CurveSpec, GraphGrid, Plot1D, PlotEvent};
 
 const N: usize = 360;
 
 struct Plot1dApp {
     plot: Plot1D,
-    curve: siplot::ItemHandle,
+    curve: rsplot::ItemHandle,
     phase: f64,
     events: Vec<String>,
 }
@@ -234,7 +234,7 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
     eframe::run_native(
-        "siplot - high-level Plot1D",
+        "rsplot - high-level Plot1D",
         options,
         Box::new(|cc| Ok(Box::new(Plot1dApp::new(cc)) as Box<dyn eframe::App>)),
     )
