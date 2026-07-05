@@ -2493,6 +2493,24 @@ Impact: small stats collapse to `0.0000` (silx `1.2345e-05`), large ones print a
 
 ### R3-4: Stats-table coordinate cells render `%.7g` comma-joined — silx renders `str(tuple)` (parens, 1-tuple trailing comma, full repr precision)
 
+**FIXED (R3):** `format_coord` now renders coordinate stats as silx's
+`str(tuple)` fallback (`StatFormatter.format` finds no `numbers.Number` →
+`str(val)`, statshandler.py:81-84): a 1-tuple `(x,)` for curve coordinates and
+a 2-tuple `(x, y)` for image coordinates, each element via a new
+`python_repr_float` that reproduces CPython `repr(float)` — shortest
+round-tripping decimal, trailing `.0` for integral values, `%g` exponential
+switch at decpt `<=-4`/`>16` — so `0.12345678901` renders in full, not `%.7g`'s
+`0.1234568`. The `%.7g` `format_g7`/`coord_component` pair (the divergence) was
+removed.
+
+**Anchor sweep:** the sibling `roi_stats_widget::format_coord` (silx
+`ROIStatsWidget` shares the same `StatFormatter`/`StatCoord` path) carried the
+same defect *plus* `{:.3}` components, a bare (paren-less) 1-tuple, and a
+single-dash `-` for undefined; it was unified onto the shared
+`stats_widget::format_coord` so both tables render identically. The third
+`chrome::format_coord` is an axis tick-label formatter `(v, lo, hi)`, not a
+stat cell — distinct, untouched.
+
 Severity: Low
 
 Rust: `src/widget/stats_widget.rs:281-309` — `format_coord`/`coord_component` emit `"2.5"` / `"1, 3"` with `%.7g` components; the doc comment claims the `.7g` float formatting silx applies to coordinate components, citing `PositionInfo.py:310-312`.

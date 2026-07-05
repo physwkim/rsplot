@@ -278,33 +278,86 @@ fn row_cells(stats: &Stats) -> [String; 7] {
     ]
 }
 
-/// Format a coordinate (COM / argmin / argmax) as silx `valueToString` does
-/// for a tuple (PositionInfo.py:310-312, comma-joined), using the `.7g`-style
-/// float formatting silx applies to coordinate components.
+/// Format a coordinate stat (COM / argmin / argmax) exactly as silx renders it:
+/// the stat's value is a Python tuple, and `StatFormatter.format` — finding no
+/// `numbers.Number` — falls through to `str(tuple)` (statshandler.py:81-84). So
+/// a curve coordinate (one axis) shows as a 1-tuple `(x,)` and an image
+/// coordinate (two axes) as a 2-tuple `(x, y)`, each element via Python
+/// `repr(float)`. Both this table and `ROIStatsWidget` share this formatter.
 ///
-/// `(None, None)` -> `"--"`. Curve coords (`y == None`) render the x only.
-/// Non-finite components print as Python would inside silx's `str(tuple)`
-/// fallback (`"nan"`, `"inf"`, `"-inf"`, statshandler.py:84) — a NaN COM or
-/// a NaN-positioned extremum is visible data, not an undefined stat (R2-11).
-fn format_coord(coord: ComCoord) -> String {
+/// `(None, _)` -> `"--"` (silx `None` / `numpy.ma.masked`, statshandler.py:79).
+/// Non-finite components print as `repr` does (`"nan"`, `"inf"`, `"-inf"`) — a
+/// NaN COM or a NaN-positioned extremum is visible data, not an undefined stat
+/// (R2-11).
+pub fn format_coord(coord: ComCoord) -> String {
     match (coord.x, coord.y) {
         (None, _) => "--".to_owned(),
-        (Some(x), None) => coord_component(x),
-        (Some(x), Some(y)) => format!("{}, {}", coord_component(x), coord_component(y)),
+        (Some(x), None) => format!("({},)", python_repr_float(x)),
+        (Some(x), Some(y)) => {
+            format!("({}, {})", python_repr_float(x), python_repr_float(y))
+        }
     }
 }
 
-/// One coordinate component: `%.7g` for finite values, Python float
-/// spellings for non-finite ones.
-fn coord_component(v: f64) -> String {
-    if v.is_finite() {
-        format_g7(v)
-    } else if v.is_nan() {
-        "nan".to_owned()
-    } else if v > 0.0 {
-        "inf".to_owned()
+/// Format a float as CPython's `repr(float)` does: the shortest decimal string
+/// that round-trips, with a trailing `.0` for integral values and `%g`-style
+/// exponential switching (decimal exponent `<= -4` or `> 16`). This is what
+/// `str(tuple)` prints for each coordinate component (statshandler.py:84);
+/// `nan`, `inf`, `-inf` use CPython's spellings.
+fn python_repr_float(v: f64) -> String {
+    if v.is_nan() {
+        return "nan".to_owned();
+    }
+    if v.is_infinite() {
+        return if v < 0.0 { "-inf" } else { "inf" }.to_owned();
+    }
+    if v == 0.0 {
+        return if v.is_sign_negative() { "-0.0" } else { "0.0" }.to_owned();
+    }
+    let sign = if v < 0.0 { "-" } else { "" };
+    // Rust's `{}` for f64 is the shortest round-tripping decimal, always in
+    // fixed (non-exponential) notation — the ideal digit source. Read off the
+    // significant digits and the decimal-point position (`decpt`: count of
+    // digits left of the point), then re-lay-out per CPython's rules.
+    let fixed = format!("{}", v.abs());
+    let (int_part, frac_part) = match fixed.split_once('.') {
+        Some((i, f)) => (i, f),
+        None => (fixed.as_str(), ""),
+    };
+    let mut decpt = int_part.len() as i32;
+    let joined = format!("{int_part}{frac_part}");
+    // Strip leading zeros (each lowers decpt by one) and trailing zeros (they
+    // leave the point where it is). What remains is the bare significant run:
+    // value == 0.<digits> x 10^decpt. `digits` is non-empty (v != 0).
+    let after_leading = joined.trim_start_matches('0');
+    decpt -= (joined.len() - after_leading.len()) as i32;
+    let digits = after_leading.trim_end_matches('0');
+    if decpt <= -4 || decpt > 16 {
+        // Exponential: d[.ddd]e±XX, exponent decpt-1, min two exponent digits.
+        let exp = decpt - 1;
+        let mantissa = if digits.len() == 1 {
+            digits.to_owned()
+        } else {
+            format!("{}.{}", &digits[0..1], &digits[1..])
+        };
+        format!(
+            "{sign}{mantissa}e{}{:02}",
+            if exp < 0 { "-" } else { "+" },
+            exp.abs()
+        )
+    } else if decpt <= 0 {
+        // 0.<zeros><digits>
+        format!("{sign}0.{}{digits}", "0".repeat((-decpt) as usize))
+    } else if decpt as usize >= digits.len() {
+        // Integral value: pad to the point, then CPython's ADD_DOT_0.
+        format!(
+            "{sign}{digits}{}.0",
+            "0".repeat(decpt as usize - digits.len())
+        )
     } else {
-        "-inf".to_owned()
+        // Point falls inside the digit run.
+        let (a, b) = digits.split_at(decpt as usize);
+        format!("{sign}{a}.{b}")
     }
 }
 
@@ -321,15 +374,6 @@ pub fn format_stat(value: Option<f64>) -> String {
         Some(v) if v.is_nan() => "nan".to_owned(),
         Some(v) => format!("{v:.3}"),
     }
-}
-
-/// Format a float like silx `valueToString` does for reals (`"%.7g"`,
-/// PositionInfo.py:315): up to 7 significant digits, trailing-zero trimmed.
-fn format_g7(v: f64) -> String {
-    if !v.is_finite() {
-        return "--".to_owned();
-    }
-    format_significant(v, 7)
 }
 
 /// Pure significant-digits formatter: round `value` to `digits` significant
@@ -442,7 +486,8 @@ mod tests {
             x: Some(f64::NAN),
             y: Some(f64::NEG_INFINITY),
         };
-        assert_eq!(format_coord(c), "nan, -inf");
+        // silx str((nan, -inf)) — non-finite components are visible data.
+        assert_eq!(format_coord(c), "(nan, -inf)");
     }
 
     #[test]
@@ -532,7 +577,8 @@ mod tests {
             x: Some(2.5),
             y: None,
         };
-        assert_eq!(format_coord(c), "2.5");
+        // silx str((2.5,)) — a curve coordinate is a 1-tuple (trailing comma).
+        assert_eq!(format_coord(c), "(2.5,)");
     }
 
     #[test]
@@ -541,12 +587,48 @@ mod tests {
             x: Some(1.0),
             y: Some(3.0),
         };
-        assert_eq!(format_coord(c), "1, 3");
+        // silx str((1.0, 3.0)) — integral floats keep repr's ".0", not "1, 3".
+        assert_eq!(format_coord(c), "(1.0, 3.0)");
     }
 
     #[test]
     fn format_coord_none_is_dashes() {
         assert_eq!(format_coord(ComCoord::NONE), "--");
+    }
+
+    #[test]
+    fn format_coord_full_precision_not_truncated() {
+        // R3-4: silx str((0.12345678901,)) shows full repr, not %.7g's
+        // "0.1234568".
+        let c = ComCoord {
+            x: Some(0.12345678901),
+            y: None,
+        };
+        assert_eq!(format_coord(c), "(0.12345678901,)");
+    }
+
+    #[test]
+    fn python_repr_float_matches_cpython_repr() {
+        // Integral floats keep the trailing ".0".
+        assert_eq!(python_repr_float(5.0), "5.0");
+        assert_eq!(python_repr_float(100.0), "100.0");
+        assert_eq!(python_repr_float(-3.0), "-3.0");
+        assert_eq!(python_repr_float(0.0), "0.0");
+        assert_eq!(python_repr_float(-0.0), "-0.0");
+        // Fractional values render shortest round-trip, full precision.
+        assert_eq!(python_repr_float(2.5), "2.5");
+        assert_eq!(python_repr_float(0.5), "0.5");
+        assert_eq!(python_repr_float(0.12345678901), "0.12345678901");
+        assert_eq!(python_repr_float(0.0001), "0.0001");
+        // %g-style exponential switch: decpt <= -4 or > 16.
+        assert_eq!(python_repr_float(0.00001), "1e-05");
+        assert_eq!(python_repr_float(1e20), "1e+20");
+        assert_eq!(python_repr_float(1.5e20), "1.5e+20");
+        assert_eq!(python_repr_float(1e15), "1000000000000000.0");
+        // Non-finite: CPython spellings.
+        assert_eq!(python_repr_float(f64::NAN), "nan");
+        assert_eq!(python_repr_float(f64::INFINITY), "inf");
+        assert_eq!(python_repr_float(f64::NEG_INFINITY), "-inf");
     }
 
     #[test]

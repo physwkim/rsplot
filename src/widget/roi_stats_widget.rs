@@ -14,20 +14,13 @@
 //! [`PlotWidget::feed_roi_stats`]: crate::widget::high_level::PlotWidget::feed_roi_stats
 //! [`PlotWidget::show_roi_stats_widget`]: crate::widget::high_level::PlotWidget::show_roi_stats_widget
 
-use crate::core::stats::ComCoord;
 use crate::widget::roi_stats::RoiStats;
-use crate::widget::stats_widget::format_stat;
-
-/// Format a [`ComCoord`] for the stats table: `-` when undefined, the single
-/// `x` for a curve coordinate, or `(x, y)` for an image coordinate. Each
-/// component uses the shared [`format_stat`] significant-digit formatting.
-fn format_coord(c: ComCoord) -> String {
-    match (c.x, c.y) {
-        (None, _) => "-".to_string(),
-        (Some(_), None) => format_stat(c.x),
-        (Some(_), Some(_)) => format!("({}, {})", format_stat(c.x), format_stat(c.y)),
-    }
-}
+// silx's `ROIStatsWidget` renders coordinate stats through the same
+// `StatFormatter` -> `str(tuple)` path as the main stats table, so both share
+// one coordinate formatter (`(x,)` / `(x, y)`, Python `repr` components, `--`
+// for undefined) rather than the divergent `{:.3}`/bare-1-tuple copy this crate
+// used to carry.
+use crate::widget::stats_widget::{format_coord, format_stat};
 
 /// One ROI's row in the ROI-stats table: a display label plus the statistics
 /// reduced over the item inside that ROI.
