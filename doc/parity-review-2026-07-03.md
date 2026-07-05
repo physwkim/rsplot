@@ -2988,6 +2988,23 @@ Impact: for a malformed/degenerate `format` (`"%g"`, `"%f"`, `"%.3f"`), MEDM's w
 
 ### R3-23: Related-display single-button-vs-menu gate counts names; MEDM counts labels — (R2-64 residual)
 
+**FIXED (R3):** the single-button-vs-menu gate now uses MEDM's `iNumberOfDisplays`
+— the count of `display[N]` entries with a non-empty **label**
+(`medmRelatedDisplay.c:235-243`), computed by the new `related_display_labeled_count`
+over the raw `display` records — instead of `entries.len()` (named-target count).
+`emit_related_display` gates `<= 1` (and not a hidden button) to "Case 1 of 4": a
+single plain button opening the *first* named target (`entries[0]`, `:302-309`), with
+any further named targets unreachable exactly as MEDM leaves them; row/column now
+require `labeled_count >= 2`. `related_display_entries` still keeps only name-bearing
+targets (the openable set) — the two counts coincide for real MEDM files (every used
+slot carries both), so all fixtures (`rd_visuals.adl`, `rd_parent.adl`) and existing
+tests are unchanged.
+
+Tests: `related_display_with_named_targets_but_no_labels_is_one_button` (three names,
+zero labels → one button opening the first, no menu, later targets unreachable) and
+`related_display_one_label_among_many_names_is_still_one_button` (the `count == 1`
+boundary).
+
 Severity: Low
 
 Rust: `adl2sidm/src/codegen.rs:2235` (single plain button iff exactly one non-empty-name entry) and `:2220` (row/col iff `entries.len() >= 2`), with `entries` built from non-empty names (`related_display_entries`, `:2488`).

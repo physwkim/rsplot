@@ -2350,16 +2350,19 @@ fn emit_related_display(b: &mut Builder, widget: &MedmWidget, z: ZLayer) {
     }
 
     let id = b.index();
-    // MEDM `visual` (medmRelatedDisplay.c:180-593) picks the rendering. Only a
-    // multi-target row/column or an invisible hotspot diverge from the default
-    // menu path; a single target is always one button (MEDM "case 1 of 4",
-    // :243), so those visuals fall through to the menu path below unchanged.
+    // MEDM selects the rendering by `iNumberOfDisplays` — the count of entries
+    // with a non-empty **label**, not the count of named targets
+    // (medmRelatedDisplay.c:235-243). `<= 1` (and not a hidden button) is "Case 1
+    // of 4": a single plain button opening the first named target, even when more
+    // named targets follow (they are unreachable, exactly as MEDM leaves them).
+    // Only `>= 2` reaches a multi-target row/column/menu.
+    let labeled_count = related_display_labeled_count(widget);
     match related_display_visual(b, widget) {
         RdVisual::Hidden => {
             emit_hidden_related_display(b, widget, z, geom, id, &entries);
             return;
         }
-        v @ (RdVisual::Row | RdVisual::Col) if entries.len() >= 2 => {
+        v @ (RdVisual::Row | RdVisual::Col) if labeled_count >= 2 => {
             emit_related_display_buttons(b, widget, z, geom, id, &entries, v);
             return;
         }
@@ -2374,10 +2377,13 @@ fn emit_related_display(b: &mut Builder, widget: &MedmWidget, z: ZLayer) {
         b.needs_color = true;
     }
     let (icon_fg, icon_bg) = icon_color_exprs(widget);
-    let body = if let [entry] = entries.as_slice() {
-        // Exactly one target: a plain button. A hover tooltip names the target so
-        // it is discoverable in the GUI; adl2pydm likewise gives the button a
-        // tooltip.
+    let body = if labeled_count <= 1 {
+        // MEDM "Case 1 of 4" (medmRelatedDisplay.c:242-243, :302-309): a single
+        // plain button opening the *first* named target. Any further named targets
+        // are unreachable, exactly as MEDM leaves them. A hover tooltip names the
+        // target so it is discoverable in the GUI; adl2pydm likewise gives the
+        // button a tooltip. `entries` is non-empty (checked above), so [0] is safe.
+        let entry = &entries[0];
         let (hover, click) = rd_click(b, widget.line, entry);
         match &caption {
             Some(label) => format!(
@@ -2666,6 +2672,26 @@ fn related_display_entries(b: &mut Builder, widget: &MedmWidget) -> Vec<RdEntry>
         });
     }
     entries
+}
+
+/// MEDM `iNumberOfDisplays` (`medmRelatedDisplay.c:235-240`): the number of
+/// `display[N]` entries with a non-empty **label**. This — not the count of
+/// name-bearing targets — is what selects MEDM's rendering: `<= 1` (and not a
+/// hidden button) is "Case 1 of 4", a single plain button opening the first
+/// name-bearing target (`:242-243`, `:302-309`); `>= 2` is the menu / row /
+/// column. It is counted over the raw `display` records (a label-only, name-less
+/// entry still counts toward the gate in MEDM), so it can differ from
+/// `related_display_entries().len()`, which keeps only the openable name-bearing
+/// targets.
+fn related_display_labeled_count(widget: &MedmWidget) -> usize {
+    widget
+        .records
+        .get("displays")
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
+        .iter()
+        .filter(|spec| spec.get("label").is_some_and(|s| !s.is_empty()))
+        .count()
 }
 
 /// An `eprintln!` statement that prints `msg` verbatim: `msg` is the sole format
@@ -9123,6 +9149,112 @@ composite {
             g.source
         );
         assert!(g.source.contains("ui.close();"), "{}", g.source);
+    }
+
+    #[test]
+    fn related_display_with_named_targets_but_no_labels_is_one_button() {
+        // R3-23: MEDM gates single-button vs menu on iNumberOfDisplays — the count
+        // of non-empty *labels*, not names (medmRelatedDisplay.c:235-243). Three
+        // named targets with no per-entry labels give iNumberOfDisplays == 0, so
+        // MEDM renders a single plain button opening the first target (b.adl and
+        // c.adl are unreachable), not a menu exposing all three.
+        let adl = r#"
+"color map" {
+	colors {
+		ffffff,
+	}
+}
+"related display" {
+	object {
+		x=0
+		y=0
+		width=120
+		height=20
+	}
+	label="Screens"
+	display[0] {
+		name="a.adl"
+	}
+	display[1] {
+		name="b.adl"
+	}
+	display[2] {
+		name="c.adl"
+	}
+}
+"#;
+        let g = generate(&parse(adl), &Options::default());
+        // No menu — a single plain button captioned by the widget label.
+        assert!(
+            !g.source.contains("menu_button"),
+            "zero labels must not render a menu:\n{}",
+            g.source
+        );
+        assert!(
+            g.source
+                .contains("if ui.button(\"Screens\").on_hover_text(\"related display: open a.adl\").clicked() {"),
+            "expected a single button opening the first target:\n{}",
+            g.source
+        );
+        // The first target opens; the later named targets are unreachable, exactly
+        // as MEDM's Case 1 leaves them.
+        assert!(
+            g.source
+                .contains("eprintln!(\"related display: open a.adl\");"),
+            "{}",
+            g.source
+        );
+        assert!(
+            !g.source.contains("b.adl") && !g.source.contains("c.adl"),
+            "later targets must be unreachable in Case 1:\n{}",
+            g.source
+        );
+    }
+
+    #[test]
+    fn related_display_one_label_among_many_names_is_still_one_button() {
+        // R3-23 boundary: iNumberOfDisplays == 1 also fires Case 1 (`<= 1`), even
+        // with two named targets — a single button opening the first name.
+        let adl = r#"
+"color map" {
+	colors {
+		ffffff,
+	}
+}
+"related display" {
+	object {
+		x=0
+		y=0
+		width=120
+		height=20
+	}
+	label="Screens"
+	display[0] {
+		label="A"
+		name="a.adl"
+	}
+	display[1] {
+		name="b.adl"
+	}
+}
+"#;
+        let g = generate(&parse(adl), &Options::default());
+        assert!(
+            !g.source.contains("menu_button"),
+            "one label (count == 1) must not render a menu:\n{}",
+            g.source
+        );
+        assert!(
+            g.source
+                .contains("eprintln!(\"related display: open a.adl\");"),
+            "the first target must open:\n{}",
+            g.source
+        );
+        assert!(
+            !g.source.contains("b.adl"),
+            "the second target must be unreachable:\n{}",
+            g.source
+        );
     }
 
     /// A 2-target related display with `visual="a row of buttons"`, used by the
