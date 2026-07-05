@@ -7,8 +7,11 @@
 //! (`send_value`). PyDM's `step_exponent` single-step is reproduced faithfully:
 //! the single step is `10^step_exponent` and `step_exponent` defaults to `0`
 //! (step = 1.0), independent of precision (`spinbox.py:35`); Ctrl+Left/Right
-//! adjust it (floored at `-decimals`, `spinbox.py:84-88`) and the `Step: 1E{n}`
-//! suffix shows it (`spinbox.py:143-145`).
+//! adjust it (floored at `-decimals`, `spinbox.py:84-88`). The suffix is PyDM's
+//! `update_format_string` (`spinbox.py:129-148`): an optional engineering-unit
+//! half (`showUnits`) composed with the step exponent — `"{units} Step: 1E{n}"`
+//! when `showStepExponent` is on, or the units alone with the step relegated to a
+//! signed line-edit tooltip (`"Step: 1E{n:+d}"`) when it is off.
 //!
 //! The range resolution is the pure
 //! [`control_range`], the step-exponent clamp is the pure
@@ -37,6 +40,12 @@ pub struct SidmSpinbox {
     pub step_exponent: i32,
     /// Show the `Step: 1E{n}` suffix (PyDM `showStepExponent`, default `true`).
     pub show_step_exponent: bool,
+    /// Append the channel's engineering unit to the suffix (PyDM `showUnits` /
+    /// `_show_units`, default `false`, `base.py:390`). The unit itself is the
+    /// PV's EGU (`ChannelState::units`); PyDM composes `units = " {}".format(
+    /// self._unit)` (`spinbox.py:138-139`) with `_unit` defaulting to `""`, so
+    /// `show_units` with no EGU yields a lone leading space, exactly as PyDM.
+    pub show_units: bool,
     /// Send on every step/change rather than only on Enter (PyDM `writeOnPress`,
     /// default `false`, `spinbox.py:31`). When `false` the entry composes
     /// locally and commits once on Enter (`keyPressEvent` Return/Enter →
@@ -58,6 +67,34 @@ pub fn should_write(enter_pressed: bool, changed: bool, write_on_press: bool) ->
     enter_pressed || (changed && write_on_press)
 }
 
+/// PyDM `update_format_string` (`spinbox.py:129-148`): compose the spin box
+/// suffix and the optional line-edit tooltip from the unit half and the step
+/// exponent. `unit` is the PV EGU (`ChannelState::units`, `""` when absent);
+/// PyDM's `units = " {}".format(self._unit)` keeps the leading space even when
+/// `_unit` is empty, so `show_units` with no EGU yields a lone space.
+///
+/// Returns `(suffix, tooltip)`. When the step exponent is shown it is folded
+/// into the suffix and the tooltip is `None` (PyDM clears it); when hidden the
+/// suffix is the units alone and the step moves to a signed tooltip
+/// `"Step: 1E{n:+d}"`.
+pub fn format_suffix_and_tooltip(
+    show_units: bool,
+    unit: &str,
+    show_step_exponent: bool,
+    step_exponent: i32,
+) -> (String, Option<String>) {
+    let units = if show_units {
+        format!(" {unit}")
+    } else {
+        String::new()
+    };
+    if show_step_exponent {
+        (format!("{units} Step: 1E{step_exponent}"), None)
+    } else {
+        (units, Some(format!("Step: 1E{step_exponent:+}")))
+    }
+}
+
 impl SidmSpinbox {
     /// Connect `address` and wrap it in a spin box.
     pub fn new(engine: &Engine, address: &str) -> Result<Self, EngineError> {
@@ -68,6 +105,7 @@ impl SidmSpinbox {
             user_limits: UserLimits::default(),
             step_exponent: 0,
             show_step_exponent: true,
+            show_units: false,
             write_on_press: false,
         })
     }
@@ -96,6 +134,13 @@ impl SidmSpinbox {
     /// MEDM single-sided `hoprSrc="default"`, R2-66).
     pub fn with_upper_limit(mut self, max: f64) -> Self {
         self.user_limits.upper = Some(max);
+        self
+    }
+
+    /// Append the channel's engineering unit to the suffix (builder style; PyDM
+    /// `showUnits`).
+    pub fn with_show_units(mut self, show_units: bool) -> Self {
+        self.show_units = show_units;
         self
     }
 
@@ -171,6 +216,14 @@ impl SidmSpinbox {
         let step = self.single_step();
         let show_step = self.show_step_exponent;
         let step_exponent = self.step_exponent;
+        // PyDM update_format_string (spinbox.py:129-148): unit half + step
+        // exponent → (suffix, optional line-edit tooltip).
+        let (suffix, tooltip) = format_suffix_and_tooltip(
+            self.show_units,
+            state.units.as_deref().unwrap_or(""),
+            show_step,
+            step_exponent,
+        );
         let range = control_range(&state, self.user_limits);
         let mut value = state
             .value
@@ -183,16 +236,18 @@ impl SidmSpinbox {
             .framed_alarm_content(ui, &state, true, |ui| {
                 let mut drag = egui::DragValue::new(&mut value)
                     .speed(step)
-                    .max_decimals(decimals.max(0) as usize);
-                if show_step {
-                    // PyDM's showStepExponent suffix (spinbox.py:143-145); with
-                    // units off it is " Step: 1E{n}".
-                    drag = drag.suffix(format!(" Step: 1E{step_exponent}"));
-                }
+                    .max_decimals(decimals.max(0) as usize)
+                    .suffix(suffix.clone());
                 if let Some((lo, hi)) = range {
                     drag = drag.range(lo..=hi);
                 }
-                ui.add(drag)
+                let resp = ui.add(drag);
+                // PyDM sets the line-edit tooltip only when the step exponent is
+                // hidden (spinbox.py:146-148); otherwise it is cleared (no hover).
+                match &tooltip {
+                    Some(t) => resp.on_hover_text(t.clone()),
+                    None => resp,
+                }
             })
             .inner;
 
@@ -305,6 +360,53 @@ mod tests {
         assert_eq!(stepped_exponent(-3, 3, -1), -3);
         // Ctrl+Left from the floor moves up normally.
         assert_eq!(stepped_exponent(-3, 3, 1), -2);
+    }
+
+    #[test]
+    fn show_units_defaults_off_like_pydm() {
+        // PyDM `_show_units` defaults False (base.py:390).
+        let (_e, spin) = spinbox("loc://spin_units_default");
+        assert!(!spin.show_units);
+        assert!(spin.with_show_units(true).show_units);
+    }
+
+    #[test]
+    fn suffix_and_tooltip_compose_units_and_step_like_pydm() {
+        // showStepExponent on, units off: the pre-existing " Step: 1E{n}" suffix,
+        // no tooltip (spinbox.py:144-145). This is what sidm did before R3-14.
+        assert_eq!(
+            format_suffix_and_tooltip(false, "", true, -2),
+            (" Step: 1E-2".to_owned(), None)
+        );
+        // showStepExponent on, units on: the unit half prefixes the step
+        // ("{units} Step: 1E{n}", units == " mm").
+        assert_eq!(
+            format_suffix_and_tooltip(true, "mm", true, -2),
+            (" mm Step: 1E-2".to_owned(), None)
+        );
+        // showStepExponent OFF, units off: empty suffix, step relegated to a
+        // signed tooltip (spinbox.py:146-148, "%+d").
+        assert_eq!(
+            format_suffix_and_tooltip(false, "", false, -2),
+            (String::new(), Some("Step: 1E-2".to_owned()))
+        );
+        // showStepExponent OFF, units on: the units alone are the suffix; the
+        // step still moves to the signed tooltip.
+        assert_eq!(
+            format_suffix_and_tooltip(true, "mm", false, 3),
+            (" mm".to_owned(), Some("Step: 1E+3".to_owned()))
+        );
+        // The tooltip's "+d" always signs, including zero.
+        assert_eq!(
+            format_suffix_and_tooltip(false, "", false, 0).1,
+            Some("Step: 1E+0".to_owned())
+        );
+        // PyDM quirk: showUnits on with an empty EGU keeps the lone leading
+        // space (`" {}".format("")`), so the step suffix gains a double space.
+        assert_eq!(
+            format_suffix_and_tooltip(true, "", true, 1),
+            ("  Step: 1E1".to_owned(), None)
+        );
     }
 
     #[test]

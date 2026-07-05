@@ -2712,6 +2712,22 @@ Impact: any `calc://` with a waveform child works in PyDM and is a silent dead c
 
 ### R3-14: SidmSpinbox suffix drops the `{units}` half of PyDM's composition and the `showStepExponent=False` tooltip fallback — (R2-54 residual)
 
+**FIXED (R3):** ported PyDM `update_format_string` (`spinbox.py:129-148`) whole,
+as a pure `format_suffix_and_tooltip(show_units, unit, show_step_exponent,
+step_exponent) -> (String, Option<String>)`. It composes the unit half
+(`units = " {}".format(self._unit)` when `showUnits`, `""` otherwise — the PV
+EGU from `ChannelState::units`, `""` when absent, keeping PyDM's lone-space
+quirk) with the step exponent: `"{units} Step: 1E{n}"` + cleared tooltip when
+`showStepExponent` is on, or the units alone as suffix + a signed line-edit
+tooltip `"Step: 1E{n:+d}"` when off. Added a `show_units` field (default
+`false`, PyDM `_show_units`, `base.py:390`) and `with_show_units` builder;
+`show()` now applies the suffix always and attaches the tooltip via
+`on_hover_text` only when the step is hidden.
+
+Tests: `suffix_and_tooltip_compose_units_and_step_like_pydm` (all four
+show_units×show_step corners + signed-zero tooltip + empty-EGU double space),
+`show_units_defaults_off_like_pydm`.
+
 Severity: Low
 
 Rust: `sidm/src/widgets/spinbox.rs:187-191` — suffix is only `" Step: 1E{n}"`; no `show_units`/unit path exists; `show_step_exponent=false` produces neither suffix nor tooltip. The R2-54 fix (`278e689`) cites spinbox.py:143-145 but ports only the step half of line `:144`.
