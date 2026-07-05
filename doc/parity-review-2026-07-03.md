@@ -2738,6 +2738,24 @@ Impact: a spinbox with `showUnits` loses its engineering-units suffix; turning t
 
 ### R3-15: `loc://` `type=array` ignores the numpy `dtype` kwarg cited in R1-32's reference — (R1-32 residual)
 
+**FIXED (R3):** `initial_local_state` now reads the `dtype` param and threads it
+through `parse_init` → `parse_array`, which honors it via a new
+`array_dtype_kind` classifier: a floating dtype (`float`/`float64`/… ,
+`double`/`single`/`half`) forces a Float waveform and an integer dtype
+(`int`/`int32`/… , `uint*`, `long`/`short`/`byte`) an Int one, truncating float
+literals toward zero as numpy's int cast does. Without a `dtype` (or an
+unrecognized one), the literal inference is unchanged — matching numpy's default
+`dtype=object`, which preserves each element's Python int/float type. Only
+`dtype` is honored: PyDM calls `format_type_params` for the numpy keys but only
+`dtype` changes the value (the finding's own note), and PyDM only reaches it for
+`type=array` (`np.array`), so scalar types ignore a stray `dtype` — verified by a
+`type=int&dtype=float` case that stays `Int(5)`. Exotic numpy typecodes (`f8`,
+`complex`) fall back to inference (documented).
+
+Test: `array_dtype_kwarg_overrides_literal_inference` (float promotion, int
+truncation, sized aliases, unrecognized fallback, no-dtype inference, scalar
+untouched).
+
 Severity: Low
 
 Rust: `sidm/src/data_plugins/local_plugin.rs:104-116` — `initial_local_state` matches `type/init/precision|prec/unit/upper_limit/lower_limit/enum_string` and drops every other key (`_ => {}`); element types are inferred from the literal (`:196-209`). The R1-32 fix (`e4ed898`) never mentions the dtype kwarg the finding's own Reference named (doc `:348`).

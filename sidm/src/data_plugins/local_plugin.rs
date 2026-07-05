@@ -11,7 +11,10 @@
 //! Supported `type`s: `float` (default), `int`, `bool`, `str`, `array` (a
 //! bracketed list — all-integer elements make an Int waveform, any float
 //! element promotes it to Float, like numpy dtype unification under PyDM's
-//! `np.array(ast.literal_eval(init))`, local_plugin.py:32 + :321-323).
+//! `np.array(ast.literal_eval(init))`, local_plugin.py:32 + :321-323). A numpy
+//! `dtype` kwarg (`type=array&init=[1,2]&dtype=float`, PyDM
+//! `_extra_numpy_config_keys`, local_plugin.py:30 + :257-288) overrides that
+//! inference — `dtype=float` yields a Float waveform, `dtype=int` an Int one.
 //!
 //! Extras (`parse_channel_extras`, local_plugin.py:103-121): `precision`,
 //! `unit`, `upper_limit`/`lower_limit` (numeric types only → ctrl limits),
@@ -96,6 +99,7 @@ impl DataPlugin for LocalPlugin {
 pub(crate) fn initial_local_state(params: &[(String, String)]) -> ChannelState {
     let mut ty = "float";
     let mut init: Option<&str> = None;
+    let mut dtype: Option<&str> = None;
     let mut precision: Option<i32> = None;
     let mut units: Option<Arc<str>> = None;
     let mut upper: Option<f64> = None;
@@ -105,6 +109,11 @@ pub(crate) fn initial_local_state(params: &[(String, String)]) -> ChannelState {
         match key.as_str() {
             "type" => ty = value.as_str(),
             "init" => init = Some(value.as_str()),
+            // The numpy element dtype for `type=array` (PyDM
+            // `_extra_numpy_config_keys`, local_plugin.py:30, :257-288). The
+            // other numpy kwargs (copy/order/subok/ndmin) have no effect on the
+            // value, matching PyDM in practice, so they stay dropped below.
+            "dtype" => dtype = Some(value.as_str()),
             // Extras (parse_channel_extras, local_plugin.py:103-121). `prec`
             // is a sidm-accepted alias for `precision`.
             "precision" | "prec" => precision = value.parse().ok(),
@@ -116,7 +125,7 @@ pub(crate) fn initial_local_state(params: &[(String, String)]) -> ChannelState {
         }
     }
 
-    let value = parse_init(ty, init);
+    let value = parse_init(ty, init, dtype);
 
     // A float variable without an explicit precision derives it from the
     // value (add_listener, local_plugin.py:341-345).
@@ -152,16 +161,48 @@ pub(crate) fn initial_local_state(params: &[(String, String)]) -> ChannelState {
 }
 
 /// Parse the `init` string under the declared `type`, falling back to a
-/// type-appropriate zero when `init` is absent or unparsable.
-fn parse_init(ty: &str, init: Option<&str>) -> PvValue {
+/// type-appropriate zero when `init` is absent or unparsable. `dtype` is the
+/// numpy element dtype kwarg, meaningful only for `type=array`.
+fn parse_init(ty: &str, init: Option<&str>, dtype: Option<&str>) -> PvValue {
     match ty {
         "int" | "integer" => PvValue::Int(init.and_then(|s| s.trim().parse().ok()).unwrap_or(0)),
         "bool" | "boolean" => PvValue::Bool(init.map(parse_bool).unwrap_or(false)),
         "str" | "string" => PvValue::Str(Arc::from(init.unwrap_or(""))),
-        "array" => parse_array(init.unwrap_or("")),
+        "array" => parse_array(init.unwrap_or(""), dtype),
         // float and anything unrecognized.
         _ => PvValue::Float(init.and_then(|s| s.trim().parse().ok()).unwrap_or(0.0)),
     }
+}
+
+/// The sidm array element kind a numpy `dtype` string forces.
+enum ArrayKind {
+    Int,
+    Float,
+}
+
+/// Classify a numpy `dtype` kwarg (PyDM `np.dtype(dtype)`,
+/// local_plugin.py:257-288) into one of sidm's two array element kinds. `None`
+/// means "not a recognized numeric dtype", so the element type is inferred from
+/// the literal instead — matching numpy's default `dtype=object`, which
+/// preserves each literal's own int/float type. Only the readable numeric names
+/// a `loc://` URL would carry are honored (`float`/`float64`/…, `int`/`int32`/…,
+/// `uint*`); exotic numpy typecodes (`f8`, `i4`, complex, str) fall through to
+/// inference.
+fn array_dtype_kind(dtype: &str) -> Option<ArrayKind> {
+    let d = dtype.trim().to_ascii_lowercase();
+    if d == "double" || d == "single" || d == "half" || d.starts_with("float") {
+        return Some(ArrayKind::Float);
+    }
+    if d == "long"
+        || d == "short"
+        || d == "byte"
+        || d == "longlong"
+        || d.starts_with("int")
+        || d.starts_with("uint")
+    {
+        return Some(ArrayKind::Int);
+    }
+    None
 }
 
 fn parse_bool(s: &str) -> bool {
@@ -169,13 +210,16 @@ fn parse_bool(s: &str) -> bool {
     s.eq_ignore_ascii_case("true") || s == "1"
 }
 
-/// Parse a `type=array` init — PyDM's `np.array(ast.literal_eval(init))`
-/// (local_plugin.py:32 + :321-323). A bracketed (or parenthesized) list of
-/// integers becomes an Int waveform; any float element promotes the whole
-/// array to Float, like numpy dtype unification. Absent/unparsable input
-/// falls back to an empty Float waveform (the array-shaped type zero; PyDM
-/// logs the failed conversion and publishes no value).
-fn parse_array(init: &str) -> PvValue {
+/// Parse a `type=array` init — PyDM's `np.array(ast.literal_eval(init),
+/// **type_kwargs)` (local_plugin.py:32 + :321-323). With no `dtype` kwarg the
+/// element type is inferred: a bracketed (or parenthesized) list of integers
+/// becomes an Int waveform; any float element promotes the whole array to Float,
+/// like numpy dtype unification. An explicit `dtype` forces the element type
+/// (`dtype=float` → Float even for an integer literal; `dtype=int` → Int,
+/// truncating float literals toward zero as numpy's int cast does). Absent/
+/// unparsable input falls back to an empty Float waveform (the array-shaped type
+/// zero; PyDM logs the failed conversion and publishes no value).
+fn parse_array(init: &str, dtype: Option<&str>) -> PvValue {
     let empty = || PvValue::FloatArray(Arc::from(Vec::new()));
     let s = init.trim();
     let inner = s
@@ -193,6 +237,35 @@ fn parse_array(init: &str) -> PvValue {
     if tokens.is_empty() {
         return empty();
     }
+
+    // An explicit numpy `dtype` forces the element type over the literal's own.
+    match dtype.and_then(array_dtype_kind) {
+        Some(ArrayKind::Float) => {
+            return tokens
+                .iter()
+                .map(|t| t.parse::<f64>().ok())
+                .collect::<Option<Vec<f64>>>()
+                .map(|v| PvValue::FloatArray(v.into()))
+                .unwrap_or_else(empty);
+        }
+        Some(ArrayKind::Int) => {
+            // numpy's int cast truncates toward zero and accepts float literals
+            // (`np.array([1.9], dtype=int)` → `[1]`).
+            return tokens
+                .iter()
+                .map(|t| {
+                    t.parse::<i64>()
+                        .ok()
+                        .or_else(|| t.parse::<f64>().ok().map(|f| f.trunc() as i64))
+                })
+                .collect::<Option<Vec<i64>>>()
+                .map(|v| PvValue::IntArray(v.into()))
+                .unwrap_or_else(empty);
+        }
+        None => {}
+    }
+
+    // Inference (no explicit dtype): all-integer → Int, any float → Float.
     if let Some(ints) = tokens
         .iter()
         .map(|t| t.parse::<i64>().ok())
@@ -348,6 +421,75 @@ mod tests {
         assert_eq!(
             initial_local_state(&params(&[("type", "array"), ("init", "nonsense")])).value,
             Some(PvValue::FloatArray(Arc::from([].as_slice())))
+        );
+    }
+
+    #[test]
+    fn array_dtype_kwarg_overrides_literal_inference() {
+        // dtype=float promotes an all-integer literal to a Float waveform
+        // (np.array([1,2,3], dtype=float)); without it inference keeps it Int.
+        assert_eq!(
+            initial_local_state(&params(&[
+                ("type", "array"),
+                ("init", "[1, 2, 3]"),
+                ("dtype", "float"),
+            ]))
+            .value,
+            Some(PvValue::FloatArray(Arc::from([1.0, 2.0, 3.0].as_slice())))
+        );
+        // dtype=int truncates float literals toward zero (numpy int cast).
+        assert_eq!(
+            initial_local_state(&params(&[
+                ("type", "array"),
+                ("init", "[1.9, 2.1, -3.8]"),
+                ("dtype", "int"),
+            ]))
+            .value,
+            Some(PvValue::IntArray(Arc::from([1_i64, 2, -3].as_slice())))
+        );
+        // Sized aliases resolve too (int64 → Int, float32 → Float).
+        assert_eq!(
+            initial_local_state(&params(&[
+                ("type", "array"),
+                ("init", "[4, 5]"),
+                ("dtype", "int64"),
+            ]))
+            .value,
+            Some(PvValue::IntArray(Arc::from([4_i64, 5].as_slice())))
+        );
+        assert_eq!(
+            initial_local_state(&params(&[
+                ("type", "array"),
+                ("init", "[6, 7]"),
+                ("dtype", "float32"),
+            ]))
+            .value,
+            Some(PvValue::FloatArray(Arc::from([6.0, 7.0].as_slice())))
+        );
+        // An unrecognized dtype falls back to literal inference (Int here).
+        assert_eq!(
+            initial_local_state(&params(&[
+                ("type", "array"),
+                ("init", "[8, 9]"),
+                ("dtype", "complex"),
+            ]))
+            .value,
+            Some(PvValue::IntArray(Arc::from([8_i64, 9].as_slice())))
+        );
+        // No dtype: inference is unchanged (all-int → Int).
+        assert_eq!(
+            initial_local_state(&params(&[("type", "array"), ("init", "[1, 2]")])).value,
+            Some(PvValue::IntArray(Arc::from([1_i64, 2].as_slice())))
+        );
+        // dtype only affects arrays: a scalar int with a stray dtype is untouched.
+        assert_eq!(
+            initial_local_state(&params(&[
+                ("type", "int"),
+                ("init", "5"),
+                ("dtype", "float"),
+            ]))
+            .value,
+            Some(PvValue::Int(5))
         );
     }
 
