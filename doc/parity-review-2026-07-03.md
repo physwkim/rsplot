@@ -2701,6 +2701,16 @@ Impact: the readout never says what was picked — silx distinguishes an isosurf
 
 ### R3-12: `loc://` fabricates a configured variable from any first listener; PyDM requires `name`+`type`+`init` and defers to the first config-bearing listener
 
+**DEFERRED (R3 — sign-off required, connection-semantics change):** closing this changes
+`loc://` connection semantics across `local_plugin.rs`, `engine.rs`, and `address.rs`:
+require `name`+`type`+`init` before publishing a connected state (PyDM
+`_required_config_keys`), send disconnected (no fabricated `0.0`) until a config-bearing
+listener connects, defer to the first such listener regardless of creation order, re-run
+configuration on every `add_listener`, and map an unparsable `init` to `None` rather than
+a type-zero. This is a structural state-machine change with cross-file impact (including
+the pooled-connection reuse that currently drops a later address's query), not a patch —
+held for sign-off. No code changed this round.
+
 Severity: Medium
 
 Rust: `sidm/src/data_plugins/local_plugin.rs:52-67` — `LocalPlugin::connect` unconditionally publishes a connected state from the first address's params; `initial_local_state` defaults `ty="float"` (`:97`), `parse_init` falls back to a type-zero for absent/unparsable `init` (`:156-165`). `engine.rs:196-199` reuses the pooled connection for every later `loc://name?...`, `address.rs:103-109` pools with the query dropped, so a later config-bearing address is discarded. Module doc (`:7-9`) claims "parameters apply only on the first connection, matching PyDM".
