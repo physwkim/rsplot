@@ -2166,6 +2166,11 @@ pub struct Isosurface {
     level: f32,
     auto: Option<fn(&[f32]) -> f32>,
     color: Color32,
+    /// Whether the surface is emitted (silx `Item3D.setVisible`,
+    /// `items/core.py:183-231`; default `True`). Hiding a surface keeps its
+    /// level/colour while suppressing its geometry — the counterpart of the
+    /// sibling owned child [`CutPlane`]'s `visible` flag.
+    visible: bool,
 }
 
 impl Isosurface {
@@ -2175,6 +2180,7 @@ impl Isosurface {
             level,
             auto: None,
             color,
+            visible: true,
         }
     }
 
@@ -2185,6 +2191,7 @@ impl Isosurface {
             level: f32::NAN,
             auto: Some(auto),
             color,
+            visible: true,
         }
     }
 
@@ -2219,6 +2226,17 @@ impl Isosurface {
     /// Set the iso-surface colour (silx `setColor`).
     pub fn set_color(&mut self, color: Color32) {
         self.color = color;
+    }
+
+    /// Whether the surface is emitted (silx `Item3D.isVisible`, default `true`).
+    pub fn is_visible(&self) -> bool {
+        self.visible
+    }
+
+    /// Show or hide the surface (silx `Item3D.setVisible`): a hidden surface
+    /// keeps its level/colour but contributes no geometry.
+    pub fn set_visible(&mut self, visible: bool) {
+        self.visible = visible;
     }
 
     /// Re-resolve an auto-level against `data` (called by the parent on data
@@ -2924,7 +2942,7 @@ fn append_solid_isosurfaces(
     order.sort_by(|&a, &b| isosurfaces[b].level.total_cmp(&isosurfaces[a].level));
     for i in order {
         let iso = &isosurfaces[i];
-        if !iso.level.is_finite() {
+        if !iso.visible || !iso.level.is_finite() {
             continue;
         }
         let Some((vertices, normals, indices)) =
@@ -2954,7 +2972,7 @@ fn append_colormapped_isosurface(
     iso: &ComplexIsosurface,
 ) {
     let level = iso.level();
-    if !level.is_finite() {
+    if !iso.is_visible() || !level.is_finite() {
         return;
     }
     let (depth, height, width) = dims;
@@ -3131,6 +3149,16 @@ impl ComplexIsosurface {
     /// True when the level is computed by an auto-level function.
     pub fn is_auto_level(&self) -> bool {
         self.iso.is_auto_level()
+    }
+
+    /// Whether the surface is emitted (silx `Item3D.isVisible`, default `true`).
+    pub fn is_visible(&self) -> bool {
+        self.iso.is_visible()
+    }
+
+    /// Show or hide the surface (silx `Item3D.setVisible`).
+    pub fn set_visible(&mut self, visible: bool) {
+        self.iso.set_visible(visible);
     }
 
     /// The colour mode used to colour the surface.
@@ -4515,6 +4543,33 @@ mod tests {
     }
 
     #[test]
+    fn hidden_isosurface_emits_no_geometry_but_keeps_level_and_colour() {
+        // R3-8: silx Item3D.setVisible(False) suppresses a surface's geometry
+        // while keeping its level/colour — the CutPlane visibility contract now
+        // extended to isosurfaces.
+        let (data, d, h, w) = blob_field();
+        let mut sf = ScalarField3D::new().with_data(&data, d, h, w);
+        let idx = sf.add_isosurface(0.5, DEFAULT_ISOSURFACE_COLOR);
+
+        let mut visible = Scene3dGeometry::new();
+        sf.append_to(&mut visible);
+        assert!(
+            !visible.meshes.is_empty(),
+            "visible surface emits triangles"
+        );
+
+        sf.isosurface_mut(idx).unwrap().set_visible(false);
+        assert!(!sf.isosurfaces()[idx].is_visible());
+        // Level and colour are retained across the hide.
+        assert_eq!(sf.isosurfaces()[idx].level(), 0.5);
+        assert_eq!(sf.isosurfaces()[idx].color(), DEFAULT_ISOSURFACE_COLOR);
+
+        let mut hidden = Scene3dGeometry::new();
+        sf.append_to(&mut hidden);
+        assert!(hidden.meshes.is_empty(), "hidden surface emits no geometry");
+    }
+
+    #[test]
     fn non_finite_level_emits_nothing() {
         let (data, d, h, w) = blob_field();
         let mut sf = ScalarField3D::new().with_data(&data, d, h, w);
@@ -5013,6 +5068,36 @@ mod tests {
             colours.len() > 1,
             "a colormapped surface is not a single solid colour"
         );
+    }
+
+    #[test]
+    fn hidden_colormapped_isosurface_emits_no_geometry() {
+        // R3-8: the visibility flag reaches ComplexField3D's colormapped
+        // isosurfaces too (via the embedded Isosurface).
+        let (re, im) = ramp_complex_3();
+        let mut cf = ComplexField3D::new().with_data(&re, &im, 3, 3, 3);
+        let idx = cf.add_colormapped_isosurface(ComplexIsosurface::new(
+            1.5,
+            ComplexMode::Imaginary,
+            Colormap::autoscale(ColormapName::Viridis),
+            Color32::from_rgba_unmultiplied(0, 0, 0, 128),
+        ));
+
+        let mut visible = Scene3dGeometry::new();
+        cf.append_to(&mut visible);
+        assert!(
+            !visible.meshes.is_empty(),
+            "visible surface emits triangles"
+        );
+
+        cf.colormapped_isosurface_mut(idx)
+            .unwrap()
+            .set_visible(false);
+        assert!(!cf.colormapped_isosurfaces()[idx].is_visible());
+
+        let mut hidden = Scene3dGeometry::new();
+        cf.append_to(&mut hidden);
+        assert!(hidden.meshes.is_empty(), "hidden surface emits no geometry");
     }
 
     #[test]

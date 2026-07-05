@@ -2593,6 +2593,21 @@ Impact: silx's documented gesture contract is unreachable — Ctrl+left orbits i
 
 ### R3-8: Isosurface has no visibility flag — silx `Item3D.setVisible` semantics ported for CutPlane only
 
+**FIXED (R3):** `Isosurface` gained a `visible` flag (default `true`, silx
+`Item3D` default) with `is_visible`/`set_visible`, mirroring the sibling owned
+child `CutPlane`. Both emit helpers now skip a hidden surface —
+`append_solid_isosurfaces` (`if !iso.visible`) and `append_colormapped_
+isosurface` (`if !iso.is_visible()`). `ComplexIsosurface` exposes the flag via
+its embedded `Isosurface`, so `ComplexField3D`'s colormapped surfaces are
+covered by the same single flag. Picking is geometry-based (ray vs the emitted
+mesh), so suppressing emission also removes the surface from picks — no separate
+pick gate needed. Bounds are the volume box regardless, so hiding a surface
+leaves them unchanged (matching silx group-bounds skipping invisible children in
+effect).
+
+Tests: `hidden_isosurface_emits_no_geometry_but_keeps_level_and_colour` and
+`hidden_colormapped_isosurface_emits_no_geometry`.
+
 Severity: Low
 
 Rust: `src/render/scene3d_items.rs:2165-2222` — `Isosurface` carries `level`/`color`/`auto_level` only; `append_solid_isosurfaces` (`:2915`) and `append_colormapped_isosurface` (`:2949`) emit every surface unconditionally. `CutPlane` (`:2260-2273`) does have `visible`/`set_visible`, honored by render (`:3006`) and pick (`:2838`). `ComplexField3D`'s colormapped isosurfaces (`:3231`) also have none.
