@@ -17,7 +17,7 @@ use siplot::egui;
 
 use crate::channel::{Channel, PvValue};
 use crate::engine::{Engine, EngineError};
-use crate::widgets::base::{AlarmPalette, BorderMode, ChannelBase, control_range};
+use crate::widgets::base::{AlarmPalette, BorderMode, ChannelBase, UserLimits, control_range};
 use crate::widgets::byte::Orientation;
 
 /// PyDM's default number of slider positions (`PyDMSlider._num_steps`).
@@ -27,8 +27,9 @@ pub const DEFAULT_NUM_STEPS: u32 = 101;
 pub struct SidmSlider {
     base: ChannelBase,
     /// Override the min/max instead of using the PV's control limits (PyDM
-    /// `userDefinedLimits`).
-    pub user_limits: Option<(f64, f64)>,
+    /// `userDefinedLimits`); per-bound so a single end can stay channel-driven
+    /// (MEDM single-sided `limits`, R2-66).
+    pub user_limits: UserLimits,
     /// Number of discrete positions along the track (PyDM `num_steps`).
     pub num_steps: u32,
     /// Override the displayed decimals; `None` uses the PV's precision (or `0`).
@@ -46,16 +47,31 @@ impl SidmSlider {
             base: ChannelBase::new(engine.connect(address)?)
                 .with_border_mode(BorderMode::Off)
                 .with_alarm_sensitive_content(true),
-            user_limits: None,
+            user_limits: UserLimits::default(),
             num_steps: DEFAULT_NUM_STEPS,
             precision_override: None,
             orientation: Orientation::Horizontal,
         })
     }
 
-    /// Override the min/max range (builder style; PyDM `userDefinedLimits`).
+    /// Override both min/max range bounds (builder style; PyDM
+    /// `userDefinedLimits`).
     pub fn with_limits(mut self, min: f64, max: f64) -> Self {
-        self.user_limits = Some((min, max));
+        self.user_limits = UserLimits::both(min, max);
+        self
+    }
+
+    /// Pin only the lower bound, leaving the upper channel-driven (builder style;
+    /// MEDM single-sided `loprSrc="default"`, R2-66).
+    pub fn with_lower_limit(mut self, min: f64) -> Self {
+        self.user_limits.lower = Some(min);
+        self
+    }
+
+    /// Pin only the upper bound, leaving the lower channel-driven (builder style;
+    /// MEDM single-sided `hoprSrc="default"`, R2-66).
+    pub fn with_upper_limit(mut self, max: f64) -> Self {
+        self.user_limits.upper = Some(max);
         self
     }
 
@@ -242,13 +258,51 @@ mod tests {
             ctrl_limits: Some((0.0, 10.0)),
             ..ChannelState::default()
         };
-        assert_eq!(control_range(&st, None), Some((0.0, 10.0)));
-        assert_eq!(control_range(&st, Some((-5.0, 5.0))), Some((-5.0, 5.0)));
+        assert_eq!(control_range(&st, UserLimits::default()), Some((0.0, 10.0)));
+        assert_eq!(
+            control_range(&st, UserLimits::both(-5.0, 5.0)),
+            Some((-5.0, 5.0))
+        );
         let st = ChannelState {
             connected: true,
             ..ChannelState::default()
         };
-        assert_eq!(control_range(&st, None), None);
+        assert_eq!(control_range(&st, UserLimits::default()), None);
+    }
+
+    #[test]
+    fn single_sided_limit_keeps_the_other_end_channel_driven() {
+        // R2-66: MEDM hoprSrc="default" (upper pinned) keeps LOPR from the
+        // channel; loprSrc="default" (lower pinned) keeps HOPR from the channel.
+        let st = ChannelState {
+            connected: true,
+            ctrl_limits: Some((0.0, 10.0)),
+            ..ChannelState::default()
+        };
+        // Upper pinned to 1.0, lower channel-driven (DRVL=0.0).
+        let (_e, upper_only) = slider("loc://slider_upper_only");
+        let upper_only = upper_only.with_upper_limit(1.0);
+        assert_eq!(
+            upper_only.user_limits,
+            UserLimits {
+                lower: None,
+                upper: Some(1.0)
+            }
+        );
+        assert_eq!(control_range(&st, upper_only.user_limits), Some((0.0, 1.0)));
+        // Lower pinned to -3.0, upper channel-driven (DRVH=10.0).
+        let (_e, lower_only) = slider("loc://slider_lower_only");
+        let lower_only = lower_only.with_lower_limit(-3.0);
+        assert_eq!(
+            control_range(&st, lower_only.user_limits),
+            Some((-3.0, 10.0))
+        );
+        // Single-sided with NO channel limit → no full range.
+        let st_no_ctrl = ChannelState {
+            connected: true,
+            ..ChannelState::default()
+        };
+        assert_eq!(control_range(&st_no_ctrl, lower_only.user_limits), None);
     }
 
     #[test]

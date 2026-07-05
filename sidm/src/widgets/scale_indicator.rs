@@ -24,7 +24,8 @@ use siplot::egui::{self, Color32, Stroke, Vec2};
 use crate::channel::{Channel, PvValue};
 use crate::engine::{Engine, EngineError};
 use crate::widgets::base::{
-    AlarmPalette, BorderMode, ChannelBase, control_range, justified_size, layout_justify,
+    AlarmPalette, BorderMode, ChannelBase, UserLimits, control_range, justified_size,
+    layout_justify,
 };
 use crate::widgets::byte::Orientation;
 use crate::widgets::display_format::{DisplayFormat, FormatSpec, format_value};
@@ -54,7 +55,7 @@ pub fn division_proportions(num_divisions: u32) -> Vec<f64> {
 /// A value indicator on a tick scale (PyDM `PyDMScaleIndicator`).
 pub struct SidmScaleIndicator {
     base: ChannelBase,
-    user_limits: Option<(f64, f64)>,
+    user_limits: UserLimits,
     num_divisions: u32,
     orientation: Orientation,
     inverted_appearance: bool,
@@ -74,7 +75,7 @@ impl SidmScaleIndicator {
     pub fn new(engine: &Engine, address: &str) -> Result<Self, EngineError> {
         Ok(Self {
             base: ChannelBase::new(engine.connect(address)?),
-            user_limits: None,
+            user_limits: UserLimits::default(),
             num_divisions: DEFAULT_NUM_DIVISIONS,
             orientation: Orientation::Horizontal,
             inverted_appearance: false,
@@ -89,11 +90,24 @@ impl SidmScaleIndicator {
         })
     }
 
-    /// Override the scale limits (builder style; PyDM `userDefinedLimits` /
-    /// `userLowerLimit` / `userUpperLimit`). Without this the PV control limits
-    /// are used.
+    /// Override both scale limits (builder style; PyDM `userDefinedLimits`).
+    /// Without this the PV control limits are used.
     pub fn with_limits(mut self, lower: f64, upper: f64) -> Self {
-        self.user_limits = Some((lower, upper));
+        self.user_limits = UserLimits::both(lower, upper);
+        self
+    }
+
+    /// Pin only the lower bound, leaving the upper channel-driven (builder style;
+    /// MEDM single-sided `loprSrc="default"`, R2-66).
+    pub fn with_lower_limit(mut self, lower: f64) -> Self {
+        self.user_limits.lower = Some(lower);
+        self
+    }
+
+    /// Pin only the upper bound, leaving the lower channel-driven (builder style;
+    /// MEDM single-sided `hoprSrc="default"`, R2-66).
+    pub fn with_upper_limit(mut self, upper: f64) -> Self {
+        self.user_limits.upper = Some(upper);
         self
     }
 

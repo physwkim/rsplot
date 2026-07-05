@@ -39,7 +39,7 @@ pub mod waveform_plot;
 pub mod waveform_table;
 
 pub use base::{
-    AlarmPalette, BorderMode, BorderStyle, ChannelBase, alarm_border, control_range,
+    AlarmPalette, BorderMode, BorderStyle, ChannelBase, UserLimits, alarm_border, control_range,
     middle_click_copy, severity_color, severity_color_medm,
 };
 pub use byte::{Orientation, SidmByteIndicator, extract_bits};

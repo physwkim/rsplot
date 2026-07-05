@@ -102,12 +102,45 @@ pub enum BorderMode {
     Off,
 }
 
-/// Resolve a numeric widget's range: the user override when set, otherwise the
-/// PV's control limits (`DRVL`/`DRVH`). `None` when neither is available — the
-/// widget then cannot establish a range (PyDM `reset_limits` /
-/// `userDefinedLimits`).
-pub fn control_range(state: &ChannelState, user_limits: Option<(f64, f64)>) -> Option<(f64, f64)> {
-    user_limits.or(state.ctrl_limits)
+/// A numeric widget's per-bound range override. Each end is either pinned to a
+/// fixed value or `None` to take the channel's control limit (`DRVL`/`DRVH`).
+///
+/// PyDM's `userDefinedLimits` is all-or-nothing — both `userMinimum` and
+/// `userMaximum`, or neither (`reset_limits` bails when either is `None`,
+/// spinbox.py:249-259). MEDM instead resolves `lopr` and `hopr` INDEPENDENTLY
+/// from their own `*Src` (medmCommon.c:653-666), so a single-sided MEDM
+/// `*Src="default"` pins one end and leaves the other channel-driven. This struct
+/// models that per-bound resolution — a deliberate step beyond PyDM parity so
+/// `adl2sidm` can convert single-sided `limits` blocks faithfully (R2-66).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct UserLimits {
+    /// Fixed lower bound, or `None` to take the channel's `DRVL`.
+    pub lower: Option<f64>,
+    /// Fixed upper bound, or `None` to take the channel's `DRVH`.
+    pub upper: Option<f64>,
+}
+
+impl UserLimits {
+    /// Both bounds pinned to fixed values (PyDM `userDefinedLimits` with
+    /// min + max, or MEDM `loprSrc="default"` + `hoprSrc="default"`).
+    pub fn both(lower: f64, upper: f64) -> Self {
+        Self {
+            lower: Some(lower),
+            upper: Some(upper),
+        }
+    }
+}
+
+/// Resolve a numeric widget's range: each bound is the user override when pinned,
+/// otherwise the PV's control limit (`DRVL`/`DRVH`). `None` when EITHER bound is
+/// unavailable (unpinned and no channel limit) — the widget then cannot establish
+/// a full range (PyDM `reset_limits` / `userDefinedLimits`). A single-sided
+/// override keeps the other end channel-driven (MEDM per-bound `*Src`).
+pub fn control_range(state: &ChannelState, user: UserLimits) -> Option<(f64, f64)> {
+    let ctrl = state.ctrl_limits;
+    let lower = user.lower.or_else(|| ctrl.map(|(lo, _)| lo))?;
+    let upper = user.upper.or_else(|| ctrl.map(|(_, hi)| hi))?;
+    Some((lower, upper))
 }
 
 /// The justify flags of `ui`'s layout, captured for [`justified_size`]. Capture

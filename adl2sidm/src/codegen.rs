@@ -698,13 +698,7 @@ fn emit_valuator(b: &mut Builder, widget: &MedmWidget, options: &Options, z: ZLa
     // SidmSlider ships alarm-sensitive content ON (PyDM parity), so a valuator
     // without clrmod="alarm" must turn it OFF; one with it takes the MEDM palette.
     builders.extend(valuator_alarm_builder(widget));
-    if let Some((lo, hi)) = user_defined_limits(b, widget) {
-        builders.push(format!(
-            ".with_limits({}, {})",
-            float_lit(lo),
-            float_lit(hi)
-        ));
-    }
+    builders.extend(user_defined_limits(widget));
     if let Some(orientation) = direction_orientation(b, widget, false) {
         builders.push(orientation);
     }
@@ -754,13 +748,7 @@ fn emit_wheel_switch(b: &mut Builder, widget: &MedmWidget, options: &Options, z:
     let mut builders = Vec::new();
     // MEDM clrmod="alarm" recolours the digits by severity (medmWheelSwitch.c:390).
     builders.extend(alarm_content_builder(widget));
-    if let Some((lo, hi)) = user_defined_limits(b, widget) {
-        builders.push(format!(
-            ".with_limits({}, {})",
-            float_lit(lo),
-            float_lit(hi)
-        ));
-    }
+    builders.extend(user_defined_limits(widget));
     // Precision comes from MEDM `format` (what adl2pydm reads), falling back to
     // the `limits` block's `precDefault` (what real wheel-switch screens carry).
     if let Some(fmt) = widget.assignments.get("format") {
@@ -903,13 +891,7 @@ fn emit_scale_indicator(
         b.needs_color = true;
     }
     builders.extend(alarm_content_builder(widget));
-    if let Some((lo, hi)) = user_defined_limits(b, widget) {
-        builders.push(format!(
-            ".with_limits({}, {})",
-            float_lit(lo),
-            float_lit(hi)
-        ));
-    }
+    builders.extend(user_defined_limits(widget));
     // `SidmScaleIndicator` defaults to horizontal.
     if let Some(orient) = direction_orientation(b, widget, false) {
         builders.push(orient);
@@ -3014,45 +2996,39 @@ fn text_alignment(widget: &MedmWidget) -> Option<(&'static str, &'static str)> {
     }
 }
 
-/// User-defined `(low, high)` limits for a control. MEDM resolves each end from
-/// its own source: an end is user-defined only when its `*Src ==
-/// PV_LIMITS_DEFAULT`, and the value falls to `loprDefault` (LOPR_DEFAULT `0.0`)
-/// / `hoprDefault` (HOPR_DEFAULT `1.0`) when the `*Default` key is omitted
-/// (`medmWidget.h:55-56`; `writeDlLimits` omits each default at that value,
-/// `medmCommon.c:653-662`). sidm's `with_limits` is all-or-nothing
-/// (`user_limits.or(ctrl_limits)`), so a fixed range is emitted only when BOTH
-/// ends are default; a single-sided default (one end fixed, the other
-/// channel-driven) cannot be split, so it stays channel-driven and warns rather
-/// than fabricating the channel end.
-fn user_defined_limits(b: &mut Builder, widget: &MedmWidget) -> Option<(f64, f64)> {
+/// The limit builder for a control's `limits` block, resolving each end from its
+/// OWN MEDM source. An end is user-defined only when its `*Src ==
+/// PV_LIMITS_DEFAULT` (`"default"`), and its value falls to `loprDefault`
+/// (LOPR_DEFAULT `0.0`) / `hoprDefault` (HOPR_DEFAULT `1.0`) when the `*Default`
+/// key is omitted (`medmWidget.h:55-56`; `writeDlLimits` omits each default at
+/// that value, `medmCommon.c:653-662`). sidm resolves limits per bound (R2-66),
+/// so each MEDM case maps directly: both ends default → `.with_limits`, lower
+/// only → `.with_lower_limit`, upper only → `.with_upper_limit`, neither →
+/// nothing (both channel-driven). This closes the former all-or-nothing residual
+/// where a single-sided default was dropped to the channel and warned.
+fn user_defined_limits(widget: &MedmWidget) -> Option<String> {
     let lo_default = widget.assignments.get("loprSrc").map(String::as_str) == Some("default");
     let hi_default = widget.assignments.get("hoprSrc").map(String::as_str) == Some("default");
-    match (lo_default, hi_default) {
-        (false, false) => None, // both channel-sourced
-        (true, true) => {
-            let lo = widget
-                .assignments
-                .get("loprDefault")
-                .and_then(|s| s.parse::<f64>().ok())
-                .unwrap_or(0.0); // LOPR_DEFAULT
-            let hi = widget
-                .assignments
-                .get("hoprDefault")
-                .and_then(|s| s.parse::<f64>().ok())
-                .unwrap_or(1.0); // HOPR_DEFAULT
-            Some((lo, hi))
-        }
-        _ => {
-            let fixed = if lo_default { "loprSrc" } else { "hoprSrc" };
-            b.warnings.push(format!(
-                "line {}: only {fixed}=\"default\" (single-sided limit); the other end \
-                 is channel-sourced and sidm limits are all-or-nothing, so the range \
-                 stays channel-driven",
-                widget.line
-            ));
-            None
-        }
+    if !lo_default && !hi_default {
+        return None; // both channel-sourced
     }
+    let lo = widget
+        .assignments
+        .get("loprDefault")
+        .and_then(|s| s.parse::<f64>().ok())
+        .unwrap_or(0.0); // LOPR_DEFAULT
+    let hi = widget
+        .assignments
+        .get("hoprDefault")
+        .and_then(|s| s.parse::<f64>().ok())
+        .unwrap_or(1.0); // HOPR_DEFAULT
+    Some(if lo_default && hi_default {
+        format!(".with_limits({}, {})", float_lit(lo), float_lit(hi))
+    } else if lo_default {
+        format!(".with_lower_limit({})", float_lit(lo))
+    } else {
+        format!(".with_upper_limit({})", float_lit(hi))
+    })
 }
 
 /// A `.with_orientation(...)` builder from a MEDM `direction`, or `None` when the
@@ -5900,6 +5876,48 @@ byte {
     }
 
     #[test]
+    fn single_sided_valuator_limit_emits_a_per_bound_builder() {
+        // R2-66: a valuator whose limits block pins only HOPR (hoprSrc="default")
+        // emits .with_upper_limit and leaves LOPR channel-driven — no all-or-nothing
+        // .with_limits, no warning.
+        let adl = r#"
+"color map" {
+	colors {
+		ffffff,
+		000000,
+	}
+}
+valuator {
+	object {
+		x=0
+		y=0
+		width=120
+		height=20
+	}
+	control {
+		chan="$(P)v"
+		clr=0
+	}
+	limits {
+		hoprSrc="default"
+		hoprDefault=42
+	}
+}
+"#;
+        let g = generate(&parse(adl), &Options::default());
+        assert!(
+            g.source.contains(".with_upper_limit(42.0)"),
+            "single-sided upper limit not emitted:\n{}",
+            g.source
+        );
+        assert!(
+            !g.source.contains(".with_limits("),
+            "single-sided limit must not emit an all-or-nothing range:\n{}",
+            g.source
+        );
+    }
+
+    #[test]
     fn wheel_switch_format_sets_decimals() {
         let g = controls();
         assert!(g.source.contains("SidmSpinbox::new(&engine, \"ca://WHL\")"));
@@ -7268,7 +7286,7 @@ composite {
         // R2-66: MEDM resolves lopr/hopr/prec from their own *Src keys; a bare
         // `precDefault` (no `precSrc="default"`) is a leftover MEDM ignores, an
         // absent `hoprDefault` is HOPR_DEFAULT 1.0 (not 0.0), and a single-sided
-        // default cannot be split into sidm's all-or-nothing limits.
+        // default maps to sidm's per-bound `.with_lower_limit`/`.with_upper_limit`.
         let widget = |pairs: &[(&str, &str)]| MedmWidget {
             assignments: pairs
                 .iter()
@@ -7292,43 +7310,41 @@ composite {
             Some(".with_precision(0)".to_string())
         );
 
-        // limits: both ends default -> fixed; absent hoprDefault -> 1.0.
-        let mut b = Builder::default();
+        // limits: each end resolves from its own source (R2-66).
+        // Both ends default -> fixed range; absent hoprDefault -> 1.0.
         assert_eq!(
-            user_defined_limits(
-                &mut b,
-                &widget(&[
-                    ("loprSrc", "default"),
-                    ("loprDefault", "-5"),
-                    ("hoprSrc", "default"),
-                    ("hoprDefault", "5"),
-                ]),
-            ),
-            Some((-5.0, 5.0))
+            user_defined_limits(&widget(&[
+                ("loprSrc", "default"),
+                ("loprDefault", "-5"),
+                ("hoprSrc", "default"),
+                ("hoprDefault", "5"),
+            ])),
+            Some(".with_limits(-5.0, 5.0)".to_string())
         );
         assert_eq!(
-            user_defined_limits(
-                &mut b,
-                &widget(&[("loprSrc", "default"), ("hoprSrc", "default")]),
-            ),
-            Some((0.0, 1.0)) // LOPR_DEFAULT 0.0, HOPR_DEFAULT 1.0
+            user_defined_limits(&widget(&[("loprSrc", "default"), ("hoprSrc", "default")])),
+            // LOPR_DEFAULT 0.0, HOPR_DEFAULT 1.0
+            Some(".with_limits(0.0, 1.0)".to_string())
         );
-        assert!(b.warnings.is_empty(), "both-default must not warn");
 
-        // neither default -> channel-driven, no warning.
-        assert_eq!(user_defined_limits(&mut b, &widget(&[])), None);
-        assert!(b.warnings.is_empty());
+        // Neither default -> channel-driven, no builder.
+        assert_eq!(user_defined_limits(&widget(&[])), None);
 
-        // single-sided default -> channel-driven with a warning (unrepresentable).
+        // Single-sided default is now representable per-bound: the pinned end
+        // emits, the other stays channel-driven (no warn, no fabricated end).
         assert_eq!(
-            user_defined_limits(
-                &mut b,
-                &widget(&[("hoprSrc", "default"), ("hoprDefault", "9")])
-            ),
-            None
+            user_defined_limits(&widget(&[("hoprSrc", "default"), ("hoprDefault", "9")])),
+            Some(".with_upper_limit(9.0)".to_string())
         );
-        assert_eq!(b.warnings.len(), 1);
-        assert!(b.warnings[0].contains("hoprSrc"));
+        assert_eq!(
+            user_defined_limits(&widget(&[("loprSrc", "default"), ("loprDefault", "-2")])),
+            Some(".with_lower_limit(-2.0)".to_string())
+        );
+        // Lower-only with an absent loprDefault falls to LOPR_DEFAULT 0.0.
+        assert_eq!(
+            user_defined_limits(&widget(&[("loprSrc", "default")])),
+            Some(".with_lower_limit(0.0)".to_string())
+        );
     }
 
     #[test]

@@ -2282,10 +2282,23 @@ bare `precDefault` that were intended to pin precision (`sample.adl`,
 pinning screens; committed modules regenerated. Test:
 `limits_precision_resolves_each_bound_per_its_own_source`.
 
-Residual (documented): sidm has no single-ended limit API, so a genuinely
-single-sided MEDM range (one bound fixed, one channel-driven) is warned and
-deferred to the channel rather than half-pinned — closing fully would need a
-cross-crate sidm extension.
+**FIXED (single-ended residual, structural) — per-bound limit model.** The
+former all-or-nothing residual is closed. sidm's numeric widgets
+(`SidmSlider`/`SidmSpinbox`/`SidmScaleIndicator`) now hold a per-bound
+`UserLimits { lower: Option<f64>, upper: Option<f64> }` instead of
+`Option<(f64, f64)>`; `control_range` resolves EACH end independently (user
+override when pinned, else the channel `DRVL`/`DRVH`), returning `None` only when
+a bound is unavailable. New `with_lower_limit`/`with_upper_limit` builders pin one
+end and leave the other channel-driven — a deliberate step beyond PyDM parity
+(PyDM's `userDefinedLimits` is all-or-nothing, `reset_limits` bails when either
+`userMinimum`/`userMaximum` is `None`) so `adl2sidm` converts single-sided MEDM
+`limits` blocks faithfully. `adl2sidm`'s `user_defined_limits` now maps each MEDM
+case directly (`both default → .with_limits`, `lower only → .with_lower_limit`,
+`upper only → .with_upper_limit`, `neither → nothing`), replacing the warn-and-
+drop. Tests: sidm `single_sided_limit_keeps_the_other_end_channel_driven`
+(slider + spinbox), adl2sidm `single_sided_valuator_limit_emits_a_per_bound_builder`
+plus the extended `user_defined_limits` unit cases (lower-only / upper-only /
+absent-default fallbacks).
 
 Severity: Medium
 

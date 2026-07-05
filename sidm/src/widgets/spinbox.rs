@@ -19,7 +19,7 @@ use siplot::egui;
 
 use crate::channel::{Channel, ChannelState, PvValue};
 use crate::engine::{Engine, EngineError};
-use crate::widgets::base::{AlarmPalette, BorderMode, ChannelBase, control_range};
+use crate::widgets::base::{AlarmPalette, BorderMode, ChannelBase, UserLimits, control_range};
 
 /// A writable numeric spin box (PyDM `PyDMSpinbox`).
 pub struct SidmSpinbox {
@@ -28,8 +28,9 @@ pub struct SidmSpinbox {
     /// precision (or `0`).
     pub precision_override: Option<i32>,
     /// Override the min/max instead of using the PV's control limits (PyDM
-    /// `userDefinedLimits`).
-    pub user_limits: Option<(f64, f64)>,
+    /// `userDefinedLimits`); per-bound so a single end can stay channel-driven
+    /// (MEDM single-sided `limits`, R2-66).
+    pub user_limits: UserLimits,
     /// The single-step exponent (PyDM `step_exponent`): the single step is
     /// `10^step_exponent`. Defaults to `0` (step = 1.0), independent of
     /// precision (`spinbox.py:35`); Ctrl+Left/Right adjust it in [`Self::show`].
@@ -64,7 +65,7 @@ impl SidmSpinbox {
             // PyDMSpinbox ships with alarmSensitiveBorder = False (spinbox.py:29).
             base: ChannelBase::new(engine.connect(address)?).with_border_mode(BorderMode::Off),
             precision_override: None,
-            user_limits: None,
+            user_limits: UserLimits::default(),
             step_exponent: 0,
             show_step_exponent: true,
             write_on_press: false,
@@ -77,9 +78,24 @@ impl SidmSpinbox {
         self
     }
 
-    /// Override the min/max range (builder style; PyDM `userDefinedLimits`).
+    /// Override both min/max range bounds (builder style; PyDM
+    /// `userDefinedLimits`).
     pub fn with_limits(mut self, min: f64, max: f64) -> Self {
-        self.user_limits = Some((min, max));
+        self.user_limits = UserLimits::both(min, max);
+        self
+    }
+
+    /// Pin only the lower bound, leaving the upper channel-driven (builder style;
+    /// MEDM single-sided `loprSrc="default"`, R2-66).
+    pub fn with_lower_limit(mut self, min: f64) -> Self {
+        self.user_limits.lower = Some(min);
+        self
+    }
+
+    /// Pin only the upper bound, leaving the lower channel-driven (builder style;
+    /// MEDM single-sided `hoprSrc="default"`, R2-66).
+    pub fn with_upper_limit(mut self, max: f64) -> Self {
+        self.user_limits.upper = Some(max);
         self
     }
 
@@ -317,10 +333,37 @@ mod tests {
     #[test]
     fn range_uses_user_limits_over_ctrl_limits() {
         let st = state_with(Some(1), Some((0.0, 10.0)));
-        assert_eq!(control_range(&st, None), Some((0.0, 10.0)));
-        assert_eq!(control_range(&st, Some((-1.0, 1.0))), Some((-1.0, 1.0)));
+        assert_eq!(control_range(&st, UserLimits::default()), Some((0.0, 10.0)));
+        assert_eq!(
+            control_range(&st, UserLimits::both(-1.0, 1.0)),
+            Some((-1.0, 1.0))
+        );
         let st = state_with(Some(1), None);
-        assert_eq!(control_range(&st, None), None);
+        assert_eq!(control_range(&st, UserLimits::default()), None);
+    }
+
+    #[test]
+    fn single_sided_limit_keeps_the_other_end_channel_driven() {
+        // R2-66: one pinned bound, the other from the channel (DRVL/DRVH).
+        let st = state_with(Some(1), Some((0.0, 10.0)));
+        let (_e, spin) = spinbox("loc://spin_upper_only");
+        let spin = spin.with_upper_limit(1.0);
+        assert_eq!(
+            spin.user_limits,
+            UserLimits {
+                lower: None,
+                upper: Some(1.0)
+            }
+        );
+        assert_eq!(control_range(&st, spin.user_limits), Some((0.0, 1.0)));
+        let (_e, spin) = spinbox("loc://spin_lower_only");
+        let spin = spin.with_lower_limit(-3.0);
+        assert_eq!(control_range(&st, spin.user_limits), Some((-3.0, 10.0)));
+        // No channel limit → a single-sided override can't form a full range.
+        assert_eq!(
+            control_range(&state_with(Some(1), None), spin.user_limits),
+            None
+        );
     }
 
     #[test]
