@@ -1035,12 +1035,30 @@ impl Colormap {
             return cm;
         }
         let (amin, amax) = self.autoscale_range(mode, data);
-        if self.vmin_auto {
-            cm.vmin = amin;
-        }
-        if self.vmax_auto {
-            cm.vmax = amax;
-        }
+        // silx `_getColormapRange` ordering-clamp tail (colors.py:739-748): the
+        // auto side is clamped against the *pinned* opposite so the resolved
+        // range always satisfies `vmin <= vmax`. Filling only the auto side with
+        // the raw data bound leaves an inverted range when a pinned bound sits on
+        // the wrong side of the data — e.g. pin `vmax = 2` over data `[3, 90]`
+        // with `vmin` auto gives `(3, 2)`, which violates `norm_bounds`' `vmax >
+        // vmin` precondition and collapses the whole item to the low color. silx
+        // returns the degenerate-but-ordered `(2, 2)` instead.
+        let vmin = if self.vmin_auto {
+            if self.vmax_auto {
+                amin
+            } else {
+                amin.min(self.vmax)
+            }
+        } else {
+            self.vmin
+        };
+        let vmax = if self.vmax_auto {
+            amax.max(vmin)
+        } else {
+            self.vmax
+        };
+        cm.vmin = vmin;
+        cm.vmax = vmax;
         cm
     }
 }
@@ -1394,6 +1412,29 @@ mod tests {
         let cm = Colormap::new(ColormapName::Viridis, 2.0, 8.0);
         let out = cm.resolved(AutoscaleMode::MinMax, &[100.0, 200.0]);
         assert_eq!((out.vmin, out.vmax), (2.0, 8.0));
+    }
+
+    #[test]
+    fn resolved_clamps_auto_bound_against_a_pinned_wrong_side_bound() {
+        // R3-6: silx `_getColormapRange`'s ordering clamp (colors.py:740-746).
+        // Pin vmax=2 below the data [3,90] with vmin auto: the auto vmin is
+        // clamped to the pinned vmax, giving the degenerate-but-ordered (2, 2),
+        // not the inverted (3, 2) that violates `norm_bounds`' `vmax > vmin`
+        // precondition and collapses the item to the low color.
+        let mut cm = Colormap::autoscale(ColormapName::Gray);
+        cm.vmax = 2.0;
+        cm.vmax_auto = false;
+        let out = cm.resolved(AutoscaleMode::MinMax, &[3.0, 90.0]);
+        assert_eq!((out.vmin, out.vmax), (2.0, 2.0));
+        assert!(out.vmin <= out.vmax, "resolved range must be ordered");
+
+        // Symmetric: pin vmin=100 above the data, vmax auto → vmax2 = max(90,
+        // 100) = 100, so (100, 100), not the inverted (100, 90).
+        let mut cm = Colormap::autoscale(ColormapName::Gray);
+        cm.vmin = 100.0;
+        cm.vmin_auto = false;
+        let out = cm.resolved(AutoscaleMode::MinMax, &[3.0, 90.0]);
+        assert_eq!((out.vmin, out.vmax), (100.0, 100.0));
     }
 
     #[test]

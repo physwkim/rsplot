@@ -2550,6 +2550,29 @@ Impact: a time-series X axis always shows ~5 ticks regardless of width while a n
 
 ### R3-6: `Colormap::resolved` omits `getColormapRange`'s unconditional ordering clamps — inverted pinned ranges collapse the render — (R2-14/41/46 residual)
 
+**FIXED (R3):** both per-bound resolvers now apply silx `_getColormapRange`'s
+ordering-clamp tail (colors.py:739-748), so the auto side is always clamped
+against the *pinned* opposite and the result satisfies `vmin <= vmax`:
+
+- `Colormap::resolved` (colormap.rs): after autoscale, `vmin = min(amin, vmax)`
+  when vmin is auto and vmax pinned, `vmax = max(amax, vmin)` when vmax is auto —
+  instead of filling only the auto side with the raw data bound. Pin `vmax = 2`
+  over data `[3, 90]` with vmin auto now yields the ordered `(2, 2)`, not the
+  inverted `(3, 2)`. Every consumer (3D `scene3d_items`, `ComplexImageView`, the
+  dialog) is fixed transitively through this single owner.
+- `colormap_dialog::resolve_bounds` (colormap_dialog.rs): rewritten to be the
+  sole owner of the silx tail. The former split — fill the auto side raw, then
+  clamp only *invalid* pins via `repair_range` — left a genuinely-auto but
+  *valid* data bound on the wrong side of a pinned opposite unclamped. `resolve_
+  bounds` now treats "auto" as user-auto OR normalization-invalid (silx's `None`
+  switch) and applies `min`/`max` uniformly; the now-redundant `repair_range`
+  helper was removed and its per-side-repair tests folded into `resolve_bounds`
+  cases.
+
+Tests: `resolved_clamps_auto_bound_against_a_pinned_wrong_side_bound` and
+`resolve_bounds_clamps_auto_bound_against_pinned_wrong_side` (both directions),
+plus the migrated invalid-repair cases.
+
 Severity: Medium
 
 Rust: `src/core/colormap.rs:1032-1045` — `Colormap::resolved(mode, data)` early-returns when both bounds are pinned and otherwise fills only the auto side(s) with raw `amin`/`amax`, applying no cross-bound ordering clamp and keeping a normalization-invalid pinned bound. `src/widget/colormap_dialog.rs:458-462` (`resolve_bounds`): the auto-filled bound is never clamped against the pinned opposite; `repair_range` (`:410-428`) cross-clamps only when the pinned value is invalid under the normalization, not when it is merely on the wrong side of the data range.
