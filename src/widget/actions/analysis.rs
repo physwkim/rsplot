@@ -206,11 +206,12 @@ pub struct PixelHistogram {
     pub min: f64,
     /// Finite maximum pixel value (histogram range upper bound).
     pub max: f64,
-    /// Mean of the finite pixels (silx `numpy.nanmean`).
+    /// Mean of the non-NaN pixels (silx `numpy.nanmean`; ±inf propagate).
     pub mean: f64,
-    /// Population standard deviation of the finite pixels (silx `numpy.nanstd`).
+    /// Population standard deviation of the non-NaN pixels (silx
+    /// `numpy.nanstd`; ±inf propagate → nan).
     pub std: f64,
-    /// Sum of the finite pixels (silx `numpy.nansum`).
+    /// Sum of the non-NaN pixels (silx `numpy.nansum`; ±inf propagate).
     pub sum: f64,
     /// Number of bins (`counts.len()`).
     pub n_bins: usize,
@@ -236,17 +237,19 @@ pub struct PixelHistogram {
 ///   the max lands in the last bin (not discarded), and an interior value `v`
 ///   lands in `floor((v - min) * n_bins / (max - min))`.
 /// - Statistics: `min`/`max` are the finite range bounds; `mean`/`std`/`sum`
-///   are over the finite pixels (silx `nanmean`/`nanstd`/`nansum`), `std` being
-///   the population standard deviation.
+///   are over the non-NaN pixels (silx `nanmean`/`nanstd`/`nansum` skip NaN but
+///   propagate ±inf — only the range is finite-filtered), `std` being the
+///   population standard deviation.
 ///
 /// Returns `None` when there is no finite pixel (silx `HistogramWidget.reset`
 /// on all-not-finite data).
 pub fn pixel_intensity_histogram(pixels: &[f64], n_bins: Option<usize>) -> Option<PixelHistogram> {
-    // Finite pass: range bounds and running stats over finite pixels only.
+    // Finite pass: range bounds + reset gate only. silx takes the range from
+    // `min_max(finite=True)` and resets when no pixel is finite
+    // (histogram.py:246-249).
     let mut finite_count: usize = 0;
     let mut min = f64::INFINITY;
     let mut max = f64::NEG_INFINITY;
-    let mut sum = 0.0_f64;
     for &v in pixels {
         if v.is_finite() {
             finite_count += 1;
@@ -256,7 +259,6 @@ pub fn pixel_intensity_histogram(pixels: &[f64], n_bins: Option<usize>) -> Optio
             if v > max {
                 max = v;
             }
-            sum += v;
         }
     }
     if finite_count == 0 {
@@ -264,16 +266,30 @@ pub fn pixel_intensity_histogram(pixels: &[f64], n_bins: Option<usize>) -> Optio
         return None;
     }
 
-    let mean = sum / finite_count as f64;
+    // Stats pass: silx computes mean/std/sum with `numpy.nanmean`/`nanstd`/
+    // `nansum` (histogram.py:296-298), which skip NaN but PROPAGATE +/-inf —
+    // only the range above is finite-filtered. So an image carrying +/-inf
+    // pixels shows inf/nan stats, matching silx, rather than the finite-only
+    // stats a `is_finite()` filter would give. `non_nan_count >= finite_count
+    // >= 1`, so the divisions below are safe.
+    let mut non_nan_count: usize = 0;
+    let mut sum = 0.0_f64;
+    for &v in pixels {
+        if !v.is_nan() {
+            non_nan_count += 1;
+            sum += v;
+        }
+    }
+    let mean = sum / non_nan_count as f64;
     // Population standard deviation (numpy.nanstd default ddof=0).
     let mut var_acc = 0.0_f64;
     for &v in pixels {
-        if v.is_finite() {
+        if !v.is_nan() {
             let d = v - mean;
             var_acc += d * d;
         }
     }
-    let std = (var_acc / finite_count as f64).sqrt();
+    let std = (var_acc / non_nan_count as f64).sqrt();
 
     // Bin count: silx guessed = min(1024, int(sqrt(array.size))), then
     // max(2, ...) — the TOTAL element count, NaN/inf included (only the range
@@ -541,22 +557,39 @@ mod tests {
         assert!((h.std - 2.0_f64.sqrt()).abs() < 1e-12);
     }
 
-    /// NaN and inf pixels are excluded from range, counts, and statistics.
+    /// NaN and inf pixels are excluded from the range and counts, but silx's
+    /// stats (`nanmean`/`nanstd`/`nansum`, histogram.py:296-298) skip only NaN
+    /// and PROPAGATE ±inf — so a +inf pixel makes sum/mean inf and std nan,
+    /// while the range and counts stay finite.
     #[test]
-    fn histogram_excludes_non_finite() {
+    fn histogram_stats_propagate_inf_while_range_excludes_it() {
         // Finite values {0,1,2,3} plus a NaN and a +inf.
         let pixels = [0.0, 1.0, f64::NAN, 2.0, f64::INFINITY, 3.0];
         let h = pixel_intensity_histogram(&pixels, Some(4)).expect("finite pixels");
         // Range from finite only: min 0, max 3.
         assert_eq!(h.min, 0.0);
         assert_eq!(h.max, 3.0);
-        // Stats over the 4 finite pixels only.
-        assert_eq!(h.sum, 6.0);
-        assert_eq!(h.mean, 1.5);
-        // Only the 4 finite pixels are counted.
+        // Stats over the non-NaN pixels {0,1,2,inf,3}: the +inf propagates.
+        assert_eq!(h.sum, f64::INFINITY);
+        assert_eq!(h.mean, f64::INFINITY);
+        assert!(h.std.is_nan());
+        // Only the 4 finite pixels are counted (NaN/inf fall outside [0,3]).
         assert_eq!(h.counts.iter().sum::<u64>(), 4);
         // Default bin formula would use sqrt(4)=2, but we forced 4 bins.
         assert_eq!(h.n_bins, 4);
+    }
+
+    /// With no ±inf present, the stats skip NaN and stay finite (the common
+    /// case): `nanmean`/`nanstd`/`nansum` over the non-NaN pixels.
+    #[test]
+    fn histogram_stats_skip_nan_and_stay_finite() {
+        let pixels = [0.0, 1.0, f64::NAN, 2.0, 3.0];
+        let h = pixel_intensity_histogram(&pixels, Some(4)).expect("finite pixels");
+        assert_eq!(h.sum, 6.0);
+        assert_eq!(h.mean, 1.5);
+        // Population std of {0,1,2,3}: mean 1.5, var (2.25+0.25+0.25+2.25)/4=1.25.
+        assert!((h.std - 1.25_f64.sqrt()).abs() < 1e-12);
+        assert_eq!(h.counts.iter().sum::<u64>(), 4);
     }
 
     /// All-equal pixels: degenerate range is enlarged so the pixels land in a

@@ -2455,6 +2455,15 @@ Impact: silx's grid button yields major+minor; siplot's yields major only. The R
 
 ### R3-2: `pixel_intensity_histogram` mean/std/sum drop ±inf — silx `nanmean`/`nanstd`/`nansum` skip only NaN and propagate infinities — (R2-20 residual)
 
+**FIXED (R3):** `analysis.rs` now computes mean/std/sum over the non-NaN pixels
+(a second pass gated on `!v.is_nan()`) instead of the finite-only pass, so ±inf
+propagates (sum/mean → ±inf, std → nan) exactly as `numpy.nanmean/nanstd/nansum`
+do; the range/reset stays finite-filtered (`min_max(finite=True)`). The stale
+test `histogram_excludes_non_finite` — which asserted the divergent finite-only
+`sum==6.0`/`mean==1.5` — was replaced by `histogram_stats_propagate_inf_while_
+range_excludes_it` (+inf → inf/inf/nan) and `histogram_stats_skip_nan_and_stay_
+finite`.
+
 Severity: Low
 
 Rust: `src/widget/actions/analysis.rs:245-276` — stats accumulate over `v.is_finite()` pixels only, while docs at `:209-214`/`:238-240` claim these are silx `numpy.nanmean`/`nanstd`/`nansum`.
