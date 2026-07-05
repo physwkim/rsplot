@@ -2663,6 +2663,25 @@ Impact: coincident-fragment policy inverted — silx lets the later-drawn primit
 
 ### R3-11: ScenePositionInfo drops the Item field and its `%g` claim is wrong
 
+**PARTIALLY FIXED (R3):** The `%g` correctness half is fixed. `fn g` now formats
+via `format_g_python(f64::from(v), 6)` — CPython `"%g"` with the default 6
+significant digits (`PositionInfoWidget.py:205-215`), replacing Rust's default
+`Display` (which prints the shortest round-trippable form, diverging for
+>6-sig-digit values, e.g. `0.12345679` → silx `0.123457`). The `fn g` doc no
+longer claims `Display ≡ %g`. silx's array `"%.3g"` path is N/A: siplot's
+`FieldPick::value` is a single scalar. Test:
+`g_rounds_to_six_significant_digits_like_python_g` (+ `g_drops_trailing_zeros_…`).
+The module doc now states the four coordinate/value fields are complete and the
+fifth `_itemLabel` ("Item") field is not yet ported.
+
+**DEFERRED (Item field, pending sign-off):** silx's fifth `_itemLabel` shows the
+picked item's `getLabel()` so an isosurface hit reads differently from a
+cut-plane hit. Porting it is a data-model extension across the pick pipeline —
+`FieldPick` carries no source tag and the 3D items (`Isosurface`/`CutPlane`) have
+no label — i.e. a feature-sized change on a Low finding. Surfaced for sign-off
+(batched with R3-7); the user was away at ask time, so it is held rather than
+implemented unilaterally.
+
 Severity: Low
 
 Rust: `src/widget/scene_position_info.rs:3-9` — module doc lists four fields (X/Y/Z/Data, silx `_xLabel`/`_yLabel`/`_zLabel`/`_dataLabel`); `:51-69` draws exactly those four; `:77-81` `fn g` claims to format "the way silx's `%g` does" via Rust default float `Display`.

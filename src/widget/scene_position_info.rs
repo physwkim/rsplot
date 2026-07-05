@@ -8,6 +8,14 @@
 //! ([`crate::SceneWindow`]) feeds it the pick result of
 //! [`crate::ScalarFieldView::pick`] each frame.
 //!
+//! silx has a fifth field `_itemLabel` ("Item", `PositionInfoWidget.py:60`) that
+//! shows `item.getLabel()` of the picked item so an isosurface hit reads
+//! differently from a cut-plane hit. It is **not yet ported**: siplot's
+//! [`FieldPick`] carries no source tag and the 3D items ([`ScalarField3D`]'s
+//! isosurfaces / cut plane) have no label, so the field needs a data-model
+//! extension across the pick pipeline. Deferred pending sign-off (R3-11); the
+//! four coordinate/value fields below are complete.
+//!
 //! The Qt picking-mode toggle action is not ported (interactive-mode toolbars
 //! are Qt shell, like the rest of the `SceneWindow` chrome the roadmap lists as
 //! N/A); the readout itself is the substance.
@@ -15,6 +23,7 @@
 use egui::Ui;
 
 use crate::widget::scalar_field_view::FieldPick;
+use crate::widget::stats_widget::format_g_python;
 
 /// A position/value readout fed by [`crate::ScalarFieldView::pick`]. Hold one,
 /// call [`set`](ScenePositionInfo::set) with the current pick each frame, and
@@ -74,8 +83,35 @@ fn dash() -> String {
     "-".to_string()
 }
 
-/// Format a value the way silx's `"%g"` does for the readout: shortest
-/// round-trippable form (Rust's default float `Display`), e.g. `1.5`, `0.5`.
+/// Format a value as silx's readout does — CPython `"%g"` with its default 6
+/// significant digits (`PositionInfoWidget.py:205-215`, `"%g" % x`), **not**
+/// Rust's default float `Display`. `Display` prints the shortest round-trippable
+/// form (`0.123456789` in full), whereas silx `%g` rounds to 6 sig digits
+/// (`0.123457`). silx uses `"%.3g"` for array-valued data, but siplot's
+/// [`FieldPick::value`] is a single scalar, so only the scalar `%g` path applies.
 fn g(v: f32) -> String {
-    format!("{v}")
+    format_g_python(f64::from(v), 6)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::g;
+
+    #[test]
+    fn g_rounds_to_six_significant_digits_like_python_g() {
+        // silx `"%g" % 0.12345679` → "0.123457" (6 sig digits); Rust `Display`
+        // would print the full round-trippable "0.12345679". This is the exact
+        // divergence the old `fn g` doc wrongly claimed was equivalent.
+        let v = 0.123_456_79_f32;
+        assert_eq!(g(v), "0.123457");
+        assert_ne!(g(v), format!("{v}"));
+    }
+
+    #[test]
+    fn g_drops_trailing_zeros_like_python_g() {
+        // `%g` strips a trailing `.0` and trailing fraction zeros.
+        assert_eq!(g(5.0), "5");
+        assert_eq!(g(1.5), "1.5");
+        assert_eq!(g(-0.25), "-0.25");
+    }
 }
