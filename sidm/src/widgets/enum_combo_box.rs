@@ -327,7 +327,10 @@ mod tests {
     #[test]
     fn select_writes_the_index_to_the_channel() {
         let engine = Engine::new();
-        let combo = SidmEnumComboBox::new(&engine, "loc://enum_combo_select").expect("connect");
+        // Config-bearing loc (type+init) so the connection connects — a bare
+        // `loc://` stays disconnected until configured (R3-12).
+        let combo = SidmEnumComboBox::new(&engine, "loc://enum_combo_select?type=int&init=0")
+            .expect("connect");
         assert!(
             wait_for(|| combo.channel().is_connected(), Duration::from_secs(2)),
             "combo channel never connected"

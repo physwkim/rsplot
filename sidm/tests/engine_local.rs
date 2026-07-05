@@ -146,6 +146,107 @@ fn local_array_type_serves_a_waveform() {
 }
 
 #[test]
+fn bare_local_is_disconnected_with_no_value() {
+    // R3-12: a bare `loc://name` (no type+init) is not config-bearing, so PyDM
+    // leaves it disconnected with no value — never a fabricated `0.0`
+    // (`_configure_local_plugin` returns early, local_plugin.py:47-61).
+    let engine = Engine::new();
+    let ch = engine.connect("loc://bare_only").unwrap();
+
+    // It must never connect on its own, and must carry no value.
+    assert!(
+        !wait_for(|| ch.is_connected(), Duration::from_millis(300)),
+        "a bare loc:// must stay disconnected until configured"
+    );
+    assert_eq!(
+        ch.read(|s| s.value.clone()),
+        None,
+        "a bare loc:// must not fabricate a value"
+    );
+}
+
+#[test]
+fn partial_local_missing_a_required_key_is_disconnected() {
+    // R3-12: `type` without `init` (or vice versa) is a partial address — PyDM
+    // requires both (`_required_config_keys`), so it stays disconnected.
+    let engine = Engine::new();
+    let type_only = engine.connect("loc://partial_t?type=int").unwrap();
+    let init_only = engine.connect("loc://partial_i?init=5").unwrap();
+
+    assert!(
+        !wait_for(|| type_only.is_connected(), Duration::from_millis(300)),
+        "type without init must stay disconnected"
+    );
+    assert!(
+        !wait_for(|| init_only.is_connected(), Duration::from_millis(300)),
+        "init without type must stay disconnected"
+    );
+    assert_eq!(type_only.read(|s| s.value.clone()), None);
+    assert_eq!(init_only.read(|s| s.value.clone()), None);
+}
+
+#[test]
+fn unparsable_init_connects_with_no_value() {
+    // R3-12: a config-bearing address whose `init` cannot be converted connects
+    // but carries no value — PyDM's `convert_value` returns `None`
+    // (local_plugin.py:318-323), never a fabricated type-zero.
+    let engine = Engine::new();
+    let ch = engine
+        .connect("loc://unparsable?type=int&init=notanint")
+        .unwrap();
+
+    assert!(
+        wait_for(|| ch.is_connected(), Duration::from_secs(1)),
+        "a config-bearing address connects even when init is unparsable"
+    );
+    assert_eq!(
+        ch.read(|s| s.value.clone()),
+        None,
+        "unparsable init must yield no value, not a type-zero"
+    );
+}
+
+#[test]
+fn config_bearing_listener_configures_a_bare_connection_regardless_of_order() {
+    // R3-12 (the primary defect): a bare reader connecting FIRST must not lock
+    // the variable disconnected — the first config-bearing listener configures
+    // the shared connection whichever order the engine reaches them (PyDM
+    // re-runs `_configure_local_plugin` on every `add_listener`, :333-335).
+    let engine = Engine::new();
+
+    // Bare reader creates the pooled connection, disconnected with no value.
+    let reader = engine.connect("loc://ordered").unwrap();
+    assert!(
+        !wait_for(|| reader.is_connected(), Duration::from_millis(200)),
+        "bare-first reader is disconnected until a config-bearing listener arrives"
+    );
+
+    // A later config-bearing declarer configures the same connection.
+    let declarer = engine.connect("loc://ordered?type=int&init=5").unwrap();
+    assert_eq!(
+        engine.connection_count(),
+        1,
+        "same name → one pooled connection"
+    );
+
+    // Both handles now observe the configured, connected value.
+    assert!(
+        wait_for(
+            || reader.is_connected() && declarer.is_connected(),
+            Duration::from_secs(1)
+        ),
+        "the config-bearing listener must connect the bare-first connection"
+    );
+    assert_eq!(reader.read(|s| s.value.clone()), Some(PvValue::Int(5)));
+
+    // And a write through either handle still flows.
+    let before = reader.stamp();
+    declarer.put(PvValue::Int(11));
+    assert!(wait_for(|| reader.stamp() > before, Duration::from_secs(1)));
+    assert_eq!(reader.read(|s| s.value.clone()), Some(PvValue::Int(11)));
+}
+
+#[test]
 fn unknown_protocol_errors() {
     let engine = Engine::new();
     assert!(engine.connect("zz://nope").is_err());

@@ -142,6 +142,8 @@ impl DataPlugin for CalcPlugin {
         let ConnectionCtx {
             writer,
             writes,
+            // `calc://` does not reconfigure per listener (see `ConnectionCtx::listeners`).
+            listeners: _,
             cancel,
             runtime,
             address,
@@ -1069,7 +1071,7 @@ mod tests {
     /// A child channel whose state the caller sets directly (value-less until
     /// posted). Dangling pool weak → the `Drop` prune is a no-op.
     fn child_channel() -> (Channel, StateWriter) {
-        let (conn, writer, _writes, _cancel) = crate::channel::Connection::new(
+        let (conn, writer, _writes, _listeners, _cancel) = crate::channel::Connection::new(
             PvAddress::parse("loc://calc_child"),
             crate::channel::RepaintHook::default(),
             std::sync::Weak::new(),

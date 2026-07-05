@@ -60,7 +60,10 @@ fn gradient_array_renders_a_color_mapped_image() {
     let rs = create_render_state(default_wgpu_setup());
     siplot::install(&rs);
     let engine = Engine::new();
-    let mut view = SidmImageView::new(&engine, &rs, 0, "loc://cam", None)
+    // Config-bearing loc (type+init) so the connection connects — a bare
+    // `loc://` stays disconnected until configured (R3-12); the array write
+    // below overrides the scalar init.
+    let mut view = SidmImageView::new(&engine, &rs, 0, "loc://cam?type=float&init=0", None)
         .expect("connect image channel")
         .with_width(16)
         .with_color_map_range(0.0, 255.0);

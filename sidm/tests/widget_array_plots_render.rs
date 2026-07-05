@@ -44,9 +44,12 @@ fn waveform_curve_renders_from_a_y_array() {
     siplot::install(&rs);
     let engine = Engine::new();
     let mut plot = SidmWaveformPlot::new(&rs, 0);
+    // Config-bearing loc (type+init) so the connection connects — a bare
+    // `loc://` stays disconnected until configured (R3-12); the array write
+    // below overrides the scalar init.
     plot.add_channel(
         &engine,
-        "loc://wave_y",
+        "loc://wave_y?type=float&init=0",
         egui::Color32::from_rgb(0, 255, 0),
         "y",
     )

@@ -136,7 +136,11 @@ mod tests {
     #[test]
     fn set_checked_writes_to_the_channel() {
         let engine = Engine::new();
-        let checkbox = SidmCheckbox::new(&engine, "loc://checkbox_set", "enable").expect("connect");
+        // Config-bearing loc (type+init) so the connection is connected — a
+        // bare `loc://` is disconnected until configured (R3-12), and the
+        // widget must be connected to accept the write.
+        let checkbox = SidmCheckbox::new(&engine, "loc://checkbox_set?type=int&init=0", "enable")
+            .expect("connect");
         assert!(
             wait_for(|| checkbox.channel().is_connected(), Duration::from_secs(2)),
             "checkbox channel never connected"

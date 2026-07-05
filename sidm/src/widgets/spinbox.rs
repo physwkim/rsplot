@@ -470,7 +470,9 @@ mod tests {
 
     #[test]
     fn set_value_writes_a_float_to_the_channel() {
-        let (engine, spin) = spinbox("loc://spin_set");
+        // Config-bearing loc (type+init) so the connection connects — a bare
+        // `loc://` stays disconnected until configured (R3-12).
+        let (engine, spin) = spinbox("loc://spin_set?type=float&init=0");
         let _seed = engine.connect("loc://spin_set").expect("seed handle");
         assert!(
             wait_for(|| spin.channel().is_connected(), Duration::from_secs(2)),

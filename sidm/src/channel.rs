@@ -448,6 +448,11 @@ pub(crate) struct Connection {
     shared: Arc<ConnShared>,
     address: PvAddress,
     writes_tx: mpsc::UnboundedSender<PvValue>,
+    /// Forwards each later listener's full address to the plugin task (see
+    /// [`Connection::forward_listener`]). Only the `loc://` task reads the
+    /// paired receiver; for other protocols the receiver is simply never
+    /// polled, so sends here are dropped harmlessly.
+    listeners_tx: mpsc::UnboundedSender<PvAddress>,
     cancel: CancellationToken,
     pool: Weak<Mutex<std::collections::HashMap<String, Weak<Connection>>>>,
     pool_key: String,
@@ -466,6 +471,7 @@ impl Connection {
         Arc<Connection>,
         StateWriter,
         mpsc::UnboundedReceiver<PvValue>,
+        mpsc::UnboundedReceiver<PvAddress>,
         CancellationToken,
     ) {
         let shared = Arc::new(ConnShared {
@@ -474,17 +480,30 @@ impl Connection {
             value_subs: Mutex::new(Vec::new()),
         });
         let (writes_tx, writes_rx) = mpsc::unbounded_channel();
+        let (listeners_tx, listeners_rx) = mpsc::unbounded_channel();
         let cancel = CancellationToken::new();
         let conn = Arc::new(Connection {
             shared: shared.clone(),
             address,
             writes_tx,
+            listeners_tx,
             cancel: cancel.clone(),
             pool,
             pool_key,
         });
         let writer = StateWriter { shared };
-        (conn, writer, writes_rx, cancel)
+        (conn, writer, writes_rx, listeners_rx, cancel)
+    }
+
+    /// Notify the plugin task that a new `Channel` is attaching to this
+    /// already-pooled connection, handing it the listener's full address (with
+    /// query). The `loc://` task consumes this to configure on the first
+    /// config-bearing address regardless of connect order (PyDM's
+    /// per-`add_listener` `_configure_local_plugin`); tasks that never poll the
+    /// receiver simply let the send fall on the floor. A closed channel (task
+    /// already exited) is ignored — there is nothing left to configure.
+    pub(crate) fn forward_listener(&self, address: PvAddress) {
+        let _ = self.listeners_tx.send(address);
     }
 }
 
@@ -660,7 +679,7 @@ mod tests {
     /// Build a connected `(Channel, StateWriter)` pair with a dangling pool weak
     /// (the pool prune in `Drop` is a no-op) for exercising the value-event path.
     fn channel_pair() -> (Channel, StateWriter) {
-        let (conn, writer, _writes, _cancel) = Connection::new(
+        let (conn, writer, _writes, _listeners, _cancel) = Connection::new(
             crate::address::PvAddress::parse("loc://value_events"),
             RepaintHook::default(),
             Weak::new(),

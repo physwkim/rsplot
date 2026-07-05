@@ -105,6 +105,8 @@ impl DataPlugin for CaPlugin {
         let ConnectionCtx {
             writer,
             writes,
+            // `ca://` does not reconfigure per listener (see `ConnectionCtx::listeners`).
+            listeners: _,
             cancel,
             runtime,
             address,

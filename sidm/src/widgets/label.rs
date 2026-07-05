@@ -268,7 +268,11 @@ mod tests {
     #[test]
     fn live_value_flows_from_a_write() {
         let engine = Engine::new();
-        let label = SidmLabel::new(&engine, "loc://label_live").expect("connect");
+        // Config-bearing float loc (type+init, no explicit precision) so the
+        // connection connects — a bare `loc://` is disconnected until
+        // configured (R3-12) — while still deriving precision from the written
+        // value below.
+        let label = SidmLabel::new(&engine, "loc://label_live?type=float&init=0").expect("connect");
         let writer = engine.connect("loc://label_live").expect("second handle");
         assert!(
             wait_for(|| label.channel().is_connected(), Duration::from_secs(2)),

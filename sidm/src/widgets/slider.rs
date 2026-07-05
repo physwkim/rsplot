@@ -315,7 +315,9 @@ mod tests {
         // an external write landing off the step grid (13.6 on a 5..20
         // range = 0.15 steps) was echoed back to the channel as 13.55 one
         // frame later — retargeting the IOC that wrote it.
-        let (engine, slider) = slider("loc://slider_echo");
+        // Config-bearing loc (type+init) so the connection connects — a bare
+        // `loc://` stays disconnected until configured (R3-12).
+        let (engine, slider) = slider("loc://slider_echo?type=float&init=0");
         let slider = slider.with_limits(5.0, 20.0).with_precision(3);
         let seed = engine.connect("loc://slider_echo").expect("seed handle");
         assert!(
@@ -379,7 +381,9 @@ mod tests {
 
     #[test]
     fn set_value_writes_a_float_to_the_channel() {
-        let (engine, slider) = slider("loc://slider_set");
+        // Config-bearing loc (type+init) so the connection connects — a bare
+        // `loc://` stays disconnected until configured (R3-12).
+        let (engine, slider) = slider("loc://slider_set?type=float&init=0");
         let _seed = engine.connect("loc://slider_set").expect("seed handle");
         assert!(
             wait_for(|| slider.channel().is_connected(), Duration::from_secs(2)),

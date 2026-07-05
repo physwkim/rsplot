@@ -27,6 +27,16 @@ pub struct ConnectionCtx {
     pub writer: StateWriter,
     /// Values queued by `Channel::put` on the GUI thread.
     pub writes: mpsc::UnboundedReceiver<PvValue>,
+    /// The full address (with query) of every *subsequent* listener that
+    /// attaches to this already-pooled connection — one per fast-path
+    /// `Engine::connect` reuse after creation. PyDM re-runs
+    /// `_configure_local_plugin` on every `add_listener`
+    /// (`local_plugin.py:333-335`), so the `loc://` plugin uses this to
+    /// configure on the first *config-bearing* address (`name`+`type`+`init`)
+    /// regardless of connect order, instead of being locked to the creating
+    /// address (whose query the pool otherwise drops). Plugins that do not
+    /// reconfigure per listener (`ca`/`pva`/`fake`/`calc`) ignore it.
+    pub listeners: mpsc::UnboundedReceiver<PvAddress>,
     /// Fired when the last `Channel` for this connection drops — the task must
     /// observe it and exit.
     pub cancel: CancellationToken,

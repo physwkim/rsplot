@@ -30,11 +30,19 @@ fn calc_sums_two_local_children_and_recomputes_on_write() {
     let calc = engine
         .connect("calc://sum?expr=a+b&a=loc://calc_x&b=loc://calc_y")
         .expect("connect calc channel");
-    // The children share by name with these direct handles.
-    let a = engine.connect("loc://calc_x").expect("connect child a");
-    let b = engine.connect("loc://calc_y").expect("connect child b");
+    // The children share by name with these config-bearing direct handles.
+    // A bare `loc://` is disconnected until a config-bearing address (type+init)
+    // arrives (R3-12); the engine forwards these later addresses to the
+    // connections the calc opened bare, so the children configure regardless of
+    // connect order.
+    let a = engine
+        .connect("loc://calc_x?type=float&init=0")
+        .expect("connect child a");
+    let b = engine
+        .connect("loc://calc_y?type=float&init=0")
+        .expect("connect child b");
 
-    // Both children connect immediately (loc:// is in-process) → calc connects.
+    // Both children configure via the direct handles → calc connects.
     assert!(
         wait_for(|| calc.is_connected(), Duration::from_secs(2)),
         "calc channel never connected (children did not all connect)"
@@ -70,8 +78,13 @@ fn calc_update_list_restricts_which_child_triggers_recompute() {
     let calc = engine
         .connect("calc://restricted?expr=a+b&a=loc://calc_ua&b=loc://calc_ub&update=a")
         .expect("connect calc channel");
-    let a = engine.connect("loc://calc_ua").expect("connect child a");
-    let b = engine.connect("loc://calc_ub").expect("connect child b");
+    // Config-bearing handles so the bare children the calc opened connect (R3-12).
+    let a = engine
+        .connect("loc://calc_ua?type=float&init=0")
+        .expect("connect child a");
+    let b = engine
+        .connect("loc://calc_ub?type=float&init=0")
+        .expect("connect child b");
 
     assert!(
         wait_for(|| calc.is_connected(), Duration::from_secs(2)),
@@ -129,7 +142,10 @@ fn medm_if_zero_gate_tracks_a_float_channel() {
     let calc = engine
         .connect("calc://medm_zero?dialect=medm&expr=A=0&A=loc://medm_zero_a&update=A")
         .expect("connect medm calc channel");
-    let a = engine.connect("loc://medm_zero_a").expect("connect child");
+    // Config-bearing handle so the bare child the calc opened connects (R3-12).
+    let a = engine
+        .connect("loc://medm_zero_a?type=float&init=0")
+        .expect("connect child");
 
     // loc:// children start at Float(0.0) → "if zero" is TRUE (1.0: shown).
     assert!(
@@ -152,7 +168,10 @@ fn medm_if_not_zero_gate_is_the_inverse() {
     let calc = engine
         .connect("calc://medm_nz?dialect=medm&expr=A%230&A=loc://medm_nz_a&update=A")
         .expect("connect medm calc channel");
-    let a = engine.connect("loc://medm_nz_a").expect("connect child");
+    // Config-bearing handle so the bare child the calc opened connects (R3-12).
+    let a = engine
+        .connect("loc://medm_nz_a?type=float&init=0")
+        .expect("connect child");
 
     // Float(0.0) → `A#0` is FALSE (0.0: hidden).
     assert!(
@@ -176,8 +195,13 @@ fn medm_ternary_functions_and_encoded_and_evaluate() {
     let calc = engine
         .connect("calc://medm_tern?dialect=medm&expr=A>2?SQRT(B):MIN(A,B)&A=loc://medm_t_a&B=loc://medm_t_b")
         .expect("connect medm ternary channel");
-    let a = engine.connect("loc://medm_t_a").expect("connect child a");
-    let b = engine.connect("loc://medm_t_b").expect("connect child b");
+    // Config-bearing handles so the bare children the calc opened connect (R3-12).
+    let a = engine
+        .connect("loc://medm_t_a?type=float&init=0")
+        .expect("connect child a");
+    let b = engine
+        .connect("loc://medm_t_b?type=float&init=0")
+        .expect("connect child b");
     assert!(
         wait_for(|| calc.is_connected(), Duration::from_secs(2)),
         "medm ternary channel never connected"
@@ -217,7 +241,10 @@ fn medm_lowercase_operands_bind_like_uppercase() {
     let calc = engine
         .connect("calc://medm_lc?dialect=medm&expr=a%230&A=loc://medm_lc_a")
         .expect("connect medm lowercase channel");
-    let a = engine.connect("loc://medm_lc_a").expect("connect child");
+    // Config-bearing handle so the bare child the calc opened connects (R3-12).
+    let a = engine
+        .connect("loc://medm_lc_a?type=float&init=0")
+        .expect("connect child");
 
     assert!(
         wait_for_float(&calc, 0.0),
@@ -240,7 +267,11 @@ fn medm_metadata_operand_g_reads_first_channel_element_count() {
     let calc = engine
         .connect("calc://medm_g?dialect=medm&expr=G&A=loc://medm_g_a")
         .expect("connect medm G channel");
-    let _a = engine.connect("loc://medm_g_a").expect("connect child");
+    // Config-bearing handle so the bare child the calc opened connects (R3-12).
+    // A scalar float value has element count 1.
+    let _a = engine
+        .connect("loc://medm_g_a?type=float&init=0")
+        .expect("connect child");
 
     assert!(
         wait_for_float(&calc, 1.0),

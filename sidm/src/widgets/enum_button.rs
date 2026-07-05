@@ -277,7 +277,10 @@ mod tests {
     #[test]
     fn select_writes_the_index_to_the_channel() {
         let engine = Engine::new();
-        let button = SidmEnumButton::new(&engine, "loc://enum_button_select").expect("connect");
+        // Config-bearing loc (type+init) so the connection connects — a bare
+        // `loc://` stays disconnected until configured (R3-12).
+        let button = SidmEnumButton::new(&engine, "loc://enum_button_select?type=int&init=0")
+            .expect("connect");
         assert!(
             wait_for(|| button.channel().is_connected(), Duration::from_secs(2)),
             "button channel never connected"

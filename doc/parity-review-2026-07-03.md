@@ -2725,15 +2725,34 @@ Impact: the readout never says what was picked — silx distinguishes an isosurf
 
 ### R3-12: `loc://` fabricates a configured variable from any first listener; PyDM requires `name`+`type`+`init` and defers to the first config-bearing listener
 
-**DEFERRED (R3 — sign-off required, connection-semantics change):** closing this changes
-`loc://` connection semantics across `local_plugin.rs`, `engine.rs`, and `address.rs`:
-require `name`+`type`+`init` before publishing a connected state (PyDM
-`_required_config_keys`), send disconnected (no fabricated `0.0`) until a config-bearing
-listener connects, defer to the first such listener regardless of creation order, re-run
-configuration on every `add_listener`, and map an unparsable `init` to `None` rather than
-a type-zero. This is a structural state-machine change with cross-file impact (including
-the pooled-connection reuse that currently drops a later address's query), not a patch —
-held for sign-off. No code changed this round.
+**FIXED (R3 — structural, user sign-off "완전 PyDM 충실 / disconnected" 2026-07-05):**
+`loc://` configuration is now *config-bearing*-gated, not first-connection-wins.
+`is_config_bearing` (both non-empty `type` **and** `init`, matching PyDM
+`_required_config_keys` + `parse_qs` blank-drop) decides the initial state:
+config-bearing → `post_value` a connected state; bare/partial → `update` a
+**disconnected, valueless** state (`disconnected_local_state`), never a fabricated
+`0.0`. `parse_init` now returns `Option<PvValue>`, so an unparsable `init` connects
+with `value: None` (PyDM `convert_value` → `None`), not a type-zero. The
+creation-order dependency is closed by a **listener seam**: `Connection` carries a
+`listeners_tx`; `Engine::connect`'s fast-path forwards each later listener's full
+address (`forward_listener`) to the plugin task, which configures on the first
+config-bearing address regardless of order and exactly once (`done_configuring`) —
+PyDM's per-`add_listener` `_configure_local_plugin`. The four non-`loc` plugins
+ignore the new `ConnectionCtx::listeners` field (they do not reconfigure per
+listener). Writes update the value without connecting (PyDM `put_value` never
+touches connection state).
+
+Tests: `engine_local.rs` boundaries — `bare_local_is_disconnected_with_no_value`,
+`partial_local_missing_a_required_key_is_disconnected`,
+`unparsable_init_connects_with_no_value`,
+`config_bearing_listener_configures_a_bare_connection_regardless_of_order` (the
+primary defect: bare-first then config-later, via the seam); plus rewritten
+`local_plugin` unit tests (`is_config_bearing`, `has_explicit_precision`,
+`disconnected_local_state`, `missing_or_unparsable_init_has_no_value_but_stays_connected`).
+The bare-`loc://`-write test idiom (widgets + calc children) was migrated to
+config-bearing `?type=…&init=…` addresses, which reproduces the prior connected
+render (snapshots unchanged) while exercising the seam for calc's bare-opened
+children. Full sidm suite green (416/416), clippy clean, doctests pass.
 
 Severity: Medium
 

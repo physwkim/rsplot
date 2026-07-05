@@ -121,6 +121,8 @@ impl DataPlugin for PvaPlugin {
         let ConnectionCtx {
             writer,
             writes,
+            // `pva://` does not reconfigure per listener (see `ConnectionCtx::listeners`).
+            listeners: _,
             cancel,
             runtime,
             address,

@@ -5,8 +5,21 @@
 //! (`loc://name?type=float&init=1.5&precision=3`); writes replace the value and
 //! echo to every listener. Because the engine pools connections by
 //! `scheme://full_address` (query dropped), all `loc://name?...` addresses with
-//! the same `name` share one connection — so the variable is shared by name and
-//! the parameters apply only on the first connection, matching PyDM.
+//! the same `name` share one connection.
+//!
+//! Configuration is *config-bearing*-gated, not first-connection-wins: PyDM
+//! requires `name`+`type`+`init` (`_required_config_keys`, local_plugin.py:26)
+//! before a variable is connected. A bare `loc://name` reader, or a partial
+//! address missing `type` or `init`, connects **disconnected with no value** —
+//! never a fabricated `0.0` — and stays that way until the first config-bearing
+//! address arrives, *regardless of connect order*: PyDM re-runs
+//! `_configure_local_plugin` on every `add_listener` (:333-335), and sidm
+//! mirrors that by forwarding each later listener's address to the connection
+//! task (see [`crate::data_plugins::ConnectionCtx::listeners`]). So a screen
+//! where one widget declares `loc://x?type=int&init=5` and others reference
+//! bare `loc://x` configures correctly whichever widget the engine reaches
+//! first. An unparsable `init` connects with a `None` value, not a type-zero
+//! (`convert_value` → `None`, :318-323).
 //!
 //! Supported `type`s: `float` (default), `int`, `bool`, `str`, `array` (a
 //! bracketed list — all-integer elements make an Int waveform, any float
@@ -43,41 +56,79 @@ impl DataPlugin for LocalPlugin {
         let ConnectionCtx {
             writer,
             mut writes,
+            mut listeners,
             cancel,
             runtime,
             address,
         } = ctx;
 
-        // Publish the initial (connected) state from the query parameters. Use
-        // post_value so an initial value (if the address carried one) is also
-        // emitted as the first value event; with no initial value it publishes
-        // nothing (the snapshot value stays `None`).
+        // PyDM configures a local variable only from a *config-bearing* address
+        // — one carrying both `type` and `init` (`_required_config_keys`,
+        // local_plugin.py:26). A bare `loc://name` reader (or a partial address
+        // missing either key) leaves the connection **disconnected with no
+        // value** — never a fabricated `0.0` — until a config-bearing listener
+        // arrives (`_configure_local_plugin` returns early with
+        // `send_connection_state(False)`, :47-61). `_precision_set` tracks
+        // whether an explicit precision was configured, so float writes know
+        // whether to re-derive it (:103-109, :377-382).
         let params = address.query_params();
-        // Whether an explicit precision was configured — PyDM's
-        // `_precision_set` (local_plugin.py:103-109). When it is, float
-        // writes must NOT re-derive the precision.
-        let mut explicit_precision: Option<i32> = None;
-        for (key, value) in &params {
-            if matches!(key.as_str(), "precision" | "prec") {
-                explicit_precision = value.parse().ok();
-            }
+        let mut precision_set = has_explicit_precision(&params);
+        // `done_configuring` is true once we have configured (from the creating
+        // address or a later listener), or once no more listeners can arrive —
+        // either way we stop watching the listener stream.
+        let mut done_configuring;
+        if is_config_bearing(&params) {
+            // post_value emits the initial value as the first sample (or
+            // nothing, when an unparsable `init` left it `None`).
+            let init = initial_local_state(&params);
+            writer.post_value(move |s| {
+                *s = init;
+                s.timestamp = Some(SystemTime::now());
+            });
+            done_configuring = true;
+        } else {
+            // Metadata/connection-only change (no value) → `update`, so no
+            // spurious sample is emitted for the disconnected state.
+            writer.update(|s| {
+                *s = disconnected_local_state();
+                s.timestamp = Some(SystemTime::now());
+            });
+            done_configuring = false;
         }
-        let precision_set = explicit_precision.is_some();
-        let init = initial_local_state(&params);
-        writer.post_value(move |s| {
-            *s = init;
-            s.timestamp = Some(SystemTime::now());
-        });
 
         runtime.spawn(async move {
             loop {
                 tokio::select! {
                     _ = cancel.cancelled() => break,
+                    // Defer to the first config-bearing listener regardless of
+                    // connect order (PyDM's per-`add_listener`
+                    // `_configure_local_plugin`). Disabled once configured — the
+                    // configuration is applied exactly once.
+                    maybe = listeners.recv(), if !done_configuring => match maybe {
+                        Some(addr) => {
+                            let p = addr.query_params();
+                            if is_config_bearing(&p) {
+                                precision_set = has_explicit_precision(&p);
+                                let init = initial_local_state(&p);
+                                writer.post_value(move |s| {
+                                    *s = init;
+                                    s.timestamp = Some(SystemTime::now());
+                                });
+                                done_configuring = true;
+                            }
+                        }
+                        // No more listeners can arrive; stop watching so the
+                        // disabled branch does not busy-loop on a closed channel.
+                        None => done_configuring = true,
+                    },
                     maybe = writes.recv() => match maybe {
                         Some(value) => writer.post_value(|s| {
                             // PyDM re-derives the precision on every float
                             // write when none was configured
-                            // (put_value, local_plugin.py:377-382).
+                            // (put_value, local_plugin.py:377-382). A write
+                            // updates the value but does not itself connect the
+                            // variable (put_value never touches the connection
+                            // state), matching PyDM.
                             if !precision_set && let PvValue::Float(v) = &value {
                                 s.precision = Some(precision_for_value(*v));
                             }
@@ -91,6 +142,44 @@ impl DataPlugin for LocalPlugin {
         });
 
         Ok(())
+    }
+}
+
+/// Whether a `loc://` address carries a complete configuration — a non-empty
+/// `type` **and** a non-empty `init` query parameter. PyDM configures a local
+/// variable only when `name`, `type` and `init` are all present
+/// (`_required_config_keys`, local_plugin.py:26); `UrlToPython.get_info`
+/// (:421-438) returns `(None, name, address)` — the bare/partial case — when
+/// either is missing. `name` is the `loc://name` host, always present for a
+/// valid address, so the predicate reduces to the two query keys. Empty values
+/// (`type=`) do not count: PyDM's `parse_qs` drops blank values, so
+/// `config["type"]`/`config["init"]` would raise `KeyError` there too.
+fn is_config_bearing(params: &[(String, String)]) -> bool {
+    let has = |k: &str| params.iter().any(|(key, val)| key == k && !val.is_empty());
+    has("type") && has("init")
+}
+
+/// Whether an explicit `precision`/`prec` that parses to an integer was
+/// configured — PyDM's `_precision_set` (local_plugin.py:103-109). When it was,
+/// float writes must not re-derive the precision from the value.
+fn has_explicit_precision(params: &[(String, String)]) -> bool {
+    params
+        .iter()
+        .any(|(k, v)| matches!(k.as_str(), "precision" | "prec") && v.parse::<i32>().is_ok())
+}
+
+/// The state of a `loc://` connection opened by a bare or partial address, i.e.
+/// one that is not config-bearing. PyDM's constructor ends with
+/// `send_connection_state(False)` + `self.connected = False` and never sets a
+/// value for such a connection (local_plugin.py:43-45), while still advertising
+/// write access (`send_access_state`, :333) so a later `put` is accepted.
+fn disconnected_local_state() -> ChannelState {
+    ChannelState {
+        connected: false,
+        write_access: true,
+        value: None,
+        severity: AlarmSeverity::NoAlarm,
+        ..Default::default()
     }
 }
 
@@ -125,12 +214,18 @@ pub(crate) fn initial_local_state(params: &[(String, String)]) -> ChannelState {
         }
     }
 
+    // PyDM's `convert_value` returns `None` when `init` cannot be converted to
+    // the declared type (`except ValueError`, local_plugin.py:318-323), and the
+    // connection is still marked connected with a `None` value — never a
+    // fabricated type-zero. `parse_init` mirrors that: `None` for an unparsable
+    // (or, off the config-bearing path, absent) `init`.
     let value = parse_init(ty, init, dtype);
 
     // A float variable without an explicit precision derives it from the
-    // value (add_listener, local_plugin.py:341-345).
+    // value (add_listener, local_plugin.py:341-345). No value → nothing to
+    // derive from, matching `isinstance(self.value, float)` being False.
     if precision.is_none()
-        && let PvValue::Float(v) = &value
+        && let Some(PvValue::Float(v)) = &value
     {
         precision = Some(precision_for_value(*v));
     }
@@ -150,7 +245,7 @@ pub(crate) fn initial_local_state(params: &[(String, String)]) -> ChannelState {
     ChannelState {
         connected: true,
         write_access: true,
-        value: Some(value),
+        value,
         severity: AlarmSeverity::NoAlarm,
         precision,
         units,
@@ -160,17 +255,21 @@ pub(crate) fn initial_local_state(params: &[(String, String)]) -> ChannelState {
     }
 }
 
-/// Parse the `init` string under the declared `type`, falling back to a
-/// type-appropriate zero when `init` is absent or unparsable. `dtype` is the
-/// numpy element dtype kwarg, meaningful only for `type=array`.
-fn parse_init(ty: &str, init: Option<&str>, dtype: Option<&str>) -> PvValue {
+/// Parse the `init` string under the declared `type`, returning `None` when the
+/// value cannot be converted (PyDM's `convert_value` `except ValueError` path,
+/// local_plugin.py:318-323) — the connection is still connected, just with no
+/// value. `dtype` is the numpy element dtype kwarg, meaningful only for
+/// `type=array`. Numeric (`int`/`float`) and `array` inits can fail to parse
+/// and yield `None`; `bool` and `str` never fail (Python `bool(str)`/`str(x)`
+/// raise no `ValueError`), so they always carry a value.
+fn parse_init(ty: &str, init: Option<&str>, dtype: Option<&str>) -> Option<PvValue> {
     match ty {
-        "int" | "integer" => PvValue::Int(init.and_then(|s| s.trim().parse().ok()).unwrap_or(0)),
-        "bool" | "boolean" => PvValue::Bool(init.map(parse_bool).unwrap_or(false)),
-        "str" | "string" => PvValue::Str(Arc::from(init.unwrap_or(""))),
+        "int" | "integer" => init.and_then(|s| s.trim().parse().ok()).map(PvValue::Int),
+        "bool" | "boolean" => Some(PvValue::Bool(init.map(parse_bool).unwrap_or(false))),
+        "str" | "string" => Some(PvValue::Str(Arc::from(init.unwrap_or("")))),
         "array" => parse_array(init.unwrap_or(""), dtype),
         // float and anything unrecognized.
-        _ => PvValue::Float(init.and_then(|s| s.trim().parse().ok()).unwrap_or(0.0)),
+        _ => init.and_then(|s| s.trim().parse().ok()).map(PvValue::Float),
     }
 }
 
@@ -216,26 +315,26 @@ fn parse_bool(s: &str) -> bool {
 /// becomes an Int waveform; any float element promotes the whole array to Float,
 /// like numpy dtype unification. An explicit `dtype` forces the element type
 /// (`dtype=float` → Float even for an integer literal; `dtype=int` → Int,
-/// truncating float literals toward zero as numpy's int cast does). Absent/
-/// unparsable input falls back to an empty Float waveform (the array-shaped type
-/// zero; PyDM logs the failed conversion and publishes no value).
-fn parse_array(init: &str, dtype: Option<&str>) -> PvValue {
+/// truncating float literals toward zero as numpy's int cast does). A valid but
+/// empty literal (`[]`) is an empty Float waveform (numpy's `np.array([])`
+/// default dtype). Input that is not a list literal, or whose elements are not
+/// all numeric, yields `None` — PyDM's `ast.literal_eval` raises `ValueError`
+/// there and `convert_value` returns `None` (no value published).
+fn parse_array(init: &str, dtype: Option<&str>) -> Option<PvValue> {
     let empty = || PvValue::FloatArray(Arc::from(Vec::new()));
     let s = init.trim();
     let inner = s
         .strip_prefix('[')
         .and_then(|t| t.strip_suffix(']'))
-        .or_else(|| s.strip_prefix('(').and_then(|t| t.strip_suffix(')')));
-    let Some(inner) = inner else {
-        return empty();
-    };
+        .or_else(|| s.strip_prefix('(').and_then(|t| t.strip_suffix(')')))?;
     let mut tokens: Vec<&str> = inner.split(',').map(str::trim).collect();
     // A Python literal tolerates a trailing comma (`[1, 2,]`).
     if tokens.last() == Some(&"") {
         tokens.pop();
     }
     if tokens.is_empty() {
-        return empty();
+        // A valid empty list literal → empty Float waveform (not a parse error).
+        return Some(empty());
     }
 
     // An explicit numpy `dtype` forces the element type over the literal's own.
@@ -245,8 +344,7 @@ fn parse_array(init: &str, dtype: Option<&str>) -> PvValue {
                 .iter()
                 .map(|t| t.parse::<f64>().ok())
                 .collect::<Option<Vec<f64>>>()
-                .map(|v| PvValue::FloatArray(v.into()))
-                .unwrap_or_else(empty);
+                .map(|v| PvValue::FloatArray(v.into()));
         }
         Some(ArrayKind::Int) => {
             // numpy's int cast truncates toward zero and accepts float literals
@@ -259,8 +357,7 @@ fn parse_array(init: &str, dtype: Option<&str>) -> PvValue {
                         .or_else(|| t.parse::<f64>().ok().map(|f| f.trunc() as i64))
                 })
                 .collect::<Option<Vec<i64>>>()
-                .map(|v| PvValue::IntArray(v.into()))
-                .unwrap_or_else(empty);
+                .map(|v| PvValue::IntArray(v.into()));
         }
         None => {}
     }
@@ -271,16 +368,17 @@ fn parse_array(init: &str, dtype: Option<&str>) -> PvValue {
         .map(|t| t.parse::<i64>().ok())
         .collect::<Option<Vec<i64>>>()
     {
-        return PvValue::IntArray(ints.into());
+        return Some(PvValue::IntArray(ints.into()));
     }
     if let Some(floats) = tokens
         .iter()
         .map(|t| t.parse::<f64>().ok())
         .collect::<Option<Vec<f64>>>()
     {
-        return PvValue::FloatArray(floats.into());
+        return Some(PvValue::FloatArray(floats.into()));
     }
-    empty()
+    // Non-numeric elements (`[1, abc]`) — PyDM would raise and publish nothing.
+    None
 }
 
 /// Parse an `enum_string` extra — PyDM's `tuple(ast.literal_eval(v))`
@@ -372,26 +470,35 @@ mod tests {
     }
 
     #[test]
-    fn missing_init_is_type_zero() {
+    fn missing_or_unparsable_init_has_no_value_but_stays_connected() {
+        // PyDM's convert_value returns None when init cannot be converted to
+        // the declared type (local_plugin.py:318-323); the connection is still
+        // marked connected, just with no value — never a fabricated type-zero.
+        // (In production initial_local_state is only reached for config-bearing
+        // addresses — both type and init present — but an unparsable init still
+        // lands here, as can an absent one off that path.)
+        assert_eq!(initial_local_state(&params(&[])).value, None); // float, no init
+        assert_eq!(initial_local_state(&params(&[("type", "int")])).value, None);
         assert_eq!(
-            initial_local_state(&params(&[])).value,
-            Some(PvValue::Float(0.0))
+            initial_local_state(&params(&[("type", "int"), ("init", "notanint")])).value,
+            None
         );
         assert_eq!(
-            initial_local_state(&params(&[("type", "int")])).value,
-            Some(PvValue::Int(0))
+            initial_local_state(&params(&[("type", "float"), ("init", "notafloat")])).value,
+            None
         );
+        // The connection stays connected even with no value.
+        assert!(initial_local_state(&params(&[("type", "int"), ("init", "notanint")])).connected);
+
+        // str/bool never fail to convert (Python str(x)/bool(str) raise no
+        // ValueError), so they always carry a value, even with no init.
         assert_eq!(
             initial_local_state(&params(&[("type", "str")])).value,
             Some(PvValue::Str(Arc::from("")))
         );
-    }
-
-    #[test]
-    fn unparsable_init_falls_back_to_zero() {
         assert_eq!(
-            initial_local_state(&params(&[("type", "int"), ("init", "notanint")])).value,
-            Some(PvValue::Int(0))
+            initial_local_state(&params(&[("type", "bool")])).value,
+            Some(PvValue::Bool(false))
         );
     }
 
@@ -413,14 +520,21 @@ mod tests {
             initial_local_state(&params(&[("type", "array"), ("init", "[4,]")])).value,
             Some(PvValue::IntArray(Arc::from([4_i64].as_slice())))
         );
-        // Absent / unparsable init falls back to an empty Float waveform.
+        // A valid but empty list literal is an empty Float waveform
+        // (numpy `np.array([])`).
+        assert_eq!(
+            initial_local_state(&params(&[("type", "array"), ("init", "[]")])).value,
+            Some(PvValue::FloatArray(Arc::from([].as_slice())))
+        );
+        // Absent / non-list / non-numeric init has no value — PyDM's
+        // ast.literal_eval raises and convert_value returns None.
         assert_eq!(
             initial_local_state(&params(&[("type", "array")])).value,
-            Some(PvValue::FloatArray(Arc::from([].as_slice())))
+            None
         );
         assert_eq!(
             initial_local_state(&params(&[("type", "array"), ("init", "nonsense")])).value,
-            Some(PvValue::FloatArray(Arc::from([].as_slice())))
+            None
         );
     }
 
@@ -574,8 +688,9 @@ mod tests {
             initial_local_state(&params(&[("init", "3")])).precision,
             Some(1)
         );
-        // The default 0.0 value (no init) also derives 1.
-        assert_eq!(initial_local_state(&params(&[])).precision, Some(1));
+        // No init → no value → nothing to derive a precision from (PyDM's
+        // `isinstance(self.value, float)` is False when the value is None).
+        assert_eq!(initial_local_state(&params(&[])).precision, None);
         // Cap at 8 digits.
         assert_eq!(
             initial_local_state(&params(&[("init", "0.1234567891")])).precision,
@@ -591,5 +706,58 @@ mod tests {
             initial_local_state(&params(&[("type", "int"), ("init", "7")])).precision,
             None
         );
+    }
+
+    #[test]
+    fn config_bearing_requires_both_nonempty_type_and_init() {
+        // PyDM configures only with name+type+init (_required_config_keys,
+        // local_plugin.py:26). name is the loc host; the predicate is the two
+        // query keys, both non-empty.
+        assert!(is_config_bearing(&params(&[
+            ("type", "int"),
+            ("init", "5")
+        ])));
+        // Bare reader: neither key.
+        assert!(!is_config_bearing(&params(&[])));
+        // Partial: one key missing.
+        assert!(!is_config_bearing(&params(&[("type", "int")])));
+        assert!(!is_config_bearing(&params(&[("init", "5")])));
+        // Empty values do not count (PyDM's parse_qs drops blank values).
+        assert!(!is_config_bearing(&params(&[("type", ""), ("init", "5")])));
+        assert!(!is_config_bearing(&params(&[
+            ("type", "int"),
+            ("init", "")
+        ])));
+        // Extra keys alongside a complete pair still configure.
+        assert!(is_config_bearing(&params(&[
+            ("type", "float"),
+            ("init", "1.5"),
+            ("precision", "3"),
+        ])));
+    }
+
+    #[test]
+    fn explicit_precision_detected_only_when_it_parses() {
+        // _precision_set is set only when precision converts to int
+        // (local_plugin.py:103-109).
+        assert!(has_explicit_precision(&params(&[("precision", "3")])));
+        assert!(has_explicit_precision(&params(&[("prec", "0")])));
+        assert!(!has_explicit_precision(&params(&[])));
+        // A non-integer precision does not set it (PyDM's caught ValueError).
+        assert!(!has_explicit_precision(&params(&[("precision", "abc")])));
+        assert!(!has_explicit_precision(&params(&[("precision", "")])));
+    }
+
+    #[test]
+    fn disconnected_state_has_no_value_and_write_access() {
+        // Bare/partial addresses connect disconnected with no value but with
+        // write access advertised (PyDM constructor :43-45 + send_access_state).
+        let s = disconnected_local_state();
+        assert!(!s.connected);
+        assert_eq!(s.value, None);
+        assert!(s.write_access);
+        assert_eq!(s.severity, AlarmSeverity::NoAlarm);
+        // effective_severity reports Disconnected while not connected.
+        assert_eq!(s.effective_severity(), AlarmSeverity::Disconnected);
     }
 }

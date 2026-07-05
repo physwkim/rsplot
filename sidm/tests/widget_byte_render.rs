@@ -51,7 +51,10 @@ struct Counts {
 fn render(value: i64, num_bits: usize) -> Counts {
     let rs = create_render_state(default_wgpu_setup());
     let engine = Engine::new();
-    let indicator = SidmByteIndicator::new(&engine, "loc://byte_render")
+    // Config-bearing loc (type+init) so the connection is connected — a bare
+    // `loc://` is disconnected until configured (R3-12), which would render the
+    // indicator in its disconnected style instead of over the written value.
+    let indicator = SidmByteIndicator::new(&engine, "loc://byte_render?type=int&init=0")
         .expect("connect")
         .with_num_bits(num_bits)
         .with_show_labels(false);

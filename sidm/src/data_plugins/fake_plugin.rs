@@ -151,6 +151,8 @@ impl DataPlugin for FakePlugin {
         let ConnectionCtx {
             writer,
             mut writes,
+            // `fake://` does not reconfigure per listener (see `ConnectionCtx::listeners`).
+            listeners: _,
             cancel,
             runtime,
             address,

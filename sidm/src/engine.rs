@@ -191,10 +191,15 @@ impl Engine {
         let parsed = Self::resolve_address(inner, address)?;
         let key = parsed.connection_id();
 
-        // Fast path: reuse a live pooled connection.
+        // Fast path: reuse a live pooled connection. Hand the plugin task this
+        // later listener's full address (with query) so a config-bearing
+        // `loc://` address can configure a connection first opened by a bare
+        // one — PyDM re-runs `_configure_local_plugin` on every `add_listener`,
+        // whereas the pool key drops the query.
         {
             let pool = inner.pool.lock().expect("connection pool poisoned");
             if let Some(existing) = pool.get(&key).and_then(Weak::upgrade) {
+                existing.forward_listener(parsed);
                 return Ok(Channel::new(existing));
             }
         }
@@ -211,7 +216,7 @@ impl Engine {
             .cloned()
             .ok_or(EngineError::UnknownProtocol(scheme))?;
 
-        let (conn, writer, writes, cancel) = Connection::new(
+        let (conn, writer, writes, listeners, cancel) = Connection::new(
             parsed.clone(),
             inner.repaint.clone(),
             Arc::downgrade(&inner.pool),
@@ -221,6 +226,7 @@ impl Engine {
         plugin.connect(ConnectionCtx {
             writer,
             writes,
+            listeners,
             cancel,
             runtime: inner.handle.clone(),
             address: parsed,
