@@ -107,21 +107,36 @@ pub const TICK_LABELS_PER_INCH: f64 = 1.3;
 /// silx's own fallback constant rather than the actual screen.
 pub const REFERENCE_DPI: f64 = 92.0;
 
+/// Reduced label density silx applies to a time axis in the microseconds
+/// regime: `1.0` label per inch instead of [`TICK_LABELS_PER_INCH`]
+/// (`GLPlotFrame.py:451-457` lowers `tickDensity` to `1.0·dpr/dpi` when
+/// `bestUnit(span) == MICRO_SECONDS`, before `calcTicksAdaptive`).
+pub const TICK_LABELS_PER_INCH_MICROSECONDS: f64 = 1.0;
+
 /// silx `ticklayout.niceNumbersAdaptative` tick count (`ticklayout.py:174-192`
 /// deployed at `GLPlotFrame.py:414-425`): the number of ticks adapts to the
-/// axis's physical pixel length instead of a fixed count.
+/// axis's physical pixel length instead of a fixed count. Uses the default
+/// [`TICK_LABELS_PER_INCH`] density; see [`adaptive_n_ticks_density`] for the
+/// density-parameterized form (time-axis microseconds regime).
+pub fn adaptive_n_ticks(physical_len_px: f64) -> usize {
+    adaptive_n_ticks_density(physical_len_px, TICK_LABELS_PER_INCH)
+}
+
+/// As [`adaptive_n_ticks`] but with an explicit label density (labels per inch),
+/// so the time-axis microseconds regime can request the reduced
+/// [`TICK_LABELS_PER_INCH_MICROSECONDS`] density silx uses there.
 ///
 /// silx computes `nbPixels = physical_len / devicePixelRatio` (logical px) and
-/// `tickDensity = 1.3·devicePixelRatio / dpi`; their product is
-/// `1.3·physical_len / dpi`, so the `devicePixelRatio` cancels and the density is
-/// exactly 1.3 labels per inch. `physical_len_px` is therefore the axis length in
-/// device pixels (in egui: logical points × `pixels_per_point`). At least 2
-/// ticks, matching silx's `max(2, …)`.
-pub fn adaptive_n_ticks(physical_len_px: f64) -> usize {
+/// `tickDensity = labels_per_inch·devicePixelRatio / dpi`; their product is
+/// `labels_per_inch·physical_len / dpi`, so the `devicePixelRatio` cancels.
+/// `physical_len_px` is therefore the axis length in device pixels (in egui:
+/// logical points × `pixels_per_point`). At least 2 ticks, matching silx's
+/// `max(2, …)`.
+pub fn adaptive_n_ticks_density(physical_len_px: f64, labels_per_inch: f64) -> usize {
     // `round_ties_even` matches Python's `int(round(x))` (round half to even);
     // realistic pixel lengths never land exactly on a half, but this keeps the
     // rounding mode identical to silx rather than round-half-away-from-zero.
-    let nticks = (TICK_LABELS_PER_INCH * physical_len_px / REFERENCE_DPI).round_ties_even();
+    let nticks = (labels_per_inch * physical_len_px / REFERENCE_DPI).round_ties_even();
     nticks.max(2.0) as usize
 }
 
@@ -241,5 +256,29 @@ mod tests {
         assert_eq!(adaptive_n_ticks(355.0), 5);
         // 390 px -> 5.51 -> 6.
         assert_eq!(adaptive_n_ticks(390.0), 6);
+    }
+
+    #[test]
+    fn adaptive_n_ticks_density_reduces_count_in_microseconds_regime() {
+        // The default 1.3 density delegates to `adaptive_n_ticks`.
+        assert_eq!(
+            adaptive_n_ticks_density(920.0, TICK_LABELS_PER_INCH),
+            adaptive_n_ticks(920.0)
+        );
+        // silx's µs-regime density 1.0 gives fewer ticks than 1.3 for the same
+        // width: 920 px -> round(1.0*920/92) = round(10.0) = 10 vs 13.
+        assert_eq!(
+            adaptive_n_ticks_density(920.0, TICK_LABELS_PER_INCH_MICROSECONDS),
+            10
+        );
+        assert!(
+            adaptive_n_ticks_density(920.0, TICK_LABELS_PER_INCH_MICROSECONDS)
+                < adaptive_n_ticks(920.0)
+        );
+        // Still floored at 2.
+        assert_eq!(
+            adaptive_n_ticks_density(10.0, TICK_LABELS_PER_INCH_MICROSECONDS),
+            2
+        );
     }
 }

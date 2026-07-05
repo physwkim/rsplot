@@ -18,7 +18,9 @@ use crate::core::roi::{
     HandleKind, ManagedRoi, Roi, RoiInteractionMode, arc_inner_radius, arc_outer_radius,
 };
 use crate::core::shape::{Line, Shape, ShapeKind, triangulate_simple_polygon};
-use crate::core::ticklayout::{adaptive_n_ticks, nice_num};
+use crate::core::ticklayout::{
+    TICK_LABELS_PER_INCH_MICROSECONDS, adaptive_n_ticks, adaptive_n_ticks_density, nice_num,
+};
 use crate::core::transform::{Axis, AxisSide, Scale, Transform, YAxis};
 use crate::core::triangles::Triangles;
 use crate::widget::interaction;
@@ -400,10 +402,6 @@ fn format_axis_log_tick(v: f64) -> String {
     format!("1e{logpos:+03}")
 }
 
-/// Default target tick count for a date-time (TimeSeries) axis, mirroring silx
-/// `NiceDateLocator(numTicks=5)` (`backends/BackendMatplotlib.py:162`).
-const TIME_SERIES_NUM_TICKS: usize = 5;
-
 /// Tick values plus their formatted labels for one axis: "nice" numbers on a
 /// linear axis, one-per-decade on a log axis. The default [`TickMode::Numeric`]
 /// path is unchanged.
@@ -443,8 +441,10 @@ fn axis_ticks_with_mode(
             (axis.max, axis.min)
         };
         let (lo_epoch, hi_epoch) = (lo + time_offset, hi + time_offset);
-        let (ticks, spacing, unit) =
-            dtime_ticks::calc_ticks_tz(lo_epoch, hi_epoch, TIME_SERIES_NUM_TICKS, tz);
+        // `max_ticks` is the adaptive (pixel-density) count, mirroring silx's
+        // time axis, which runs the SAME `calcTicksAdaptive` density path as the
+        // numeric axis (`GLPlotFrame.py:450-459`) — not a fixed count.
+        let (ticks, spacing, unit) = dtime_ticks::calc_ticks_tz(lo_epoch, hi_epoch, max_ticks, tz);
         // `calc_ticks_tz` brackets one tick beyond each end (`include_first_beyond`
         // in `date_range`), so cull to the visible epoch window before formatting:
         // otherwise a bracket tick + label (and, with grid on, a grid line) paints
@@ -601,7 +601,23 @@ pub fn draw_axes_with_x_tick_mode(
     // per inch. egui `Rect` extents are logical points, so scale by
     // `pixels_per_point` to device pixels, matching silx's physical-pixel input.
     let ppp = f64::from(painter.ctx().pixels_per_point());
-    let x_ticks_n = x_max_ticks.unwrap_or_else(|| adaptive_n_ticks(f64::from(area.width()) * ppp));
+    let x_ticks_n = x_max_ticks.unwrap_or_else(|| {
+        let len_px = f64::from(area.width()) * ppp;
+        // silx reduces the time axis to 1.0 label/inch (from 1.3) in the
+        // microseconds regime — span <= ~2 s so `bestUnit == MICRO_SECONDS` —
+        // before `calcTicksAdaptive` (`GLPlotFrame.py:451-457`). Only when the
+        // TimeSeries-on-linear path is actually taken (a log axis falls back to
+        // numeric decades). `time_offset` cancels in the span difference.
+        if x_tick_mode == TickMode::TimeSeries
+            && t.x.scale == Scale::Linear
+            && dtime_ticks::best_unit((t.x.max - t.x.min).abs()).1
+                == dtime_ticks::DtUnit::MicroSeconds
+        {
+            adaptive_n_ticks_density(len_px, TICK_LABELS_PER_INCH_MICROSECONDS)
+        } else {
+            adaptive_n_ticks(len_px)
+        }
+    });
     let y_ticks_n = y_max_ticks.unwrap_or_else(|| adaptive_n_ticks(f64::from(area.height()) * ppp));
     let xticks = axis_ticks_with_mode(&t.x, x_ticks_n, x_tick_mode, x_time_zone, x_time_offset);
     let yticks = axis_ticks_with_mode(&t.y, y_ticks_n, TickMode::Numeric, TimeZone::Utc, 0.0);
@@ -2263,6 +2279,32 @@ mod tests {
         }
         // The relative positions stay small (f32-safe), not ~1.6e9.
         assert!(rel.last().unwrap().0 <= span + 1.0);
+    }
+
+    #[test]
+    fn axis_ticks_time_series_honors_max_ticks_count() {
+        // R3-5: the TimeSeries arm must scale with the adaptive `max_ticks`
+        // (like the numeric arm), not a fixed count. A 20-hour window with a
+        // larger tick budget yields more ticks — before the fix both budgets
+        // used the hardcoded 5 and produced identical output.
+        let min = crate::core::dtime_ticks::DateTime::from_civil(2021, 1, 4, 0, 0, 0, 0)
+            .to_epoch_seconds();
+        let max = crate::core::dtime_ticks::DateTime::from_civil(2021, 1, 4, 20, 0, 0, 0)
+            .to_epoch_seconds();
+        let axis = Axis {
+            min,
+            max,
+            scale: Scale::Linear,
+            inverted: false,
+        };
+        let few = axis_ticks_with_mode(&axis, 5, TickMode::TimeSeries, TimeZone::Utc, 0.0);
+        let many = axis_ticks_with_mode(&axis, 15, TickMode::TimeSeries, TimeZone::Utc, 0.0);
+        assert!(
+            many.len() > few.len(),
+            "TimeSeries must honor max_ticks: 15 -> {} ticks vs 5 -> {} ticks",
+            many.len(),
+            few.len()
+        );
     }
 
     #[test]

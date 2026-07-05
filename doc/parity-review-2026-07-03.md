@@ -2521,6 +2521,25 @@ Impact: cosmetic cell divergence (no parens/trailing comma, 7-sig-fig truncation
 
 ### R3-5: TimeSeries axis tick count hardcoded to 5 — the R2-38 adaptive-density fix covered only the numeric sibling — (R2-38 residual)
 
+**FIXED (R3):** the `TickMode::TimeSeries` arm of `axis_ticks_with_mode` now
+passes the adaptive `max_ticks` to `calc_ticks_tz` instead of the removed
+`TIME_SERIES_NUM_TICKS = 5`, so time axes get the same pixel-density count
+(1.3 labels/inch) the numeric arm does — silx runs the identical
+`calcTicksAdaptive` density path for both (`GLPlotFrame.py:450-459`). The
+microseconds regime (span `<= ~2 s`, `bestUnit == MICRO_SECONDS`) reduces the
+density to 1.0 label/inch before the count is taken (`GLPlotFrame.py:451-457`);
+this is applied at the caller (where cap-vs-adaptive is resolved, next to
+`adaptive_n_ticks`) via the new `adaptive_n_ticks_density` +
+`TICK_LABELS_PER_INCH_MICROSECONDS`, so it fires only for the adaptive (uncapped)
+TimeSeries-on-linear path. The reference guards the µs case with
+`if bestUnit((dtMax - dtMin).total_seconds() == DtUnit.MICRO_SECONDS)` — a
+mis-parenthesized silx bug (it tests `bestUnit(bool)`); the port applies the
+*intended* condition `best_unit(span) == MicroSeconds`.
+
+Tests: `adaptive_n_ticks_density_reduces_count_in_microseconds_regime` (1.0
+density < 1.3 for the same width) and `axis_ticks_time_series_honors_max_ticks_
+count` (15 vs 5 budget yields different counts — fails on the old const-5 arm).
+
 Severity: Low
 
 Rust: `src/widget/chrome.rs:405` (`TIME_SERIES_NUM_TICKS = 5`) consumed at `:447` where the `TickMode::TimeSeries` arm of `axis_ticks_with_mode` ignores the `max_ticks` parameter the numeric arm honors; the adaptive count from `:604-607` (the f75f601 R2-38 fix) never reaches time axes.
