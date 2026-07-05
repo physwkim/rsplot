@@ -56,5 +56,18 @@ fn apply_fog(color: vec4<f32>, cam_z: f32) -> vec4<f32> {
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // The texture already holds premultiplied-linear RGBA; sample straight
     // through (premultiplied-alpha blend composites it correctly).
-    return apply_fog(textureSample(tex, samp, in.uv), in.cam_z);
+    let color = textureSample(tex, samp, in.uv);
+    // silx `_Image` discards fully transparent texels
+    // (`plot3d/scene/primitives.py:2120-2123`, `if (color.a == 0.) discard;`),
+    // covering both ImageData (a below-min colormap hole → alpha 0) and
+    // ImageRgba. `discard` writes neither colour nor DEPTH; without it a
+    // transparent texel — the CPU stand-in for the GLSL `discard`, e.g. a cut
+    // plane's below-min hole — still passes the depth test and occludes the 3D
+    // geometry behind the hole. The texture is premultiplied-linear, so alpha 0
+    // is fully transparent. Sample is taken before the branch so its implicit
+    // derivatives stay in uniform control flow.
+    if (color.a == 0.0) {
+        discard;
+    }
+    return apply_fog(color, in.cam_z);
 }

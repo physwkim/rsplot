@@ -142,3 +142,113 @@ fn scene3d_image_quad_projects_its_texels() {
         "top-right should be white; got {white:?}"
     );
 }
+
+/// A front image with one fully transparent texel must let the 3D geometry
+/// behind the hole show through — silx `_Image` discards `alpha == 0` texels
+/// (`primitives.py:2120-2123`), so they write neither colour nor depth. Before
+/// the fix the transparent stand-in for GLSL `discard` still wrote depth and
+/// occluded whatever sat behind the hole.
+struct DepthHoleApp {
+    camera: Camera,
+    last_rect: Option<egui::Rect>,
+}
+
+impl DepthHoleApp {
+    fn new(rs: &RenderState) -> Self {
+        install_scene3d(rs);
+
+        let mut g = Scene3dGeometry::new();
+
+        // FRONT quad at z=0 (nearer the camera): 2×2 with the bottom-left texel
+        // (row0,col0) fully transparent (a "hole") and the rest opaque red.
+        // Inserted FIRST, so it is drawn first — without the discard it stamps
+        // depth across the hole and hides the back quad there.
+        let transparent = [0u8, 0, 0, 0];
+        let mut front = Vec::new();
+        front.extend_from_slice(&transparent); // row0,col0 — the hole
+        front.extend_from_slice(&px(Color32::RED)); // row0,col1
+        front.extend_from_slice(&px(Color32::RED)); // row1,col0
+        front.extend_from_slice(&px(Color32::RED)); // row1,col1
+        g.add_image_layer(Scene3dImageLayer {
+            pixels: front,
+            width: 2,
+            height: 2,
+            origin: [0.0, 0.0, 0.0],
+            scale: [1.0, 1.0], // world [0,2]×[0,2] at z=0
+            interpolation: ImageInterpolation::Nearest,
+        });
+
+        // BACK quad at z=-1 (farther): opaque green, same world rect. Visible at
+        // the hole only if the front's transparent texel was discarded.
+        g.add_image_layer(Scene3dImageLayer {
+            pixels: px(Color32::GREEN).repeat(4),
+            width: 2,
+            height: 2,
+            origin: [0.0, 0.0, -1.0],
+            scale: [1.0, 1.0],
+            interpolation: ImageInterpolation::Nearest,
+        });
+        set_scene3d(rs, SCENE_ID, &g);
+
+        let camera = Camera::new(
+            30.0,
+            0.1,
+            100.0,
+            (1.0, 1.0),
+            Vec3::new(1.0, 1.0, 5.0),
+            Vec3::new(0.0, 0.0, -1.0),
+            Vec3::new(0.0, 1.0, 0.0),
+        );
+        Self {
+            camera,
+            last_rect: None,
+        }
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui) {
+        let (rect, _resp) = ui.allocate_exact_size(ui.available_size(), egui::Sense::hover());
+        paint_scene3d(ui, rect, SCENE_ID, &self.camera, Color32::BLACK);
+        self.last_rect = Some(rect);
+    }
+}
+
+#[test]
+fn transparent_front_texel_does_not_occlude_geometry_behind() {
+    let rs = create_render_state(default_wgpu_setup());
+    let app = Rc::new(RefCell::new(DepthHoleApp::new(&rs)));
+    let renderer = WgpuTestRenderer::from_render_state(rs);
+
+    let app_ui = app.clone();
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(WIN, WIN))
+        .with_pixels_per_point(1.0)
+        .renderer(renderer)
+        .build_ui(move |ui| app_ui.borrow_mut().ui(ui));
+
+    harness.step();
+    let rect = app.borrow().last_rect.expect("scene rect captured");
+
+    let image = harness.render().expect("headless wgpu render");
+    let (iw, ih) = (image.width() as usize, image.height() as usize);
+    let raw = image.as_raw();
+
+    let at = |fx: f32, fy: f32| -> (u8, u8, u8) {
+        let x = ((rect.min.x + fx * rect.width()).round() as usize).min(iw - 1);
+        let y = ((rect.min.y + fy * rect.height()).round() as usize).min(ih - 1);
+        let i = (y * iw + x) * 4;
+        (raw[i], raw[i + 1], raw[i + 2])
+    };
+
+    // Bottom-left quadrant = the front hole → the back green must show through.
+    let hole = at(0.313, 0.687);
+    assert!(
+        hole.1 > 150 && hole.0 < 90 && hole.2 < 90,
+        "hole should reveal the green quad behind it; got {hole:?}"
+    );
+    // Bottom-right quadrant = front's opaque red texel, drawn over the back.
+    let opaque = at(0.687, 0.687);
+    assert!(
+        opaque.0 > 150 && opaque.1 < 90 && opaque.2 < 90,
+        "opaque front texel should stay red over the back quad; got {opaque:?}"
+    );
+}

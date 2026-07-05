@@ -2618,6 +2618,22 @@ Impact: within the owned-children model (isosurfaces live inside `ScalarField3D`
 
 ### R3-9: R2-51 residual — transparent-texel stand-in for GLSL `discard` still writes depth, occluding later-drawn geometry behind below-min holes — (R2-51 residual)
 
+**FIXED (R3):** `scene3d_image.wgsl` `fs_main` now discards `color.a == 0.0`
+texels, the exact port of silx `_Image` (`plot3d/scene/primitives.py:2115-2123`,
+`if (color.a == 0.) discard;`) — the discard is in the shared `_Image` base, so
+it covers both `ImageData` (a below-min colormap hole → alpha 0) and
+`ImageRgba`, which is why the fix belongs in the one shared siplot image shader
+rather than at the cut-plane call site. A discarded fragment writes neither
+colour nor depth, so a transparent below-min hole no longer stamps the depth
+buffer and occludes 3D geometry behind it. The sample is taken before the branch
+to keep its implicit derivatives in uniform control flow.
+
+Test: `transparent_front_texel_does_not_occlude_geometry_behind` in
+`tests/scene3d_image_render.rs` — a front quad with one transparent texel drawn
+before an opaque green quad 1 unit behind it; the hole must reveal green.
+Verified it fails without the discard (hole reads `(0,0,0)`, the black clear)
+and passes with it.
+
 Severity: Low
 
 Rust: `src/render/scene3d_items.rs:2478-2566` (`build_cut_plane_mesh`, fix 37d9edd) — a below-min texel with `display_values_below_min == false` is emitted `Color32::TRANSPARENT`, but the quad still rasterizes: the image pipeline has `depth_write_enabled: Some(true)` (`src/render/gpu_scene3d.rs:1017-1030`), draw order triangles → lines → meshes → images → points (`:1397-1433`).
