@@ -2847,6 +2847,27 @@ Impact: included content whose bbox min is not (0,0) — common, since child dis
 
 ### R3-18: Strip-chart per-pen `limits` block silently dropped; pens not ranged
 
+**FIXED (R3, warn-convention closure — the finding's stated fault):** the pen
+`limits {}` block used to vanish at the parser (`locate_assignments` takes
+level-0 assignments only), so codegen could not even warn. `indexed_records`
+gained a `deep` flag; the `pen[` call now uses `locate_assignments_deep`, which
+flattens the nested `limits` keys (`loprSrc`/`hoprSrc`/`loprDefault`/… — they
+cannot collide with the pen's `chan`/`clr`) into the pen's IR map. `emit_strip_chart`
+now counts pens carrying an authored range and **warns** that MEDM normalises
+each pen to its own `[lopr, hopr]` (`medmStripChart.c:467-509`) but SidmTimePlot
+shares one auto-scaled y-axis, so the per-pen ranges are not applied — no longer
+a silent drop that bypasses the warn convention.
+
+Tests: `strip_chart_pen_limits_are_retained_and_warned_not_silently_dropped`
+(one ranged pen → warn names count + reason; the nested block does not corrupt
+the pen's own `chan`/`clr`), `strip_chart_without_pen_limits_does_not_warn`.
+
+**DEFERRED (per-pen normalisation — a SidmTimePlot rendering feature):** actually
+reproducing MEDM's per-pen normalised traces needs a per-curve normalised y-axis,
+which SidmTimePlot (single shared `with_y_range`/`set_y_range`) does not have.
+That is a plotting-engine feature, not a converter change; documented, not taken
+unilaterally.
+
 Severity: Medium
 
 Rust: `adl2sidm/src/adl_parser.rs:538-571` — `indexed_records("pen[", …)` collects pen fields via `locate_assignments` (`:197-215`), which takes level-0 `key=value` lines only, so a pen's nested `limits { … }` block vanishes at the IR level with no warning; `codegen.rs:1373-1381` — `emit_strip_chart` uses only `chan` + `color` per pen.

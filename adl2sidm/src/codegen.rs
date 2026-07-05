@@ -1378,6 +1378,21 @@ fn emit_strip_chart(b: &mut Builder, widget: &MedmWidget, options: &Options, z: 
         return;
     }
 
+    // A pen's `limits {}` block (MEDM `parsePen` → `parseLimits`) is now retained
+    // by the parser's deep pass, so its range keys are visible here. MEDM scales
+    // EACH pen to its own `[lopr, hopr]` (medmStripChart.c:467-509 — per-pen
+    // normalised traces); SidmTimePlot draws every curve on one shared,
+    // auto-scaled y-axis and has no per-curve normalisation, so authored per-pen
+    // ranges cannot be reproduced. Warn rather than drop silently.
+    let ranged_pens = pens
+        .iter()
+        .filter(|pen| {
+            ["loprSrc", "hoprSrc", "loprDefault", "hoprDefault"]
+                .iter()
+                .any(|k| pen.contains_key(*k))
+        })
+        .count();
+
     let mut adds = Vec::new();
     for pen in pens {
         let Some(chan) = pen.get("chan").filter(|c| !c.is_empty()) else {
@@ -1398,6 +1413,14 @@ fn emit_strip_chart(b: &mut Builder, widget: &MedmWidget, options: &Options, z: 
     }
     if adds.is_empty() {
         return; // every pen lacked a channel; warnings already recorded
+    }
+    if ranged_pens > 0 {
+        b.warnings.push(format!(
+            "line {}: strip chart has {ranged_pens} pen(s) with an authored `limits` range; \
+             MEDM normalises each pen to its own [lopr, hopr], but SidmTimePlot shares one \
+             auto-scaled y-axis (no per-pen normalisation) — the per-pen ranges are not applied",
+            widget.line
+        ));
     }
 
     let mut with = Vec::new();
@@ -7317,6 +7340,86 @@ composite {
         assert!(g.source.contains(
             "add_channel(&engine, \"ca://DEV:H2\", Color32::from_rgb(0, 255, 0), \"DEV:H2\")"
         ));
+    }
+
+    #[test]
+    fn strip_chart_pen_limits_are_retained_and_warned_not_silently_dropped() {
+        // R3-18: a pen's `limits {}` block used to vanish at the parser (level-0
+        // assignments only), so codegen could not even warn. The deep pass now
+        // retains it; codegen warns that MEDM's per-pen [lopr, hopr] normalisation
+        // is not reproduced on SidmTimePlot's single shared axis — and the pen's
+        // own chan/clr must still parse through the nested block.
+        let adl = r#"
+"color map" {
+	colors {
+		ffffff,
+		000000,
+		ff0000,
+		00ff00,
+	}
+}
+"strip chart" {
+	object {
+		x=0
+		y=0
+		width=100
+		height=100
+	}
+	pen[0] {
+		chan="DEV:T"
+		clr=2
+		limits {
+			loprSrc="Default constant"
+			loprDefault=0
+			hoprSrc="Default constant"
+			hoprDefault=300
+		}
+	}
+	pen[1] {
+		chan="DEV:P"
+		clr=3
+	}
+}
+"#;
+        let g = generate(&parse(adl), &Options::default());
+        // Exactly one pen carried a range block → warn names the count and the
+        // reason, rather than dropping it silently.
+        assert!(
+            g.warnings
+                .iter()
+                .any(|w| w.contains("1 pen(s) with an authored `limits` range")
+                    && w.contains("not applied")),
+            "expected a per-pen-limits warning:\n{:?}",
+            g.warnings
+        );
+        // The nested limits block must not corrupt the pen's own chan/clr parse.
+        assert!(
+            g.source.contains(
+                "add_channel(&engine, \"ca://DEV:T\", Color32::from_rgb(255, 0, 0), \"DEV:T\")"
+            ),
+            "pen with a limits block lost its chan/clr:\n{}",
+            g.source
+        );
+        assert!(
+            g.source.contains(
+                "add_channel(&engine, \"ca://DEV:P\", Color32::from_rgb(0, 255, 0), \"DEV:P\")"
+            ),
+            "limitless pen dropped:\n{}",
+            g.source
+        );
+    }
+
+    #[test]
+    fn strip_chart_without_pen_limits_does_not_warn() {
+        // The stock two-pen chart (no `limits`) must not trip the new warning.
+        let g = plots(&Options::default());
+        assert!(
+            !g.warnings
+                .iter()
+                .any(|w| w.contains("authored `limits` range")),
+            "no-limits strip chart must not warn:\n{:?}",
+            g.warnings
+        );
     }
 
     #[test]

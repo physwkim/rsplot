@@ -506,25 +506,25 @@ fn apply_widget_specifics(
         "cartesian plot" => {
             widget.records.insert(
                 "traces".to_string(),
-                indexed_records("trace[", content, blocks, color_table, "data_clr"),
+                indexed_records("trace[", content, blocks, color_table, "data_clr", false),
             );
         }
         "strip chart" => {
             widget.records.insert(
                 "pens".to_string(),
-                indexed_records("pen[", content, blocks, color_table, "clr"),
+                indexed_records("pen[", content, blocks, color_table, "clr", true),
             );
         }
         "related display" => {
             widget.records.insert(
                 "displays".to_string(),
-                indexed_records("display[", content, blocks, color_table, ""),
+                indexed_records("display[", content, blocks, color_table, "", false),
             );
         }
         "shell command" => {
             widget.records.insert(
                 "commands".to_string(),
-                indexed_records("command[", content, blocks, color_table, ""),
+                indexed_records("command[", content, blocks, color_table, "", false),
             );
         }
         _ => {}
@@ -535,19 +535,32 @@ fn apply_widget_specifics(
 /// (e.g. `"trace["`), ordered by their `[N]` index. When `color_key` is
 /// non-empty, that colour-index field is resolved against the table and stored
 /// back as the named field's index (kept as a string for the IR).
+///
+/// `deep` selects [`locate_assignments_deep`] over [`locate_assignments`], so a
+/// record's nested sub-block fields flatten into the same map — used for
+/// `strip chart` pens, whose `limits {}` block (per-pen range, MEDM `parsePen`
+/// → `parseLimits`) would otherwise vanish. Only safe when the record's
+/// sub-block keys cannot collide with its top-level keys (a pen's `limits`
+/// keys — `loprSrc`/`hoprSrc`/`loprDefault`/… — do not collide with `chan`/`clr`).
 fn indexed_records(
     prefix: &str,
     content: &[&str],
     blocks: &[Block],
     color_table: &[Color],
     color_key: &str,
+    deep: bool,
 ) -> Vec<BTreeMap<String, String>> {
     let mut rows: Vec<(i64, BTreeMap<String, String>)> = Vec::new();
     for block in blocks {
         if !block.symbol.starts_with(prefix) {
             continue;
         }
-        let mut aa = locate_assignments(&block_content(content, block));
+        let pen_content = block_content(content, block);
+        let mut aa = if deep {
+            locate_assignments_deep(&pen_content)
+        } else {
+            locate_assignments(&pen_content)
+        };
         if !color_key.is_empty()
             && let Some(value) = aa.get(color_key)
             && let Ok(index) = value.parse::<usize>()
