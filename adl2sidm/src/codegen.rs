@@ -22,7 +22,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
-use crate::adl_parser::{Color, Geometry, MedmScreen, MedmWidget, parse};
+use crate::adl_parser::{Color, Geometry, MedmScreen, MedmWidget, parse_in_dir};
 use crate::symbols::{self, ZLayer};
 
 /// Maximum embedded-display nesting depth inlined at code-gen time, a backstop
@@ -281,26 +281,23 @@ pub fn generate(screen: &MedmScreen, options: &Options) -> Generated {
     for widget in &screen.widgets {
         emit_widget(&mut b, widget, options);
     }
-    // A blank `cmap` with no inline color map is already resolved to MEDM's
-    // default 65-colour palette by the parser, so an EMPTY table here means MEDM
-    // had a colormap we could not reproduce — a non-blank `cmap` naming an
-    // external colormap file (no filesystem loader; deferred) or, degenerately,
-    // no display block at all. Either way every `clr`/`bclr` fell to a sidm theme
-    // default: warn, naming the unresolved file, rather than dropping it silently.
-    if screen.color_table.is_empty() {
-        let cmap = screen
-            .assignments
-            .get("cmap")
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty());
-        let detail = match cmap {
-            Some(file) => format!("external colormap file {file:?} is not parsed"),
-            None => "no color map is defined".to_string(),
-        };
+    // An external `cmap` file the parser could not resolve (missing, unparsable,
+    // or parsed with no source dir) left `unresolved_cmap` set and fell the table
+    // back to MEDM's default 65-colour palette — warn, naming the file, so the
+    // colour difference from the real file is visible rather than silent
+    // (medmDisplay.c:404-407 "Using the default colormap"). A still-empty table
+    // means no colormap at all (degenerately, no display block): every `clr`/`bclr`
+    // falls to a sidm theme default.
+    if let Some(file) = &screen.unresolved_cmap {
         b.warnings.push(format!(
-            "{detail} (adl2sidm has no external-colormap loader); every fg/bg colour \
-             falls to a sidm theme default"
+            "external colormap file {file:?} could not be read (searched the display's \
+             directory and EPICS_DISPLAY_PATH); every fg/bg colour falls to MEDM's default \
+             palette instead of the file's colours"
         ));
+    } else if screen.color_table.is_empty() {
+        b.warnings.push(
+            "no color map is defined; every fg/bg colour falls to a sidm theme default".to_string(),
+        );
     }
     // The screen's `bclr` background is painted in `ui()` with `color_expr`, so it
     // needs the `Color32` import even when no widget carries a colour.
@@ -2195,7 +2192,7 @@ fn emit_embedded_display(b: &mut Builder, widget: &MedmWidget, options: &Options
         }
     };
 
-    let mut target = parse(&text);
+    let mut target = parse_in_dir(&text, canonical.parent());
     // Resolve the target's channels in the embedded directory (so a nested
     // embedded display resolves relative to *its* file). Per MEDM
     // `compositeFileParse`, a non-empty macro string on the `composite file`
@@ -7606,9 +7603,11 @@ composite {
 
     #[test]
     fn external_cmap_warns_and_no_colormap_uses_default_palette() {
-        // R3-20: a display referencing an external colormap file (non-blank cmap,
-        // no inline color map) has no reproducible colours — warn, naming the file,
-        // rather than dropping every colour silently.
+        // R3-20: a display referencing an external colormap file the converter
+        // could not read (non-blank cmap, no inline color map, no source dir) falls
+        // to MEDM's default palette (medmDisplay.c "Using the default colormap") and
+        // warns naming the file, so the colour difference from the real file is
+        // visible rather than silent.
         let external = r#"
 display {
 	object {
@@ -7639,9 +7638,17 @@ display {
             g.warnings
                 .iter()
                 .any(|w| w.contains("external colormap file \"site.map\"")
-                    && w.contains("theme default")),
+                    && w.contains("default palette")),
             "external cmap must warn naming the file: {:?}",
             g.warnings
+        );
+        // The unresolved cmap still resolves clr against the default palette
+        // (index 15 = (0,216,0)) rather than dropping every colour to a theme
+        // default — the warning marks that these are MEDM defaults, not the file's.
+        assert!(
+            g.source.contains("Color32::from_rgb(0, 216, 0)"),
+            "unresolved cmap must still resolve clr against the default palette:\n{}",
+            g.source
         );
 
         // The same screen WITHOUT a cmap resolves against MEDM's default palette

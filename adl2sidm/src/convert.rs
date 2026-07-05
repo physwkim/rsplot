@@ -24,7 +24,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use crate::adl_parser::{MedmScreen, parse};
+use crate::adl_parser::{MedmScreen, parse_in_dir};
 use crate::codegen::{Options, PLOT_IDS_HELPER, RdModule, generate, has_macro_ref};
 
 /// The result of a recursive conversion: one source file (root screen, child
@@ -227,7 +227,7 @@ fn indent_block(block: &str, pad: &str) -> String {
 fn registry_entry(canon: &Path, ident: Option<String>) -> Result<Entry, String> {
     let text =
         std::fs::read_to_string(canon).map_err(|e| format!("reading {}: {e}", canon.display()))?;
-    let mut screen = parse(&text);
+    let mut screen = parse_in_dir(&text, canon.parent());
     let title = canon
         .file_name()
         .and_then(|n| n.to_str())

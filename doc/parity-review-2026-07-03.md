@@ -3005,15 +3005,36 @@ now handled.
   colour silently.
 
 Tests: `no_inline_colormap_blank_cmap_uses_medm_default_palette`,
-`non_blank_cmap_leaves_table_empty_for_deferred_external_parse`,
-`external_cmap_warns_and_no_colormap_uses_default_palette`. No golden churn — every
-fixture `.adl` carries an inline color map, so the default is never injected there.
+`external_cmap_warns_and_no_colormap_uses_default_palette` (plus the external-file
+tests listed in the FIXED block below). No golden churn — every fixture `.adl`
+carries an inline color map, so the default is never injected there.
 
-**DEFERRED (external-file parse — needs a public-API change):** actually reading
-and parsing the named external colormap file requires threading a source dir into
-`parse()` (a public entry point with many callers/tests) so the table is populated
-before widget colours resolve. That signature change is feature-sized; deferred
-for sign-off. The warn closes the silent-loss fault in the meantime.
+**FIXED (R3 — external-file parse, user "위에 3개 착수" 2026-07-06):** an
+**additive** API change threads the source dir without breaking any caller. New
+`parse_in_dir(text, Option<&Path>)` holds the former `parse` body; `parse(text) =
+parse_in_dir(text, None)`, so every existing test caller is untouched — only the
+two production callers that know a directory switch over (`convert::registry_entry`
+→ `canon.parent()`, `codegen::emit_embedded_display` → `canonical.parent()`).
+
+When the display's table is empty and `cmap` is non-blank, `load_external_colormap`
+resolves the file (`resolve_colormap_path`: the `.adl` dir then `EPICS_DISPLAY_PATH`,
+mirroring `dmOpenUsableFile`; the `.adl` dir replaces MEDM's literal process-CWD,
+which has no batch-converter analogue), reads it, and parses the `"color map"`
+block with the **same** inline `parse_color_map` grammar MEDM's
+`parseAndExtractExternalColormap` reuses (medmCommon.c:1315). On any miss (no dir,
+file absent, unparsable, empty block) the table falls to MEDM's default 65-colour
+palette — matching `executeDlDisplay`'s "Using the default colormap"
+(medmDisplay.c:404-420) — and `MedmScreen.unresolved_cmap` records the file so
+codegen warns that the colours are MEDM defaults, not the file's. An inline
+`"color map"` still wins (the empty-table guard skips the cmap branch entirely).
+
+Tests: `external_cmap_file_is_read_and_its_colours_resolve` (temp dir + `site.map`
+→ the file's colours populate the table, `clr` resolves against it),
+`missing_external_cmap_with_source_dir_falls_to_default_and_signals`,
+`non_blank_cmap_without_source_dir_falls_to_default_palette_and_signals` (replaces
+the old empty-table test — the deferred contract is gone), `inline_color_map_wins_
+over_a_named_cmap`, and the extended blank-cmap + codegen warning tests. adl2sidm
+147/147, clippy clean, doctests pass.
 
 Severity: Medium
 

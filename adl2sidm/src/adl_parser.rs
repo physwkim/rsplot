@@ -25,6 +25,7 @@
 //! tree of [`MedmWidget`]s); [`crate::codegen`] walks it to emit SiDM Rust.
 
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
 /// MEDM angle unit: angles are stored as integer 1/64-degree units.
 const MEDM_DEGREE_UNITS: f64 = 64.0;
@@ -99,6 +100,11 @@ pub struct MedmScreen {
     pub background_color: Option<Color>,
     /// Remaining `display`-block assignments (e.g. `cmap`, `gridSpacing`).
     pub assignments: BTreeMap<String, String>,
+    /// A non-blank `cmap` naming an external colormap file that could not be
+    /// resolved or parsed; the colour table fell back to MEDM's default palette
+    /// and [`crate::codegen`] warns. `None` for inline maps, blank-`cmap`
+    /// defaults, and successful external loads.
+    pub unresolved_cmap: Option<String>,
     pub widgets: Vec<MedmWidget>,
 }
 
@@ -663,6 +669,50 @@ fn parse_color_map(content: &[&str]) -> Vec<Color> {
     table
 }
 
+/// Resolve `name` against `dir` (then `EPICS_DISPLAY_PATH`), read it, and parse
+/// the `"color map"` block inside with the inline grammar ([`parse_color_map`]),
+/// mirroring MEDM's `parseAndExtractExternalColormap` (medmCommon.c:1315), which
+/// tokenizes the file, finds its `"color map"` word, and calls the same
+/// `parseColormap` the inline path uses. `None` when the file is not found,
+/// unreadable, has no `"color map"` block, or the block is empty — MEDM's
+/// `NULL` return, which upstream falls to the default palette.
+fn load_external_colormap(name: &str, dir: &Path) -> Option<Vec<Color>> {
+    let path = resolve_colormap_path(name, dir)?;
+    let text = std::fs::read_to_string(&path).ok()?;
+    let buf: Vec<&str> = text.lines().collect();
+    let blocks = locate_blocks(&buf);
+    let block = named_block("color map", &blocks)?;
+    let table = parse_color_map(&block_content(&buf, block));
+    (!table.is_empty()).then_some(table)
+}
+
+/// Resolve an external colormap file name the way MEDM's `dmOpenUsableFile`
+/// (display.c) does for a search with no related-display directory: an absolute
+/// name as-is, a relative one against `dir` (the `.adl`'s own directory — a
+/// deliberate, faithful-in-spirit choice for a batch converter, where MEDM's
+/// literal process-CWD has no analogue) then each `EPICS_DISPLAY_PATH` entry.
+fn resolve_colormap_path(name: &str, dir: &Path) -> Option<PathBuf> {
+    let p = Path::new(name);
+    let mut candidates = Vec::new();
+    if p.is_absolute() {
+        candidates.push(p.to_path_buf());
+    } else {
+        candidates.push(dir.join(p));
+        candidates.extend(epics_display_path().iter().map(|d| d.join(p)));
+    }
+    candidates
+        .into_iter()
+        .find_map(|c| c.canonicalize().ok().filter(|c| c.is_file()))
+}
+
+/// The `EPICS_DISPLAY_PATH` search directories (platform path-separator
+/// splitting, like MEDM's `dmOpenUsableFile`).
+fn epics_display_path() -> Vec<PathBuf> {
+    std::env::var_os("EPICS_DISPLAY_PATH")
+        .map(|v| std::env::split_paths(&v).collect())
+        .unwrap_or_default()
+}
+
 /// MEDM's built-in default colormap (`siteSpecific.h` `defaultDlColormap`, 65
 /// entries r/g/b — the `inten` column is display-only and dropped). MEDM applies
 /// it to any display that has no inline `"color map"` block and a blank `cmap`
@@ -768,8 +818,20 @@ fn parse_file(content: &[&str], screen: &mut MedmScreen) {
     screen.adl_version = a.get("version").cloned().unwrap_or_else(|| "0".to_string());
 }
 
-/// Parse a full MEDM `.adl` document into a [`MedmScreen`].
+/// Parse a full MEDM `.adl` document into a [`MedmScreen`] with no source
+/// directory: an external `cmap` colormap file cannot be resolved, so a non-blank
+/// `cmap` falls back to MEDM's default palette (as it does when the file is
+/// missing). Use [`parse_in_dir`] to resolve external colormaps.
 pub fn parse(text: &str) -> MedmScreen {
+    parse_in_dir(text, None)
+}
+
+/// Parse a full MEDM `.adl` document into a [`MedmScreen`]. `source_dir` is the
+/// directory the `.adl` lives in; a non-blank `cmap` naming an external colormap
+/// file is resolved against it (and `EPICS_DISPLAY_PATH`), read, and parsed so
+/// `clr`/`bclr` indices resolve to the file's colours during this parse (MEDM
+/// `executeDlDisplay` → `parseAndExtractExternalColormap`, medmDisplay.c:386-427).
+pub fn parse_in_dir(text: &str, source_dir: Option<&Path>) -> MedmScreen {
     let buf: Vec<&str> = text.lines().collect();
     let blocks = locate_blocks(&buf);
 
@@ -786,16 +848,25 @@ pub fn parse(text: &str) -> MedmScreen {
     if let Some(block) = named_block("display", &blocks) {
         let content = block_content(&buf, block);
         // MEDM colormap fallback chain (executeDlDisplay, medmDisplay.c:386-427):
-        // with no inline `"color map"` block, a BLANK `cmap` falls to the built-in
-        // default 65-colour palette (createDlColormap). A NON-blank `cmap` names an
-        // external colormap file, which needs a filesystem read `parse` has no
-        // source dir for — deferred; the table stays empty and codegen warns.
+        // with no inline `"color map"` block, a NON-blank `cmap` names an external
+        // colormap file — read + parse it against `source_dir`; on any miss (no
+        // dir, file absent, unparsable) fall to the built-in default 65-colour
+        // palette (createDlColormap) and record the file so codegen warns. A BLANK
+        // `cmap` falls straight to the default palette.
         if screen.color_table.is_empty() {
-            let has_cmap = locate_assignments(&content)
+            let cmap = locate_assignments(&content)
                 .get("cmap")
-                .is_some_and(|s| !s.trim().is_empty());
-            if !has_cmap {
-                screen.color_table = default_dl_colormap();
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+            match cmap {
+                None => screen.color_table = default_dl_colormap(),
+                Some(file) => match source_dir.and_then(|d| load_external_colormap(&file, d)) {
+                    Some(table) => screen.color_table = table,
+                    None => {
+                        screen.color_table = default_dl_colormap();
+                        screen.unresolved_cmap = Some(file);
+                    }
+                },
             }
         }
         let table = screen.color_table.clone();
@@ -822,6 +893,16 @@ pub fn parse(text: &str) -> MedmScreen {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A process- and call-unique scratch directory under the system temp dir,
+    /// for the external-colormap file tests (R3-20). The caller creates and
+    /// removes it.
+    fn unique_temp_dir(tag: &str) -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let n = SEQ.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!("adl2sidm_{tag}_{}_{n}", std::process::id()))
+    }
 
     const SAMPLE: &str = r#"
 file {
@@ -935,13 +1016,18 @@ display {
                 b: 255
             })
         );
+        assert!(
+            screen.unresolved_cmap.is_none(),
+            "a blank cmap is not an unresolved external file"
+        );
     }
 
     #[test]
-    fn non_blank_cmap_leaves_table_empty_for_deferred_external_parse() {
-        // A non-blank cmap names an external colormap file the parser cannot read
-        // (no source dir); the default palette must NOT be substituted (MEDM would
-        // use the file's colours), so the table stays empty and codegen warns.
+    fn non_blank_cmap_without_source_dir_falls_to_default_palette_and_signals() {
+        // R3-20: a non-blank cmap names an external colormap file. With no source
+        // dir (bare `parse`) it cannot be read, so — matching MEDM's "Using the
+        // default colormap" (medmDisplay.c:404-420) — the table falls to the
+        // default palette and `unresolved_cmap` records the file so codegen warns.
         let adl = r#"
 file {
 	name="x.adl"
@@ -960,14 +1046,161 @@ display {
 }
 "#;
         let screen = parse(adl);
-        assert!(
-            screen.color_table.is_empty(),
-            "external cmap must not fall to the default palette"
+        assert_eq!(
+            screen.color_table.len(),
+            65,
+            "an unresolved external cmap falls to MEDM's default palette"
         );
         assert_eq!(
-            screen.assignments.get("cmap").map(String::as_str),
-            Some("site.map")
+            screen.color,
+            Some(Color { r: 0, g: 0, b: 0 }),
+            "clr=14 resolves through the default palette (MEDM black)"
         );
+        assert_eq!(
+            screen.unresolved_cmap.as_deref(),
+            Some("site.map"),
+            "the unresolved external file must be recorded for the codegen warning"
+        );
+    }
+
+    #[test]
+    fn external_cmap_file_is_read_and_its_colours_resolve() {
+        // R3-20: with a source dir, the named external colormap file is read and
+        // parsed with the inline grammar so `clr` resolves to ITS colours.
+        let dir = unique_temp_dir("r3_20_external_cmap");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("site.map"),
+            "color map {\n\tncolors=2\n\tcolors {\n\t\t112233,\n\t\t445566,\n\t}\n}\n",
+        )
+        .unwrap();
+        let adl = r#"
+file {
+	name="x.adl"
+	version=030111
+}
+display {
+	object {
+		x=0
+		y=0
+		width=100
+		height=100
+	}
+	cmap="site.map"
+	clr=1
+	bclr=0
+}
+"#;
+        let screen = parse_in_dir(adl, Some(&dir));
+        assert_eq!(
+            screen.color_table,
+            vec![
+                Color {
+                    r: 0x11,
+                    g: 0x22,
+                    b: 0x33
+                },
+                Color {
+                    r: 0x44,
+                    g: 0x55,
+                    b: 0x66
+                }
+            ],
+            "the external file's colours must populate the table"
+        );
+        assert_eq!(
+            screen.color,
+            Some(Color {
+                r: 0x44,
+                g: 0x55,
+                b: 0x66
+            }),
+            "clr=1 resolves against the external file"
+        );
+        assert!(screen.unresolved_cmap.is_none(), "the file resolved");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn missing_external_cmap_with_source_dir_falls_to_default_and_signals() {
+        // R3-20: a source dir that does NOT contain the named file falls to the
+        // default palette and still records the unresolved file.
+        let dir = unique_temp_dir("r3_20_missing_cmap");
+        std::fs::create_dir_all(&dir).unwrap();
+        let adl = r#"
+file {
+	name="x.adl"
+	version=030111
+}
+display {
+	object {
+		x=0
+		y=0
+		width=100
+		height=100
+	}
+	cmap="absent.map"
+	clr=14
+	bclr=0
+}
+"#;
+        let screen = parse_in_dir(adl, Some(&dir));
+        assert_eq!(
+            screen.color_table.len(),
+            65,
+            "missing file → default palette"
+        );
+        assert_eq!(screen.unresolved_cmap.as_deref(), Some("absent.map"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn inline_color_map_wins_over_a_named_cmap() {
+        // R3-20: an inline `"color map"` block resolves colours directly, so a
+        // `cmap` naming an external file is never consulted (and not unresolved).
+        let dir = unique_temp_dir("r3_20_inline_wins");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("site.map"),
+            "color map {\n\tcolors {\n\t\t010203,\n\t}\n}\n",
+        )
+        .unwrap();
+        let adl = r#"
+file {
+	name="x.adl"
+	version=030111
+}
+color map {
+	ncolors=2
+	colors {
+		aabbcc,
+		ddeeff,
+	}
+}
+display {
+	object {
+		x=0
+		y=0
+		width=100
+		height=100
+	}
+	cmap="site.map"
+	clr=1
+	bclr=0
+}
+"#;
+        let screen = parse_in_dir(adl, Some(&dir));
+        assert_eq!(
+            screen.color,
+            Some(Color {
+                r: 0xdd,
+                g: 0xee,
+                b: 0xff
+            }),
+            "the inline color map must win over the external cmap"
+        );
+        assert!(screen.unresolved_cmap.is_none());
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
