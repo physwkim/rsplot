@@ -2818,6 +2818,25 @@ Impact: for `"composite file"="child.adl;M=2"` inside a parent opened with `P=io
 
 ### R3-17: Composite-file include skips MEDM's bbox refit + child translation
 
+**FIXED (R3):** `emit_embedded_display` now mirrors `compositeFileParse`'s
+post-parse refit (`medmComposite.c:709-736`): `content_bbox` takes the children's
+bounding box (min/max of each widget's `x,y,x+w,y+h` — the skipped
+file/display/colormap blocks are absent from `target.widgets`, exactly as they are
+absent from MEDM's `dlElementList`), the frame is sized to `(maxX-minX,
+maxY-minY)` at the composite's WRITTEN `x,y`, and the children are measured from
+the bbox min (`child_origin = (min_x, min_y)`) so the content's top-left lands at
+the written corner. A childless include keeps the written geometry. Previously the
+frame kept the child.adl's stale display w/h and children rendered at
+`frame_origin + (child.x, child.y)`, shifting content whose bbox min ≠ (0,0).
+
+Test: `embedded_display_refits_frame_to_content_bbox_and_translates_children` —
+two widgets with bbox min (15,30) and bbox 45×38 inside a composite written at
+(100,200) with a wrong 999×888 size; asserts the frame refits to
+`100,200,45,38` (stale 999×888 gone) and each child is translated by
+`-bbox-min`. The committed `local_panel_screen.rs` golden was regenerated: the
+`embed_child.adl` frame went 160×40 → 152×34 with its two children translated by
+`(-4,-2)` — exactly the refit.
+
 Severity: Medium
 
 Rust: `adl2sidm/src/codegen.rs:2116-2128` — `emit_embedded_display` inlines the target with `child_origin (0,0)`, so each child renders at `frame_origin + (child.x, child.y)`, and the frame keeps the stale `.adl` geometry (`geom` at `:2121`).

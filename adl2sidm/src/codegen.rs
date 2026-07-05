@@ -2135,17 +2135,36 @@ fn emit_embedded_display(b: &mut Builder, widget: &MedmWidget, options: &Options
     // replace-include nested inside another stays sealed regardless).
     let prev_seal = b.seal_macros;
     b.seal_macros = prev_seal || !macros.trim().is_empty();
-    // The target's widgets are in its OWN screen coordinates (origin 0,0), so they
-    // translate into the frame interior by (0, 0).
+    // MEDM `compositeFileParse` (`medmComposite.c:709-736`) refits the composite
+    // to its contents after parsing: it takes the children's bounding box
+    // (min/max of each element's `x,y,x+w,y+h` — the skipped file/display/colormap
+    // blocks are not in the list, exactly as they are absent from `target.widgets`),
+    // sets the composite's size to `(maxX-minX, maxY-minY)`, and moves every child
+    // by `(oldX-minX, oldY-minY)` so the content's top-left lands at the
+    // composite's WRITTEN `x,y`. So children are measured from the bbox min (not
+    // the child.adl's file origin) and the frame takes the content size, not the
+    // stale `.adl` display geometry. A childless include keeps the written geometry.
+    let (frame_geom, child_origin) = match content_bbox(&target.widgets) {
+        Some((min_x, min_y, max_x, max_y)) => (
+            Geometry {
+                x: geom.x,
+                y: geom.y,
+                width: max_x - min_x,
+                height: max_y - min_y,
+            },
+            (min_x, min_y),
+        ),
+        None => (geom, (0, 0)),
+    };
     emit_frame_container(
         b,
         z,
-        geom,
+        frame_geom,
         &addr,
         true,
         &format!("adl2sidm: connect {addr} (embedded {file})"),
         &target.widgets,
-        (0, 0),
+        child_origin,
         &child_options,
     );
     b.seal_macros = prev_seal;
@@ -2170,6 +2189,24 @@ fn embedded_file_and_macros(widget: &MedmWidget) -> Option<(String, String)> {
         Some((file, macros)) => Some((file.trim().to_string(), macros.trim().to_string())),
         None => Some((spec.to_string(), String::new())),
     }
+}
+
+/// The bounding box `(min_x, min_y, max_x, max_y)` over the widgets that carry a
+/// geometry, matching MEDM's composite-refit loop (`medmComposite.c:710-726`:
+/// min/max of each element's `x`, `y`, `x+width`, `y+height`). `None` when no
+/// widget has a geometry (an empty include — nothing to refit).
+fn content_bbox(widgets: &[MedmWidget]) -> Option<(i32, i32, i32, i32)> {
+    let mut it = widgets.iter().filter_map(|w| w.geometry);
+    let first = it.next()?;
+    let (mut min_x, mut min_y) = (first.x, first.y);
+    let (mut max_x, mut max_y) = (first.x + first.width, first.y + first.height);
+    for g in it {
+        min_x = min_x.min(g.x);
+        min_y = min_y.min(g.y);
+        max_x = max_x.max(g.x + g.width);
+        max_y = max_y.max(g.y + g.height);
+    }
+    Some((min_x, min_y, max_x, max_y))
 }
 
 /// Parse an embedded display's macro string (`"A=1,B=2"`) into pairs, dropping
@@ -8150,6 +8187,98 @@ composite {
         assert!(
             g.source.contains("loc://ioc1:dev?type=int"),
             "empty macro string must inherit the parent's macros:\n{}",
+            g.source
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn embedded_display_refits_frame_to_content_bbox_and_translates_children() {
+        // MEDM compositeFileParse (medmComposite.c:709-736): the composite refits
+        // to its children's bounding box. child.adl has two widgets whose bbox min
+        // is (15, 30) — NOT the file origin — and whose bbox is 45x38. The parent
+        // composite is written at (100, 200) with a deliberately WRONG 999x888
+        // size. After refit the frame must sit at (100, 200) sized 45x38, and each
+        // child must be measured from the bbox min (translated by -15, -30).
+        let dir = embed_tmpdir("refit");
+        std::fs::write(
+            dir.join("child.adl"),
+            r#"
+display {
+	object {
+		x=0
+		y=0
+		width=300
+		height=300
+	}
+	clr=1
+	bclr=0
+}
+"text update" {
+	object {
+		x=20
+		y=30
+		width=40
+		height=10
+	}
+	monitor {
+		chan="loc://a?type=int"
+		clr=1
+	}
+}
+"text update" {
+	object {
+		x=15
+		y=60
+		width=25
+		height=8
+	}
+	monitor {
+		chan="loc://b?type=int"
+		clr=1
+	}
+}
+"#,
+        )
+        .unwrap();
+        let parent = r#"
+composite {
+	object {
+		x=100
+		y=200
+		width=999
+		height=888
+	}
+	"composite file"="child.adl"
+}
+"#;
+        let options = Options {
+            source_dir: Some(dir.clone()),
+            ..Options::default()
+        };
+        let g = generate(&parse(parent), &options);
+        // Frame at written (100,200) but sized to the content bbox (45x38), not
+        // the stale composite 999x888.
+        assert!(
+            g.source.contains("100.0, 200.0, 45.0, 38.0"),
+            "frame must refit to the content bbox at the written position:\n{}",
+            g.source
+        );
+        assert!(
+            !g.source.contains("999.0, 888.0"),
+            "stale composite geometry must be dropped:\n{}",
+            g.source
+        );
+        // Child A (20,30,40,10) measured from bbox min (15,30) → (5.0, 0.0).
+        assert!(
+            g.source.contains("5.0, 0.0, 40.0, 10.0"),
+            "child A must be translated by -bbox-min:\n{}",
+            g.source
+        );
+        // Child B (15,60,25,8) → (0.0, 30.0).
+        assert!(
+            g.source.contains("0.0, 30.0, 25.0, 8.0"),
+            "child B must be translated by -bbox-min:\n{}",
             g.source
         );
         let _ = std::fs::remove_dir_all(&dir);
