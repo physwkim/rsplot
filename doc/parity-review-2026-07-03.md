@@ -2437,6 +2437,14 @@ or whose doc note mis-classified the remaining half — are the R3 findings tagg
 
 ### R3-1: Toolbar grid toggle turns on the major grid only — silx PlotWindow's GridAction sets `"both"` (major + minor) — (R2-18 residual)
 
+**FIXED (R3, commit after `bd37b11`):** both user-facing binary grid toggles
+(toolbar grid button `high_level.rs`, LimitsWidget "Show Grid" checkbox
+`limits_widget.rs`) now go `None <-> MajorAndMinor` to match silx's deployed
+`GridAction(gridMode="both")`. The toolbar's minor sub-button still drops to
+major-only, so siplot stays a strict superset. Internal `set_graph_grid(bool)`
+setup calls (ImageView / side histograms) keep major-on/off — a distinct site,
+not the deployed action.
+
 Severity: Low
 
 Rust: `src/widget/high_level.rs:6606-6611` — grid button calls `self.set_graph_grid(grid)`; `:7135-7141` — `set_graph_grid(true)` sets `GraphGrid::Major`. Minor grid is a separate opt-in button (`:6613-6623`) silx's toolbar does not have.

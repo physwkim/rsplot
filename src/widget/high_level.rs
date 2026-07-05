@@ -6606,7 +6606,16 @@ impl PlotWidget {
         let mut grid = self.graph_grid();
         if toolbar_icon_button(ui, ToolbarIcon::Grid, grid, "Toggle grid").clicked() {
             grid = !grid;
-            self.set_graph_grid(grid);
+            // silx's deployed GridAction uses gridMode="both": toggling the grid
+            // on shows major AND minor lines, not major only
+            // (PlotWindow.py:199 `gridMode="both"`; actions/control.py:293,314
+            // `setGraphGrid(self._gridMode if checked else None)`). The minor
+            // sub-button below then lets the user drop to major-only.
+            self.set_graph_grid_mode(if grid {
+                GraphGrid::MajorAndMinor
+            } else {
+                GraphGrid::None
+            });
             out.grid_changed = true;
         }
 

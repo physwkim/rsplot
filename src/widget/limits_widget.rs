@@ -134,7 +134,13 @@ impl LimitsWidget {
                 ui.separator();
 
                 if ui.checkbox(&mut self.grid, "Show Grid").changed() {
-                    plot.set_graph_grid(self.grid);
+                    // Match silx's GridAction gridMode="both": grid on = major +
+                    // minor (see high_level.rs toolbar grid button).
+                    plot.set_graph_grid_mode(if self.grid {
+                        crate::core::plot::GraphGrid::MajorAndMinor
+                    } else {
+                        crate::core::plot::GraphGrid::None
+                    });
                 }
 
                 ui.horizontal(|ui| {
