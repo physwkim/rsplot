@@ -2963,6 +2963,21 @@ Impact: a two-axis cartesian plot (current on Y1, pressure on Y2) plots every tr
 
 ### R3-22: `wheel_decimals` unparseable-format fallback diverges from Xc `compute_format` — (R2-69 residual)
 
+**FIXED (R3):** `wheel_decimals` is now a faithful port of Xc `compute_format`
+(`WheelSwitch.c:1347-1400`) and returns `i32` (never `Option`) — Xc always yields a
+precision and never leaves it to the channel. Without a `%`+`f` (`"%g"`, `"% 6d"`,
+`"garbage"`) it returns `DEFAULT_FORMAT` precision 2 (`:44`); with a `%…f` it skips
+flags then emulates `sscanf("%d.%d")`: no width digits (`"%f"`, `"%.3f"`, leading
+`.`) → `nparsed==0` → 2; width only (`"%6f"`) → 0; `n.m` → precision clamped to
+`[0, width-1]`. The caller drops its former None→warn→channel branch and always
+pushes `.with_precision(wheel_decimals(fmt))`. The R2-69 `Option`/bare-`w.d`
+convenience is subsumed: `"6.2"` (no `%`) is Xc's DEFAULT 2, and `"integer"`
+stays the 0 convenience. No fixture carries a wheel-switch `format`, so no golden
+churn.
+
+Test: `wheel_decimals_reads_medm_printf_and_bare_forms` rewritten for the `i32`
+signature with the new `"%f"`/`"%.3f"`/`"%g"`/`"% 6d"`/`"garbage"` → 2 cases.
+
 Severity: Low
 
 Rust: `adl2sidm/src/codegen.rs:3078-3099` — a format without `%…f` returns `None` (caller `:755-761` warns, precision left to channel); `"%f"` yields `Some(0)`; `"%.3f"` yields `Some(3)`.

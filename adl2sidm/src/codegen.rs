@@ -782,13 +782,9 @@ fn emit_wheel_switch(b: &mut Builder, widget: &MedmWidget, options: &Options, z:
     // Precision comes from MEDM `format` (what adl2pydm reads), falling back to
     // the `limits` block's `precDefault` (what real wheel-switch screens carry).
     if let Some(fmt) = widget.assignments.get("format") {
-        match wheel_decimals(fmt) {
-            Some(decimals) => builders.push(format!(".with_precision({decimals})")),
-            None => b.warnings.push(format!(
-                "line {}: wheel switch format {fmt:?} not parseable; precision left to channel",
-                widget.line
-            )),
-        }
+        // Xc `compute_format` always yields a precision (DEFAULT 2 for an
+        // unparseable format), never leaving it to the channel — see wheel_decimals.
+        builders.push(format!(".with_precision({})", wheel_decimals(fmt)));
     } else if let Some(prec) = precision_default_builder(widget) {
         builders.push(prec);
     }
@@ -3217,33 +3213,63 @@ fn direction_orientation(
     }
 }
 
-/// Decimals for a wheel-switch `format`. MEDM stores the value raw and hands it
-/// to the Xc `WheelSwitch` widget, whose documented form is a printf spec
-/// `xxx%[flags]w.pf` (default `"% 6.2f"`): it finds `%`, requires an `f`
-/// conversion after it, skips flags, reads `w.p`, and clamps `p` to `[0, w-1]`
-/// (`WheelSwitch.c:1347-1391`). A width-only printf (`% 6f`) means 0 decimals.
-/// `"integer"` -> 0 and a bare `w.d` (no `%`/`f`) are `adl2pydm` conveniences seen
-/// in converted files. `None` (the caller warns) when no decimals are recoverable.
-fn wheel_decimals(fmt: &str) -> Option<i32> {
+/// Decimals for a wheel-switch `format`, a faithful port of Xc `compute_format`
+/// (`WheelSwitch.c:1347-1400`). MEDM hands the raw `format` to the Xc `WheelSwitch`
+/// widget, which never leaves the precision to the channel:
+///   - it needs a `%` with an `f` conversion after it; without both, the whole
+///     format is invalid and it falls back to `DEFAULT_FORMAT` `"% 6.2f"`
+///     (precision 2, `:44`);
+///   - otherwise it skips printf flags, then `sscanf`s the remainder as `"%d.%d"`
+///     (width.precision):
+///       * both fields (`n.m`) -> precision, clamped to `[0, width-1]`;
+///       * width only (`%6f`)  -> precision 0;
+///       * neither  (`%f`, `%.3f`: a leading `.`/no digit gives `nparsed==0`)
+///         -> `DEFAULT_FORMAT` precision 2.
+///
+/// So an unparseable/degenerate format is 2 decimals (Xc's default), never a
+/// fall-through to the channel — this always returns a concrete precision. R2-69
+/// ported only the happy-path `n.m` clamp; R3-22 adds Xc's default fallback.
+/// `"integer"` is an `adl2pydm`/adl2sidm convenience (not a printf spec) for 0.
+fn wheel_decimals(fmt: &str) -> i32 {
+    const DEFAULT_PRECISION: i32 = 2; // DEFAULT_FORMAT "% 6.2f" (WheelSwitch.c:44-46)
     if fmt == "integer" {
-        return Some(0);
+        return 0;
     }
-    match fmt.find('%') {
-        Some(pct) => {
-            let after = &fmt[pct + 1..];
-            let fpos = after.find('f')?; // no `f` conversion -> not a valid spec
-            let spec = after[..fpos].trim_start_matches([' ', '+', '#', '0', '-']);
-            let Some((width, prec)) = spec.split_once('.') else {
-                return Some(0); // width-only, e.g. `% 6f`
-            };
-            let prec: i32 = prec.trim().parse().ok()?;
-            match width.trim().parse::<i32>() {
-                Ok(w) if w >= 1 => Some(prec.clamp(0, w - 1)),
-                _ => Some(prec.max(0)),
+    // Need a `%` with an `f` conversion after it; else Xc uses DEFAULT_FORMAT.
+    let Some(pct) = fmt.find('%') else {
+        return DEFAULT_PRECISION;
+    };
+    let after = &fmt[pct + 1..];
+    let Some(fpos) = after.find('f') else {
+        return DEFAULT_PRECISION;
+    };
+    // Skip printf flags, then emulate `sscanf(rest, "%d.%d")` over the pre-`f` span.
+    let spec = after[..fpos].trim_start_matches([' ', '+', '#', '0', '-']);
+    // Leading width digits are sscanf's first `%d`; none -> nparsed 0 -> DEFAULT
+    // (e.g. `%f`, `%.3f`).
+    let wend = spec
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(spec.len());
+    if wend == 0 {
+        return DEFAULT_PRECISION;
+    }
+    let Ok(width) = spec[..wend].parse::<i32>() else {
+        return DEFAULT_PRECISION; // width overflow: treat as unparseable
+    };
+    // A leading `0` was stripped as a flag, so the first width digit is 1-9 and
+    // `width >= 1` here. After the width, `.<digits>` gives the precision
+    // (nparsed 2); no `.`, or `.` with no digits, is width-only (nparsed 1) -> 0.
+    match spec[wend..].strip_prefix('.') {
+        Some(rest) => {
+            let pend = rest
+                .find(|c: char| !c.is_ascii_digit())
+                .unwrap_or(rest.len());
+            match rest[..pend].parse::<i32>() {
+                Ok(prec) => prec.clamp(0, width - 1), // Xc clamps to [0, width-1]
+                Err(_) => 0, // `.` with no digits -> sscanf stops at 1 field
             }
         }
-        // adl2pydm's bare `w.d` convenience (no `%`/`f`), e.g. `format="6.2"`.
-        None => fmt.split_once('.')?.1.parse::<i32>().ok(),
+        None => 0, // width only, e.g. `%6f`
     }
 }
 
@@ -6082,17 +6108,20 @@ valuator {
     fn wheel_decimals_reads_medm_printf_and_bare_forms() {
         // R2-69: MEDM's real wheel-switch format is a printf spec handed to the Xc
         // widget; the decimals are the `.p` field, clamped to [0, width-1].
-        assert_eq!(wheel_decimals("% 6.2f"), Some(2)); // MEDM DEFAULT_FORMAT
-        assert_eq!(wheel_decimals("%6.2f"), Some(2)); // no flags
-        assert_eq!(wheel_decimals("% 8.0f"), Some(0)); // explicit 0 decimals
-        assert_eq!(wheel_decimals("% 6f"), Some(0)); // width-only -> 0
-        assert_eq!(wheel_decimals("% 3.9f"), Some(2)); // p clamped to width-1
-        // adl2pydm conveniences still work.
-        assert_eq!(wheel_decimals("6.2"), Some(2)); // bare w.d
-        assert_eq!(wheel_decimals("integer"), Some(0));
-        // Genuinely unparseable -> None (caller warns, never silent).
-        assert_eq!(wheel_decimals("% 6d"), None); // no `f` conversion
-        assert_eq!(wheel_decimals("garbage"), None);
+        assert_eq!(wheel_decimals("% 6.2f"), 2); // MEDM DEFAULT_FORMAT
+        assert_eq!(wheel_decimals("%6.2f"), 2); // no flags
+        assert_eq!(wheel_decimals("% 8.0f"), 0); // explicit 0 decimals
+        assert_eq!(wheel_decimals("% 6f"), 0); // width-only (nparsed 1) -> 0
+        assert_eq!(wheel_decimals("% 3.9f"), 2); // p clamped to width-1
+        assert_eq!(wheel_decimals("integer"), 0); // adl2pydm/adl2sidm convenience
+        // R3-22: Xc compute_format never leaves precision to the channel — an
+        // unparseable/degenerate format falls back to DEFAULT_FORMAT precision 2.
+        assert_eq!(wheel_decimals("%f"), 2); // nparsed 0 (no width digits)
+        assert_eq!(wheel_decimals("%.3f"), 2); // nparsed 0 (leading '.')
+        assert_eq!(wheel_decimals("%g"), 2); // no `f` conversion -> DEFAULT
+        assert_eq!(wheel_decimals("% 6d"), 2); // no `f` conversion -> DEFAULT
+        assert_eq!(wheel_decimals("garbage"), 2); // no `%` -> DEFAULT
+        assert_eq!(wheel_decimals("6.2"), 2); // no `%` -> DEFAULT (matches user's 2)
     }
 
     #[test]
