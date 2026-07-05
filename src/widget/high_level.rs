@@ -8886,10 +8886,19 @@ impl Plot2D {
             }
         };
 
-        // Stats line (silx HistogramWidget min/max/mean/std/sum).
+        // Stats line (silx HistogramWidget min/max/mean/std/sum). silx renders
+        // each stat with `f"{value:.5g}"` (_StatWidget.setValue, histogram.py:95),
+        // not fixed decimals — 5 significant digits with %g fixed/exponential
+        // switching, and CPython's "inf"/"nan" spellings for the non-finite
+        // mean/std/sum that ±inf pixels can produce (see R3-2).
+        use crate::widget::stats_widget::format_g_python;
         ui.label(format!(
-            "min {:.4}  max {:.4}  mean {:.4}  std {:.4}  sum {:.4}",
-            histo.min, histo.max, histo.mean, histo.std, histo.sum
+            "min {}  max {}  mean {}  std {}  sum {}",
+            format_g_python(histo.min, 5),
+            format_g_python(histo.max, 5),
+            format_g_python(histo.mean, 5),
+            format_g_python(histo.std, 5),
+            format_g_python(histo.sum, 5),
         ));
 
         // Bar chart drawn with the egui painter.

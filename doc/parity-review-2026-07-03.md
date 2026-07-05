@@ -2474,6 +2474,15 @@ Impact: an image with ±inf pixels shows finite mean/std/sum in siplot where sil
 
 ### R3-3: Pixel-histogram stats line formatted with Rust `{:.4}` (fixed 4 decimals) — silx uses `%.5g` — (R2-25 residual)
 
+**FIXED (R3):** the histogram stat line now renders each of min/max/mean/std/sum
+with `format_g_python(v, 5)` — silx's `f"{value:.5g}"` (`_StatWidget.setValue`,
+histogram.py:95): 5 significant digits, %g fixed/exponential switching. Because
+R3-2 makes mean/std/sum reachably ±inf/nan and silx's `%.5g` prints CPython's
+`"inf"`/`"-inf"`/`"nan"` there (not `format_significant`'s `"--"`, which is the
+`PositionInfo` convention), a thin `format_g_python` wrapper over
+`format_significant` supplies the non-finite spellings. Test
+`format_g_python_matches_python_5g`.
+
 Severity: Low
 
 Rust: `src/widget/high_level.rs:8881-8884` — `format!("min {:.4} max {:.4} mean {:.4} std {:.4} sum {:.4}", ...)`.

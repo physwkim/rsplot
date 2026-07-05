@@ -369,6 +369,24 @@ pub fn format_significant(value: f64, digits: usize) -> String {
     }
 }
 
+/// Format like Python's `f"{value:.{digits}g}"`, including the non-finite
+/// spellings CPython prints (`"inf"`, `"-inf"`, `"nan"`).
+///
+/// Distinct from [`format_significant`], whose `"--"` non-finite rendering
+/// matches silx's `PositionInfo`/`valueToString` convention, not raw `%g`. Use
+/// this where silx feeds a value straight through `f"{v:.5g}"` — e.g. the
+/// `HistogramWidget` stat line (`_StatWidget.setValue`, histogram.py:95), whose
+/// mean/std/sum can be ±inf/nan (silx `nanmean`/`nanstd`/`nansum`).
+pub fn format_g_python(value: f64, digits: usize) -> String {
+    if value.is_nan() {
+        return "nan".to_owned();
+    }
+    if value.is_infinite() {
+        return if value < 0.0 { "-inf" } else { "inf" }.to_owned();
+    }
+    format_significant(value, digits)
+}
+
 /// Trim trailing zeros (and a dangling decimal point) from a fixed-notation
 /// number, matching C `%g`.
 fn trim_fraction(s: &str) -> String {
@@ -463,6 +481,21 @@ mod tests {
     fn format_significant_small_uses_exponential() {
         // exp < -4 -> exponential.
         assert_eq!(format_significant(0.00001234, 4), "1.234e-05");
+    }
+
+    #[test]
+    fn format_g_python_matches_python_5g() {
+        // Finite: same 5-sig-fig %g as format_significant.
+        assert_eq!(format_g_python(1.5, 5), "1.5");
+        assert_eq!(format_g_python(0.0000123456, 5), "1.2346e-05");
+        assert_eq!(format_g_python(123456.0, 5), "1.2346e+05");
+        // Non-finite: CPython's f"{v:.5g}" spellings, NOT format_significant's
+        // "--" (which is silx's PositionInfo convention).
+        assert_eq!(format_g_python(f64::INFINITY, 5), "inf");
+        assert_eq!(format_g_python(f64::NEG_INFINITY, 5), "-inf");
+        assert_eq!(format_g_python(f64::NAN, 5), "nan");
+        // Contrast: format_significant renders non-finite as "--".
+        assert_eq!(format_significant(f64::INFINITY, 5), "--");
     }
 
     #[test]
