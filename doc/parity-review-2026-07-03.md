@@ -2778,13 +2778,34 @@ boundaries on one flag: value-less child → `warned` stays false; waveform chil
 → `warned` true, result `None`; scalar child → binds and evaluates, `warned`
 false.
 
-**DEFERRED (full array binding — needs sign-off):** true parity (evaluating
-`A[0]`, `np.mean(A)`, bare `A` over ndarray children) requires reversing sidm's
-**documented scalar-only calc value model** and adding an evalexpr array
-vocabulary + `np`/`numpy` namespace — a feature-sized change that overturns an
-existing design decision. Surfaced for sign-off (batched with R3-7 / R3-11 /
-R3-12), held while the user is away rather than reversing the scope decision
-unilaterally.
+**FIXED (R3 — full array binding, user "위에 3개 착수" 2026-07-06):** the
+scalar-only value model is reversed. `pv_to_evalexpr` now binds a numeric
+waveform child (`FloatArray`/`IntArray`) as a `Value::Tuple`, and `evalexpr_to_pv`
+reconstructs an array from a tuple result (all-`Int` → `IntArray`, any-`Float` →
+`FloatArray`, all-`String` → `StrArray`; empty/mixed → skip), so **bare `A`**
+publishes the array unchanged. `pydm_calc_context` registers a numeric array
+vocabulary — `mean(A)`, `sum(A)`, `at(A, i)` (indexing) — on top of the evalexpr
+builtins `min(A)`/`max(A)`/`len(A)`, which already fold a single tuple. A
+**string array** stays unbindable and keeps the R2-59 fail-visible warn-once path
+(sidm's array vocabulary is numeric; PyDM binds it as an ndarray of strings).
+
+Faithful ceiling (evalexpr has no attribute or index syntax, so it is not
+source-compatible with PyDM's Python expression strings): PyDM's `np.mean(A)` is
+spelled `mean(A)`, `A[0]` is `at(A, 0)`; the `np`/`numpy` namespace, `A[1:3]`
+slices, and elementwise `A + B` over waveforms are unavailable and remain visible
+eval errors (warn-once). This closes the finding's fault — an array child is no
+longer a permanently silent dead channel — while keeping the vocabulary within
+what a pure-Rust evaluator can express.
+
+Tests: rewrote `array_child_warns_once_while_missing_value_stays_silent` →
+`numeric_array_binds_string_array_warns_missing_stays_silent` (numeric waveform
+binds + evaluates; string array warns-once; value-less stays silent; scalar
+unchanged); added `array_vocabulary_folds_indexes_and_round_trips`
+(`mean`/`sum`/`min`/`max`/`len`/`at`, out-of-range → skip, bare `A` → array) and
+`int_array_round_trips_and_mixes_with_a_scalar_child`; extended
+`value_round_trips_through_evalexpr` (numeric arrays → tuple, string array →
+None, tuple → array by element type, empty/mixed → None). sidm 418/418, clippy
+clean, doctests pass.
 
 Severity: Medium
 

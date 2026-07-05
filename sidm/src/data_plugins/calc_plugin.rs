@@ -22,15 +22,21 @@
 //! ([`pydm_calc_context`]): every bare `math` name PyDM injects (`sin(A)`,
 //! `pi`, `floor(B)`, …) plus `epics_string` / `epics_unsigned`
 //! (`CalcThread.eval_env`, `calc_plugin.py:50-53`; the gaps — `np`, dotted
-//! `math.` spellings, Python builtins — are enumerated on that function). Only
-//! **scalar** children participate — a child with **no value yet** silently
-//! defers evaluation (PyDM waits until every child has a value), but a child
-//! that *is* connected with a **non-scalar (waveform) value** cannot bind (PyDM
-//! evaluates array children through its ndarray vocabulary; sidm's calc value
-//! model is scalar-only) and so **warns once**, then skips — fail-visible per
-//! the R2-59 contract, not the silent permanent dead channel a bare skip would
-//! leave. A [`PvValue::Bytes`] char waveform is the one exception that binds, as
-//! its NUL-terminated string (the `epics_string` transform). An expression that
+//! `math.` spellings, Python builtins — are enumerated on that function).
+//!
+//! **Array children (R3-13).** A numeric waveform child (`FloatArray`/`IntArray`)
+//! binds as a tuple, so a numeric array vocabulary operates on it: `mean(A)`,
+//! `sum(A)`, and the evalexpr builtins `min(A)`/`max(A)`/`len(A)` fold it,
+//! `at(A, i)` indexes it, and bare `A` publishes the array unchanged. evalexpr
+//! has no attribute or index syntax, so PyDM's `np.mean(A)` / `A[0]` are spelled
+//! `mean(A)` / `at(A, 0)` here (no `np.` namespace, no `A[i]` bracket, no
+//! `A[1:3]` slice, no elementwise `A + B` — those are visible eval errors). A
+//! **string array** (`StrArray`) has no numeric use and does not bind: it
+//! **warns once**, then skips — fail-visible per the R2-59 contract, not the
+//! silent permanent dead channel a bare skip would leave. A child with **no
+//! value yet** silently defers evaluation (PyDM waits until every child has a
+//! value). A [`PvValue::Bytes`] char waveform binds as its NUL-terminated string
+//! (the `epics_string` transform), not as a numeric tuple. An expression that
 //! fails to evaluate likewise publishes nothing and **warns once** per
 //! connection (PyDM `logger.exception`s every failure, `calc_plugin.py:174-179`;
 //! sidm's 50 ms poll would repeat the message indefinitely, so it logs once).
@@ -360,10 +366,11 @@ fn evaluate(
 /// - a child has **no value yet** — a silent skip, matching PyDM's "skip until
 ///   all values set" (`calc_plugin.py:170-172`); it resolves once the child
 ///   delivers a value;
-/// - a child has a **non-scalar (waveform) value** that sidm's scalar-only calc
-///   cannot bind — **warn-once**, then skip. PyDM evaluates array children; sidm
-///   does not, so R2-59's fail-visible contract turns what was a permanently
-///   silent dead channel (the old bare `?`) into a logged skip;
+/// - a child has a **string-array value** that sidm's numeric array vocabulary
+///   cannot bind — **warn-once**, then skip (numeric waveforms now bind as
+///   tuples). PyDM binds it as an ndarray of strings, so R2-59's fail-visible
+///   contract turns what was a permanently silent dead channel (the old bare
+///   `?`) into a logged skip;
 /// - the **expression itself fails** — **warn-once**, matching PyDM's
 ///   `logger.exception` on an `eval` failure (`calc_plugin.py:174-179`).
 ///
@@ -386,19 +393,18 @@ fn evaluate_evalexpr(
             return None;
         };
         let Some(var) = pv_to_evalexpr(&value) else {
-            // Value present but not scalar-bindable — a waveform child
-            // (FloatArray/IntArray/StrArray; `pv_to_evalexpr` returns `None`).
-            // sidm's calc value model is scalar-only (a documented scope
-            // decision), so it cannot bind; PyDM would evaluate it through its
-            // ndarray vocabulary. Fail-visible per the R2-59 contract — warn
-            // once, then skip — instead of the bare `?`'s permanently silent
-            // dead channel that re-skipped every 50 ms poll.
+            // Value present but not bindable. Numeric waveforms now bind as
+            // tuples (`pv_to_evalexpr`), so the only remaining case is a
+            // **string array** (`StrArray`) — sidm's array vocabulary is
+            // numeric. Fail-visible per the R2-59 contract — warn once, then
+            // skip — instead of the bare `?`'s permanently silent dead channel
+            // that re-skipped every 50 ms poll.
             if !*warned_eval {
                 *warned_eval = true;
                 log::warn!(
-                    "{id}: calc variable {name:?} has a non-scalar (waveform) value; \
-                     sidm's calc is scalar-only so it cannot bind — publishing nothing. \
-                     PyDM evaluates array children; full array binding is not ported."
+                    "{id}: calc variable {name:?} has a string-array value; \
+                     sidm's calc array vocabulary is numeric so it cannot bind — \
+                     publishing nothing. PyDM binds it as an ndarray of strings."
                 );
             }
             return None;
@@ -433,18 +439,21 @@ fn evaluate_evalexpr(
 /// injected **bare** (`sin(A)`, `pi`, `floor(B)` — no `math.` prefix needed),
 /// plus the two EPICS helpers `epics_string` / `epics_unsigned`. evalexpr's own
 /// builtins (`min`, `max`, `len`, `math::*` under the `::` spelling) remain
-/// available alongside.
+/// available alongside, and a numeric **array vocabulary** — `mean(A)`,
+/// `sum(A)`, `at(A, i)`, plus the builtin `min(A)`/`max(A)`/`len(A)` — folds or
+/// indexes a numeric waveform child bound as a tuple (`pv_to_evalexpr`).
 ///
 /// Deliberate gaps, all *visible* (an unknown name is an eval error, which
 /// [`evaluate_evalexpr`] now logs): the `np`/`numpy` namespaces and the dotted
-/// `math.sin` spelling (evalexpr has no attribute syntax; sidm's value model is
-/// scalar, so the array vocabulary has nothing to operate on); Python's
-/// implicit `__builtins__` (`abs`, `round`, `int`, `str`, …) beyond what
-/// evalexpr provides; the tuple-returning `frexp`/`modf`; the iterable-consuming
-/// `fsum`/`prod`/`dist`/`sumprod`/`isqrt`; the integer-combinatoric
-/// `factorial`/`comb`/`perm`/`gcd`/`lcm`; and `gamma`/`lgamma`/`nextafter`/
-/// `ulp`/`remainder` (no std implementation; `erf`/`erfc` are covered by
-/// siplot's SunPro port).
+/// `math.sin` spelling (evalexpr has no attribute syntax — PyDM's `np.mean(A)` is
+/// spelled `mean(A)`); PyDM's `A[0]` index and `A[1:3]` slice (evalexpr has no
+/// `[]` — indexing is `at(A, 0)`, there is no slice) and elementwise array
+/// arithmetic (`A + B` over waveforms); Python's implicit `__builtins__` (`abs`,
+/// `round`, `int`, `str`, …) beyond what evalexpr provides; the tuple-returning
+/// `frexp`/`modf`; the iterable-consuming `fsum`/`prod`/`dist`/`sumprod`/`isqrt`;
+/// the integer-combinatoric `factorial`/`comb`/`perm`/`gcd`/`lcm`; and
+/// `gamma`/`lgamma`/`nextafter`/`ulp`/`remainder` (no std implementation;
+/// `erf`/`erfc` are covered by siplot's SunPro port).
 fn pydm_calc_context() -> HashMapContext {
     /// A bare math-vocabulary entry: Python name -> f64 implementation.
     type Unary = (&'static str, fn(f64) -> f64);
@@ -615,6 +624,62 @@ fn pydm_calc_context() -> HashMapContext {
     )
     .expect("HashMapContext is mutable");
 
+    // Numeric array vocabulary (R3-13). A numeric waveform child binds as a
+    // [`Value::Tuple`] (`pv_to_evalexpr`), so these fold/index it. PyDM spells
+    // these `np.mean(A)` / `A[0]`; evalexpr has no attribute or index syntax, so
+    // sidm exposes `mean(A)` / `at(A, 0)`. `min`/`max`/`len` need no registration
+    // — evalexpr's builtins already accept a single tuple argument.
+
+    // mean(A): arithmetic mean of a numeric tuple (float; empty → eval error).
+    ctx.set_function(
+        "mean".to_owned(),
+        Function::new(|arg| {
+            let items = arg.as_tuple()?;
+            if items.is_empty() {
+                return Err(EvalexprError::CustomMessage("mean: empty array".to_owned()));
+            }
+            let mut total = 0.0;
+            for v in &items {
+                total += v.as_number()?;
+            }
+            Ok(Value::Float(total / items.len() as f64))
+        }),
+    )
+    .expect("HashMapContext is mutable");
+
+    // sum(A): sum of a numeric tuple (float, matching `mean`'s promotion).
+    ctx.set_function(
+        "sum".to_owned(),
+        Function::new(|arg| {
+            let items = arg.as_tuple()?;
+            let mut total = 0.0;
+            for v in &items {
+                total += v.as_number()?;
+            }
+            Ok(Value::Float(total))
+        }),
+    )
+    .expect("HashMapContext is mutable");
+
+    // at(A, i): element i of a tuple (PyDM `A[i]`). A negative or out-of-range
+    // index is a visible eval error, matching Python's `IndexError`.
+    ctx.set_function(
+        "at".to_owned(),
+        Function::new(|arg| {
+            let args = arg.as_fixed_len_tuple(2)?;
+            let items = args[0].as_tuple()?;
+            let i = args[1].as_int()?;
+            match usize::try_from(i).ok().filter(|&idx| idx < items.len()) {
+                Some(idx) => Ok(items[idx].clone()),
+                None => Err(EvalexprError::CustomMessage(format!(
+                    "at: index {i} out of range for array of length {}",
+                    items.len()
+                ))),
+            }
+        }),
+    )
+    .expect("HashMapContext is mutable");
+
     ctx
 }
 
@@ -727,8 +792,14 @@ fn percent_decode(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-/// Bind a scalar [`PvValue`] as an [`evalexpr`] variable. Arrays are unsupported
-/// in expressions and yield `None`.
+/// Bind a [`PvValue`] as an [`evalexpr`] variable. Scalars map to the matching
+/// evalexpr scalar; a **numeric waveform** (`FloatArray`/`IntArray`) binds as a
+/// [`Value::Tuple`], so the array vocabulary (`mean`/`sum`/`at`, and the builtin
+/// `min`/`max`/`len`) and bare `A` (round-tripped back to an array by
+/// [`evalexpr_to_pv`]) operate on it. A **string array** (`StrArray`) has no
+/// numeric use and yields `None` — the fail-visible warn-once path in
+/// [`evaluate_evalexpr`] then reports it (PyDM binds it as an ndarray of strings,
+/// which sidm's numeric array vocabulary does not model).
 fn pv_to_evalexpr(value: &PvValue) -> Option<Value> {
     Some(match value {
         PvValue::Int(n) => Value::Int(*n),
@@ -736,6 +807,11 @@ fn pv_to_evalexpr(value: &PvValue) -> Option<Value> {
         PvValue::Bool(b) => Value::Boolean(*b),
         PvValue::Str(s) => Value::String(s.to_string()),
         PvValue::Enum { index, .. } => Value::Int(i64::from(*index)),
+        // Numeric waveforms bind as tuples (PyDM binds the raw ndarray). evalexpr
+        // has no `[]`/`np.` syntax, so `A[0]`/`np.mean(A)` are spelled `at(A, 0)`
+        // / `mean(A)` here (see [`pydm_calc_context`] and the module docs).
+        PvValue::FloatArray(a) => Value::Tuple(a.iter().map(|&f| Value::Float(f)).collect()),
+        PvValue::IntArray(a) => Value::Tuple(a.iter().map(|&n| Value::Int(n)).collect()),
         // A char waveform binds as its NUL-terminated UTF-8 string — the
         // `epics_string` transform (calc_plugin.py:19-33) applied at binding
         // time, since evalexpr has no byte-array value. PyDM binds the raw
@@ -745,20 +821,44 @@ fn pv_to_evalexpr(value: &PvValue) -> Option<Value> {
             let nul_terminated = &b[..b.iter().position(|&c| c == 0).unwrap_or(b.len())];
             Value::String(String::from_utf8_lossy(nul_terminated).into_owned())
         }
-        _ => return None,
+        // A string array has no numeric binding — fail-visible (warn-once).
+        PvValue::StrArray(_) => return None,
     })
 }
 
-/// Normalize an [`evalexpr`] result back into a [`PvValue`]. Tuple/empty results
-/// have no channel representation and yield `None`.
+/// Normalize an [`evalexpr`] result back into a [`PvValue`]. A **tuple** result
+/// reconstructs an array (bare `A` over a bound waveform child, or a helper that
+/// returns several elements): all-`Int` → `IntArray`, all-numeric (any `Float`)
+/// → `FloatArray`, all-`String` → `StrArray`. An **empty** or **mixed-type**
+/// tuple has no array representation and yields `None`.
 fn evalexpr_to_pv(value: &Value) -> Option<PvValue> {
-    Some(match value {
-        Value::Int(n) => PvValue::Int(*n),
-        Value::Float(f) => PvValue::Float(*f),
-        Value::Boolean(b) => PvValue::Bool(*b),
-        Value::String(s) => PvValue::Str(Arc::from(s.as_str())),
-        Value::Tuple(_) | Value::Empty => return None,
-    })
+    match value {
+        Value::Int(n) => Some(PvValue::Int(*n)),
+        Value::Float(f) => Some(PvValue::Float(*f)),
+        Value::Boolean(b) => Some(PvValue::Bool(*b)),
+        Value::String(s) => Some(PvValue::Str(Arc::from(s.as_str()))),
+        Value::Tuple(items) if !items.is_empty() => {
+            if items.iter().all(|v| matches!(v, Value::Int(_))) {
+                Some(PvValue::IntArray(
+                    items.iter().filter_map(|v| v.as_int().ok()).collect(),
+                ))
+            } else if items
+                .iter()
+                .all(|v| matches!(v, Value::Int(_) | Value::Float(_)))
+            {
+                Some(PvValue::FloatArray(
+                    items.iter().filter_map(|v| v.as_number().ok()).collect(),
+                ))
+            } else if items.iter().all(|v| matches!(v, Value::String(_))) {
+                Some(PvValue::StrArray(
+                    items.iter().filter_map(|v| v.as_string().ok()).collect(),
+                ))
+            } else {
+                None
+            }
+        }
+        Value::Tuple(_) | Value::Empty => None,
+    }
 }
 
 /// Which expression language a `calc://` connection evaluates.
@@ -919,9 +1019,17 @@ mod tests {
             }),
             Some(Value::Int(2))
         );
-        // Arrays cannot be expression variables.
+        // Numeric arrays bind as tuples (R3-13); string arrays do not.
         assert_eq!(
-            pv_to_evalexpr(&PvValue::FloatArray(Arc::from([1.0].as_slice()))),
+            pv_to_evalexpr(&PvValue::FloatArray(Arc::from([1.0, 2.0].as_slice()))),
+            Some(Value::Tuple(vec![Value::Float(1.0), Value::Float(2.0)]))
+        );
+        assert_eq!(
+            pv_to_evalexpr(&PvValue::IntArray(Arc::from([3, 4].as_slice()))),
+            Some(Value::Tuple(vec![Value::Int(3), Value::Int(4)]))
+        );
+        assert_eq!(
+            pv_to_evalexpr(&PvValue::StrArray(Arc::from(["a".to_owned()].as_slice()))),
             None
         );
 
@@ -937,6 +1045,25 @@ mod tests {
         assert_eq!(
             evalexpr_to_pv(&Value::String("hi".to_owned())),
             Some(PvValue::Str(Arc::from("hi")))
+        );
+        // A tuple result reconstructs an array by element type (R3-13).
+        assert_eq!(
+            evalexpr_to_pv(&Value::Tuple(vec![Value::Int(1), Value::Int(2)])),
+            Some(PvValue::IntArray(Arc::from([1, 2].as_slice())))
+        );
+        assert_eq!(
+            evalexpr_to_pv(&Value::Tuple(vec![Value::Int(1), Value::Float(2.5)])),
+            Some(PvValue::FloatArray(Arc::from([1.0, 2.5].as_slice())))
+        );
+        assert_eq!(
+            evalexpr_to_pv(&Value::Tuple(vec![Value::String("x".to_owned())])),
+            Some(PvValue::StrArray(Arc::from(["x".to_owned()].as_slice())))
+        );
+        // Empty and mixed-type tuples have no array representation.
+        assert_eq!(evalexpr_to_pv(&Value::Tuple(vec![])), None);
+        assert_eq!(
+            evalexpr_to_pv(&Value::Tuple(vec![Value::Int(1), Value::Boolean(true)])),
+            None
         );
         assert_eq!(evalexpr_to_pv(&Value::Empty), None);
     }
@@ -1081,10 +1208,11 @@ mod tests {
     }
 
     #[test]
-    fn array_child_warns_once_while_missing_value_stays_silent() {
-        // R3-13: distinguish "no value yet" (silent skip) from "value present
-        // but unbindable" (fail-visible warn-once). The old bare `?` conflated
-        // both into a permanently silent dead channel.
+    fn numeric_array_binds_string_array_warns_missing_stays_silent() {
+        // R3-13: a numeric waveform child now binds (as a tuple) and evaluates;
+        // a string array cannot bind (numeric vocabulary) and is fail-visible
+        // warn-once; a value-less child stays a silent skip. The old bare `?`
+        // conflated all three into a permanently silent dead channel.
 
         // No value yet → silent skip: PyDM waits until every child has a value.
         let (absent, _w) = child_channel();
@@ -1092,7 +1220,7 @@ mod tests {
         assert_eq!(
             evaluate_evalexpr(
                 "calc://t",
-                "A + 1.0",
+                "mean(A)",
                 &[("A".to_owned(), absent)],
                 None,
                 &mut warned,
@@ -1101,7 +1229,7 @@ mod tests {
         );
         assert!(!warned, "a value-less child must skip silently");
 
-        // Waveform value → the scalar calc cannot bind it: fail-visible.
+        // Numeric waveform → binds as a tuple and evaluates (mean = 2.0).
         let (arr, arr_w) = child_channel();
         arr_w.post_value(|s| {
             s.connected = true;
@@ -1111,8 +1239,29 @@ mod tests {
         assert_eq!(
             evaluate_evalexpr(
                 "calc://t",
-                "A + 1.0",
+                "mean(A)",
                 &[("A".to_owned(), arr)],
+                None,
+                &mut warned,
+            ),
+            Some(PvValue::Float(2.0))
+        );
+        assert!(!warned, "a bound numeric waveform child must not warn");
+
+        // String array → cannot bind (numeric vocabulary): fail-visible.
+        let (strs, strs_w) = child_channel();
+        strs_w.post_value(|s| {
+            s.connected = true;
+            s.value = Some(PvValue::StrArray(Arc::from(
+                ["a".to_owned(), "b".to_owned()].as_slice(),
+            )));
+        });
+        let mut warned = false;
+        assert_eq!(
+            evaluate_evalexpr(
+                "calc://t",
+                "mean(A)",
+                &[("A".to_owned(), strs)],
                 None,
                 &mut warned,
             ),
@@ -1120,7 +1269,7 @@ mod tests {
         );
         assert!(
             warned,
-            "an unbindable waveform child must trip the warn-once flag"
+            "an unbindable string-array child must trip the warn-once flag"
         );
 
         // Scalar value → binds and evaluates as before (unchanged).
@@ -1141,6 +1290,57 @@ mod tests {
             Some(PvValue::Float(5.0))
         );
         assert!(!warned, "a bound scalar child must not warn");
+    }
+
+    #[test]
+    fn array_vocabulary_folds_indexes_and_round_trips() {
+        // R3-13: the numeric array vocabulary over a tuple-bound waveform.
+        let arr = &[(
+            "A",
+            Value::Tuple(vec![
+                Value::Float(1.0),
+                Value::Float(2.0),
+                Value::Float(3.0),
+            ]),
+        )];
+        // Aggregations (mean/sum registered; min/max/len via evalexpr builtins).
+        assert_eq!(eval_vars("mean(A)", arr), Some(PvValue::Float(2.0)));
+        assert_eq!(eval_vars("sum(A)", arr), Some(PvValue::Float(6.0)));
+        assert_eq!(eval_vars("min(A)", arr), Some(PvValue::Float(1.0)));
+        assert_eq!(eval_vars("max(A)", arr), Some(PvValue::Float(3.0)));
+        assert_eq!(eval_vars("len(A)", arr), Some(PvValue::Int(3)));
+        // Indexing: `at(A, i)` replaces PyDM's `A[i]`.
+        assert_eq!(eval_vars("at(A, 0)", arr), Some(PvValue::Float(1.0)));
+        assert_eq!(eval_vars("at(A, 2)", arr), Some(PvValue::Float(3.0)));
+        // Out-of-range index is a visible eval error (skip).
+        assert_eq!(eval_vars("at(A, 3)", arr), None);
+        // Bare `A` publishes the array unchanged.
+        assert_eq!(
+            eval_vars("A", arr),
+            Some(PvValue::FloatArray(Arc::from([1.0, 2.0, 3.0].as_slice())))
+        );
+    }
+
+    #[test]
+    fn int_array_round_trips_and_mixes_with_a_scalar_child() {
+        // An int waveform binds, `at` keeps int element type, `mean` promotes to
+        // float, and bare `A` round-trips to an IntArray.
+        let ints = &[("A", Value::Tuple(vec![Value::Int(2), Value::Int(4)]))];
+        assert_eq!(
+            eval_vars("A", ints),
+            Some(PvValue::IntArray(Arc::from([2, 4].as_slice())))
+        );
+        assert_eq!(eval_vars("at(A, 1)", ints), Some(PvValue::Int(4)));
+        assert_eq!(eval_vars("mean(A)", ints), Some(PvValue::Float(3.0)));
+        // Mixed array + scalar children in one expression.
+        let mixed = &[
+            (
+                "A",
+                Value::Tuple(vec![Value::Float(1.0), Value::Float(3.0)]),
+            ),
+            ("s", Value::Float(10.0)),
+        ];
+        assert_eq!(eval_vars("mean(A) + s", mixed), Some(PvValue::Float(12.0)));
     }
 
     #[test]
