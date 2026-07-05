@@ -4,10 +4,277 @@ use egui_wgpu::RenderState;
 use crate::core::backend::ItemHandle;
 use crate::core::plot::PlotId;
 use crate::core::roi::Roi;
+use crate::core::scatter_viz::ProfileAxis;
+use crate::core::transform::YAxis;
 use crate::render::gpu_curve::CurveData;
 use crate::widget::high_level::{
     Plot1D, ProfileMethod, aligned_profile_values, free_line_profile, rect_profile_values,
 };
+
+/// Python-style `%g` formatting of a profile-title coordinate — silx uses `%g`
+/// throughout `_lineProfileTitle`/`createProfile`: 6 significant digits, with
+/// trailing zeros and a bare trailing dot stripped, and scientific notation
+/// outside `[1e-4, 1e6)`. Integer-valued coords render without a decimal point
+/// (e.g. `3`, `-2`).
+fn format_g(v: f64) -> String {
+    if v == 0.0 {
+        return "0".to_string();
+    }
+    if !v.is_finite() {
+        return if v.is_nan() {
+            "nan".to_string()
+        } else if v > 0.0 {
+            "inf".to_string()
+        } else {
+            "-inf".to_string()
+        };
+    }
+    // Normalized decimal exponent via Rust's `{:e}` (reliable at powers of ten,
+    // unlike `log10().floor()`).
+    let exp: i32 = {
+        let s = format!("{:e}", v.abs());
+        s.split_once('e')
+            .and_then(|(_, e)| e.parse().ok())
+            .unwrap_or(0)
+    };
+    let p: i32 = 6;
+    if exp < -4 || exp >= p {
+        let s = format!("{:.*e}", (p - 1) as usize, v);
+        let (mant, e) = s.split_once('e').unwrap_or((s.as_str(), "0"));
+        let mant = strip_trailing_zeros(mant);
+        let e_num: i32 = e.parse().unwrap_or(0);
+        let sign = if e_num < 0 { '-' } else { '+' };
+        format!("{mant}e{sign}{:02}", e_num.abs())
+    } else {
+        let prec = (p - 1 - exp).max(0) as usize;
+        strip_trailing_zeros(&format!("{:.*}", prec, v))
+    }
+}
+
+/// Drop trailing zeros (and a bare trailing dot) from a fixed-point string,
+/// leaving integer-free-of-dot strings untouched.
+fn strip_trailing_zeros(s: &str) -> String {
+    if s.contains('.') {
+        s.trim_end_matches('0').trim_end_matches('.').to_string()
+    } else {
+        s.to_string()
+    }
+}
+
+/// `%+g`: [`format_g`] with an explicit sign — silx `{b:+g}` for a diagonal
+/// line's intercept.
+fn format_g_signed(v: f64) -> String {
+    let sign = if v < 0.0 { '-' } else { '+' };
+    format!("{sign}{}", format_g(v.abs()))
+}
+
+/// Fill `{xlabel}`/`{ylabel}` tokens with the source plot's axis labels,
+/// falling back to `"X"`/`"Y"` when a label is empty — silx `_relabelAxes`
+/// (`tools/profile/rois.py:53-65`). The source plot supplies the real
+/// fallbacks in practice (a [`Plot2D`](crate::widget::high_level::Plot2D)
+/// image plot carries `"Columns"`/`"Rows"`).
+fn relabel(template: &str, x_label: &str, y_label: &str) -> String {
+    let xl = if x_label.is_empty() { "X" } else { x_label };
+    let yl = if y_label.is_empty() { "Y" } else { y_label };
+    template.replace("{xlabel}", xl).replace("{ylabel}", yl)
+}
+
+/// The Y-axis label of a profile plot: silx `str(method).capitalize()`
+/// (`rois.py:315`), i.e. the reduction method's name.
+fn method_label(method: ProfileMethod) -> &'static str {
+    match method {
+        ProfileMethod::Mean => "Mean",
+        ProfileMethod::Sum => "Sum",
+    }
+}
+
+/// silx `_alignedFullProfile` integration band for a whole-image aligned
+/// profile (`core.py:222-235`), in pixel indices under siplot's identity image
+/// geometry: the profile line at `position` on the axis of length `size`,
+/// integrated over `line_width` pixels. Returns `(lo, hi)` = the reported band
+/// bounds `min(area)`, `max(area) − 1` (silx `core.py:380,398`).
+fn aligned_band(position: f64, size: u32, line_width: u32) -> (i64, i64) {
+    let roi_width = i64::from(line_width.max(1)).min(i64::from(size.max(1)));
+    let img_pos = position.trunc() as i64;
+    let start_f = img_pos as f64 + 0.5 - roi_width as f64 / 2.0;
+    let start = (start_f.trunc() as i64).clamp(0, (i64::from(size) - roi_width).max(0));
+    (start, start + roi_width - 1)
+}
+
+/// The silx `_lineProfileTitle` template (`tools/profile/rois.py:68-89`) for a
+/// free line from `(x0, y0)` to `(x1, y1)`, with `{xlabel}`/`{ylabel}` tokens
+/// unfilled: a vertical line (`x0 == x1`), a horizontal line (`y0 == y1`), or a
+/// diagonal (`y = m·x + b`).
+fn line_title_template(x0: f64, y0: f64, x1: f64, y1: f64) -> String {
+    if x0 == x1 {
+        format!(
+            "{{xlabel}} = {}; {{ylabel}} = [{}, {}]",
+            format_g(x0),
+            format_g(y0),
+            format_g(y1)
+        )
+    } else if y0 == y1 {
+        format!(
+            "{{ylabel}} = {}; {{xlabel}} = [{}, {}]",
+            format_g(y0),
+            format_g(x0),
+            format_g(x1)
+        )
+    } else {
+        let m = (y1 - y0) / (x1 - x0);
+        let b = y0 - m * x0;
+        format!(
+            "{{ylabel}} = {} * {{xlabel}} {}",
+            format_g(m),
+            format_g_signed(b)
+        )
+    }
+}
+
+/// The silx `createProfile` title + X-label templates for a free-line image
+/// profile (`core.py:405-563`), replicating [`free_line_profile`]'s
+/// aligned/general ordering so the title matches the plotted coordinates.
+/// Endpoints are `(col, row)` pixel coords (`start`/`end` of a [`Roi::Line`]).
+fn line_profile_desc(start: (f64, f64), end: (f64, f64)) -> (String, String) {
+    let (sc, sr) = start;
+    let (ec, er) = end;
+    let aligned =
+        (sr.trunc() as i64) == (er.trunc() as i64) || (sc.trunc() as i64) == (ec.trunc() as i64);
+    if !aligned {
+        // Diagonal: order by column then row (silx `core.py:467-470`).
+        let (mut a, mut b) = ((sc, sr), (ec, er));
+        if a.0 > b.0 || (a.0 == b.0 && a.1 > b.1) {
+            std::mem::swap(&mut a, &mut b);
+        }
+        (
+            line_title_template(a.0, a.1, b.0, b.1),
+            "{xlabel}".to_string(),
+        )
+    } else {
+        // Aligned: integer pixel indices, ordered per component.
+        let mut s = (sr.trunc() as i64, sc.trunc() as i64); // (row, col)
+        let mut e = (er.trunc() as i64, ec.trunc() as i64);
+        if s.0 > e.0 || s.1 > e.1 {
+            std::mem::swap(&mut s, &mut e);
+        }
+        let (x0, y0, x1, y1) = (s.1, s.0, e.1, e.0); // (col, row)
+        if s.1 == e.1 {
+            // Column-aligned (vertical line): x constant, y ranges.
+            (
+                format!("{{xlabel}} = {x0}; {{ylabel}} = [{y0}, {y1}]"),
+                "{ylabel}".to_string(),
+            )
+        } else {
+            // Row-aligned (horizontal line): y constant, x ranges.
+            (
+                format!("{{ylabel}} = {y0}; {{xlabel}} = [{x0}, {x1}]"),
+                "{xlabel}".to_string(),
+            )
+        }
+    }
+}
+
+/// The silx `createProfile` title + X-label templates (`{xlabel}`/`{ylabel}`
+/// tokens unfilled) for the image profile `roi` at band `line_width`, over a
+/// `width`×`height` image under siplot's identity geometry. Returns `None` for
+/// a ROI kind that yields no profile (matching [`profiles_for_roi`]).
+fn image_profile_desc(
+    roi: &Roi,
+    width: u32,
+    height: u32,
+    line_width: u32,
+) -> Option<(String, String)> {
+    match roi {
+        Roi::HRange { y } => {
+            let (lo, hi) = aligned_band((y.0 + y.1) / 2.0, height, line_width);
+            let title = if line_width <= 1 {
+                format!("{{ylabel}} = {lo}")
+            } else {
+                format!("{{ylabel}} = [{lo}, {hi}]")
+            };
+            Some((title, "{xlabel}".to_string()))
+        }
+        Roi::VRange { x } => {
+            let (lo, hi) = aligned_band((x.0 + x.1) / 2.0, width, line_width);
+            let title = if line_width <= 1 {
+                format!("{{xlabel}} = {lo}")
+            } else {
+                format!("{{xlabel}} = [{lo}, {hi}]")
+            };
+            Some((title, "{ylabel}".to_string()))
+        }
+        Roi::Rect { y, .. } => {
+            // Row band reduced along columns (silx "X" aligned width>1 form).
+            let hi_row = (f64::from(height) - 1.0).max(0.0);
+            let row_min = y.0.min(y.1).round().clamp(0.0, hi_row);
+            let row_max = y.0.max(y.1).round().clamp(0.0, hi_row);
+            Some((
+                format!(
+                    "{{ylabel}} = [{}, {}]",
+                    format_g(row_min),
+                    format_g(row_max)
+                ),
+                "{xlabel}".to_string(),
+            ))
+        }
+        Roi::Line { start, end } => Some(line_profile_desc(*start, *end)),
+        Roi::Cross { center } => {
+            // silx renders a cross as two separate profile windows
+            // (ProfileImageCrossROI: an hline + a vline sub-ROI). siplot merges
+            // both curves into one window, so the title names the crossing
+            // pixel and the X label follows the horizontal (column) sub-profile.
+            let (cx, cy) = *center;
+            Some((
+                format!(
+                    "{{xlabel}} = {}; {{ylabel}} = {}",
+                    format_g(cx.trunc()),
+                    format_g(cy.trunc())
+                ),
+                "{xlabel}".to_string(),
+            ))
+        }
+        _ => None,
+    }
+}
+
+/// The self-describing labels of a profile plot — silx `*ProfileData`'s
+/// `title`/`xLabel`/`yLabel`, already relabeled from the source plot. Passed to
+/// [`ProfileWindow::set_profile_curve`] for a precomputed profile;
+/// [`scatter_profile_labels`] builds the scatter-profile set.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ProfileLabels {
+    /// Profile-plot title (silx `profileName`).
+    pub title: String,
+    /// Profile X-axis label.
+    pub x_label: String,
+    /// Profile Y-axis label.
+    pub y_label: String,
+}
+
+/// The relabeled [`ProfileLabels`] for a scatter line profile — silx
+/// `ScatterProfile*ROI.computeProfile` (`rois.py:797-821`): the title is
+/// `_lineProfileTitle` over the sampled endpoints; the X label follows the
+/// dominant [`ProfileAxis`]; the Y label is the fixed string `"Profile"`.
+/// `src_x_label`/`src_y_label` are the source scatter plot's axis labels
+/// (empty falls back to `"X"`/`"Y"`).
+pub(crate) fn scatter_profile_labels(
+    first: [f64; 2],
+    last: [f64; 2],
+    axis: ProfileAxis,
+    src_x_label: &str,
+    src_y_label: &str,
+) -> ProfileLabels {
+    let title_tpl = line_title_template(first[0], first[1], last[0], last[1]);
+    let xlabel_tpl = match axis {
+        ProfileAxis::X => "{xlabel}",
+        ProfileAxis::Y => "{ylabel}",
+    };
+    ProfileLabels {
+        title: relabel(&title_tpl, src_x_label, src_y_label),
+        x_label: relabel(xlabel_tpl, src_x_label, src_y_label),
+        y_label: "Profile".to_string(),
+    }
+}
 
 /// A single named profile curve extracted from a profile ROI: a legend label, a
 /// draw color, and the `(x, y)` samples. A line/range/rect ROI yields one of
@@ -205,6 +472,12 @@ pub struct ProfileWindow {
     /// initial placement on the next open — mirrors silx
     /// `ProfileManager._previousWindowGeometry`.
     remembered_pos: Option<egui::Pos2>,
+    /// The source plot's X/Y axis labels, threaded in by [`update_profile`] so
+    /// the computed title/axis labels relabel `{xlabel}`/`{ylabel}` from the
+    /// originating image plot (silx `_relabelAxes`). Default `"Columns"`/
+    /// `"Rows"` matches a [`Plot2D`](crate::widget::high_level::Plot2D).
+    src_x_label: String,
+    src_y_label: String,
 }
 
 impl ProfileWindow {
@@ -224,6 +497,8 @@ impl ProfileWindow {
             size: egui::vec2(420.0, 320.0),
             placement: None,
             remembered_pos: None,
+            src_x_label: "Columns".to_string(),
+            src_y_label: "Rows".to_string(),
         }
     }
 
@@ -296,7 +571,20 @@ impl ProfileWindow {
     /// the current line width and reduction method. Retains `(data, roi)` as the
     /// active [`ProfileSource`] so subsequent width/method edits and
     /// [`refresh_image`](Self::refresh_image) calls recompute from it.
-    pub fn update_profile(&mut self, width: u32, height: u32, data: &[f32], roi: &Roi) {
+    /// `x_label`/`y_label` are the source image plot's axis labels, used to
+    /// relabel the computed profile title/axes (silx `_relabelAxes`); an empty
+    /// label falls back to `"X"`/`"Y"`.
+    pub fn update_profile(
+        &mut self,
+        width: u32,
+        height: u32,
+        data: &[f32],
+        roi: &Roi,
+        x_label: &str,
+        y_label: &str,
+    ) {
+        self.src_x_label = x_label.to_string();
+        self.src_y_label = y_label.to_string();
         self.source = Some(ProfileSource {
             width,
             height,
@@ -328,17 +616,26 @@ impl ProfileWindow {
     /// [`refresh_image`](Self::refresh_image), and the in-window width/method
     /// edits. No-op when no source is retained.
     fn recompute(&mut self) {
-        let curves = match &self.source {
-            Some(src) => profiles_for_roi(
-                src.width,
-                src.height,
-                &src.data,
-                &src.roi,
-                self.line_width,
-                self.method,
-            ),
-            None => return,
+        let Some(src) = self.source.as_ref() else {
+            return;
         };
+        let (w, h, roi) = (src.width, src.height, src.roi.clone());
+        let curves = profiles_for_roi(w, h, &src.data, &roi, self.line_width, self.method);
+        // Self-describing title + axis labels (silx `createProfile` +
+        // `computeProfile`): relabel `{xlabel}`/`{ylabel}` from the source plot,
+        // append silx's `; width = %d`, and set the Y label to the method name.
+        if let Some((title_tpl, xlabel_tpl)) = image_profile_desc(&roi, w, h, self.line_width) {
+            let title = format!(
+                "{}; width = {}",
+                relabel(&title_tpl, &self.src_x_label, &self.src_y_label),
+                self.line_width
+            );
+            let xlabel = relabel(&xlabel_tpl, &self.src_x_label, &self.src_y_label);
+            self.plot.set_graph_title(title);
+            self.plot.set_graph_x_label(xlabel);
+            self.plot
+                .set_graph_y_label(method_label(self.method), YAxis::Left);
+        }
         self.set_curves(curves);
     }
 
@@ -347,13 +644,17 @@ impl ProfileWindow {
     /// (silx `ScatterProfileToolBar` / `Profile3DToolBar`, whose profiles come
     /// from [`crate::core::scatter_viz::scatter_line_profile`] / a stack
     /// reduction). `label` names the curve in the legend; `color` is its stroke.
-    /// An empty `x` is ignored (the previous profile stays shown).
+    /// `labels` are the already-computed, already-relabeled profile-plot
+    /// descriptions (silx `CurveProfileData.title`/`xLabel`/`yLabel`) — see
+    /// [`scatter_profile_labels`]. An empty `x` is ignored (the previous profile
+    /// stays shown).
     pub fn set_profile_curve(
         &mut self,
         label: &'static str,
         color: Color32,
         x: Vec<f64>,
         y: Vec<f64>,
+        labels: &ProfileLabels,
     ) {
         if x.is_empty() {
             return;
@@ -362,6 +663,10 @@ impl ProfileWindow {
         // drop any retained source: a later width/method edit must not re-derive
         // a stale image profile over this precomputed curve.
         self.source = None;
+        self.plot.set_graph_title(labels.title.clone());
+        self.plot.set_graph_x_label(labels.x_label.clone());
+        self.plot
+            .set_graph_y_label(labels.y_label.clone(), YAxis::Left);
         self.set_curves(vec![ProfileCurve { label, color, x, y }]);
     }
 
@@ -574,5 +879,172 @@ mod tests {
             )
             .is_empty()
         );
+    }
+
+    // --- R2-6 title/label computation ---------------------------------------
+
+    #[test]
+    fn format_g_matches_python_percent_g() {
+        assert_eq!(format_g(0.0), "0");
+        assert_eq!(format_g(3.0), "3");
+        assert_eq!(format_g(-2.0), "-2");
+        assert_eq!(format_g(1.5), "1.5");
+        assert_eq!(format_g(1.0 / 3.0), "0.333333");
+        // Scientific outside [1e-4, 1e6): Python '%g' % 1234567 == '1.23457e+06'.
+        assert_eq!(format_g(1_234_567.0), "1.23457e+06");
+        // '%g' % 0.00001234 == '1.234e-05'.
+        assert_eq!(format_g(0.00001234), "1.234e-05");
+    }
+
+    #[test]
+    fn format_g_signed_always_carries_a_sign() {
+        assert_eq!(format_g_signed(3.0), "+3");
+        assert_eq!(format_g_signed(-2.5), "-2.5");
+        assert_eq!(format_g_signed(0.0), "+0");
+    }
+
+    #[test]
+    fn relabel_fills_tokens_and_falls_back_to_x_y() {
+        assert_eq!(
+            relabel("{ylabel} = 1; {xlabel} = [0, 5]", "Columns", "Rows"),
+            "Rows = 1; Columns = [0, 5]"
+        );
+        // Empty source labels fall back to X/Y (silx `_relabelAxes`).
+        assert_eq!(relabel("{xlabel} vs {ylabel}", "", ""), "X vs Y");
+    }
+
+    #[test]
+    fn hrange_title_is_the_band_row_and_widens_with_line_width() {
+        // Width 1 over a 3-row image at row 1: single reported row.
+        assert_eq!(
+            image_profile_desc(&Roi::HRange { y: (1.0, 1.0) }, 3, 3, 1),
+            Some(("{ylabel} = 1".to_string(), "{xlabel}".to_string()))
+        );
+        // Width 3 clamps the band to rows [0, 2] (silx `_alignedFullProfile`).
+        assert_eq!(
+            image_profile_desc(&Roi::HRange { y: (1.0, 1.0) }, 3, 3, 3),
+            Some(("{ylabel} = [0, 2]".to_string(), "{xlabel}".to_string()))
+        );
+    }
+
+    #[test]
+    fn vrange_title_is_the_band_column() {
+        assert_eq!(
+            image_profile_desc(&Roi::VRange { x: (1.0, 1.0) }, 3, 3, 1),
+            Some(("{xlabel} = 1".to_string(), "{ylabel}".to_string()))
+        );
+    }
+
+    #[test]
+    fn rect_title_is_the_row_range_reduced_over_columns() {
+        assert_eq!(
+            image_profile_desc(
+                &Roi::Rect {
+                    x: (0.0, 2.0),
+                    y: (1.0, 3.0)
+                },
+                5,
+                5,
+                1
+            ),
+            Some(("{ylabel} = [1, 3]".to_string(), "{xlabel}".to_string()))
+        );
+    }
+
+    #[test]
+    fn cross_title_names_the_crossing_pixel() {
+        assert_eq!(
+            image_profile_desc(&Roi::Cross { center: (2.0, 1.0) }, 5, 5, 1),
+            Some((
+                "{xlabel} = 2; {ylabel} = 1".to_string(),
+                "{xlabel}".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn line_title_horizontal_vertical_and_diagonal() {
+        // Row-aligned (horizontal) line at row 2 spanning columns 0..5.
+        assert_eq!(
+            image_profile_desc(
+                &Roi::Line {
+                    start: (0.0, 2.0),
+                    end: (5.0, 2.0)
+                },
+                8,
+                8,
+                1
+            ),
+            Some((
+                "{ylabel} = 2; {xlabel} = [0, 5]".to_string(),
+                "{xlabel}".to_string()
+            ))
+        );
+        // Column-aligned (vertical) line at column 3 spanning rows 1..6.
+        assert_eq!(
+            image_profile_desc(
+                &Roi::Line {
+                    start: (3.0, 1.0),
+                    end: (3.0, 6.0)
+                },
+                8,
+                8,
+                1
+            ),
+            Some((
+                "{xlabel} = 3; {ylabel} = [1, 6]".to_string(),
+                "{ylabel}".to_string()
+            ))
+        );
+        // Diagonal line (0,0)->(3,4): slope 4/3, intercept 0.
+        assert_eq!(
+            image_profile_desc(
+                &Roi::Line {
+                    start: (0.0, 0.0),
+                    end: (3.0, 4.0)
+                },
+                8,
+                8,
+                1
+            ),
+            Some((
+                "{ylabel} = 1.33333 * {xlabel} +0".to_string(),
+                "{xlabel}".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn line_title_is_independent_of_drag_direction() {
+        // Silx orders endpoints (column then row) before titling, so dragging a
+        // diagonal either way yields the same title.
+        let forward = image_profile_desc(
+            &Roi::Line {
+                start: (0.0, 0.0),
+                end: (3.0, 4.0),
+            },
+            8,
+            8,
+            1,
+        );
+        let reversed = image_profile_desc(
+            &Roi::Line {
+                start: (3.0, 4.0),
+                end: (0.0, 0.0),
+            },
+            8,
+            8,
+            1,
+        );
+        assert_eq!(forward, reversed);
+    }
+
+    #[test]
+    fn scatter_labels_pick_the_dominant_axis_and_relabel() {
+        // Y span (8) > X span (6): X label follows Y ("Rows"); Y label fixed.
+        let labels = scatter_profile_labels([0.0, 0.0], [6.0, 8.0], ProfileAxis::Y, "Cols", "Rows");
+        assert_eq!(labels.title, "Rows = 1.33333 * Cols +0");
+        assert_eq!(labels.x_label, "Rows");
+        assert_eq!(labels.y_label, "Profile");
     }
 }

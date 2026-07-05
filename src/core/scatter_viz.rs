@@ -619,26 +619,48 @@ pub struct ScatterLineProfile {
     pub values: Vec<Option<f64>>,
 }
 
+/// Which source axis a scatter profile is plotted against — the axis with the
+/// larger span along the segment (silx `ScatterProfile*ROI.computeProfile`,
+/// `tools/profile/rois.py:801-808`). Selects the profile-window X-axis label:
+/// [`X`](Self::X) → the source plot's X label, [`Y`](Self::Y) → its Y label.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProfileAxis {
+    /// X had the larger span (silx `xLabel = "{xlabel}"`).
+    X,
+    /// Y had the larger (or equal) span (silx `xLabel = "{ylabel}"`).
+    Y,
+}
+
 impl ScatterLineProfile {
-    /// Convert the profile to a `(distance, value)` curve for plotting against
-    /// distance along the segment — the form silx `ScatterProfileToolBar` shows
-    /// in its profile window. `distance[i]` is the Euclidean distance from the
-    /// first sample to `points[i]` (`0` at the start, increasing along the line);
-    /// `value[i]` is the interpolated value with out-of-hull samples (`None`)
-    /// mapped to `f64::NAN` so they render as gaps (silx keeps them `NaN`).
-    /// Returns empty vectors for an empty profile.
+    /// Convert the profile to the `(coords, value, axis)` curve silx
+    /// `ScatterProfileToolBar` plots: values against the *dominant* source axis,
+    /// not arc distance. silx picks whichever of X or Y spans farther along the
+    /// segment (`rois.py:801-808`): `|x_last − x_first| > |y_last − y_first|`
+    /// plots against `points[:, 0]` ([`ProfileAxis::X`]); otherwise against
+    /// `points[:, 1]` ([`ProfileAxis::Y`]) — the tie goes to Y, as in silx's
+    /// non-strict `else`. `value[i]` maps out-of-hull samples (`None`) to
+    /// `f64::NAN` so they render as gaps. Returns empty vectors (and
+    /// [`ProfileAxis::X`]) for an empty profile.
     #[must_use]
-    pub fn distance_value_curve(&self) -> (Vec<f64>, Vec<f64>) {
-        let Some(&[x0, y0]) = self.points.first() else {
-            return (Vec::new(), Vec::new());
+    pub fn dominant_axis_curve(&self) -> (Vec<f64>, Vec<f64>, ProfileAxis) {
+        let (Some(&[x0, y0]), Some(&[xn, yn])) = (self.points.first(), self.points.last()) else {
+            return (Vec::new(), Vec::new(), ProfileAxis::X);
         };
-        let distance = self
+        let axis = if (xn - x0).abs() > (yn - y0).abs() {
+            ProfileAxis::X
+        } else {
+            ProfileAxis::Y
+        };
+        let coords = self
             .points
             .iter()
-            .map(|&[x, y]| (x - x0).hypot(y - y0))
+            .map(|&[x, y]| match axis {
+                ProfileAxis::X => x,
+                ProfileAxis::Y => y,
+            })
             .collect();
         let value = self.values.iter().map(|v| v.unwrap_or(f64::NAN)).collect();
-        (distance, value)
+        (coords, value, axis)
     }
 }
 
@@ -1460,24 +1482,52 @@ mod tests {
     }
 
     #[test]
-    fn distance_value_curve_is_distance_from_start_with_nan_gaps() {
-        // Samples at (0,0),(3,4),(6,8): distances from the first are 0, 5, 10.
+    fn dominant_axis_curve_picks_the_wider_span_with_nan_gaps() {
+        // Samples at (0,0),(3,4),(6,8): X span 6, Y span 8 -> Y dominates, so
+        // the curve plots against the Y coords (silx rois.py:801-808).
         // The middle value is None (out of hull) -> NaN in the curve.
         let prof = ScatterLineProfile {
             points: vec![[0.0, 0.0], [3.0, 4.0], [6.0, 8.0]],
             values: vec![Some(1.0), None, Some(2.0)],
         };
-        let (distance, value) = prof.distance_value_curve();
-        assert_eq!(distance, vec![0.0, 5.0, 10.0]);
+        let (coords, value, axis) = prof.dominant_axis_curve();
+        assert_eq!(axis, ProfileAxis::Y);
+        assert_eq!(coords, vec![0.0, 4.0, 8.0]);
         assert_eq!(value[0], 1.0);
         assert!(value[1].is_nan(), "out-of-hull sample maps to NaN");
         assert_eq!(value[2], 2.0);
     }
 
     #[test]
-    fn distance_value_curve_empty_profile_is_empty() {
+    fn dominant_axis_curve_x_wider_plots_against_x() {
+        // X span 10 > Y span 2 -> X dominates, curve plots against X coords.
+        let prof = ScatterLineProfile {
+            points: vec![[0.0, 0.0], [10.0, 2.0]],
+            values: vec![Some(1.0), Some(3.0)],
+        };
+        let (coords, _value, axis) = prof.dominant_axis_curve();
+        assert_eq!(axis, ProfileAxis::X);
+        assert_eq!(coords, vec![0.0, 10.0]);
+    }
+
+    #[test]
+    fn dominant_axis_curve_equal_span_ties_to_y() {
+        // Equal spans (5 and 5): silx's non-strict `else` picks Y.
+        let prof = ScatterLineProfile {
+            points: vec![[0.0, 0.0], [5.0, 5.0]],
+            values: vec![Some(1.0), Some(2.0)],
+        };
+        let (coords, _value, axis) = prof.dominant_axis_curve();
+        assert_eq!(axis, ProfileAxis::Y);
+        assert_eq!(coords, vec![0.0, 5.0]);
+    }
+
+    #[test]
+    fn dominant_axis_curve_empty_profile_is_empty() {
         let prof = ScatterLineProfile::default();
-        assert_eq!(prof.distance_value_curve(), (Vec::new(), Vec::new()));
+        let (coords, value, axis) = prof.dominant_axis_curve();
+        assert!(coords.is_empty() && value.is_empty());
+        assert_eq!(axis, ProfileAxis::X);
     }
 
     // --- IRREGULAR_GRID image -----------------------------------------------

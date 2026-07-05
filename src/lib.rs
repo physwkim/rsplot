@@ -62,10 +62,10 @@ pub use crate::core::plot::{
 pub use crate::core::roi::{BandLines, ManagedRoi, Roi, RoiEdge, RoiInteractionMode, RoiLineStyle};
 pub use crate::core::roi_io::{RoiIoError, decode_rois, encode_rois, load_rois, save_rois};
 pub use crate::core::scatter_viz::{
-    BinnedStatistic, BinnedStatisticFunction, GridImage, GridMajorOrder, PointsViz, RegularGrid,
-    ScatterLineProfile, Triangulation, binned_statistic, delaunay, detect_regular_grid,
-    interpolate, irregular_grid_image, irregular_grid_pick, irregular_grid_triangles,
-    regular_grid_pick, scatter_line_profile, solid_triangles,
+    BinnedStatistic, BinnedStatisticFunction, GridImage, GridMajorOrder, PointsViz, ProfileAxis,
+    RegularGrid, ScatterLineProfile, Triangulation, binned_statistic, delaunay,
+    detect_regular_grid, interpolate, irregular_grid_image, irregular_grid_pick,
+    irregular_grid_triangles, regular_grid_pick, scatter_line_profile, solid_triangles,
 };
 pub use crate::core::scene3d::camera::{
     Camera, CameraDirection, CameraExtrinsic, CameraFace, CameraMove, Orthographic, Perspective,
@@ -168,7 +168,7 @@ pub use crate::widget::position_info::{
 pub use crate::widget::print_preview::{
     CommentPosition, PrintPreview, compose_page, resize_item_rect,
 };
-pub use crate::widget::profile_window::ProfileWindow;
+pub use crate::widget::profile_window::{ProfileLabels, ProfileWindow};
 pub use crate::widget::radar_view::{
     DataRect, RadarMapping, RadarResponse, RadarView, clamp_viewport, point_in_rect,
 };

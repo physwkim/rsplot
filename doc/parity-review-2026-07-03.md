@@ -580,20 +580,37 @@ reads its X-span `0..3`, not distance `0..5`). Tests:
 `free_line_profile_general_case_orders_endpoints_left_to_right`,
 `free_line_profile_aligned_coords_offset_by_the_start_pixel`.
 
-**UNFIXED — title/labels half (sign-off batch):** silx also sets a computed
-window title (`profileName`, e.g. `"{ylabel} = {y0:g}; {xlabel} = [{x0:g},
-{x1:g}]"`, plus `"; width = %d"`) and relabels the profile axes from the source
-plot (`core.py:535-563`, `rois.py:313-323`). Porting this needs (a) a distinct
-`profileName`/`xLabel` format per ROI type (line ×3 sub-cases, hrange, vrange,
-cross, rect) and (b) threading the *source plot's* x/y axis labels through the
-profile pipeline (`profiles_for_roi` → `update_profile`/`ProfileSource` → the two
-call sites in `high_level.rs:10977` ImageView and `:13083` StackView). This is a
-cross-boundary change large enough to be its own change, and it carries a semantic
-question — what siplot's ImageView exposes as `{xlabel}`/`{ylabel}` (its Plot2D
-labels are currently unset in the profile context). Deferred for sign-off.
-Also unported: the scatter profile's `distance_value_curve`
-(`scatter_viz.rs:631-642`) still uses arc distance (silx scatter picks
-`points[:,0]`/`points[:,1]` by dominant span, `rois.py:801-808`).
+**FIXED (Round 2 profile-subsystem cluster) — title/labels + scatter halves
+(user sign-off 2026-07-04, "compute title, fall back Columns/Rows"):**
+
+*Title/labels.* `profile_window.rs` now computes silx's self-describing profile
+title + axis labels (`createProfile` `profileName`/`xLabel`, `core.py:369-565`;
+`_lineProfileTitle`, `rois.py:68-89`), instead of the static `"Profile"`. A pure
+`image_profile_desc(roi, w, h, line_width)` returns the `{xlabel}`/`{ylabel}`
+templates per ROI kind: HRange → `{ylabel} = <row>` / `= [<lo>, <hi>]` widening
+with the band (`_alignedFullProfile`); VRange → `{xlabel} = <col>`; Rect → the
+row range reduced over columns; Line → the aligned/diagonal `_lineProfileTitle`
+forms, replicating `free_line_profile`'s column-then-row endpoint ordering so the
+title is drag-direction-independent; Cross → the crossing pixel (siplot merges
+silx's two cross sub-windows into one). `relabel` fills the tokens from the
+source plot's axis labels (silx `_relabelAxes`, empty → `"X"`/`"Y"`); the two
+image call sites thread the ImageView `Plot2D`'s `"Columns"`/`"Rows"` and the
+StackView's perspective labels. The title gets silx's `; width = %d` suffix and
+the Y label is the method name (`"Mean"`/`"Sum"`). `%g` coordinate formatting is
+ported in `format_g`/`format_g_signed`.
+
+*Scatter.* `distance_value_curve` is replaced by
+`ScatterLineProfile::dominant_axis_curve` (`scatter_viz.rs`): silx plots the
+interpolated values against whichever source axis spans farther along the segment
+(`rois.py:801-808`, `|x_last−x_first| > |y_last−y_first|`, tie → Y), not arc
+distance, and `scatter_profile_labels` builds the window title via
+`_lineProfileTitle` with `yLabel = "Profile"` (`rois.py:797-821`).
+
+Tests: `format_g_matches_python_percent_g`, `relabel_*`, `hrange/vrange/rect/
+cross_title_*`, `line_title_horizontal_vertical_and_diagonal`,
+`line_title_is_independent_of_drag_direction`,
+`scatter_labels_pick_the_dominant_axis_and_relabel`,
+`dominant_axis_curve_*` (dominant span, tie-to-Y, NaN gaps, empty).
 
 Severity: Medium
 

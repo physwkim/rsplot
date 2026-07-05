@@ -122,8 +122,14 @@ impl eframe::App for RoiProfileApp {
             // If the user modified the ROI, the plot updates automatically.
             // In a real app we'd check for `PlotEvent::RoiChanged { index: idx }`
             // but updating it every frame is fine for the example.
-            self.profile_window
-                .update_profile(WIDTH, HEIGHT, &self.pixels, &managed.roi);
+            self.profile_window.update_profile(
+                WIDTH,
+                HEIGHT,
+                &self.pixels,
+                &managed.roi,
+                "Columns",
+                "Rows",
+            );
         }
     }
 }

@@ -11381,9 +11381,27 @@ impl ImageView {
             let end = transform.pixel_to_data(p);
             if let Some(roi) = profile_roi_from_drag(self.profile_mode, start, end) {
                 // ProfileWindow re-derives the profile from the ROI using the
-                // same line/row/column helpers (single source of truth).
-                self.profile_window
-                    .update_profile(self.width, self.height, &self.pixels, &roi);
+                // same line/row/column helpers (single source of truth). The
+                // image plot's axis labels ("Columns"/"Rows") relabel the
+                // computed profile title (silx `_relabelAxes`).
+                let x_label = self
+                    .image_plot
+                    .graph_x_label()
+                    .unwrap_or("Columns")
+                    .to_string();
+                let y_label = self
+                    .image_plot
+                    .graph_y_label(YAxis::Left)
+                    .unwrap_or("Rows")
+                    .to_string();
+                self.profile_window.update_profile(
+                    self.width,
+                    self.height,
+                    &self.pixels,
+                    &roi,
+                    &x_label,
+                    &y_label,
+                );
                 self.profile_window.set_open(true);
             }
         }
@@ -12119,13 +12137,30 @@ impl ScatterView {
         let Some(profile) = self.line_profile(start, end, n_points) else {
             return false;
         };
-        let (distance, value) = profile.distance_value_curve();
-        // matplotlib C0 blue, silx's default first-curve color.
+        // silx plots the interpolated values against the dominant source axis
+        // (not arc distance) and titles the window from the sampled endpoints
+        // (`rois.py:797-821`).
+        let (coords, value, axis) = profile.dominant_axis_curve();
+        let (Some(&first), Some(&last)) = (profile.points.first(), profile.points.last()) else {
+            return false;
+        };
+        let src_x = self.inner.graph_x_label().unwrap_or("").to_string();
+        let src_y = self
+            .inner
+            .graph_y_label(YAxis::Left)
+            .unwrap_or("")
+            .to_string();
+        let labels = crate::widget::profile_window::scatter_profile_labels(
+            first, last, axis, &src_x, &src_y,
+        );
+        // matplotlib C0 blue, silx's default first-curve color; silx's scatter
+        // profile Y label is the fixed string "Profile" (`rois.py:821`).
         self.profile_window.set_profile_curve(
             "Profile",
             Color32::from_rgb(31, 119, 180),
-            distance,
+            coords,
             value,
+            &labels,
         );
         self.profile_window.set_open(true);
         true
@@ -13488,8 +13523,22 @@ impl StackView {
                     return false;
                 };
                 let frame = &self.frames[self.current_frame];
-                self.profile_window
-                    .update_profile(self.width, self.height, frame, &roi);
+                // Relabel the computed profile title from the stack plot's
+                // current perspective axis labels (silx `_relabelAxes`).
+                let x_label = self.inner.graph_x_label().unwrap_or("").to_string();
+                let y_label = self
+                    .inner
+                    .graph_y_label(YAxis::Left)
+                    .unwrap_or("")
+                    .to_string();
+                self.profile_window.update_profile(
+                    self.width,
+                    self.height,
+                    frame,
+                    &roi,
+                    &x_label,
+                    &y_label,
+                );
                 self.profile_window.set_open(true);
                 true
             }

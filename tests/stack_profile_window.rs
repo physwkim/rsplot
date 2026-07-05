@@ -14,7 +14,10 @@ use egui_kittest::Harness;
 use egui_kittest::wgpu::{WgpuTestRenderer, create_render_state, default_wgpu_setup};
 use siplot::egui;
 use siplot::egui::Color32;
-use siplot::{Colormap, ProfileMethod, ProfileMode, Roi, StackProfileDimension, StackView, YAxis};
+use siplot::{
+    Colormap, ProfileLabels, ProfileMethod, ProfileMode, Roi, StackProfileDimension, StackView,
+    YAxis,
+};
 
 /// A `[2, 3, 4]` volume (2 frames, each 3 rows × 4 cols under the default
 /// `Axis0` perspective) whose element `(i, j, k)` encodes its indices as
@@ -237,7 +240,14 @@ fn width_and_method_edits_recompute_from_the_retained_source() {
 
     let mut view = app.borrow_mut();
     let pw = view.profile_window_mut();
-    pw.update_profile(3, 3, &ramp, &Roi::HRange { y: (1.0, 1.0) });
+    pw.update_profile(
+        3,
+        3,
+        &ramp,
+        &Roi::HRange { y: (1.0, 1.0) },
+        "Columns",
+        "Rows",
+    );
     // width 1, Mean -> just row 1.
     assert_eq!(pw.active_profile_values(), vec![vec![10.0, 11.0, 12.0]]);
 
@@ -302,10 +312,27 @@ fn precomputed_curve_clears_the_retained_source() {
 
     let mut view = app.borrow_mut();
     let pw = view.profile_window_mut();
-    pw.update_profile(3, 3, &ramp, &Roi::HRange { y: (1.0, 1.0) });
+    pw.update_profile(
+        3,
+        3,
+        &ramp,
+        &Roi::HRange { y: (1.0, 1.0) },
+        "Columns",
+        "Rows",
+    );
     assert!(!pw.active_profile_values().is_empty());
 
-    pw.set_profile_curve("scatter", Color32::RED, vec![0.0, 1.0], vec![5.0, 6.0]);
+    pw.set_profile_curve(
+        "scatter",
+        Color32::RED,
+        vec![0.0, 1.0],
+        vec![5.0, 6.0],
+        &ProfileLabels {
+            title: "X = 0".to_string(),
+            x_label: "X".to_string(),
+            y_label: "Profile".to_string(),
+        },
+    );
     assert!(
         pw.active_profile_values().is_empty(),
         "a precomputed curve must clear the image-ROI source"
