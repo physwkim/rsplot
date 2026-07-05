@@ -2907,6 +2907,31 @@ Impact: the most common cartesian style (MEDM default; guaranteed key-absent on 
 
 ### R3-20: Display colormap fallback chain (external `cmap` file, `defaultDlColormap`) unported — colors silently lost
 
+**FIXED (R3) — default palette ported; external file warned:** MEDM's
+`executeDlDisplay` fallback chain (`medmDisplay.c:386-427`) is: inline `"color
+map"` → external `cmap` file → built-in default palette. Two of the three are
+now handled.
+- **Default palette (`createDlColormap`, `medmCommon.c:277-284`):** `parse` now
+  injects the 65-entry `defaultDlColormap` (ported from `siteSpecific.h`) into an
+  empty `color_table` when the display has no inline color map AND a blank
+  `cmap`, so `clr`/`bclr` indices resolve to MEDM's colours instead of falling to
+  sidm theme defaults — a compile-time constant, no filesystem needed.
+- **External `cmap` file:** a NON-blank `cmap` leaves the table empty (the default
+  is deliberately NOT substituted — MEDM would use the file's own colours), and
+  `generate` now warns, naming the unresolved file, rather than dropping every
+  colour silently.
+
+Tests: `no_inline_colormap_blank_cmap_uses_medm_default_palette`,
+`non_blank_cmap_leaves_table_empty_for_deferred_external_parse`,
+`external_cmap_warns_and_no_colormap_uses_default_palette`. No golden churn — every
+fixture `.adl` carries an inline color map, so the default is never injected there.
+
+**DEFERRED (external-file parse — needs a public-API change):** actually reading
+and parsing the named external colormap file requires threading a source dir into
+`parse()` (a public entry point with many callers/tests) so the table is populated
+before widget colours resolve. That signature change is feature-sized; deferred
+for sign-off. The warn closes the silent-loss fault in the meantime.
+
 Severity: Medium
 
 Rust: `adl2sidm/src/adl_parser.rs` — the display block's `cmap` key is never read (mentioned only in the doc comment at `:100`); with no inline `"color map"` block the table is empty and `take_colors` (`:254-270`) returns `None` for every `clr`/`bclr`, so all widgets fall to sidm theme defaults with no warning.

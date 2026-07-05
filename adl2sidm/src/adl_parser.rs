@@ -663,6 +663,83 @@ fn parse_color_map(content: &[&str]) -> Vec<Color> {
     table
 }
 
+/// MEDM's built-in default colormap (`siteSpecific.h` `defaultDlColormap`, 65
+/// entries r/g/b — the `inten` column is display-only and dropped). MEDM applies
+/// it to any display that has no inline `"color map"` block and a blank `cmap`
+/// (`executeDlDisplay` → `createDlColormap`, `medmCommon.c:277-284`); porting it
+/// means such a screen's `clr`/`bclr` indices resolve to the same colours MEDM
+/// would show instead of falling to sidm theme defaults.
+fn default_dl_colormap() -> Vec<Color> {
+    const RGB: [(u8, u8, u8); 65] = [
+        (255, 255, 255),
+        (236, 236, 236),
+        (218, 218, 218),
+        (200, 200, 200),
+        (187, 187, 187),
+        (174, 174, 174),
+        (158, 158, 158),
+        (145, 145, 145),
+        (133, 133, 133),
+        (120, 120, 120),
+        (105, 105, 105),
+        (90, 90, 90),
+        (70, 70, 70),
+        (45, 45, 45),
+        (0, 0, 0),
+        (0, 216, 0),
+        (30, 187, 0),
+        (51, 153, 0),
+        (45, 127, 0),
+        (33, 108, 0),
+        (253, 0, 0),
+        (222, 19, 9),
+        (190, 25, 11),
+        (160, 18, 7),
+        (130, 4, 0),
+        (88, 147, 255),
+        (89, 126, 225),
+        (75, 110, 199),
+        (58, 94, 171),
+        (39, 84, 141),
+        (251, 243, 74),
+        (249, 218, 60),
+        (238, 182, 43),
+        (225, 144, 21),
+        (205, 97, 0),
+        (255, 176, 255),
+        (214, 127, 226),
+        (174, 78, 188),
+        (139, 26, 150),
+        (97, 10, 117),
+        (164, 170, 255),
+        (135, 147, 226),
+        (106, 115, 193),
+        (77, 82, 164),
+        (52, 51, 134),
+        (199, 187, 109),
+        (183, 157, 92),
+        (164, 126, 60),
+        (125, 86, 39),
+        (88, 52, 15),
+        (153, 255, 255),
+        (115, 223, 255),
+        (78, 165, 249),
+        (42, 99, 228),
+        (10, 0, 184),
+        (235, 241, 181),
+        (212, 219, 157),
+        (187, 193, 135),
+        (166, 164, 98),
+        (139, 130, 57),
+        (115, 255, 107),
+        (82, 218, 59),
+        (60, 180, 32),
+        (40, 147, 21),
+        (26, 115, 9),
+    ];
+    RGB.iter().map(|&(r, g, b)| Color { r, g, b }).collect()
+}
+
 /// Parse the `display` block: geometry, foreground/background colour, and any
 /// remaining assignments.
 fn parse_display(content: &[&str], color_table: &[Color], screen: &mut MedmScreen) {
@@ -708,6 +785,19 @@ pub fn parse(text: &str) -> MedmScreen {
     }
     if let Some(block) = named_block("display", &blocks) {
         let content = block_content(&buf, block);
+        // MEDM colormap fallback chain (executeDlDisplay, medmDisplay.c:386-427):
+        // with no inline `"color map"` block, a BLANK `cmap` falls to the built-in
+        // default 65-colour palette (createDlColormap). A NON-blank `cmap` names an
+        // external colormap file, which needs a filesystem read `parse` has no
+        // source dir for — deferred; the table stays empty and codegen warns.
+        if screen.color_table.is_empty() {
+            let has_cmap = locate_assignments(&content)
+                .get("cmap")
+                .is_some_and(|s| !s.trim().is_empty());
+            if !has_cmap {
+                screen.color_table = default_dl_colormap();
+            }
+        }
         let table = screen.color_table.clone();
         parse_display(&content, &table, &mut screen);
     }
@@ -804,6 +894,80 @@ text {
             }
         );
         assert_eq!(screen.color_table[2], Color { r: 255, g: 0, b: 0 });
+    }
+
+    #[test]
+    fn no_inline_colormap_blank_cmap_uses_medm_default_palette() {
+        // R3-20: MEDM's executeDlDisplay falls to the built-in default 65-colour
+        // palette when there is no inline color map and a blank cmap. The parser
+        // now injects it (createDlColormap parity) so `clr` indices resolve.
+        let adl = r#"
+file {
+	name="x.adl"
+	version=030111
+}
+display {
+	object {
+		x=0
+		y=0
+		width=100
+		height=100
+	}
+	clr=14
+	bclr=0
+}
+"#;
+        let screen = parse(adl);
+        assert_eq!(screen.color_table.len(), 65, "default palette not injected");
+        // Index 14 is MEDM's black; index 0 its white — the display's clr=14 /
+        // bclr=0 resolve through the injected table.
+        assert_eq!(screen.color_table[14], Color { r: 0, g: 0, b: 0 });
+        assert_eq!(
+            screen.color,
+            Some(Color { r: 0, g: 0, b: 0 }),
+            "display clr must resolve against the default palette"
+        );
+        assert_eq!(
+            screen.background_color,
+            Some(Color {
+                r: 255,
+                g: 255,
+                b: 255
+            })
+        );
+    }
+
+    #[test]
+    fn non_blank_cmap_leaves_table_empty_for_deferred_external_parse() {
+        // A non-blank cmap names an external colormap file the parser cannot read
+        // (no source dir); the default palette must NOT be substituted (MEDM would
+        // use the file's colours), so the table stays empty and codegen warns.
+        let adl = r#"
+file {
+	name="x.adl"
+	version=030111
+}
+display {
+	object {
+		x=0
+		y=0
+		width=100
+		height=100
+	}
+	cmap="site.map"
+	clr=14
+	bclr=0
+}
+"#;
+        let screen = parse(adl);
+        assert!(
+            screen.color_table.is_empty(),
+            "external cmap must not fall to the default palette"
+        );
+        assert_eq!(
+            screen.assignments.get("cmap").map(String::as_str),
+            Some("site.map")
+        );
     }
 
     #[test]

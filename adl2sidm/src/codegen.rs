@@ -271,6 +271,27 @@ pub fn generate(screen: &MedmScreen, options: &Options) -> Generated {
     for widget in &screen.widgets {
         emit_widget(&mut b, widget, options);
     }
+    // A blank `cmap` with no inline color map is already resolved to MEDM's
+    // default 65-colour palette by the parser, so an EMPTY table here means MEDM
+    // had a colormap we could not reproduce — a non-blank `cmap` naming an
+    // external colormap file (no filesystem loader; deferred) or, degenerately,
+    // no display block at all. Either way every `clr`/`bclr` fell to a sidm theme
+    // default: warn, naming the unresolved file, rather than dropping it silently.
+    if screen.color_table.is_empty() {
+        let cmap = screen
+            .assignments
+            .get("cmap")
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty());
+        let detail = match cmap {
+            Some(file) => format!("external colormap file {file:?} is not parsed"),
+            None => "no color map is defined".to_string(),
+        };
+        b.warnings.push(format!(
+            "{detail} (adl2sidm has no external-colormap loader); every fg/bg colour \
+             falls to a sidm theme default"
+        ));
+    }
     // The screen's `bclr` background is painted in `ui()` with `color_expr`, so it
     // needs the `Color32` import even when no widget carries a colour.
     b.needs_color |= screen.background_color.is_some();
@@ -7420,6 +7441,87 @@ composite {
             ),
             "limitless pen dropped:\n{}",
             g.source
+        );
+    }
+
+    #[test]
+    fn external_cmap_warns_and_no_colormap_uses_default_palette() {
+        // R3-20: a display referencing an external colormap file (non-blank cmap,
+        // no inline color map) has no reproducible colours — warn, naming the file,
+        // rather than dropping every colour silently.
+        let external = r#"
+display {
+	object {
+		x=0
+		y=0
+		width=100
+		height=100
+	}
+	cmap="site.map"
+	clr=14
+	bclr=0
+}
+"text" {
+	object {
+		x=0
+		y=0
+		width=50
+		height=20
+	}
+	"basic attribute" {
+		clr=15
+	}
+	textix="hi"
+}
+"#;
+        let g = generate(&parse(external), &Options::default());
+        assert!(
+            g.warnings
+                .iter()
+                .any(|w| w.contains("external colormap file \"site.map\"")
+                    && w.contains("theme default")),
+            "external cmap must warn naming the file: {:?}",
+            g.warnings
+        );
+
+        // The same screen WITHOUT a cmap resolves against MEDM's default palette
+        // (index 15 = (0,216,0)), so it renders that colour and does not warn.
+        let defaulted = r#"
+display {
+	object {
+		x=0
+		y=0
+		width=100
+		height=100
+	}
+	clr=14
+	bclr=0
+}
+"text" {
+	object {
+		x=0
+		y=0
+		width=50
+		height=20
+	}
+	"basic attribute" {
+		clr=15
+	}
+	textix="hi"
+}
+"#;
+        let g2 = generate(&parse(defaulted), &Options::default());
+        assert!(
+            g2.source.contains("Color32::from_rgb(0, 216, 0)"),
+            "default-palette colour (index 15) not resolved:\n{}",
+            g2.source
+        );
+        assert!(
+            !g2.warnings
+                .iter()
+                .any(|w| w.contains("colormap") || w.contains("color map")),
+            "a default-palette screen must not warn about colours: {:?}",
+            g2.warnings
         );
     }
 
