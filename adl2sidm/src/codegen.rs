@@ -1582,7 +1582,11 @@ fn emit_cartesian_plot(b: &mut Builder, widget: &MedmWidget, options: &Options, 
 /// is a live, full-array, auto-scaling line plot: no trigger/erase-PV wiring, no
 /// per-plot style switch (`line plot` is what it already draws), and no
 /// circular/stop point buffer. `line plot`/`line` and a numeric `count` are
-/// faithful and stay silent.
+/// faithful and stay silent. Because MEDM omits `style`/`erase_oldest` on write
+/// when they equal their POINT_PLOT / ERASE_OLDEST_OFF defaults, an ABSENT key
+/// *is* that default — so both are resolved to their default before matching,
+/// making the on-disk-common point plot / stop-at-n cases warn like the written
+/// ones rather than passing silently (R2-68 residual, R3-19).
 fn warn_unsupported_cartesian_keys(b: &mut Builder, widget: &MedmWidget) {
     let line = widget.line;
     let a = &widget.assignments;
@@ -1616,7 +1620,14 @@ fn warn_unsupported_cartesian_keys(b: &mut Builder, widget: &MedmWidget) {
              buffer; sidm has no PV-driven point count"
         ));
     }
-    if let Some(style) = a.get("style").map(String::as_str) {
+    // MEDM omits `style` on write when it equals its POINT_PLOT default
+    // (`createDlCartesianPlot:2904` / `writeDlCartesianPlot:3106`), so an ABSENT
+    // key IS a point plot — the most common cartesian style on disk. Resolve the
+    // default before matching so present and absent are treated by one uniform
+    // rule (the R2-68 fix only gated on the present key, leaving the default —
+    // and thus the majority of real plots — silently drawn as connected lines).
+    {
+        let style = a.get("style").map(String::as_str).unwrap_or("point plot");
         let rendered = match style {
             "point plot" | "point" => Some("point plot"),
             "step" => Some("step"),
@@ -1630,7 +1641,10 @@ fn warn_unsupported_cartesian_keys(b: &mut Builder, widget: &MedmWidget) {
             ));
         }
     }
-    if let Some(mode) = a.get("erase_oldest").map(String::as_str) {
+    // Likewise `erase_oldest` is omitted when it equals its ERASE_OLDEST_OFF
+    // default ("plot n pts & stop", :2905 / :3109) — the absent key is that mode.
+    {
+        let mode = a.get("erase_oldest").map(String::as_str).unwrap_or("off");
         let behaviour = match mode {
             "on" | "plot last n pts" => Some("circular (plot last n pts)"),
             "off" | "plot n pts & stop" => Some("stop-at-n (plot n pts & stop)"),
@@ -7609,7 +7623,10 @@ composite {
             g.warnings
         );
 
-        // Faithful case: a line plot with a numeric count warns for none of these.
+        // A `line plot` with a numeric count is faithful for the trigger/erase/
+        // count/STYLE surface, so none of those warn. (`erase_oldest` is absent
+        // here, which MEDM treats as its stop-at-n default — that case is covered
+        // by the R3-19 test below, not asserted silent here.)
         let plain = r#"
 "color map" {
 	colors {
@@ -7626,6 +7643,7 @@ composite {
 	}
 	count=500
 	style="line plot"
+	erase_oldest="plot last n pts"
 	trace[0] {
 		ydata="DEV:Y"
 		data_clr=1
@@ -7634,9 +7652,60 @@ composite {
 "#;
         let g2 = generate(&parse(plain), &Options::default());
         assert!(
-            !g2.warnings.iter().any(|w| w.contains("cartesian plot")),
-            "line plot + numeric count must not warn: {:?}",
+            !g2.warnings.iter().any(|w| w.contains("style")),
+            "a line plot must not warn about style: {:?}",
             g2.warnings
+        );
+        assert!(
+            !g2.warnings
+                .iter()
+                .any(|w| w.contains("trigger") || w.contains("count PV")),
+            "faithful trigger/count must stay silent: {:?}",
+            g2.warnings
+        );
+    }
+
+    #[test]
+    fn cartesian_plot_absent_style_and_erase_oldest_warn_as_medm_defaults() {
+        // R3-19 (R2-68 residual): MEDM omits `style`/`erase_oldest` on write when
+        // they equal their POINT_PLOT / ERASE_OLDEST_OFF defaults, so a plot with
+        // NEITHER key is a point plot that stops at n — both divergent from sidm's
+        // connected-line, full-array rendering. The absent keys must warn exactly
+        // like the written ones, not pass silently.
+        let adl = r#"
+"color map" {
+	colors {
+		ffffff,
+		ff0000,
+	}
+}
+"cartesian plot" {
+	object {
+		x=0
+		y=0
+		width=300
+		height=150
+	}
+	trace[0] {
+		ydata="DEV:Y"
+		data_clr=1
+	}
+}
+"#;
+        let g = generate(&parse(adl), &Options::default());
+        assert!(
+            g.warnings
+                .iter()
+                .any(|w| w.contains("style \"point plot\"")),
+            "absent style must warn as point plot: {:?}",
+            g.warnings
+        );
+        assert!(
+            g.warnings
+                .iter()
+                .any(|w| w.contains("erase_oldest stop-at-n")),
+            "absent erase_oldest must warn as stop-at-n: {:?}",
+            g.warnings
         );
     }
 

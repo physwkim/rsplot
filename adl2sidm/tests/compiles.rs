@@ -181,12 +181,15 @@ fn rd_visuals_matches_the_committed_module() {
 fn sample_conversion_warns_only_with_the_informational_visibility_note() {
     let adl = include_str!("fixtures/sample.adl");
     let generated = generate(&parse(adl), &sample_options());
-    // Every widget converts to a real SiDM widget; the one warning is the
-    // rectangle's CALC visibility rule, now wired as a calc:// gate (an
-    // informational note, not an unsupported gap).
+    // Every widget converts to a real SiDM widget. Three warnings, all
+    // informational rather than unsupported gaps: the rectangle's CALC visibility
+    // rule wired as a calc:// gate, plus the cartesian plot's two MEDM-default
+    // divergences that R3-19 now surfaces — its absent `style` is a POINT_PLOT
+    // (MEDM omits the key at that default) and its absent `erase_oldest` is
+    // stop-at-n, both rendered by sidm as a connected-line, full-array plot.
     assert_eq!(
         generated.warnings.len(),
-        1,
+        3,
         "unexpected warnings: {:?}",
         generated.warnings
     );
@@ -195,5 +198,21 @@ fn sample_conversion_warns_only_with_the_informational_visibility_note() {
             .warnings
             .iter()
             .any(|w| w.contains("dynamic visibility wired"))
+    );
+    assert!(
+        generated
+            .warnings
+            .iter()
+            .any(|w| w.contains("style \"point plot\"")),
+        "missing absent-style point-plot warning: {:?}",
+        generated.warnings
+    );
+    assert!(
+        generated
+            .warnings
+            .iter()
+            .any(|w| w.contains("erase_oldest stop-at-n")),
+        "missing absent-erase_oldest stop-at-n warning: {:?}",
+        generated.warnings
     );
 }

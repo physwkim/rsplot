@@ -2878,6 +2878,25 @@ Impact: authored per-pen ranges are lost silently (bypasses the warn convention)
 
 ### R3-19: Absent cartesian `style` key means POINT_PLOT — rendered as lines, silently — (R2-68 residual)
 
+**FIXED (R3, structural — removed the present-key gating):** the R2-68 fix warned
+about `style`/`erase_oldest` only when the key was present (`if let Some(style) =
+a.get("style")`), but MEDM omits each key on write when it equals its default
+(`writeDlCartesianPlot:3106-3108`: `style != POINT_PLOT`, `erase_oldest !=
+ERASE_OLDEST_OFF`), so the ABSENT key IS that default — and the point plot is the
+most common cartesian style on disk. `warn_unsupported_cartesian_keys` now
+resolves the default before matching (`unwrap_or("point plot")` /
+`unwrap_or("off")`), so present and absent are one uniform rule: a plot with no
+`style` warns as a point plot rendered as a connected line, and a plot with no
+`erase_oldest` warns as stop-at-n — neither passes silently.
+
+Tests: `cartesian_plot_absent_style_and_erase_oldest_warn_as_medm_defaults` (a
+plot with NEITHER key warns for both). The R2-68 test's "faithful line plot"
+sub-case was corrected (a `line plot` is silent for style but every plot is
+stop-at-n unless it opts into circular, so the over-broad "no cartesian warning"
+assertion was narrowed to style/trigger/count). `sample.adl`'s cartesian plot
+(no style/erase_oldest) now correctly emits the two default-divergence warnings,
+so the fixture warning-count test went 1 → 3.
+
 Severity: Medium
 
 Rust: `adl2sidm/src/codegen.rs:1587-1600` — `warn_unsupported_cartesian_keys` warns about non-line styles only `if let Some(style) = a.get("style")`; `:1601-1613` same present-key gating for `erase_oldest`. An absent key produces the connected-line `SidmWaveformPlot` (`:1518-1522`) with zero warning.
