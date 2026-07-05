@@ -22,7 +22,9 @@ use crate::core::colormap::{AutoscaleMode, Colormap, ColormapName, Normalization
 use crate::core::items::{Baseline, ErrorBars, LineStyle, ScalarMask, Symbol};
 use crate::core::marker::{Marker, MarkerConstraint, MarkerKind};
 use crate::core::plot::{DataMargins, DataRange, GraphGrid, Plot, PlotId};
-use crate::core::roi::{ManagedRoi, Roi, RoiInteractionMode, RoiLineStyle};
+use crate::core::roi::{
+    ManagedRoi, Roi, RoiInteractionMode, RoiLineStyle, arc_inner_radius, arc_outer_radius,
+};
 use crate::core::scatter_viz::{GridImage, ScatterLineProfile};
 use crate::core::shape::{Shape, ShapeKind};
 use crate::core::sift_align::{
@@ -13843,13 +13845,18 @@ fn roi_description(roi: &Roi) -> String {
         ),
         Roi::Arc {
             center,
-            inner_radius,
-            outer_radius,
+            radius,
+            weight,
             start_angle,
             end_angle,
         } => format!(
             "Arc  c=({:.3}, {:.3})  r=[{:.3}, {:.3}]  θ=[{:.3}, {:.3}]",
-            center.0, center.1, inner_radius, outer_radius, start_angle, end_angle
+            center.0,
+            center.1,
+            arc_inner_radius(*radius, *weight),
+            arc_outer_radius(*radius, *weight),
+            start_angle,
+            end_angle
         ),
         Roi::Band { begin, end, width } => format!(
             "Band  ({:.3},{:.3}) → ({:.3},{:.3})  w={width:.3}",

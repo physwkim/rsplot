@@ -17,8 +17,8 @@ fn rect(x: f64) -> Roi {
 fn arc() -> Roi {
     Roi::Arc {
         center: (0.0, 0.0),
-        inner_radius: 1.0,
-        outer_radius: 2.0,
+        radius: 1.5,
+        weight: 1.0,
         start_angle: 0.0,
         end_angle: std::f64::consts::FRAC_PI_2,
     }

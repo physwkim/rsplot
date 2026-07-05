@@ -882,17 +882,26 @@ creation also assigns fresh `numpy.angle` values; coherency governs edits of
 an existing geometry only). Tests: branch-cut crossing both handles +
 accumulated-past-π continuation.
 
-**UNFIXED (sign-off gated), radius/weight residual:** the adjacent impact —
-silx stores `(radius, weight)` and clamps only the *reported* inner radius
-(_arc_roi.py:856-865), so `weight > 2·radius` survives follow-up drags —
-cannot be closed inside the current `Roi::Arc { inner_radius, outer_radius }`
-model: the clamped pair cannot represent that state. Closing it means either
-(a) restoring silx's `(radius, weight)` storage with clamped-at-report
-inner/outer (public `Roi` enum change rippling through roi_io serialization,
-chrome rendering, interaction creation, arc_contains), or (b) redefining
-`inner_radius` as allowed-negative with every consumer clamping at use.
-Both change public field semantics — queued for sign-off with the
-R2-14/autoscale model decision.
+**FIXED (roi cluster), radius/weight residual (option (a), user sign-off
+2026-07-04):** the adjacent impact — silx stores `(radius, weight)` and clamps
+only the *reported* inner radius (_arc_roi.py:856-865), so `weight > 2·radius`
+survives follow-up drags — is now closed by restoring silx's `(radius, weight)`
+storage. `Roi::Arc` field pair changed from `{ inner_radius, outer_radius }` to
+`{ radius, weight }`; two free helpers `arc_inner_radius(radius, weight) =
+(radius − weight/2).max(0.0)` (report-only clamp, silx getInnerRadius) and
+`arc_outer_radius(radius, weight) = radius + weight/2` (silx getOuterRadius)
+derive the reported band at every consumer. This removes the dual meaning that
+made the clamp lossy: PolarMode `move_edge` now sets `*radius` from the inner
+handle and `*weight = 2·|d − radius|` from the outer handle (silx
+`_getWeightFromHandle`), and ThreePointMode `arc_three_point_drag` preserves
+`weight` directly instead of recomputing `outer − inner`. Rippled through the
+public `Roi` enum, `roi_io` serialization (on-disk geom now `[cx, cy, radius,
+weight, start, end]`, lossless), chrome rendering, interaction creation,
+`arc_contains`, `roi_manager` "+ Arc", `high_level`/`examples` readouts. New
+boundary test `arc_weight_survives_a_reported_inner_radius_clamp`: drag weight
+to 14 (reported inner clamps to 0), then drag radius to 8 → weight conserved
+(14), inner un-clamps to 1, outer 15 — the old `(inner, outer)` model would
+have lost the thickness and reported inner 3 / outer 13.
 
 Severity: Medium
 

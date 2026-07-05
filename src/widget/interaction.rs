@@ -1385,9 +1385,9 @@ pub fn roi_from_draw(kind: RoiDrawKind, params: &DrawParams) -> Option<Roi> {
 ///
 /// silx builds a curvature control point `mid` off the `point0 → point1` line,
 /// fits the circle through `(point0, mid, point1)`, and derives a `weight`
-/// (band thickness) of `0.2 * |point1 - point0|`. The public form our
-/// [`Roi::Arc`] stores is `center`, `inner_radius = radius - weight/2`
-/// (clamped ≥ 0), `outer_radius = radius + weight/2`, `start_angle`, `end_angle`.
+/// (band thickness) of `0.2 * |point1 - point0|`. The form our [`Roi::Arc`]
+/// stores is silx's `center`, `radius`, `weight`, `start_angle`, `end_angle`
+/// (the reported inner/outer are derived, `radius ∓ weight/2`).
 ///
 /// `defaultCurvature = π/5`, `weightCoef = 0.20`
 /// (`items/_arc_roi.py:377-381`). The fitted geometry is delegated to
@@ -1417,9 +1417,9 @@ pub fn arc_from_two_points(point0: (f64, f64), point1: (f64, f64)) -> Roi {
 /// `ArcROI._createGeometryFromControlPoints` (`items/_arc_roi.py:622-664`) — the
 /// geometry behind silx's default *ThreePointMode* sub-mode. `start` and `end`
 /// are the arc endpoints; `mid` is a point the arc passes through between them
-/// (the curvature control). `weight` is the full radial thickness, so
-/// `inner_radius = radius − weight/2` (clamped ≥ 0) and `outer_radius = radius +
-/// weight/2`.
+/// (the curvature control). `weight` is the full radial thickness, stored
+/// directly alongside the central `radius` (the reported inner/outer are derived,
+/// `radius ∓ weight/2`).
 ///
 /// Branches mirror silx exactly:
 /// - `start ≈ end` (silx `numpy.allclose`) → a closed circle through
@@ -1441,7 +1441,6 @@ pub fn arc_from_three_points(
 ) -> Roi {
     let two_pi = std::f64::consts::TAU;
     let angle = |p: (f64, f64), c: (f64, f64)| (p.1 - c.1).atan2(p.0 - c.0);
-    let radii = |radius: f64| ((radius - weight * 0.5).max(0.0), radius + weight * 0.5);
 
     // Closed circle: silx `numpy.allclose(start, end)` (atol 1e-8, rtol 1e-5).
     let close = |a: f64, b: f64| (a - b).abs() <= 1e-8 + 1e-5 * b.abs();
@@ -1449,11 +1448,10 @@ pub fn arc_from_three_points(
         let center = ((start.0 + mid.0) * 0.5, (start.1 + mid.1) * 0.5);
         let radius = (start.0 - center.0).hypot(start.1 - center.1);
         let start_angle = angle(start, center);
-        let (inner_radius, outer_radius) = radii(radius);
         return Roi::Arc {
             center,
-            inner_radius,
-            outer_radius,
+            radius,
+            weight,
             start_angle,
             end_angle: start_angle + two_pi,
         };
@@ -1464,8 +1462,8 @@ pub fn arc_from_three_points(
     if cross.abs() < 1e-5 {
         return Roi::Arc {
             center: ((start.0 + end.0) * 0.5, (start.1 + end.1) * 0.5),
-            inner_radius: 0.0,
-            outer_radius: 0.0,
+            radius: 0.0,
+            weight: 0.0,
             start_angle: 0.0,
             end_angle: 0.0,
         };
@@ -1488,11 +1486,10 @@ pub fn arc_from_three_points(
         end_angle -= two_pi;
     }
 
-    let (inner_radius, outer_radius) = radii(radius);
     Roi::Arc {
         center,
-        inner_radius,
-        outer_radius,
+        radius,
+        weight,
         start_angle,
         end_angle,
     }
@@ -1523,16 +1520,15 @@ pub enum ArcControlPoint {
 pub fn arc_control_points(arc: &Roi) -> Option<ArcControlPoints> {
     let Roi::Arc {
         center,
-        inner_radius,
-        outer_radius,
+        radius,
         start_angle,
         end_angle,
+        ..
     } = arc
     else {
         return None;
     };
     let (cx, cy) = *center;
-    let radius = (*inner_radius + *outer_radius) * 0.5;
     let at = |a: f64| (cx + radius * a.cos(), cy + radius * a.sin());
     let mid_angle = (*start_angle + *end_angle) * 0.5;
     Some((at(*start_angle), at(mid_angle), at(*end_angle)))
@@ -1544,21 +1540,14 @@ pub fn arc_control_points(arc: &Roi) -> Option<ArcControlPoints> {
 /// `_createGeometryFromControlPoints`). Unlike PolarMode editing
 /// ([`Roi::move_edge`](crate::core::roi::Roi::move_edge), which fixes the
 /// center), moving a control point re-fits both the center/radius and the sweep
-/// angles. The band thickness (`weight = outer − inner`) is preserved. Returns
+/// angles. The band thickness (`weight`) is preserved directly, so it survives
+/// even when a prior drag drove the reported inner radius to 0 (R2-15). Returns
 /// the input unchanged for a non-arc.
 pub fn arc_three_point_drag(arc: &Roi, point: ArcControlPoint, to: (f64, f64)) -> Roi {
-    let (
-        Some((start, mid, end)),
-        Roi::Arc {
-            inner_radius,
-            outer_radius,
-            ..
-        },
-    ) = (arc_control_points(arc), arc)
-    else {
+    let (Some((start, mid, end)), Roi::Arc { weight, .. }) = (arc_control_points(arc), arc) else {
         return arc.clone();
     };
-    let weight = *outer_radius - *inner_radius;
+    let weight = *weight;
     let (start, mid, end) = match point {
         ArcControlPoint::Start => (to, mid, end),
         ArcControlPoint::Mid => (start, to, end),
@@ -3218,8 +3207,8 @@ mod tests {
         match roi_from_draw(RoiDrawKind::Arc, &p).expect("arc") {
             Roi::Arc {
                 center,
-                inner_radius,
-                outer_radius,
+                radius,
+                weight,
                 start_angle,
                 end_angle,
             } => {
@@ -3229,14 +3218,13 @@ mod tests {
                     "cy={}",
                     center.1
                 );
+                // silx stores (radius, weight); the reported inner/outer above
+                // (1.8198679616369122, 2.619867961636912) derive as radius ∓ w/2.
                 assert!(
-                    (inner_radius - 1.8198679616369122).abs() <= 1e-9,
-                    "inner={inner_radius}"
+                    (radius - 2.219867961636912).abs() <= 1e-9,
+                    "radius={radius}"
                 );
-                assert!(
-                    (outer_radius - 2.619867961636912).abs() <= 1e-9,
-                    "outer={outer_radius}"
-                );
+                assert!((weight - 0.8).abs() <= 1e-9, "weight={weight}");
                 assert!(
                     (start_angle - 2.692760559012144).abs() <= 1e-9,
                     "start={start_angle}"
@@ -3258,8 +3246,8 @@ mod tests {
         match arc_from_three_points((1.0, 0.0), (0.0, 1.0), (-1.0, 0.0), 0.0) {
             Roi::Arc {
                 center,
-                inner_radius,
-                outer_radius,
+                radius,
+                weight,
                 start_angle,
                 end_angle,
             } => {
@@ -3267,8 +3255,8 @@ mod tests {
                     center.0.abs() <= 1e-9 && center.1.abs() <= 1e-9,
                     "{center:?}"
                 );
-                assert!((inner_radius - 1.0).abs() <= 1e-9, "inner={inner_radius}");
-                assert!((outer_radius - 1.0).abs() <= 1e-9, "outer={outer_radius}");
+                assert!((radius - 1.0).abs() <= 1e-9, "radius={radius}");
+                assert!(weight.abs() <= 1e-9, "weight={weight}");
                 assert!(start_angle.abs() <= 1e-9, "start={start_angle}");
                 assert!(
                     (end_angle - std::f64::consts::PI).abs() <= 1e-9,
@@ -3286,7 +3274,7 @@ mod tests {
         match arc_from_three_points((2.0, 0.0), (-2.0, 0.0), (2.0, 0.0), 0.0) {
             Roi::Arc {
                 center,
-                outer_radius,
+                radius,
                 start_angle,
                 end_angle,
                 ..
@@ -3295,7 +3283,7 @@ mod tests {
                     center.0.abs() <= 1e-9 && center.1.abs() <= 1e-9,
                     "{center:?}"
                 );
-                assert!((outer_radius - 2.0).abs() <= 1e-9, "outer={outer_radius}");
+                assert!((radius - 2.0).abs() <= 1e-9, "radius={radius}");
                 assert!(
                     (end_angle - start_angle - std::f64::consts::TAU).abs() <= 1e-9,
                     "sweep={}",
@@ -3313,13 +3301,13 @@ mod tests {
         match arc_from_three_points((0.0, 0.0), (1.0, 0.0), (2.0, 0.0), 0.5) {
             Roi::Arc {
                 center,
-                inner_radius,
-                outer_radius,
+                radius,
+                weight,
                 ..
             } => {
                 assert_eq!(center, (1.0, 0.0));
-                assert_eq!(inner_radius, 0.0);
-                assert_eq!(outer_radius, 0.0);
+                assert_eq!(radius, 0.0);
+                assert_eq!(weight, 0.0);
             }
             other => panic!("{other:?}"),
         }
@@ -3335,16 +3323,15 @@ mod tests {
         match reshaped {
             Roi::Arc {
                 center,
-                inner_radius,
-                outer_radius,
+                radius,
+                weight,
                 ..
             } => {
                 assert!(center.0.abs() <= 1e-9, "cx={}", center.0);
                 assert!((center.1 - 0.75).abs() <= 1e-9, "cy={}", center.1);
-                let radius_mid = (inner_radius + outer_radius) * 0.5;
-                assert!((radius_mid - 1.25).abs() <= 1e-9, "r={radius_mid}");
-                // weight (= outer - inner) is preserved across the reshape.
-                assert!((outer_radius - inner_radius - 0.4).abs() <= 1e-9);
+                assert!((radius - 1.25).abs() <= 1e-9, "r={radius}");
+                // weight is preserved across the reshape.
+                assert!((weight - 0.4).abs() <= 1e-9, "weight={weight}");
             }
             other => panic!("{other:?}"),
         }
@@ -3487,8 +3474,8 @@ mod tests {
     fn managed_arc(mode: RoiInteractionMode) -> ManagedRoi {
         let mut m = ManagedRoi::new(Roi::Arc {
             center: (5.0, 5.0),
-            inner_radius: 1.0,
-            outer_radius: 3.0,
+            radius: 2.0,
+            weight: 2.0,
             start_angle: 0.0,
             end_angle: std::f64::consts::PI,
         });
@@ -3514,8 +3501,8 @@ mod tests {
     fn arc_three_point_handles_are_the_control_points() {
         let arc = Roi::Arc {
             center: (5.0, 5.0),
-            inner_radius: 1.0,
-            outer_radius: 3.0,
+            radius: 2.0,
+            weight: 2.0,
             start_angle: 0.0,
             end_angle: std::f64::consts::PI,
         };

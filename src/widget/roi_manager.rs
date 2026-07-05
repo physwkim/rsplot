@@ -210,8 +210,9 @@ impl RoiManagerWidget {
                 let r = dx.abs().max(dy.abs()).max(f64::EPSILON);
                 plot.add_roi(Roi::Arc {
                     center: (cx, cy),
-                    inner_radius: r * 0.5,
-                    outer_radius: r,
+                    // ring from 0.5r to r: radius (mean) 0.75r, weight (thickness) 0.5r.
+                    radius: r * 0.75,
+                    weight: r * 0.5,
                     start_angle: 0.0,
                     end_angle: std::f64::consts::FRAC_PI_2,
                 });

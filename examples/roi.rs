@@ -102,11 +102,11 @@ impl eframe::App for RoiApp {
                     ),
                     Roi::Arc {
                         center,
-                        inner_radius,
-                        outer_radius,
+                        radius,
+                        weight,
                         ..
                     } => format!(
-                        "arc #{i}  c=({:.2}, {:.2})  r=[{inner_radius:.2}, {outer_radius:.2}]",
+                        "arc #{i}  c=({:.2}, {:.2})  r={radius:.2}  w={weight:.2}",
                         center.0, center.1
                     ),
                     Roi::Band { begin, end, width } => format!(

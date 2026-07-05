@@ -240,17 +240,19 @@ fn roi_type_and_geom(roi: &Roi) -> (&'static str, Vec<f64>) {
         ),
         Roi::Arc {
             center,
-            inner_radius,
-            outer_radius,
+            radius,
+            weight,
             start_angle,
             end_angle,
         } => (
             "arc",
+            // Store silx's (radius, weight) — lossless even when the reported
+            // inner radius clamps to 0, unlike (inner, outer) (R2-15).
             vec![
                 center.0,
                 center.1,
-                *inner_radius,
-                *outer_radius,
+                *radius,
+                *weight,
                 *start_angle,
                 *end_angle,
             ],
@@ -337,8 +339,8 @@ fn roi_from_type_and_geom(type_name: &str, g: &[f64]) -> Result<Roi, RoiIoError>
             need(6)?;
             Roi::Arc {
                 center: (g[0], g[1]),
-                inner_radius: g[2],
-                outer_radius: g[3],
+                radius: g[2],
+                weight: g[3],
                 start_angle: g[4],
                 end_angle: g[5],
             }
@@ -472,8 +474,8 @@ mod tests {
             }),
             ManagedRoi::new(Roi::Arc {
                 center: (0.0, 0.0),
-                inner_radius: 1.0,
-                outer_radius: 2.0,
+                radius: 1.5,
+                weight: 1.0,
                 start_angle: 0.0,
                 end_angle: PI,
             }),

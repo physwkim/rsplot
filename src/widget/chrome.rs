@@ -14,7 +14,9 @@ use crate::core::dtime_ticks::{self, DateTime, TimeZone};
 use crate::core::items::{LineStyle, Symbol};
 use crate::core::marker::{Marker, MarkerKind, TextAnchor};
 use crate::core::plot::{GraphGrid, TickMode};
-use crate::core::roi::{HandleKind, ManagedRoi, Roi, RoiInteractionMode};
+use crate::core::roi::{
+    HandleKind, ManagedRoi, Roi, RoiInteractionMode, arc_inner_radius, arc_outer_radius,
+};
 use crate::core::shape::{Line, Shape, ShapeKind, triangulate_simple_polygon};
 use crate::core::ticklayout::{adaptive_n_ticks, nice_num};
 use crate::core::transform::{Axis, AxisSide, Scale, Transform, YAxis};
@@ -1221,8 +1223,8 @@ pub fn draw_roi(
         }
         Roi::Arc {
             center,
-            inner_radius,
-            outer_radius,
+            radius,
+            weight,
             start_angle,
             end_angle,
         } => {
@@ -1230,20 +1232,17 @@ pub fn draw_roi(
             // transform may scale axes differently, so sample in data space —
             // silx samples the arc with up to ~100 angular steps). The sector is
             // non-convex, so it is drawn as the closed outline only (silx draws
-            // the arc shape with `setFill(False)`).
-            let pts: Vec<Pos2> = arc_outline(
-                *center,
-                *inner_radius,
-                *outer_radius,
-                *start_angle,
-                *end_angle,
-            )
-            .into_iter()
-            .map(|(x, y)| t.data_to_pixel(x, y))
-            .collect();
+            // the arc shape with `setFill(False)`). The reported inner radius is
+            // clamped at 0 (arc_inner_radius); the stored weight is untouched.
+            let inner = arc_inner_radius(*radius, *weight);
+            let outer = arc_outer_radius(*radius, *weight);
+            let pts: Vec<Pos2> = arc_outline(*center, inner, outer, *start_angle, *end_angle)
+                .into_iter()
+                .map(|(x, y)| t.data_to_pixel(x, y))
+                .collect();
             outline(pts);
             // Label anchor at the top of the outer circle.
-            Some(t.data_to_pixel(center.0, center.1 + outer_radius))
+            Some(t.data_to_pixel(center.0, center.1 + outer))
         }
         Roi::Band {
             begin,

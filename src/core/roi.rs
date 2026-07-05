@@ -85,14 +85,21 @@ pub enum Roi {
         radii: (f64, f64),
         orientation: f64,
     },
-    /// An annular sector (silx `ArcROI`): the ring between `inner_radius` and
-    /// `outer_radius` around `center`, swept from `start_angle` to `end_angle`
+    /// An annular sector (silx `ArcROI`): the ring of central `radius` and radial
+    /// thickness `weight` around `center`, swept from `start_angle` to `end_angle`
     /// (radians; if `start_angle > end_angle` the sweep is the other way). A
     /// full `2π` sweep is a circle/donut.
+    ///
+    /// Stored as silx's `(radius, weight)` (silx `_ArcGeometry`), NOT as
+    /// `(inner, outer)`: the reported inner radius `radius − weight/2` is clamped
+    /// at 0 for drawing/hit-testing ([`arc_inner_radius`]), but the stored weight
+    /// keeps the true thickness even when that clamp fires (`weight > 2·radius`),
+    /// so a follow-up drag recomputes from the real weight instead of a
+    /// collapsed-to-0 inner (silx `getInnerRadius`, `_arc_roi.py:856-865`; R2-15).
     Arc {
         center: (f64, f64),
-        inner_radius: f64,
-        outer_radius: f64,
+        radius: f64,
+        weight: f64,
         start_angle: f64,
         end_angle: f64,
     },
@@ -237,12 +244,14 @@ impl Roi {
             }
             Roi::Arc {
                 center,
-                outer_radius,
+                radius,
+                weight,
                 ..
             } => {
                 // Bounding box of the outer circle, mapped to screen.
-                let a = t.data_to_pixel(center.0 - outer_radius, center.1 - outer_radius);
-                let b = t.data_to_pixel(center.0 + outer_radius, center.1 + outer_radius);
+                let outer = arc_outer_radius(*radius, *weight);
+                let a = t.data_to_pixel(center.0 - outer, center.1 - outer);
+                let b = t.data_to_pixel(center.0 + outer, center.1 + outer);
                 Rect::from_two_pos(a, b)
             }
             Roi::Band { .. } => {
@@ -713,37 +722,33 @@ impl Roi {
                 _ => {}
             },
             // Arc handle drag — PolarMode editing, faithful to our polar
-            // `{center, inner_radius, outer_radius, start_angle, end_angle}`
-            // representation (silx `ArcROI.handleDragUpdated` PolarMode branch).
-            // silx's default ThreePointMode (a circumcircle through three
-            // start/mid/end control points) needs a point-based geometry we do
-            // not store, so PolarMode is the faithful match for our model.
+            // `{center, radius, weight, start_angle, end_angle}` representation
+            // (silx `ArcROI.handleDragUpdated` PolarMode branch). silx's default
+            // ThreePointMode (a circumcircle through three start/mid/end control
+            // points) needs a point-based geometry we do not store, so PolarMode
+            // is the faithful match for our model.
             Roi::Arc {
                 center,
-                inner_radius,
-                outer_radius,
+                radius,
+                weight,
                 start_angle,
                 end_angle,
             } => {
                 let (cx, cy) = *center;
-                let mid = (*inner_radius + *outer_radius) * 0.5;
                 match edge {
                     // Mid handle (Vertex 0) → central radius, conserving the
-                    // thickness (silx `withRadius`: weight = outer − inner kept).
+                    // thickness (silx `withRadius`: weight kept). Because weight
+                    // is stored directly it survives even when a prior drag drove
+                    // the reported inner radius to 0 (R2-15).
                     RoiEdge::Vertex(0) => {
-                        let r = (dx - cx).hypot(dy - cy);
-                        let w = *outer_radius - *inner_radius;
-                        *inner_radius = (r - w * 0.5).max(0.0);
-                        *outer_radius = r + w * 0.5;
+                        *radius = (dx - cx).hypot(dy - cy);
                     }
                     // Weight handle (Vertex 1) → thickness, symmetric about the
-                    // mid radius (silx `_getWeightFromHandle`:
+                    // central radius (silx `_getWeightFromHandle`:
                     // `weight = 2·|d − radius|`, `d = |center − handle|`).
                     RoiEdge::Vertex(1) => {
                         let d = (dx - cx).hypot(dy - cy);
-                        let w = 2.0 * (d - mid).abs();
-                        *inner_radius = (mid - w * 0.5).max(0.0);
-                        *outer_radius = mid + w * 0.5;
+                        *weight = 2.0 * (d - *radius).abs();
                     }
                     // Start / end handles (Vertex 2 / 3) → sweep angles (silx
                     // `withStartAngle` / `withEndAngle`), accumulated with the
@@ -928,14 +933,14 @@ impl Roi {
             }
             Roi::Arc {
                 center,
-                inner_radius,
-                outer_radius,
+                radius,
+                weight,
                 start_angle,
                 end_angle,
             } => arc_contains(
                 *center,
-                *inner_radius,
-                *outer_radius,
+                arc_inner_radius(*radius, *weight),
+                arc_outer_radius(*radius, *weight),
                 *start_angle,
                 *end_angle,
                 pos,
@@ -1323,29 +1328,45 @@ impl ManagedRoi {
     }
 }
 
+/// The inner (smaller) radius of an arc ring, silx-style: `radius − weight/2`
+/// clamped at 0 (silx `ArcROI.getInnerRadius`, `_arc_roi.py:856-865`). The clamp
+/// is REPORT-ONLY — used for drawing, hit-testing, and handle placement — while
+/// the stored `(radius, weight)` keep the true thickness, so a follow-up drag
+/// recomputes from the real weight rather than a collapsed-to-0 inner (R2-15).
+#[must_use]
+pub fn arc_inner_radius(radius: f64, weight: f64) -> f64 {
+    (radius - weight * 0.5).max(0.0)
+}
+
+/// The outer (bigger) radius of an arc ring: `radius + weight/2` (silx
+/// `ArcROI.getOuterRadius`, `_arc_roi.py:867-874`; never clamped).
+#[must_use]
+pub fn arc_outer_radius(radius: f64, weight: f64) -> f64 {
+    radius + weight * 0.5
+}
+
 /// Data-space position of arc shape-vertex `index`, mirroring silx `ArcROI`'s
-/// handle layout: 0 = mid (at the mid-radius `(inner+outer)/2`, mid angle),
-/// 1 = outer/weight (the outer radius at the mid angle), 2 = start point,
-/// 3 = end point. Returns `None` for any other index or a non-arc ROI.
+/// handle layout: 0 = mid (at the central `radius`, mid angle), 1 = outer/weight
+/// (the outer radius at the mid angle), 2 = start point, 3 = end point. Returns
+/// `None` for any other index or a non-arc ROI.
 fn arc_vertex_pos(roi: &Roi, index: usize) -> Option<(f64, f64)> {
     let Roi::Arc {
         center,
-        inner_radius,
-        outer_radius,
+        radius,
+        weight,
         start_angle,
         end_angle,
     } = roi
     else {
         return None;
     };
-    let radius = (inner_radius + outer_radius) * 0.5;
     let mid_angle = (start_angle + end_angle) * 0.5;
     let at = |r: f64, a: f64| (center.0 + r * a.cos(), center.1 + r * a.sin());
     Some(match index {
-        0 => at(radius, mid_angle),
-        1 => at(*outer_radius, mid_angle),
-        2 => at(radius, *start_angle),
-        3 => at(radius, *end_angle),
+        0 => at(*radius, mid_angle),
+        1 => at(arc_outer_radius(*radius, *weight), mid_angle),
+        2 => at(*radius, *start_angle),
+        3 => at(*radius, *end_angle),
         _ => return None,
     })
 }
@@ -2021,75 +2042,61 @@ mod tests {
     #[test]
     fn arc_handles_drag_radius_weight_and_angles() {
         use std::f64::consts::{FRAC_PI_2, PI};
-        // center origin, inner 2 / outer 4 (mid radius 3, thickness 2),
+        // center origin, radius 3 / weight 2 (reported inner 2, outer 4),
         // sweep 0 → π/2.
         let base = Roi::Arc {
             center: (0.0, 0.0),
-            inner_radius: 2.0,
-            outer_radius: 4.0,
+            radius: 3.0,
+            weight: 2.0,
             start_angle: 0.0,
             end_angle: FRAC_PI_2,
         };
         let approx =
             |a: f64, b: f64, what: &str| assert!((a - b).abs() < 1e-9, "{what}: {a} vs {b}");
 
-        // Mid handle → central radius 5, thickness 2 conserved → inner 4, outer 6.
+        // Mid handle → central radius 5, weight 2 conserved.
         let mut roi = base.clone();
         roi.move_edge(RoiEdge::Vertex(0), (5.0, 0.0));
         if let Roi::Arc {
-            inner_radius,
-            outer_radius,
+            radius,
+            weight,
             start_angle,
             end_angle,
             ..
         } = roi
         {
-            approx(inner_radius, 4.0, "mid inner");
-            approx(outer_radius, 6.0, "mid outer");
+            approx(radius, 5.0, "mid radius");
+            approx(weight, 2.0, "mid keeps weight");
             approx(start_angle, 0.0, "mid keeps start");
             approx(end_angle, FRAC_PI_2, "mid keeps end");
         } else {
             panic!("not an arc");
         }
 
-        // Weight handle → thickness 2·|d − mid|. d = 6, mid = 3 → weight 6 →
-        // inner 0, outer 6 (mid radius unchanged).
+        // Weight handle → weight 2·|d − radius|. d = 6, radius = 3 → weight 6
+        // (radius unchanged); reported inner clamps to 0, outer 6.
         let mut roi = base.clone();
         roi.move_edge(RoiEdge::Vertex(1), (6.0, 0.0));
-        if let Roi::Arc {
-            inner_radius,
-            outer_radius,
-            ..
-        } = roi
-        {
-            approx(inner_radius, 0.0, "weight inner");
-            approx(outer_radius, 6.0, "weight outer");
-        } else {
-            panic!("not an arc");
-        }
-        // Weight clamps the inner radius at 0: d = 10 → weight 14 →
-        // inner max(3 − 7, 0) = 0, outer 10.
-        let mut roi = base.clone();
-        roi.move_edge(RoiEdge::Vertex(1), (10.0, 0.0));
-        if let Roi::Arc {
-            inner_radius,
-            outer_radius,
-            ..
-        } = roi
-        {
-            approx(inner_radius, 0.0, "weight clamp inner");
-            approx(outer_radius, 10.0, "weight clamp outer");
+        if let Roi::Arc { radius, weight, .. } = roi {
+            approx(radius, 3.0, "weight keeps radius");
+            approx(weight, 6.0, "weight");
+            approx(
+                arc_inner_radius(radius, weight),
+                0.0,
+                "reported inner clamps",
+            );
+            approx(arc_outer_radius(radius, weight), 6.0, "reported outer");
         } else {
             panic!("not an arc");
         }
 
-        // Start / end handles set the sweep angles and leave the radii alone.
+        // Start / end handles set the sweep angles and leave radius/weight alone.
         let mut roi = base.clone();
         roi.move_edge(RoiEdge::Vertex(2), (0.0, 5.0));
         roi.move_edge(RoiEdge::Vertex(3), (-5.0, 0.0));
         if let Roi::Arc {
-            inner_radius,
-            outer_radius,
+            radius,
+            weight,
             start_angle,
             end_angle,
             ..
@@ -2097,8 +2104,59 @@ mod tests {
         {
             approx(start_angle, FRAC_PI_2, "start angle");
             approx(end_angle, PI, "end angle");
-            approx(inner_radius, 2.0, "angle keeps inner");
-            approx(outer_radius, 4.0, "angle keeps outer");
+            approx(radius, 3.0, "angle keeps radius");
+            approx(weight, 2.0, "angle keeps weight");
+        } else {
+            panic!("not an arc");
+        }
+    }
+
+    #[test]
+    fn arc_weight_survives_a_reported_inner_radius_clamp() {
+        // R2-15: silx stores (radius, weight) and clamps only the REPORTED inner
+        // radius (getInnerRadius, _arc_roi.py:856-865), so `weight > 2·radius`
+        // survives a follow-up drag. The old (inner, outer) storage collapsed the
+        // inner to 0 and lost the true weight, so re-dragging the radius rebuilt a
+        // thinner ring — the recurring edge this closes.
+        use std::f64::consts::FRAC_PI_2;
+        let approx =
+            |a: f64, b: f64, what: &str| assert!((a - b).abs() < 1e-9, "{what}: {a} vs {b}");
+        let mut roi = Roi::Arc {
+            center: (0.0, 0.0),
+            radius: 3.0,
+            weight: 2.0,
+            start_angle: 0.0,
+            end_angle: FRAC_PI_2,
+        };
+        // Fatten past 2·radius: d = 10 → weight 2·|10 − 3| = 14. The reported inner
+        // clamps to 0, but the stored weight is the true 14 (not the clamped 10).
+        roi.move_edge(RoiEdge::Vertex(1), (10.0, 0.0));
+        if let Roi::Arc { radius, weight, .. } = roi {
+            approx(radius, 3.0, "radius unchanged by the weight drag");
+            approx(weight, 14.0, "true weight stored, not the clamped 10");
+            approx(
+                arc_inner_radius(radius, weight),
+                0.0,
+                "reported inner clamps at 0",
+            );
+            approx(arc_outer_radius(radius, weight), 10.0, "reported outer");
+        } else {
+            panic!("not an arc");
+        }
+        // Now drag the MID (radius) handle. silx conserves weight, so the ring
+        // keeps its full thickness 14: outer 8+7=15, inner un-clamps to 8−7=1.
+        // The old storage would have used weight = outer − inner = 10 − 0 = 10,
+        // giving inner 3 / outer 13 — the exact bug.
+        roi.move_edge(RoiEdge::Vertex(0), (8.0, 0.0));
+        if let Roi::Arc { radius, weight, .. } = roi {
+            approx(radius, 8.0, "radius moved to 8");
+            approx(weight, 14.0, "weight conserved across the radius drag");
+            approx(arc_outer_radius(radius, weight), 15.0, "outer = 8 + 7");
+            approx(
+                arc_inner_radius(radius, weight),
+                1.0,
+                "inner un-clamps to 8 − 7",
+            );
         } else {
             panic!("not an arc");
         }
@@ -2118,8 +2176,8 @@ mod tests {
         // delta −6.0 wraps to +0.283 → the angle advances to ≈ 3.283.
         let mut roi = Roi::Arc {
             center: (0.0, 0.0),
-            inner_radius: 2.0,
-            outer_radius: 4.0,
+            radius: 3.0,
+            weight: 2.0,
             start_angle: 3.0,
             end_angle: std::f64::consts::FRAC_PI_2,
         };
@@ -2139,8 +2197,8 @@ mod tests {
         // wraps to −0.283 → ≈ −3.283.
         let mut roi = Roi::Arc {
             center: (0.0, 0.0),
-            inner_radius: 2.0,
-            outer_radius: 4.0,
+            radius: 3.0,
+            weight: 2.0,
             start_angle: 0.0,
             end_angle: -3.0,
         };
@@ -2161,8 +2219,8 @@ mod tests {
         // across lands near 3.4, not near −2.9.
         let mut roi = Roi::Arc {
             center: (0.0, 0.0),
-            inner_radius: 2.0,
-            outer_radius: 4.0,
+            radius: 3.0,
+            weight: 2.0,
             start_angle: 3.0 + (std::f64::consts::TAU - 6.0),
             end_angle: 0.0,
         };
@@ -2643,8 +2701,8 @@ mod tests {
         // Quarter ring in the first quadrant: r in [1, 2], theta in [0, pi/2].
         let arc = Roi::Arc {
             center: (0.0, 0.0),
-            inner_radius: 1.0,
-            outer_radius: 2.0,
+            radius: 1.5,
+            weight: 1.0,
             start_angle: 0.0,
             end_angle: std::f64::consts::FRAC_PI_2,
         };
@@ -2666,8 +2724,8 @@ mod tests {
         // Left-side sweep crossing the +/-pi branch: theta in [3pi/4, 5pi/4].
         let arc = Roi::Arc {
             center: (0.0, 0.0),
-            inner_radius: 1.0,
-            outer_radius: 2.0,
+            radius: 1.5,
+            weight: 1.0,
             start_angle: 3.0 * std::f64::consts::FRAC_PI_4,
             end_angle: 5.0 * std::f64::consts::FRAC_PI_4,
         };
@@ -2830,8 +2888,8 @@ mod tests {
         // Arc: 4 shape vertices (mid/outer/start/end) + a translate center.
         let arc = Roi::Arc {
             center: (0.0, 0.0),
-            inner_radius: 1.0,
-            outer_radius: 2.0,
+            radius: 1.5,
+            weight: 1.0,
             start_angle: 0.0,
             end_angle: std::f64::consts::FRAC_PI_2,
         };
@@ -2864,8 +2922,8 @@ mod tests {
         let rois = [
             Roi::Arc {
                 center: (1.0, 1.0),
-                inner_radius: 1.0,
-                outer_radius: 2.0,
+                radius: 1.5,
+                weight: 1.0,
                 start_angle: 0.0,
                 end_angle: std::f64::consts::FRAC_PI_2,
             },
@@ -2927,8 +2985,8 @@ mod tests {
     fn sample_arc() -> Roi {
         Roi::Arc {
             center: (0.0, 0.0),
-            inner_radius: 1.0,
-            outer_radius: 2.0,
+            radius: 1.5,
+            weight: 1.0,
             start_angle: 0.0,
             end_angle: std::f64::consts::FRAC_PI_2,
         }
