@@ -2583,6 +2583,15 @@ Impact: pin `vmax=2.0` with data `[3,90]`, vmin auto: silx returns degenerate `(
 
 ### R3-7: 3D interactive-mode surface missing — button bindings match no silx composition, no Ctrl swap, doc misattributes them to RotateCameraControl
 
+**DEFERRED (R3 — sign-off required, feature/gesture-contract change):** closing this
+needs a new interactive-mode surface (`set_interactive_mode('rotate'|'pan'|None)`, silx
+`Plot3DWidget.py:178-219`) plus a Ctrl-modifier `FocusManager` swap
+(`interaction.py:435-441`) and a rebinding of Secondary — a state-machine/feature
+addition *and* a gesture-contract change (right-drag currently pans, which silx never
+does). That is beyond a patch and alters user-facing input, so it is held for batched
+plot3d sign-off; the fabricated module doc is corrected as part of that change, and it is
+then recorded in `doc/plot3d-parity-roadmap.md`. No code changed this round.
+
 Severity: Medium
 
 Rust: `src/widget/scene_widget.rs:9-14` — module doc claims a `RotateCameraControl` port with "right-drag pans"; `:445-461` binds Primary to orbit, `:467-484` binds Secondary to pan, unconditionally. No keyboard-modifier handling exists (only `Modifiers::NONE` in a test, `:828`); no `set_interactive_mode`/`interactive_mode` surface.
