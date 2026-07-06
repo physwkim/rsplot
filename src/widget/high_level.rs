@@ -11564,6 +11564,15 @@ impl ImageView {
             self.profile_drag_start = None;
             self.profile_current_roi = None;
             self.profile_window.set_open(false);
+            // The profile no longer owns the primary drag: return the plot to
+            // box-zoom.
+            crate::widget::actions::mode::zoom_mode(&mut self.image_plot);
+        } else {
+            // A profile drag positions/moves the ROI, so the plot must not also
+            // box-zoom or pan on that same primary drag (silx switches the plot's
+            // interactive mode while a profile ROI tool is active). Select mode
+            // frees the primary drag for the profile without starting a box zoom.
+            crate::widget::actions::mode::select_mode(&mut self.image_plot);
         }
     }
 
@@ -13632,8 +13641,18 @@ impl StackView {
         self.profile_mode = mode;
         if mode == ProfileMode::None {
             self.profile_drag_start = None;
+            self.profile_current_roi = None;
             self.profile_window.set_open(false);
             self.stack_profile_window.set_open(false);
+            // The profile no longer owns the primary drag: return the plot to
+            // box-zoom.
+            crate::widget::actions::mode::zoom_mode(&mut self.inner);
+        } else {
+            // A profile drag positions/moves the ROI, so the plot must not also
+            // box-zoom or pan on that same primary drag (silx switches the plot's
+            // interactive mode while a profile ROI tool is active). Select mode
+            // frees the primary drag for the profile without starting a box zoom.
+            crate::widget::actions::mode::select_mode(&mut self.inner);
         }
     }
 
