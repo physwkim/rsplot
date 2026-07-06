@@ -10921,6 +10921,14 @@ impl ImageView {
     /// alpha slider (silx `ActiveImageAlphaSlider`, ImageView.py:513-517). Each
     /// change is propagated to the displayed image.
     pub fn show_toolbar(&mut self, ui: &mut egui::Ui) {
+        // Standard silx plot control toolbar (reset zoom / zoom in-out / pan /
+        // select / invert X·Y / log / autoscale / grid / keep-aspect / cursor /
+        // show-axes / save / copy / print). ImageView wraps a `Plot2D`, so these
+        // were reachable on the inner plot but never surfaced on the ImageView
+        // toolbar — the image was missing the top toolbar silx's `Plot2D` shows.
+        // Render it first, in its own row above the image-specific controls. The
+        // buttons self-apply to the plot, so the response is not needed here.
+        let _ = self.image_plot.show_toolbar(ui);
         ui.horizontal_wrapped(|ui| {
             // Interpolation selector (silx image interpolation).
             let mut interpolation = self.interpolation;
