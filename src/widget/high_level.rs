@@ -30,7 +30,7 @@ use crate::core::shape::{Shape, ShapeKind};
 use crate::core::sift_align::{
     AffineTransformation, MatchedKeypoint, SiftAlignment, sift_auto_align,
 };
-use crate::core::transform::{AxisSide, Margins, Scale, YAxis, clamp_axis_limits};
+use crate::core::transform::{AxisSide, Margins, Scale, Transform, YAxis, clamp_axis_limits};
 use crate::core::triangles::Triangles;
 use crate::render::backend_wgpu::WgpuBackend;
 use crate::render::gpu_curve::CurveData;
@@ -10284,6 +10284,86 @@ fn profile_roi_from_drag(mode: ProfileMode, start: (f64, f64), end: (f64, f64)) 
     }
 }
 
+/// Overlay accent for the profile ROI drawn on the image (a bright,
+/// colormap-contrasting magenta), mirroring silx drawing the active profile ROI
+/// on the plot so the extracted row/column/line is visible in place.
+const PROFILE_OVERLAY_COLOR: egui::Color32 = egui::Color32::from_rgb(255, 64, 192);
+
+/// Draw a profile ROI on the plot's data area, mirroring silx's on-plot profile
+/// ROI (`tools/profile/rois.py`): a full-span line at the row / column, plus —
+/// when `line_width > 1` — the shaded integration band of the averaged pixels
+/// (silx `_ImageProfileArea`). `dims` is the source image `(width, height)`, used
+/// to clamp the band exactly as the extraction does ([`aligned_band`]). The
+/// caller clips to the data area (`ui.painter_at(transform.area)`); `line_width`
+/// is ignored by the line / rectangle kinds and other ROI kinds draw nothing.
+fn draw_profile_roi_overlay(
+    painter: &egui::Painter,
+    t: &Transform,
+    roi: &Roi,
+    dims: (u32, u32),
+    line_width: u32,
+    stroke: egui::Stroke,
+) {
+    let band_fill = egui::Color32::from_rgba_unmultiplied(
+        stroke.color.r(),
+        stroke.color.g(),
+        stroke.color.b(),
+        48,
+    );
+    let (img_w, img_h) = dims;
+    match roi {
+        Roi::HRange { y } => {
+            // Integration band (rows `[lo, hi]`) spanning data-y `[lo, hi+1]`
+            // under identity image geometry — the same band the profile averages.
+            let (lo, hi) =
+                crate::widget::profile_window::aligned_band((y.0 + y.1) * 0.5, img_h, line_width);
+            let top = t.data_to_pixel(t.x.min, lo as f64).y;
+            let bot = t.data_to_pixel(t.x.min, (hi + 1) as f64).y;
+            if line_width > 1 {
+                let band = egui::Rect::from_x_y_ranges(
+                    t.area.x_range(),
+                    egui::Rangef::new(top.min(bot), top.max(bot)),
+                );
+                painter.rect_filled(band, egui::CornerRadius::ZERO, band_fill);
+            }
+            painter.hline(t.area.x_range(), (top + bot) * 0.5, stroke);
+        }
+        Roi::VRange { x } => {
+            let (lo, hi) =
+                crate::widget::profile_window::aligned_band((x.0 + x.1) * 0.5, img_w, line_width);
+            let left = t.data_to_pixel(lo as f64, t.y.min).x;
+            let right = t.data_to_pixel((hi + 1) as f64, t.y.min).x;
+            if line_width > 1 {
+                let band = egui::Rect::from_x_y_ranges(
+                    egui::Rangef::new(left.min(right), left.max(right)),
+                    t.area.y_range(),
+                );
+                painter.rect_filled(band, egui::CornerRadius::ZERO, band_fill);
+            }
+            painter.vline((left + right) * 0.5, t.area.y_range(), stroke);
+        }
+        Roi::Line { start, end } => {
+            painter.line_segment(
+                [
+                    t.data_to_pixel(start.0, start.1),
+                    t.data_to_pixel(end.0, end.1),
+                ],
+                stroke,
+            );
+        }
+        Roi::Rect { x, y } => {
+            let r = egui::Rect::from_two_pos(t.data_to_pixel(x.0, y.0), t.data_to_pixel(x.1, y.1));
+            painter.rect_stroke(
+                r,
+                egui::CornerRadius::ZERO,
+                stroke,
+                egui::StrokeKind::Inside,
+            );
+        }
+        _ => {}
+    }
+}
+
 /// Whether [`ImageView::show`] should route the captured pointer to the mask
 /// tool and paint this frame: only when the plot is in
 /// [`PlotInteractionMode::MaskDraw`] *and* the mask panel is enabled for the
@@ -10381,6 +10461,12 @@ pub struct ImageView {
     /// Data-space `(col, row)` where the current profile drag began, or `None`
     /// when no drag is in progress.
     profile_drag_start: Option<(f64, f64)>,
+    /// The profile ROI currently drawn as an overlay on the image (silx draws
+    /// the active profile ROI on the plot). Set from the last drag — the row
+    /// ([`ProfileMode::Horizontal`]) / column ([`ProfileMode::Vertical`]) the
+    /// drag positioned, or the dragged segment / rectangle; `None` when no
+    /// profile has been positioned yet or the tool is off.
+    profile_current_roi: Option<Roi>,
     /// Whether the side colorbar column is shown (silx `ColorBarAction`,
     /// ImageView's `ColorBarWidget` visibility). Defaults to `true`; when `false`
     /// the colorbar column is not reserved and the image fills its width.
@@ -10614,6 +10700,7 @@ impl ImageView {
                 image_id + 3,
             ),
             profile_drag_start: None,
+            profile_current_roi: None,
             show_colorbar: true,
             show_side_histograms: true,
             interactive_colorbar: false,
@@ -11292,6 +11379,7 @@ impl ImageView {
         // existing helpers and shows it in the profile window (silx
         // _ProfileToolBar, ImageView.py:692-697).
         self.handle_profile_drag(&plot_response);
+        self.draw_profile_overlay(ui, &plot_response);
         self.profile_window.show(ui.ctx());
     }
 
@@ -11381,52 +11469,85 @@ impl ImageView {
     fn handle_profile_drag(&mut self, plot_response: &PlotResponse) {
         if self.profile_mode == ProfileMode::None || self.pixels.is_empty() {
             self.profile_drag_start = None;
+            self.profile_current_roi = None;
             return;
         }
         let response = &plot_response.response;
         let transform = &plot_response.transform;
 
+        // A drag positions the profile ROI (silx moves the profile line by
+        // dragging it — it does not track the bare hovered cursor): the row
+        // (horizontal) / column (vertical) under the drag, or the dragged
+        // segment / rectangle. Re-dragging moves it; the last ROI is retained
+        // between drags so the overlay and profile persist.
         if response.drag_started()
             && let Some(p) = response.interact_pointer_pos()
         {
             self.profile_drag_start = Some(transform.pixel_to_data(p));
         }
-
-        if response.dragged()
+        let roi = if response.dragged()
             && let (Some(start), Some(p)) =
                 (self.profile_drag_start, response.interact_pointer_pos())
         {
             let end = transform.pixel_to_data(p);
-            if let Some(roi) = profile_roi_from_drag(self.profile_mode, start, end) {
-                // ProfileWindow re-derives the profile from the ROI using the
-                // same line/row/column helpers (single source of truth). The
-                // image plot's axis labels ("Columns"/"Rows") relabel the
-                // computed profile title (silx `_relabelAxes`).
-                let x_label = self
-                    .image_plot
-                    .graph_x_label()
-                    .unwrap_or("Columns")
-                    .to_string();
-                let y_label = self
-                    .image_plot
-                    .graph_y_label(YAxis::Left)
-                    .unwrap_or("Rows")
-                    .to_string();
-                self.profile_window.update_profile(
-                    self.width,
-                    self.height,
-                    &self.pixels,
-                    &roi,
-                    &x_label,
-                    &y_label,
-                );
-                self.profile_window.set_open(true);
-            }
-        }
-
+            profile_roi_from_drag(self.profile_mode, start, end)
+        } else {
+            None
+        };
         if response.drag_stopped() {
             self.profile_drag_start = None;
         }
+
+        // A fresh ROI this frame: keep it as the drawn overlay and re-derive the
+        // profile. ProfileWindow re-derives from the ROI using the same
+        // line/row/column helpers (single source of truth); the image plot's
+        // axis labels ("Columns"/"Rows") relabel the profile title (silx
+        // `_relabelAxes`). When no fresh ROI is produced (e.g. the cursor left
+        // the plot in row/column mode) the last overlay is retained.
+        if let Some(roi) = roi {
+            let x_label = self
+                .image_plot
+                .graph_x_label()
+                .unwrap_or("Columns")
+                .to_string();
+            let y_label = self
+                .image_plot
+                .graph_y_label(YAxis::Left)
+                .unwrap_or("Rows")
+                .to_string();
+            self.profile_window.update_profile(
+                self.width,
+                self.height,
+                &self.pixels,
+                &roi,
+                &x_label,
+                &y_label,
+            );
+            self.profile_window.set_open(true);
+            self.profile_current_roi = Some(roi);
+        }
+    }
+
+    /// Draw the active profile ROI as an overlay on the image (silx renders the
+    /// profile ROI on the plot), clipped to the data area so it does not spill
+    /// into the axis gutters.
+    fn draw_profile_overlay(&self, ui: &egui::Ui, plot_response: &PlotResponse) {
+        if self.profile_mode == ProfileMode::None {
+            return;
+        }
+        let Some(roi) = self.profile_current_roi.as_ref() else {
+            return;
+        };
+        let t = &plot_response.transform;
+        let painter = ui.painter_at(t.area);
+        draw_profile_roi_overlay(
+            &painter,
+            t,
+            roi,
+            (self.width, self.height),
+            self.profile_window.line_width(),
+            egui::Stroke::new(1.5, PROFILE_OVERLAY_COLOR),
+        );
     }
 
     /// The active profile-extraction mode of the profile tool (silx
@@ -11441,6 +11562,7 @@ impl ImageView {
         self.profile_mode = mode;
         if mode == ProfileMode::None {
             self.profile_drag_start = None;
+            self.profile_current_roi = None;
             self.profile_window.set_open(false);
         }
     }
@@ -11998,6 +12120,10 @@ pub struct ScatterView {
     /// Data-space start of the in-progress profile drag, or `None` (silx profile
     /// ROI first point). Set on `drag_started`, cleared on `drag_stopped`.
     profile_drag_start: Option<(f64, f64)>,
+    /// The line-profile ROI currently drawn as an overlay on the scatter plot
+    /// (silx draws the active profile ROI on the plot); the last dragged
+    /// segment, or `None` when none has been drawn or the tool is off.
+    profile_current_roi: Option<Roi>,
 }
 
 impl ScatterView {
@@ -12026,6 +12152,7 @@ impl ScatterView {
             profile_window: crate::widget::profile_window::ProfileWindow::new(render_state, id + 1),
             profile_mode: false,
             profile_drag_start: None,
+            profile_current_roi: None,
         }
     }
 
@@ -12222,6 +12349,7 @@ impl ScatterView {
         } else {
             self.inner.set_interaction_mode(PlotInteractionMode::Zoom);
             self.profile_drag_start = None;
+            self.profile_current_roi = None;
             self.profile_window.set_open(false);
         }
     }
@@ -12234,6 +12362,7 @@ impl ScatterView {
     fn handle_profile_drag(&mut self, plot_response: &PlotResponse) {
         if !self.profile_mode || self.points.is_none() {
             self.profile_drag_start = None;
+            self.profile_current_roi = None;
             return;
         }
         let response = &plot_response.response;
@@ -12251,11 +12380,35 @@ impl ScatterView {
         {
             let end = transform.pixel_to_data(p);
             self.show_line_profile(start, end, SCATTER_PROFILE_NPOINTS);
+            self.profile_current_roi = Some(Roi::Line { start, end });
         }
 
         if response.drag_stopped() {
             self.profile_drag_start = None;
         }
+    }
+
+    /// Draw the active line-profile ROI as an overlay on the scatter plot (silx
+    /// renders the profile ROI on the plot), clipped to the data area.
+    fn draw_profile_overlay(&self, ui: &egui::Ui, plot_response: &PlotResponse) {
+        if !self.profile_mode {
+            return;
+        }
+        let Some(roi) = self.profile_current_roi.as_ref() else {
+            return;
+        };
+        let t = &plot_response.transform;
+        let painter = ui.painter_at(t.area);
+        // The scatter profile is a free line; it has no aligned row/column band,
+        // so pass identity dims and unit width (both ignored by the line kind).
+        draw_profile_roi_overlay(
+            &painter,
+            t,
+            roi,
+            (0, 0),
+            1,
+            egui::Stroke::new(1.5, PROFILE_OVERLAY_COLOR),
+        );
     }
 
     /// Set the scatter visualization mode (silx `Scatter.setVisualization`).
@@ -12836,6 +12989,7 @@ impl ScatterView {
         // Sample the line profile when the profile tool is armed and the user is
         // dragging across the scatter (silx `ScatterProfileToolBar`).
         self.handle_profile_drag(&response);
+        self.draw_profile_overlay(ui, &response);
         // Draw the line-profile side window (silx `ScatterProfileToolBar`'s
         // profile window) when open; it lives in its own viewport beside the plot.
         self.profile_window.show(ui.ctx());
@@ -13181,6 +13335,11 @@ pub struct StackView {
     /// Data-space start of the in-progress profile drag, set on `drag_started`
     /// and cleared on `drag_stopped` (silx profile ROI first point).
     profile_drag_start: Option<(f64, f64)>,
+    /// The profile ROI currently drawn as an overlay on the displayed frame
+    /// (silx draws the active profile ROI on the plot). Set from the last drag —
+    /// the row / column the drag positioned, or the dragged segment / rectangle;
+    /// `None` when no profile has been positioned or the tool is off.
+    profile_current_roi: Option<Roi>,
     /// Side window for the 1D current-frame profile (silx profileType `"1D"`),
     /// fed from `self.frames[self.current_frame]`.
     profile_window: crate::widget::profile_window::ProfileWindow,
@@ -13221,6 +13380,7 @@ impl StackView {
             profile_mode: ProfileMode::None,
             profile_dimension: StackProfileDimension::default(),
             profile_drag_start: None,
+            profile_current_roi: None,
             profile_window: crate::widget::profile_window::ProfileWindow::new(render_state, id + 1),
             stack_profile_window: crate::widget::stack_profile_window::StackProfileWindow::new(
                 render_state,
@@ -13596,28 +13756,58 @@ impl StackView {
     fn handle_profile_drag(&mut self, plot_response: &PlotResponse) {
         if self.profile_mode == ProfileMode::None || self.frames.is_empty() {
             self.profile_drag_start = None;
+            self.profile_current_roi = None;
             return;
         }
         let response = &plot_response.response;
         let transform = &plot_response.transform;
 
+        // A drag positions the profile ROI (silx moves the profile line by
+        // dragging it — it does not track the bare hovered cursor): the row /
+        // column under the drag, or the dragged segment / rectangle. Re-dragging
+        // moves it; the last ROI is retained between drags.
         if response.drag_started()
             && let Some(p) = response.interact_pointer_pos()
         {
             self.profile_drag_start = Some(transform.pixel_to_data(p));
         }
-
-        if response.dragged()
+        let ends = if response.dragged()
             && let (Some(start), Some(p)) =
                 (self.profile_drag_start, response.interact_pointer_pos())
         {
-            let end = transform.pixel_to_data(p);
-            self.show_profile(start, end);
-        }
-
+            Some((start, transform.pixel_to_data(p)))
+        } else {
+            None
+        };
         if response.drag_stopped() {
             self.profile_drag_start = None;
         }
+
+        if let Some((start, end)) = ends {
+            self.show_profile(start, end);
+            self.profile_current_roi = profile_roi_from_drag(self.profile_mode, start, end);
+        }
+    }
+
+    /// Draw the active profile ROI as an overlay on the displayed frame (silx
+    /// renders the profile ROI on the plot), clipped to the data area.
+    fn draw_profile_overlay(&self, ui: &egui::Ui, plot_response: &PlotResponse) {
+        if self.profile_mode == ProfileMode::None {
+            return;
+        }
+        let Some(roi) = self.profile_current_roi.as_ref() else {
+            return;
+        };
+        let t = &plot_response.transform;
+        let painter = ui.painter_at(t.area);
+        draw_profile_roi_overlay(
+            &painter,
+            t,
+            roi,
+            (self.width, self.height),
+            self.profile_window.line_width(),
+            egui::Stroke::new(1.5, PROFILE_OVERLAY_COLOR),
+        );
     }
 
     /// Show the Profile3D toolbar — the profile-ROI tool buttons plus the 1D/2D
@@ -13852,6 +14042,7 @@ impl StackView {
         // frame or 2D stacked over all frames) and shows it in the matching
         // side window (silx `Profile3DToolBar`).
         self.handle_profile_drag(&response);
+        self.draw_profile_overlay(ui, &response);
         self.profile_window.show(ui.ctx());
         self.stack_profile_window.show(ui.ctx());
         response
