@@ -1,0 +1,72 @@
+name: CI
+
+# fmt / clippy / test across Linux, macOS, and Windows. The workspace has no
+# native-lib dependencies (epics-rs is pure Rust, rust-hdf5 bundles no libhdf5,
+# rfd uses the xdg-desktop-portal backend), so the only platform setup is the
+# Linux apt packages the egui/winit/wgpu stack needs to build, plus a software
+# Vulkan driver (Mesa lavapipe) so the `egui_kittest` wgpu render tests have an
+# adapter on the GPU-less Linux runner. macOS (Metal) and Windows (DX12/WARP)
+# provide an adapter out of the box.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# One in-flight run per ref; a new push cancels the previous run.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      # egui/winit build deps + Mesa lavapipe (software Vulkan) so the wgpu
+      # render tests find an adapter on the headless Linux runner.
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgtk-3-dev \
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libxkbcommon-dev \
+            libssl-dev \
+            mesa-vulkan-drivers vulkan-tools
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace --all-targets
+
+      - name: Doc tests
+        run: cargo test --workspace --doc
