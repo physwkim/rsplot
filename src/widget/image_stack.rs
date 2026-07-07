@@ -860,6 +860,12 @@ impl ImageStack {
         if self.show_table {
             self.frame_table_ui(ui);
         }
+        // Same rows as `show_toolbar`: the shared Plot2D control toolbar
+        // (zoom in/out, axis invert, keep-aspect, reset, grid, save/copy)
+        // above the frame-navigation row — callers going through `ui()`
+        // (rather than a separate `show_toolbar` + `show`) get the plot
+        // controls too. The buttons self-apply to the plot.
+        let _ = self.plot.show_toolbar(ui);
         self.navigation_ui(ui);
 
         // Lazy path: pull in any finished loads, then dispatch loads for the
@@ -933,6 +939,11 @@ impl ImageStack {
     /// point over the same row [`Self::ui`] draws, for callers that lay the
     /// plot out themselves (silx `FrameBrowser` / `HorizontalSliderWithBrowser`).
     pub fn show_toolbar(&mut self, ui: &mut egui::Ui) {
+        // Surface the shared Plot2D control toolbar (zoom in/out, axis invert,
+        // keep-aspect, reset, grid, save/copy) above the frame-navigation row,
+        // matching the rest of the image-widget family. The buttons self-apply
+        // to the plot, so the response is not needed here.
+        let _ = self.plot.show_toolbar(ui);
         self.navigation_ui(ui);
     }
 

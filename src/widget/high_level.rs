@@ -30,7 +30,7 @@ use crate::core::shape::{Shape, ShapeKind};
 use crate::core::sift_align::{
     AffineTransformation, MatchedKeypoint, SiftAlignment, sift_auto_align,
 };
-use crate::core::transform::{AxisSide, Margins, Scale, YAxis, clamp_axis_limits};
+use crate::core::transform::{AxisSide, Margins, Scale, Transform, YAxis, clamp_axis_limits};
 use crate::core::triangles::Triangles;
 use crate::render::backend_wgpu::WgpuBackend;
 use crate::render::gpu_curve::CurveData;
@@ -3735,6 +3735,11 @@ pub struct PlotWidget {
     /// like silx does; `1.0` before the first frame (where snapping already
     /// returns `None` for lack of a cached transform).
     last_pixels_per_point: f32,
+    /// Whether the control toolbar renders compact — the essential buttons
+    /// plus a "⋯" overflow menu holding the rest — or the full flat row.
+    /// Compact by default so the toolbar stays a single line and the plot
+    /// keeps its height.
+    toolbar_compact: bool,
 }
 
 impl PlotWidget {
@@ -3773,6 +3778,7 @@ impl PlotWidget {
             ruler_prev_mode: None,
             median_filter_original: None,
             last_pixels_per_point: 1.0,
+            toolbar_compact: true,
         }
     }
 
@@ -6471,10 +6477,85 @@ impl PlotWidget {
     }
 
     fn show_toolbar_controls(&mut self, ui: &mut egui::Ui, out: &mut ToolbarResponse) {
+        // Essential controls, always in the row: reset zoom, the box-zoom /
+        // pan interaction modes, Y invert, and keep-aspect.
         if toolbar_icon_button(ui, ToolbarIcon::Home, false, "Reset zoom").clicked() {
             self.reset_zoom();
             out.reset_zoom = true;
         }
+        let mode = self.interaction_mode();
+        if toolbar_icon_button(
+            ui,
+            ToolbarIcon::Zoom,
+            mode == PlotInteractionMode::Zoom,
+            "Box zoom",
+        )
+        .clicked()
+        {
+            self.set_interaction_mode(PlotInteractionMode::Zoom);
+            out.interaction_mode_changed = true;
+        }
+        if toolbar_icon_button(
+            ui,
+            ToolbarIcon::Pan,
+            mode == PlotInteractionMode::Pan,
+            "Pan",
+        )
+        .clicked()
+        {
+            self.set_interaction_mode(PlotInteractionMode::Pan);
+            out.interaction_mode_changed = true;
+        }
+        let mut y_inv = self.is_y_inverted();
+        if toolbar_icon_button(ui, ToolbarIcon::InvertY, y_inv, "Invert Y axis").clicked() {
+            y_inv = !y_inv;
+            self.set_y_inverted(y_inv);
+            out.y_inverted_changed = true;
+        }
+        let mut aspect = self.is_keep_data_aspect_ratio();
+        if toolbar_icon_button(ui, ToolbarIcon::Aspect, aspect, "Keep data aspect ratio").clicked()
+        {
+            aspect = !aspect;
+            self.set_keep_data_aspect_ratio(aspect);
+            out.aspect_changed = true;
+        }
+
+        if self.toolbar_compact {
+            // Everything else folds into one overflow menu so the toolbar
+            // stays a single row and the plot keeps its height.
+            ui.menu_button("⋯", |ui| {
+                ui.set_max_width(240.0);
+                ui.horizontal_wrapped(|ui| {
+                    self.show_toolbar_extended(ui, out);
+                });
+            })
+            .response
+            .on_hover_text("More plot controls");
+        } else {
+            self.show_toolbar_extended(ui, out);
+        }
+
+        // The print dialog only signals the choice; this owner performs it.
+        // Pumped here every frame — the Print button may sit inside the (now
+        // closed) overflow menu while its dialog is still open. GPU readback,
+        // printer submission, and the rfd file dialog are native shims; their
+        // results are ignored here (the toolbar only reports).
+        if let Some(action) = self.print_dialog.show(ui.ctx()) {
+            match action {
+                crate::widget::print_dialog::PrintDialogAction::Print { printer } => {
+                    let _ = self.print_graph_to(&printer, DEFAULT_SAVE_SIZE);
+                }
+                crate::widget::print_dialog::PrintDialogAction::SaveToFile => {
+                    let _ = self.save_dialog(DEFAULT_SAVE_SIZE);
+                }
+            }
+        }
+    }
+
+    /// The non-essential control-toolbar buttons: rendered flat in the row
+    /// when the toolbar is full, or inside the "⋯" overflow menu when compact
+    /// ([`Self::set_toolbar_compact`]).
+    fn show_toolbar_extended(&mut self, ui: &mut egui::Ui, out: &mut ToolbarResponse) {
         if toolbar_icon_button(ui, ToolbarIcon::ZoomIn, false, "Zoom in").clicked() {
             crate::widget::actions::control::zoom_in(self);
             out.zoom_in = true;
@@ -6502,17 +6583,6 @@ impl PlotWidget {
             self.set_interaction_mode(PlotInteractionMode::Select);
             out.interaction_mode_changed = true;
         }
-        if toolbar_icon_button(
-            ui,
-            ToolbarIcon::Zoom,
-            mode == PlotInteractionMode::Zoom,
-            "Box zoom",
-        )
-        .clicked()
-        {
-            self.set_interaction_mode(PlotInteractionMode::Zoom);
-            out.interaction_mode_changed = true;
-        }
         // Zoom-axes menu (silx `ZoomEnabledAxesMenu`): choose which axes a box
         // zoom affects. Both checked by default; unchecking one keeps that
         // axis's range when a box zoom is applied. rsplot's box zoom is left-axis
@@ -6529,17 +6599,6 @@ impl PlotWidget {
         })
         .response
         .on_hover_text("Choose which axes a box zoom affects");
-        if toolbar_icon_button(
-            ui,
-            ToolbarIcon::Pan,
-            mode == PlotInteractionMode::Pan,
-            "Pan",
-        )
-        .clicked()
-        {
-            self.set_interaction_mode(PlotInteractionMode::Pan);
-            out.interaction_mode_changed = true;
-        }
 
         ui.separator();
 
@@ -6548,13 +6607,6 @@ impl PlotWidget {
             x_inv = !x_inv;
             self.set_x_inverted(x_inv);
             out.x_inverted_changed = true;
-        }
-
-        let mut y_inv = self.is_y_inverted();
-        if toolbar_icon_button(ui, ToolbarIcon::InvertY, y_inv, "Invert Y axis").clicked() {
-            y_inv = !y_inv;
-            self.set_y_inverted(y_inv);
-            out.y_inverted_changed = true;
         }
 
         ui.separator();
@@ -6633,14 +6685,6 @@ impl PlotWidget {
 
         ui.separator();
 
-        let mut aspect = self.is_keep_data_aspect_ratio();
-        if toolbar_icon_button(ui, ToolbarIcon::Aspect, aspect, "Keep data aspect ratio").clicked()
-        {
-            aspect = !aspect;
-            self.set_keep_data_aspect_ratio(aspect);
-            out.aspect_changed = true;
-        }
-
         let mut cursor = self.graph_cursor();
         if toolbar_icon_button(ui, ToolbarIcon::Cursor, cursor, "Show cursor coordinates").clicked()
         {
@@ -6690,23 +6734,24 @@ impl PlotWidget {
         if toolbar_icon_button(ui, ToolbarIcon::Print, false, "Print figure").clicked() {
             // silx `PrintAction` opens QPrintDialog; here the click opens the
             // printer-selection dialog (printer list + "Save to file…"), and the
-            // dialog's choice is applied below.
+            // dialog's choice is applied by `show_toolbar_controls`, which pumps
+            // the dialog every frame (this button may live inside the closed
+            // overflow menu).
             self.print_dialog.open_with_system_printers();
             out.print = true;
         }
-        // The print dialog only signals the choice; this owner performs it.
-        // GPU readback, printer submission, and the rfd file dialog are native
-        // shims; their results are ignored here (the toolbar only reports).
-        if let Some(action) = self.print_dialog.show(ui.ctx()) {
-            match action {
-                crate::widget::print_dialog::PrintDialogAction::Print { printer } => {
-                    let _ = self.print_graph_to(&printer, DEFAULT_SAVE_SIZE);
-                }
-                crate::widget::print_dialog::PrintDialogAction::SaveToFile => {
-                    let _ = self.save_dialog(DEFAULT_SAVE_SIZE);
-                }
-            }
-        }
+    }
+
+    /// Whether the control toolbar is compact — the essential buttons plus a
+    /// "⋯" overflow menu (the default) — or the full flat row.
+    pub fn toolbar_compact(&self) -> bool {
+        self.toolbar_compact
+    }
+
+    /// Choose between the compact control toolbar (essential buttons + "⋯"
+    /// overflow menu, the default) and the full flat row.
+    pub fn set_toolbar_compact(&mut self, compact: bool) {
+        self.toolbar_compact = compact;
     }
 
     /// Set graph limits.
@@ -9290,9 +9335,19 @@ impl CompareImages {
     ///
     /// Call this before [`Self::show`].
     pub fn show_toolbar(&mut self, ui: &mut egui::Ui) -> CompareMode {
-        ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing.x = 2.0;
-
+        // One control row (matching the rest of the image-widget family): the
+        // shared Plot2D control toolbar (zoom in/out, axis invert, keep-aspect,
+        // reset, grid, save/copy) followed by the compare-specific mode and
+        // alignment buttons. `show_toolbar_with`'s closure only exposes the
+        // bare `PlotWidget`, so the buttons edit local copies that are applied
+        // to `self` after the row.
+        let mut mode = self.mode;
+        let mut alignment = self.alignment;
+        let mut split = self.split;
+        let mut split_changed = false;
+        let mut keypoints = self.keypoints_visible;
+        let has_data = !self.data_a.is_empty();
+        let _ = self.inner.show_toolbar_with(ui, |ui, _| {
             for (label, tooltip, m) in [
                 ("A", "Show only image A", CompareMode::OnlyA),
                 ("B", "Show only image B", CompareMode::OnlyB),
@@ -9319,27 +9374,22 @@ impl CompareImages {
                 ),
             ] {
                 if ui
-                    .selectable_label(self.mode == m, label)
+                    .selectable_label(mode == m, label)
                     .on_hover_text(tooltip)
                     .clicked()
-                    && self.mode != m
                 {
-                    self.mode = m;
-                    self.dirty = true;
+                    mode = m;
                 }
             }
 
-            let is_split = matches!(
-                self.mode,
-                CompareMode::HalfHalf | CompareMode::SplitHorizontal
-            );
-            if is_split && !self.data_a.is_empty() {
+            let is_split = matches!(mode, CompareMode::HalfHalf | CompareMode::SplitHorizontal);
+            if is_split && has_data {
                 ui.add_space(4.0);
                 if ui
-                    .add(egui::Slider::new(&mut self.split, 0.0..=1.0).text("split"))
+                    .add(egui::Slider::new(&mut split, 0.0..=1.0).text("split"))
                     .changed()
                 {
-                    self.dirty = true;
+                    split_changed = true;
                 }
             }
 
@@ -9368,28 +9418,35 @@ impl CompareImages {
                 ),
             ] {
                 if ui
-                    .selectable_label(self.alignment == a, label)
+                    .selectable_label(alignment == a, label)
                     .on_hover_text(tooltip)
                     .clicked()
-                    && self.alignment != a
                 {
-                    self.alignment = a;
-                    self.dirty = true;
+                    alignment = a;
                 }
             }
 
             // Keypoint-overlay toggle (silx `setKeypointsVisible`); only has
             // matched keypoints to show in the AUTO alignment.
             ui.add_space(8.0);
-            let mut visible = self.keypoints_visible;
-            if ui
-                .checkbox(&mut visible, "kp")
-                .on_hover_text("Show the matched SIFT keypoints (AUTO alignment)")
-                .changed()
-            {
-                self.set_keypoints_visible(visible);
-            }
+            ui.checkbox(&mut keypoints, "kp")
+                .on_hover_text("Show the matched SIFT keypoints (AUTO alignment)");
         });
+        if mode != self.mode {
+            self.mode = mode;
+            self.dirty = true;
+        }
+        if alignment != self.alignment {
+            self.alignment = alignment;
+            self.dirty = true;
+        }
+        if split_changed {
+            self.split = split;
+            self.dirty = true;
+        }
+        if keypoints != self.keypoints_visible {
+            self.set_keypoints_visible(keypoints);
+        }
 
         self.mode
     }
@@ -10284,6 +10341,86 @@ fn profile_roi_from_drag(mode: ProfileMode, start: (f64, f64), end: (f64, f64)) 
     }
 }
 
+/// Overlay accent for the profile ROI drawn on the image (a bright,
+/// colormap-contrasting magenta), mirroring silx drawing the active profile ROI
+/// on the plot so the extracted row/column/line is visible in place.
+const PROFILE_OVERLAY_COLOR: egui::Color32 = egui::Color32::from_rgb(255, 64, 192);
+
+/// Draw a profile ROI on the plot's data area, mirroring silx's on-plot profile
+/// ROI (`tools/profile/rois.py`): a full-span line at the row / column, plus —
+/// when `line_width > 1` — the shaded integration band of the averaged pixels
+/// (silx `_ImageProfileArea`). `dims` is the source image `(width, height)`, used
+/// to clamp the band exactly as the extraction does ([`aligned_band`]). The
+/// caller clips to the data area (`ui.painter_at(transform.area)`); `line_width`
+/// is ignored by the line / rectangle kinds and other ROI kinds draw nothing.
+fn draw_profile_roi_overlay(
+    painter: &egui::Painter,
+    t: &Transform,
+    roi: &Roi,
+    dims: (u32, u32),
+    line_width: u32,
+    stroke: egui::Stroke,
+) {
+    let band_fill = egui::Color32::from_rgba_unmultiplied(
+        stroke.color.r(),
+        stroke.color.g(),
+        stroke.color.b(),
+        48,
+    );
+    let (img_w, img_h) = dims;
+    match roi {
+        Roi::HRange { y } => {
+            // Integration band (rows `[lo, hi]`) spanning data-y `[lo, hi+1]`
+            // under identity image geometry — the same band the profile averages.
+            let (lo, hi) =
+                crate::widget::profile_window::aligned_band((y.0 + y.1) * 0.5, img_h, line_width);
+            let top = t.data_to_pixel(t.x.min, lo as f64).y;
+            let bot = t.data_to_pixel(t.x.min, (hi + 1) as f64).y;
+            if line_width > 1 {
+                let band = egui::Rect::from_x_y_ranges(
+                    t.area.x_range(),
+                    egui::Rangef::new(top.min(bot), top.max(bot)),
+                );
+                painter.rect_filled(band, egui::CornerRadius::ZERO, band_fill);
+            }
+            painter.hline(t.area.x_range(), (top + bot) * 0.5, stroke);
+        }
+        Roi::VRange { x } => {
+            let (lo, hi) =
+                crate::widget::profile_window::aligned_band((x.0 + x.1) * 0.5, img_w, line_width);
+            let left = t.data_to_pixel(lo as f64, t.y.min).x;
+            let right = t.data_to_pixel((hi + 1) as f64, t.y.min).x;
+            if line_width > 1 {
+                let band = egui::Rect::from_x_y_ranges(
+                    egui::Rangef::new(left.min(right), left.max(right)),
+                    t.area.y_range(),
+                );
+                painter.rect_filled(band, egui::CornerRadius::ZERO, band_fill);
+            }
+            painter.vline((left + right) * 0.5, t.area.y_range(), stroke);
+        }
+        Roi::Line { start, end } => {
+            painter.line_segment(
+                [
+                    t.data_to_pixel(start.0, start.1),
+                    t.data_to_pixel(end.0, end.1),
+                ],
+                stroke,
+            );
+        }
+        Roi::Rect { x, y } => {
+            let r = egui::Rect::from_two_pos(t.data_to_pixel(x.0, y.0), t.data_to_pixel(x.1, y.1));
+            painter.rect_stroke(
+                r,
+                egui::CornerRadius::ZERO,
+                stroke,
+                egui::StrokeKind::Inside,
+            );
+        }
+        _ => {}
+    }
+}
+
 /// Whether [`ImageView::show`] should route the captured pointer to the mask
 /// tool and paint this frame: only when the plot is in
 /// [`PlotInteractionMode::MaskDraw`] *and* the mask panel is enabled for the
@@ -10381,6 +10518,12 @@ pub struct ImageView {
     /// Data-space `(col, row)` where the current profile drag began, or `None`
     /// when no drag is in progress.
     profile_drag_start: Option<(f64, f64)>,
+    /// The profile ROI currently drawn as an overlay on the image (silx draws
+    /// the active profile ROI on the plot). Set from the last drag — the row
+    /// ([`ProfileMode::Horizontal`]) / column ([`ProfileMode::Vertical`]) the
+    /// drag positioned, or the dragged segment / rectangle; `None` when no
+    /// profile has been positioned yet or the tool is off.
+    profile_current_roi: Option<Roi>,
     /// Whether the side colorbar column is shown (silx `ColorBarAction`,
     /// ImageView's `ColorBarWidget` visibility). Defaults to `true`; when `false`
     /// the colorbar column is not reserved and the image fills its width.
@@ -10614,6 +10757,7 @@ impl ImageView {
                 image_id + 3,
             ),
             profile_drag_start: None,
+            profile_current_roi: None,
             show_colorbar: true,
             show_side_histograms: true,
             interactive_colorbar: false,
@@ -10828,112 +10972,275 @@ impl ImageView {
         }
     }
 
-    /// Show the ImageView toolbar: interpolation / aggregation selectors on the
-    /// active image (silx image `interpolation` nearest/linear and
-    /// `ImageDataAggregated` max/mean/min, items/image.py) plus the active-image
-    /// alpha slider (silx `ActiveImageAlphaSlider`, ImageView.py:513-517). Each
-    /// change is propagated to the displayed image.
+    /// Show the ImageView toolbar: one control row holding the standard silx
+    /// plot controls (reset zoom / zoom in-out / pan / select / invert X·Y /
+    /// log / autoscale / grid / keep-aspect / cursor / show-axes / save / copy /
+    /// print) followed by the image-specific buttons — interp / agg / alpha /
+    /// colorbar / profile / mask — each (except the plain colorbar toggle)
+    /// opening its own detached settings window (silx exposes these as toolbar
+    /// actions / dock widgets rather than inline combos and sliders).
     pub fn show_toolbar(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal_wrapped(|ui| {
-            // Interpolation selector (silx image interpolation).
-            let mut interpolation = self.interpolation;
-            egui::ComboBox::from_label("interp")
-                .selected_text(match interpolation {
-                    InterpolationMode::Nearest => "nearest",
-                    InterpolationMode::Linear => "linear",
-                })
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut interpolation, InterpolationMode::Nearest, "nearest");
-                    ui.selectable_value(&mut interpolation, InterpolationMode::Linear, "linear");
-                });
-            if interpolation != self.interpolation {
-                self.set_interpolation(interpolation);
-            }
-
-            // Aggregation selector (silx ImageDataAggregated).
-            let mut aggregation = self.aggregation;
-            egui::ComboBox::from_label("agg")
-                .selected_text(match aggregation {
-                    AggregationMode::None => "none",
-                    AggregationMode::Max => "max",
-                    AggregationMode::Mean => "mean",
-                    AggregationMode::Min => "min",
-                })
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut aggregation, AggregationMode::None, "none");
-                    ui.selectable_value(&mut aggregation, AggregationMode::Max, "max");
-                    ui.selectable_value(&mut aggregation, AggregationMode::Mean, "mean");
-                    ui.selectable_value(&mut aggregation, AggregationMode::Min, "min");
-                });
-
-            // Block factors (silx level-of-detail (lodx, lody)).
-            let mut block = self.aggregation_block;
-            let bx = ui.add(
-                egui::DragValue::new(&mut block.0)
-                    .range(1..=64)
-                    .prefix("bx "),
+        // The image buttons render inside `show_toolbar_with`'s closure, which
+        // only exposes the bare `PlotWidget` — so they just flip open-flags in
+        // egui temp memory (and record the colorbar click); the settings
+        // windows themselves render after the row, where `&mut self` is
+        // available again.
+        let plot_id = self.image_plot.plot().id;
+        let agg_active = self.aggregation != AggregationMode::None;
+        let profile_active = self.profile_mode != ProfileMode::None;
+        let in_mask_draw = self.image_plot.interaction_mode() == PlotInteractionMode::MaskDraw;
+        let show_colorbar = self.show_colorbar;
+        let mut colorbar_clicked = false;
+        let _ = self.image_plot.show_toolbar_with(ui, |ui, _| {
+            let id = egui::Id::new(plot_id);
+            Self::settings_window_button(
+                ui,
+                id.with("interp_open"),
+                "interp",
+                false,
+                "Image interpolation",
             );
-            let by = ui.add(
-                egui::DragValue::new(&mut block.1)
-                    .range(1..=64)
-                    .prefix("by "),
+            Self::settings_window_button(
+                ui,
+                id.with("agg_open"),
+                "agg",
+                agg_active,
+                "Aggregation (level-of-detail)",
             );
-            if aggregation != self.aggregation || bx.changed() || by.changed() {
-                self.set_aggregation(aggregation, block);
-            }
-
-            // Colorbar show/hide toggle (silx `ColorBarAction`).
+            Self::settings_window_button(
+                ui,
+                id.with("alpha_open"),
+                "alpha",
+                false,
+                "Image transparency",
+            );
+            // Colorbar is a plain toggle (silx `ColorBarAction`), not a
+            // settings window.
             if ui
-                .selectable_label(self.show_colorbar, "colorbar")
+                .selectable_label(show_colorbar, "colorbar")
                 .on_hover_text("Show/hide the colorbar")
                 .clicked()
             {
-                crate::widget::actions::control::image_colorbar_toggle(self);
+                colorbar_clicked = true;
             }
+            Self::settings_window_button(
+                ui,
+                id.with("profile_open"),
+                "profile",
+                profile_active,
+                "Profile tool",
+            );
+            Self::settings_window_button(
+                ui,
+                id.with("mask_open"),
+                "mask",
+                in_mask_draw,
+                "Mask tools",
+            );
         });
+        if colorbar_clicked {
+            crate::widget::actions::control::image_colorbar_toggle(self);
+        }
+        self.show_interp_window(ui);
+        self.show_aggregation_window(ui);
+        self.show_alpha_window(ui);
+        self.show_profile_tool_window(ui);
+        self.show_mask_window(ui);
+    }
 
-        let response = self.alpha.ui(ui);
-        if response.changed() {
+    /// One toolbar toggle for a detached settings window: highlighted while the
+    /// window is open (or while the control is `active`), flipping the open
+    /// flag stored in egui temp memory under `open_id` on click. Runs inside
+    /// the shared control-toolbar closure, which only has the bare
+    /// `PlotWidget`; the matching `show_*_window` method renders the window
+    /// after the row.
+    fn settings_window_button(
+        ui: &mut egui::Ui,
+        open_id: egui::Id,
+        label: &str,
+        active: bool,
+        tooltip: &str,
+    ) {
+        let open = ui.data(|d| d.get_temp::<bool>(open_id)).unwrap_or(false);
+        if ui
+            .selectable_label(open || active, label)
+            .on_hover_text(tooltip)
+            .clicked()
+        {
+            ui.data_mut(|d| d.insert_temp(open_id, !open));
+        }
+    }
+
+    /// The detached "Interpolation" settings window (nearest / linear), opened
+    /// from the toolbar's `interp` button. silx has no interpolation toolbar
+    /// action; this is a port-specific control, surfaced like the others.
+    fn show_interp_window(&mut self, ui: &mut egui::Ui) {
+        let open_id = egui::Id::new(self.image_plot.plot().id).with("interp_open");
+        if !ui.data(|d| d.get_temp::<bool>(open_id)).unwrap_or(false) {
+            return;
+        }
+        let mut interp = self.interpolation;
+        let signals = crate::widget::detached::show_detached(
+            ui.ctx(),
+            open_id.with("win"),
+            "Interpolation",
+            egui::vec2(200.0, 90.0),
+            None,
+            |ui| {
+                ui.radio_value(&mut interp, InterpolationMode::Nearest, "nearest");
+                ui.radio_value(&mut interp, InterpolationMode::Linear, "linear");
+            },
+        );
+        if interp != self.interpolation {
+            self.set_interpolation(interp);
+        }
+        if signals.close_requested {
+            ui.data_mut(|d| d.insert_temp(open_id, false));
+        }
+    }
+
+    /// The detached "Aggregation" window, opened from the toolbar's `agg`
+    /// button: the level-of-detail reduction (none / max / mean / min) and its
+    /// block factors (silx `AggregationModeAction` toolbutton menu +
+    /// `ImageDataAggregated` `lodx`/`lody`).
+    fn show_aggregation_window(&mut self, ui: &mut egui::Ui) {
+        let open_id = egui::Id::new(self.image_plot.plot().id).with("agg_open");
+        if !ui.data(|d| d.get_temp::<bool>(open_id)).unwrap_or(false) {
+            return;
+        }
+        let mut aggregation = self.aggregation;
+        let mut block = self.aggregation_block;
+        let signals = crate::widget::detached::show_detached(
+            ui.ctx(),
+            open_id.with("win"),
+            "Aggregation",
+            egui::vec2(240.0, 190.0),
+            None,
+            |ui| {
+                ui.radio_value(&mut aggregation, AggregationMode::None, "none");
+                ui.radio_value(&mut aggregation, AggregationMode::Max, "max");
+                ui.radio_value(&mut aggregation, AggregationMode::Mean, "mean");
+                ui.radio_value(&mut aggregation, AggregationMode::Min, "min");
+                ui.separator();
+                ui.horizontal(|ui| {
+                    ui.label("block");
+                    ui.add(
+                        egui::DragValue::new(&mut block.0)
+                            .range(1..=64)
+                            .prefix("bx "),
+                    );
+                    ui.add(
+                        egui::DragValue::new(&mut block.1)
+                            .range(1..=64)
+                            .prefix("by "),
+                    );
+                });
+            },
+        );
+        if aggregation != self.aggregation || block != self.aggregation_block {
+            self.set_aggregation(aggregation, block);
+        }
+        if signals.close_requested {
+            ui.data_mut(|d| d.insert_temp(open_id, false));
+        }
+    }
+
+    /// The detached "Alpha" window (the active-image transparency slider, silx
+    /// `ActiveImageAlphaSlider`), opened from the toolbar's `alpha` button.
+    fn show_alpha_window(&mut self, ui: &mut egui::Ui) {
+        let open_id = egui::Id::new(self.image_plot.plot().id).with("alpha_open");
+        if !ui.data(|d| d.get_temp::<bool>(open_id)).unwrap_or(false) {
+            return;
+        }
+        let mut changed = false;
+        let signals = crate::widget::detached::show_detached(
+            ui.ctx(),
+            open_id.with("win"),
+            "Alpha",
+            egui::vec2(260.0, 80.0),
+            None,
+            |ui| {
+                changed = self.alpha.ui(ui).changed();
+            },
+        );
+        if changed {
             self.upload_image();
         }
+        if signals.close_requested {
+            ui.data_mut(|d| d.insert_temp(open_id, false));
+        }
+    }
 
-        // Profile-tool toggles (silx _ProfileToolBar action group,
-        // ImageView.py:692-697). Clicking the active mode again disables it.
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 2.0;
-            ui.label("profile:");
-            for (label, tooltip, mode) in [
-                ("—", "Row profile (horizontal)", ProfileMode::Horizontal),
-                ("|", "Column profile (vertical)", ProfileMode::Vertical),
-                ("/", "Line profile (drag)", ProfileMode::Line),
-                ("□", "Rectangle profile (drag)", ProfileMode::Rectangle),
-            ] {
-                if ui
-                    .selectable_label(self.profile_mode == mode, label)
-                    .on_hover_text(tooltip)
-                    .clicked()
-                {
-                    let next = if self.profile_mode == mode {
-                        ProfileMode::None
-                    } else {
-                        mode
-                    };
-                    self.set_profile_mode(next);
-                }
-            }
-        });
+    /// The detached "Profile" window, opened from the toolbar's `profile`
+    /// button: pick the profile tool (none / horizontal / vertical / line /
+    /// rectangle). The extracted profile itself still shows in the separate
+    /// [`ProfileWindow`] (silx `ProfileToolBar` split button +
+    /// `ProfileWindow`).
+    fn show_profile_tool_window(&mut self, ui: &mut egui::Ui) {
+        let open_id = egui::Id::new(self.image_plot.plot().id).with("profile_open");
+        if !ui.data(|d| d.get_temp::<bool>(open_id)).unwrap_or(false) {
+            return;
+        }
+        let mut mode = self.profile_mode;
+        let signals = crate::widget::detached::show_detached(
+            ui.ctx(),
+            open_id.with("win"),
+            "Profile",
+            egui::vec2(240.0, 170.0),
+            None,
+            |ui| {
+                ui.radio_value(&mut mode, ProfileMode::None, "none");
+                ui.radio_value(&mut mode, ProfileMode::Horizontal, "— horizontal (row)");
+                ui.radio_value(&mut mode, ProfileMode::Vertical, "| vertical (column)");
+                ui.radio_value(&mut mode, ProfileMode::Line, "/ line (drag)");
+                ui.radio_value(&mut mode, ProfileMode::Rectangle, "□ rectangle (drag)");
+            },
+        );
+        if mode != self.profile_mode {
+            self.set_profile_mode(mode);
+        }
+        if signals.close_requested {
+            ui.data_mut(|d| d.insert_temp(open_id, false));
+        }
+    }
 
+    /// The detached "Mask" window, opened from the toolbar's `mask` button:
+    /// the pencil / eraser / brush / clear / invert / non-finite / threshold
+    /// controls (silx `MaskToolsDockWidget`).
+    fn show_mask_window(&mut self, ui: &mut egui::Ui) {
+        let open_id = egui::Id::new(self.image_plot.plot().id).with("mask_open");
+        if !ui.data(|d| d.get_temp::<bool>(open_id)).unwrap_or(false) {
+            return;
+        }
+        let signals = crate::widget::detached::show_detached(
+            ui.ctx(),
+            open_id.with("win"),
+            "Mask",
+            egui::vec2(340.0, 300.0),
+            None,
+            |ui| {
+                self.show_mask_controls(ui);
+            },
+        );
+        if signals.close_requested {
+            ui.data_mut(|d| d.insert_temp(open_id, false));
+        }
+    }
+
+    /// The mask-tool controls, rendered inside the detached mask window: the
+    /// pencil/eraser draw toggle plus (while drawing) tool select, brush size,
+    /// clear / invert / non-finite, and the threshold group (silx
+    /// `MaskToolsWidget`).
+    fn show_mask_controls(&mut self, ui: &mut egui::Ui) {
         // Mask-draw tool: toggle MaskDraw mode (silx `MaskToolsWidget`
         // activating the plot's pencil draw interaction). Entering it sets the
         // mask tool to Pencil so the primary drag paints; exiting restores Zoom
         // and disables the tool. While active, a brush-size slider and the
         // pencil/eraser/clear controls are exposed.
         let in_mask_draw = self.image_plot.interaction_mode() == PlotInteractionMode::MaskDraw;
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 2.0;
-            ui.label("mask:");
+        ui.horizontal_wrapped(|ui| {
             if ui
-                .selectable_label(in_mask_draw, "✏")
+                .selectable_label(in_mask_draw, "✏ draw")
                 .on_hover_text("Draw mask (pencil): primary drag paints the mask")
                 .clicked()
             {
@@ -10952,9 +11259,13 @@ impl ImageView {
                     "eraser",
                 )
                 .on_hover_text("Erase mask");
-                // silx pencil width: 1-50 slider + 1-1024 spin box, kept in sync
-                // (_BaseMaskToolsWidget.py:822-846 / _pencilWidthChanged). Both
-                // bind the same `brush_size`.
+            }
+        });
+        if in_mask_draw {
+            // silx pencil width: 1-50 slider + 1-1024 spin box, kept in sync
+            // (_BaseMaskToolsWidget.py:822-846 / _pencilWidthChanged). Both
+            // bind the same `brush_size`.
+            ui.horizontal_wrapped(|ui| {
                 ui.add(egui::Slider::new(&mut self.mask.brush_size, 1..=50).text("brush"));
                 ui.add(
                     egui::DragValue::new(&mut self.mask.brush_size)
@@ -10962,6 +11273,8 @@ impl ImageView {
                         .speed(1.0),
                 )
                 .on_hover_text("Brush width in pixels (1-1024)");
+            });
+            ui.horizontal_wrapped(|ui| {
                 if ui.button("clear mask").clicked() {
                     self.mask.clear_all();
                     self.mask.commit();
@@ -10996,18 +11309,15 @@ impl ImageView {
                     self.mask.commit();
                     self.upload_image();
                 }
-            }
-        });
-        // Threshold-masking row (silx threshold group box,
-        // `_BaseMaskToolsWidget._initThresholdGroupBox` / `_maskBtnClicked`):
-        // pick below/between/above, enter the bound(s), and Apply masks the
-        // matching pixels at the current level then commits. Per silx, the min
-        // edit shows for below/between and the max edit for between/above. Only
-        // meaningful when the mask geometry matches the active image.
-        if in_mask_draw {
+            });
+            // Threshold-masking row (silx threshold group box,
+            // `_BaseMaskToolsWidget._initThresholdGroupBox` / `_maskBtnClicked`):
+            // pick below/between/above, enter the bound(s), and Apply masks the
+            // matching pixels at the current level then commits. Per silx, the min
+            // edit shows for below/between and the max edit for between/above. Only
+            // meaningful when the mask geometry matches the active image.
             use crate::widget::mask_tools::ThresholdMode;
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 2.0;
+            ui.horizontal_wrapped(|ui| {
                 ui.label("threshold:");
                 egui::ComboBox::from_id_salt("mask_threshold_mode")
                     .selected_text(match self.mask.threshold_mode {
@@ -11292,6 +11602,7 @@ impl ImageView {
         // existing helpers and shows it in the profile window (silx
         // _ProfileToolBar, ImageView.py:692-697).
         self.handle_profile_drag(&plot_response);
+        self.draw_profile_overlay(ui, &plot_response);
         self.profile_window.show(ui.ctx());
     }
 
@@ -11381,52 +11692,85 @@ impl ImageView {
     fn handle_profile_drag(&mut self, plot_response: &PlotResponse) {
         if self.profile_mode == ProfileMode::None || self.pixels.is_empty() {
             self.profile_drag_start = None;
+            self.profile_current_roi = None;
             return;
         }
         let response = &plot_response.response;
         let transform = &plot_response.transform;
 
+        // A drag positions the profile ROI (silx moves the profile line by
+        // dragging it — it does not track the bare hovered cursor): the row
+        // (horizontal) / column (vertical) under the drag, or the dragged
+        // segment / rectangle. Re-dragging moves it; the last ROI is retained
+        // between drags so the overlay and profile persist.
         if response.drag_started()
             && let Some(p) = response.interact_pointer_pos()
         {
             self.profile_drag_start = Some(transform.pixel_to_data(p));
         }
-
-        if response.dragged()
+        let roi = if response.dragged()
             && let (Some(start), Some(p)) =
                 (self.profile_drag_start, response.interact_pointer_pos())
         {
             let end = transform.pixel_to_data(p);
-            if let Some(roi) = profile_roi_from_drag(self.profile_mode, start, end) {
-                // ProfileWindow re-derives the profile from the ROI using the
-                // same line/row/column helpers (single source of truth). The
-                // image plot's axis labels ("Columns"/"Rows") relabel the
-                // computed profile title (silx `_relabelAxes`).
-                let x_label = self
-                    .image_plot
-                    .graph_x_label()
-                    .unwrap_or("Columns")
-                    .to_string();
-                let y_label = self
-                    .image_plot
-                    .graph_y_label(YAxis::Left)
-                    .unwrap_or("Rows")
-                    .to_string();
-                self.profile_window.update_profile(
-                    self.width,
-                    self.height,
-                    &self.pixels,
-                    &roi,
-                    &x_label,
-                    &y_label,
-                );
-                self.profile_window.set_open(true);
-            }
-        }
-
+            profile_roi_from_drag(self.profile_mode, start, end)
+        } else {
+            None
+        };
         if response.drag_stopped() {
             self.profile_drag_start = None;
         }
+
+        // A fresh ROI this frame: keep it as the drawn overlay and re-derive the
+        // profile. ProfileWindow re-derives from the ROI using the same
+        // line/row/column helpers (single source of truth); the image plot's
+        // axis labels ("Columns"/"Rows") relabel the profile title (silx
+        // `_relabelAxes`). When no fresh ROI is produced (e.g. the cursor left
+        // the plot in row/column mode) the last overlay is retained.
+        if let Some(roi) = roi {
+            let x_label = self
+                .image_plot
+                .graph_x_label()
+                .unwrap_or("Columns")
+                .to_string();
+            let y_label = self
+                .image_plot
+                .graph_y_label(YAxis::Left)
+                .unwrap_or("Rows")
+                .to_string();
+            self.profile_window.update_profile(
+                self.width,
+                self.height,
+                &self.pixels,
+                &roi,
+                &x_label,
+                &y_label,
+            );
+            self.profile_window.set_open(true);
+            self.profile_current_roi = Some(roi);
+        }
+    }
+
+    /// Draw the active profile ROI as an overlay on the image (silx renders the
+    /// profile ROI on the plot), clipped to the data area so it does not spill
+    /// into the axis gutters.
+    fn draw_profile_overlay(&self, ui: &egui::Ui, plot_response: &PlotResponse) {
+        if self.profile_mode == ProfileMode::None {
+            return;
+        }
+        let Some(roi) = self.profile_current_roi.as_ref() else {
+            return;
+        };
+        let t = &plot_response.transform;
+        let painter = ui.painter_at(t.area);
+        draw_profile_roi_overlay(
+            &painter,
+            t,
+            roi,
+            (self.width, self.height),
+            self.profile_window.line_width(),
+            egui::Stroke::new(1.5, PROFILE_OVERLAY_COLOR),
+        );
     }
 
     /// The active profile-extraction mode of the profile tool (silx
@@ -11441,7 +11785,17 @@ impl ImageView {
         self.profile_mode = mode;
         if mode == ProfileMode::None {
             self.profile_drag_start = None;
+            self.profile_current_roi = None;
             self.profile_window.set_open(false);
+            // The profile no longer owns the primary drag: return the plot to
+            // box-zoom.
+            crate::widget::actions::mode::zoom_mode(&mut self.image_plot);
+        } else {
+            // A profile drag positions/moves the ROI, so the plot must not also
+            // box-zoom or pan on that same primary drag (silx switches the plot's
+            // interactive mode while a profile ROI tool is active). Select mode
+            // frees the primary drag for the profile without starting a box zoom.
+            crate::widget::actions::mode::select_mode(&mut self.image_plot);
         }
     }
 
@@ -11998,6 +12352,10 @@ pub struct ScatterView {
     /// Data-space start of the in-progress profile drag, or `None` (silx profile
     /// ROI first point). Set on `drag_started`, cleared on `drag_stopped`.
     profile_drag_start: Option<(f64, f64)>,
+    /// The line-profile ROI currently drawn as an overlay on the scatter plot
+    /// (silx draws the active profile ROI on the plot); the last dragged
+    /// segment, or `None` when none has been drawn or the tool is off.
+    profile_current_roi: Option<Roi>,
 }
 
 impl ScatterView {
@@ -12026,6 +12384,7 @@ impl ScatterView {
             profile_window: crate::widget::profile_window::ProfileWindow::new(render_state, id + 1),
             profile_mode: false,
             profile_drag_start: None,
+            profile_current_roi: None,
         }
     }
 
@@ -12222,6 +12581,7 @@ impl ScatterView {
         } else {
             self.inner.set_interaction_mode(PlotInteractionMode::Zoom);
             self.profile_drag_start = None;
+            self.profile_current_roi = None;
             self.profile_window.set_open(false);
         }
     }
@@ -12234,6 +12594,7 @@ impl ScatterView {
     fn handle_profile_drag(&mut self, plot_response: &PlotResponse) {
         if !self.profile_mode || self.points.is_none() {
             self.profile_drag_start = None;
+            self.profile_current_roi = None;
             return;
         }
         let response = &plot_response.response;
@@ -12251,11 +12612,35 @@ impl ScatterView {
         {
             let end = transform.pixel_to_data(p);
             self.show_line_profile(start, end, SCATTER_PROFILE_NPOINTS);
+            self.profile_current_roi = Some(Roi::Line { start, end });
         }
 
         if response.drag_stopped() {
             self.profile_drag_start = None;
         }
+    }
+
+    /// Draw the active line-profile ROI as an overlay on the scatter plot (silx
+    /// renders the profile ROI on the plot), clipped to the data area.
+    fn draw_profile_overlay(&self, ui: &egui::Ui, plot_response: &PlotResponse) {
+        if !self.profile_mode {
+            return;
+        }
+        let Some(roi) = self.profile_current_roi.as_ref() else {
+            return;
+        };
+        let t = &plot_response.transform;
+        let painter = ui.painter_at(t.area);
+        // The scatter profile is a free line; it has no aligned row/column band,
+        // so pass identity dims and unit width (both ignored by the line kind).
+        draw_profile_roi_overlay(
+            &painter,
+            t,
+            roi,
+            (0, 0),
+            1,
+            egui::Stroke::new(1.5, PROFILE_OVERLAY_COLOR),
+        );
     }
 
     /// Set the scatter visualization mode (silx `Scatter.setVisualization`).
@@ -12836,6 +13221,7 @@ impl ScatterView {
         // Sample the line profile when the profile tool is armed and the user is
         // dragging across the scatter (silx `ScatterProfileToolBar`).
         self.handle_profile_drag(&response);
+        self.draw_profile_overlay(ui, &response);
         // Draw the line-profile side window (silx `ScatterProfileToolBar`'s
         // profile window) when open; it lives in its own viewport beside the plot.
         self.profile_window.show(ui.ctx());
@@ -13181,6 +13567,11 @@ pub struct StackView {
     /// Data-space start of the in-progress profile drag, set on `drag_started`
     /// and cleared on `drag_stopped` (silx profile ROI first point).
     profile_drag_start: Option<(f64, f64)>,
+    /// The profile ROI currently drawn as an overlay on the displayed frame
+    /// (silx draws the active profile ROI on the plot). Set from the last drag —
+    /// the row / column the drag positioned, or the dragged segment / rectangle;
+    /// `None` when no profile has been positioned or the tool is off.
+    profile_current_roi: Option<Roi>,
     /// Side window for the 1D current-frame profile (silx profileType `"1D"`),
     /// fed from `self.frames[self.current_frame]`.
     profile_window: crate::widget::profile_window::ProfileWindow,
@@ -13221,6 +13612,7 @@ impl StackView {
             profile_mode: ProfileMode::None,
             profile_dimension: StackProfileDimension::default(),
             profile_drag_start: None,
+            profile_current_roi: None,
             profile_window: crate::widget::profile_window::ProfileWindow::new(render_state, id + 1),
             stack_profile_window: crate::widget::stack_profile_window::StackProfileWindow::new(
                 render_state,
@@ -13472,8 +13864,18 @@ impl StackView {
         self.profile_mode = mode;
         if mode == ProfileMode::None {
             self.profile_drag_start = None;
+            self.profile_current_roi = None;
             self.profile_window.set_open(false);
             self.stack_profile_window.set_open(false);
+            // The profile no longer owns the primary drag: return the plot to
+            // box-zoom.
+            crate::widget::actions::mode::zoom_mode(&mut self.inner);
+        } else {
+            // A profile drag positions/moves the ROI, so the plot must not also
+            // box-zoom or pan on that same primary drag (silx switches the plot's
+            // interactive mode while a profile ROI tool is active). Select mode
+            // frees the primary drag for the profile without starting a box zoom.
+            crate::widget::actions::mode::select_mode(&mut self.inner);
         }
     }
 
@@ -13596,28 +13998,58 @@ impl StackView {
     fn handle_profile_drag(&mut self, plot_response: &PlotResponse) {
         if self.profile_mode == ProfileMode::None || self.frames.is_empty() {
             self.profile_drag_start = None;
+            self.profile_current_roi = None;
             return;
         }
         let response = &plot_response.response;
         let transform = &plot_response.transform;
 
+        // A drag positions the profile ROI (silx moves the profile line by
+        // dragging it — it does not track the bare hovered cursor): the row /
+        // column under the drag, or the dragged segment / rectangle. Re-dragging
+        // moves it; the last ROI is retained between drags.
         if response.drag_started()
             && let Some(p) = response.interact_pointer_pos()
         {
             self.profile_drag_start = Some(transform.pixel_to_data(p));
         }
-
-        if response.dragged()
+        let ends = if response.dragged()
             && let (Some(start), Some(p)) =
                 (self.profile_drag_start, response.interact_pointer_pos())
         {
-            let end = transform.pixel_to_data(p);
-            self.show_profile(start, end);
-        }
-
+            Some((start, transform.pixel_to_data(p)))
+        } else {
+            None
+        };
         if response.drag_stopped() {
             self.profile_drag_start = None;
         }
+
+        if let Some((start, end)) = ends {
+            self.show_profile(start, end);
+            self.profile_current_roi = profile_roi_from_drag(self.profile_mode, start, end);
+        }
+    }
+
+    /// Draw the active profile ROI as an overlay on the displayed frame (silx
+    /// renders the profile ROI on the plot), clipped to the data area.
+    fn draw_profile_overlay(&self, ui: &egui::Ui, plot_response: &PlotResponse) {
+        if self.profile_mode == ProfileMode::None {
+            return;
+        }
+        let Some(roi) = self.profile_current_roi.as_ref() else {
+            return;
+        };
+        let t = &plot_response.transform;
+        let painter = ui.painter_at(t.area);
+        draw_profile_roi_overlay(
+            &painter,
+            t,
+            roi,
+            (self.width, self.height),
+            self.profile_window.line_width(),
+            egui::Stroke::new(1.5, PROFILE_OVERLAY_COLOR),
+        );
     }
 
     /// Show the Profile3D toolbar — the profile-ROI tool buttons plus the 1D/2D
@@ -13852,6 +14284,7 @@ impl StackView {
         // frame or 2D stacked over all frames) and shows it in the matching
         // side window (silx `Profile3DToolBar`).
         self.handle_profile_drag(&response);
+        self.draw_profile_overlay(ui, &response);
         self.profile_window.show(ui.ctx());
         self.stack_profile_window.show(ui.ctx());
         response

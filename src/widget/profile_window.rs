@@ -93,7 +93,7 @@ fn method_label(method: ProfileMethod) -> &'static str {
 /// geometry: the profile line at `position` on the axis of length `size`,
 /// integrated over `line_width` pixels. Returns `(lo, hi)` = the reported band
 /// bounds `min(area)`, `max(area) − 1` (silx `core.py:380,398`).
-fn aligned_band(position: f64, size: u32, line_width: u32) -> (i64, i64) {
+pub(crate) fn aligned_band(position: f64, size: u32, line_width: u32) -> (i64, i64) {
     let roi_width = i64::from(line_width.max(1)).min(i64::from(size.max(1)));
     let img_pos = position.trunc() as i64;
     let start_f = img_pos as f64 + 0.5 - roi_width as f64 / 2.0;

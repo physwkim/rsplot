@@ -9,7 +9,59 @@ This is a workspace of three crates released together: **rsplot** (the plotting
 library), **rsdm** (a PyDM-style EPICS display layer built on rsplot), and
 **adl2rsdm** (a MEDM `.adl` → RsDM-Rust-source converter).
 
-## [Unreleased]
+## [0.5.1] - 2026-07-07
+
+A feature-bearing patch over the `0.5.0` crate rename: a new volume-rendering
+widget, a toolbar restructure across the image-widget family, and the profile
+overlay drawn on the image. Also the first cross-platform CI (Linux / macOS /
+Windows), which surfaced and fixed a Direct3D-12 shader-portability bug. `rsdm`
+and `adl2rsdm` are re-released in lockstep (no functional change beyond an
+internal lint cleanup).
+
+### Added — `rsplot`
+
+- **`VolumeRaycaster`** — an interactive GPU direct-volume-rendering widget.
+  Ray-marches a `(depth, height, width)` RGBA8 volume in a fragment shader
+  (`shaders/volume_raycaster.wgsl`): a full-screen triangle un-projects each
+  pixel through the inverse camera matrix, slab-tests the volume box, and
+  front-to-back alpha-composites samples of a 3-D texture straight into egui's
+  render pass (premultiplied-alpha blend, no offscreen target or depth buffer).
+  Orbit / pan / wheel-zoom reuse the existing `Camera` + `OrbitDrag` / `PanDrag`
+  interaction state machines. Transfer knobs: `set_alpha_scale` (global opacity),
+  `set_steps` (samples per ray), `set_cull_floor` (skip near-transparent
+  samples). Unlike `ScalarFieldView` (iso-surface *geometry*), this renders the
+  volume itself — every voxel's colour and opacity contribute along the ray.
+  Naga-validated headlessly plus an `egui_kittest` wgpu render test (opaque
+  volume ⇒ visible colour, transparent volume ⇒ nothing).
+- **Compact plot control toolbar.** The `Plot2D` control toolbar now renders
+  compact by default — the essential buttons (reset zoom, box-zoom / pan modes,
+  invert Y, keep-aspect) stay in the row and everything else folds into a single
+  `⋯` overflow menu, so the toolbar stays one line and the plot keeps its
+  height. Toggle with `Plot::set_toolbar_compact` (`toolbar_compact` to read).
+- **Shared control toolbar on `ImageView`, `ImageStack`, and `CompareImages`.**
+  All three now surface the standard silx plot controls above their own rows,
+  matching the rest of the image-widget family (previously reachable only on the
+  bare inner plot).
+- **`ImageView` image controls as detached settings windows.** The image-specific
+  controls (interp / agg / alpha / profile / mask) are now toolbar buttons that
+  each open their own detached settings window, matching silx's toolbar-action /
+  dock-widget layout instead of inline combos and sliders. The colorbar stays a
+  plain toggle.
+- **Profile overlay drawn on the image.** The profile ROI and its width band are
+  now drawn directly on the image while a profile tool is active.
+
+### Fixed — `rsplot`
+
+- **Curve rendering no longer fails on Windows / Direct3D-12.** The curve
+  fragment shader ended in a function-terminal `discard`, which naga's HLSL
+  backend emits as a path with no return value; the D3D12 FXC compiler rejects
+  it (X3507, "not all control paths return a value"), so `create_render_pipeline`
+  for the curve pipeline — and every curve / scatter draw — failed on Windows.
+  Vulkan and Metal tolerate it, so it was invisible until cross-platform CI. A
+  trailing unreachable return keeps the shader portable.
+- **The plot no longer zooms while a profile drag positions the ROI.** A drag
+  that places or resizes a profile ROI is consumed by the profile tool instead
+  of also driving a box zoom.
 
 ## [0.4.2] - 2026-07-02
 

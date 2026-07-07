@@ -954,10 +954,8 @@ where
                     return Err(FitError::BadConstraintReference);
                 }
             }
-            Constraint::Quoted { min, max } => {
-                if (min.max(max) - min.min(max)) == 0.0 {
-                    return Err(FitError::InvalidConstraint);
-                }
+            Constraint::Quoted { min, max } if (min.max(max) - min.min(max)) == 0.0 => {
+                return Err(FitError::InvalidConstraint);
             }
             _ => {}
         }
