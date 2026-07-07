@@ -49,6 +49,10 @@ impl VolumeRaycaster {
     /// Create a raycaster bound to scene key `id`, installing the shared pipeline
     /// into `render_state` (idempotent). The camera looks down `-z`; the first
     /// [`set_volume`](Self::set_volume) frames it to the volume.
+    ///
+    /// Each on-screen view must use a distinct `id`: the id keys shared GPU state
+    /// including a uniform buffer that is written once per frame, so two views
+    /// sharing an id would both render with the last one's camera.
     pub fn new(render_state: &RenderState, id: VolumeId) -> Self {
         install_volume_raycaster(render_state);
         let camera = Camera::new(

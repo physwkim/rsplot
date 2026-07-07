@@ -404,6 +404,13 @@ impl egui_wgpu::CallbackTrait for VolumeCallback {
 
 /// Register the raycaster paint callback for `frame` over `rect`. A no-op on
 /// screen until [`set_volume_raycaster`] has uploaded a volume for `frame.id`.
+///
+/// **Invariant: paint each [`VolumeId`] at most once per frame.** The per-id
+/// uniform buffer is shared between `prepare` and `paint`, so if two callbacks
+/// with the same id run in one frame, `prepare` writes that buffer twice and
+/// both `paint`s read the value from whichever prepared last — both views render
+/// with the last one's camera. Give every on-screen view its own id (the
+/// [`crate::VolumeRaycaster`] widget already binds one id per instance).
 pub fn paint_volume_raycaster(ui: &mut egui::Ui, rect: egui::Rect, frame: VolumeFrame) {
     ui.painter().add(egui_wgpu::Callback::new_paint_callback(
         rect,
