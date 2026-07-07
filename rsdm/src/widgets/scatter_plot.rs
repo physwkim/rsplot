@@ -348,7 +348,7 @@ impl RsdmScatterPlot {
             if events.is_empty() {
                 continue;
             }
-            events.sort_by(|a, b| a.2.cmp(&b.2));
+            events.sort_by_key(|a| a.2);
             if curve
                 .pair
                 .ingest(events.iter().map(|&(axis, v, _)| (axis, v)))
