@@ -151,4 +151,10 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         return params.gap_color * aa;
     }
     discard;
+    // Unreachable payload: the fragment is discarded above, but a
+    // function-terminal `discard` with no following `return` makes naga's
+    // HLSL backend emit a path that FXC rejects (X3507 "not all control paths
+    // return a value") on the Direct3D-12 backend. The trailing return keeps
+    // the shader portable; its value is never written.
+    return vec4<f32>(0.0);
 }
