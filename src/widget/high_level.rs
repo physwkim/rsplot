@@ -10972,120 +10972,275 @@ impl ImageView {
         }
     }
 
-    /// Show the ImageView toolbar: interpolation / aggregation selectors on the
-    /// active image (silx image `interpolation` nearest/linear and
-    /// `ImageDataAggregated` max/mean/min, items/image.py) plus the active-image
-    /// alpha slider (silx `ActiveImageAlphaSlider`, ImageView.py:513-517). Each
-    /// change is propagated to the displayed image.
+    /// Show the ImageView toolbar: one control row holding the standard silx
+    /// plot controls (reset zoom / zoom in-out / pan / select / invert X·Y /
+    /// log / autoscale / grid / keep-aspect / cursor / show-axes / save / copy /
+    /// print) followed by the image-specific buttons — interp / agg / alpha /
+    /// colorbar / profile / mask — each (except the plain colorbar toggle)
+    /// opening its own detached settings window (silx exposes these as toolbar
+    /// actions / dock widgets rather than inline combos and sliders).
     pub fn show_toolbar(&mut self, ui: &mut egui::Ui) {
-        // Standard silx plot control toolbar (reset zoom / zoom in-out / pan /
-        // select / invert X·Y / log / autoscale / grid / keep-aspect / cursor /
-        // show-axes / save / copy / print). ImageView wraps a `Plot2D`, so these
-        // were reachable on the inner plot but never surfaced on the ImageView
-        // toolbar — the image was missing the top toolbar silx's `Plot2D` shows.
-        // Render it first, in its own row above the image-specific controls. The
-        // buttons self-apply to the plot, so the response is not needed here.
-        let _ = self.image_plot.show_toolbar(ui);
-        ui.horizontal_wrapped(|ui| {
-            // Interpolation selector (silx image interpolation).
-            let mut interpolation = self.interpolation;
-            egui::ComboBox::from_label("interp")
-                .selected_text(match interpolation {
-                    InterpolationMode::Nearest => "nearest",
-                    InterpolationMode::Linear => "linear",
-                })
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut interpolation, InterpolationMode::Nearest, "nearest");
-                    ui.selectable_value(&mut interpolation, InterpolationMode::Linear, "linear");
-                });
-            if interpolation != self.interpolation {
-                self.set_interpolation(interpolation);
-            }
-
-            // Aggregation selector (silx ImageDataAggregated).
-            let mut aggregation = self.aggregation;
-            egui::ComboBox::from_label("agg")
-                .selected_text(match aggregation {
-                    AggregationMode::None => "none",
-                    AggregationMode::Max => "max",
-                    AggregationMode::Mean => "mean",
-                    AggregationMode::Min => "min",
-                })
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut aggregation, AggregationMode::None, "none");
-                    ui.selectable_value(&mut aggregation, AggregationMode::Max, "max");
-                    ui.selectable_value(&mut aggregation, AggregationMode::Mean, "mean");
-                    ui.selectable_value(&mut aggregation, AggregationMode::Min, "min");
-                });
-
-            // Block factors (silx level-of-detail (lodx, lody)).
-            let mut block = self.aggregation_block;
-            let bx = ui.add(
-                egui::DragValue::new(&mut block.0)
-                    .range(1..=64)
-                    .prefix("bx "),
+        // The image buttons render inside `show_toolbar_with`'s closure, which
+        // only exposes the bare `PlotWidget` — so they just flip open-flags in
+        // egui temp memory (and record the colorbar click); the settings
+        // windows themselves render after the row, where `&mut self` is
+        // available again.
+        let plot_id = self.image_plot.plot().id;
+        let agg_active = self.aggregation != AggregationMode::None;
+        let profile_active = self.profile_mode != ProfileMode::None;
+        let in_mask_draw = self.image_plot.interaction_mode() == PlotInteractionMode::MaskDraw;
+        let show_colorbar = self.show_colorbar;
+        let mut colorbar_clicked = false;
+        let _ = self.image_plot.show_toolbar_with(ui, |ui, _| {
+            let id = egui::Id::new(plot_id);
+            Self::settings_window_button(
+                ui,
+                id.with("interp_open"),
+                "interp",
+                false,
+                "Image interpolation",
             );
-            let by = ui.add(
-                egui::DragValue::new(&mut block.1)
-                    .range(1..=64)
-                    .prefix("by "),
+            Self::settings_window_button(
+                ui,
+                id.with("agg_open"),
+                "agg",
+                agg_active,
+                "Aggregation (level-of-detail)",
             );
-            if aggregation != self.aggregation || bx.changed() || by.changed() {
-                self.set_aggregation(aggregation, block);
-            }
-
-            // Colorbar show/hide toggle (silx `ColorBarAction`).
+            Self::settings_window_button(
+                ui,
+                id.with("alpha_open"),
+                "alpha",
+                false,
+                "Image transparency",
+            );
+            // Colorbar is a plain toggle (silx `ColorBarAction`), not a
+            // settings window.
             if ui
-                .selectable_label(self.show_colorbar, "colorbar")
+                .selectable_label(show_colorbar, "colorbar")
                 .on_hover_text("Show/hide the colorbar")
                 .clicked()
             {
-                crate::widget::actions::control::image_colorbar_toggle(self);
+                colorbar_clicked = true;
             }
+            Self::settings_window_button(
+                ui,
+                id.with("profile_open"),
+                "profile",
+                profile_active,
+                "Profile tool",
+            );
+            Self::settings_window_button(
+                ui,
+                id.with("mask_open"),
+                "mask",
+                in_mask_draw,
+                "Mask tools",
+            );
         });
+        if colorbar_clicked {
+            crate::widget::actions::control::image_colorbar_toggle(self);
+        }
+        self.show_interp_window(ui);
+        self.show_aggregation_window(ui);
+        self.show_alpha_window(ui);
+        self.show_profile_tool_window(ui);
+        self.show_mask_window(ui);
+    }
 
-        let response = self.alpha.ui(ui);
-        if response.changed() {
+    /// One toolbar toggle for a detached settings window: highlighted while the
+    /// window is open (or while the control is `active`), flipping the open
+    /// flag stored in egui temp memory under `open_id` on click. Runs inside
+    /// the shared control-toolbar closure, which only has the bare
+    /// `PlotWidget`; the matching `show_*_window` method renders the window
+    /// after the row.
+    fn settings_window_button(
+        ui: &mut egui::Ui,
+        open_id: egui::Id,
+        label: &str,
+        active: bool,
+        tooltip: &str,
+    ) {
+        let open = ui.data(|d| d.get_temp::<bool>(open_id)).unwrap_or(false);
+        if ui
+            .selectable_label(open || active, label)
+            .on_hover_text(tooltip)
+            .clicked()
+        {
+            ui.data_mut(|d| d.insert_temp(open_id, !open));
+        }
+    }
+
+    /// The detached "Interpolation" settings window (nearest / linear), opened
+    /// from the toolbar's `interp` button. silx has no interpolation toolbar
+    /// action; this is a port-specific control, surfaced like the others.
+    fn show_interp_window(&mut self, ui: &mut egui::Ui) {
+        let open_id = egui::Id::new(self.image_plot.plot().id).with("interp_open");
+        if !ui.data(|d| d.get_temp::<bool>(open_id)).unwrap_or(false) {
+            return;
+        }
+        let mut interp = self.interpolation;
+        let signals = crate::widget::detached::show_detached(
+            ui.ctx(),
+            open_id.with("win"),
+            "Interpolation",
+            egui::vec2(200.0, 90.0),
+            None,
+            |ui| {
+                ui.radio_value(&mut interp, InterpolationMode::Nearest, "nearest");
+                ui.radio_value(&mut interp, InterpolationMode::Linear, "linear");
+            },
+        );
+        if interp != self.interpolation {
+            self.set_interpolation(interp);
+        }
+        if signals.close_requested {
+            ui.data_mut(|d| d.insert_temp(open_id, false));
+        }
+    }
+
+    /// The detached "Aggregation" window, opened from the toolbar's `agg`
+    /// button: the level-of-detail reduction (none / max / mean / min) and its
+    /// block factors (silx `AggregationModeAction` toolbutton menu +
+    /// `ImageDataAggregated` `lodx`/`lody`).
+    fn show_aggregation_window(&mut self, ui: &mut egui::Ui) {
+        let open_id = egui::Id::new(self.image_plot.plot().id).with("agg_open");
+        if !ui.data(|d| d.get_temp::<bool>(open_id)).unwrap_or(false) {
+            return;
+        }
+        let mut aggregation = self.aggregation;
+        let mut block = self.aggregation_block;
+        let signals = crate::widget::detached::show_detached(
+            ui.ctx(),
+            open_id.with("win"),
+            "Aggregation",
+            egui::vec2(240.0, 190.0),
+            None,
+            |ui| {
+                ui.radio_value(&mut aggregation, AggregationMode::None, "none");
+                ui.radio_value(&mut aggregation, AggregationMode::Max, "max");
+                ui.radio_value(&mut aggregation, AggregationMode::Mean, "mean");
+                ui.radio_value(&mut aggregation, AggregationMode::Min, "min");
+                ui.separator();
+                ui.horizontal(|ui| {
+                    ui.label("block");
+                    ui.add(
+                        egui::DragValue::new(&mut block.0)
+                            .range(1..=64)
+                            .prefix("bx "),
+                    );
+                    ui.add(
+                        egui::DragValue::new(&mut block.1)
+                            .range(1..=64)
+                            .prefix("by "),
+                    );
+                });
+            },
+        );
+        if aggregation != self.aggregation || block != self.aggregation_block {
+            self.set_aggregation(aggregation, block);
+        }
+        if signals.close_requested {
+            ui.data_mut(|d| d.insert_temp(open_id, false));
+        }
+    }
+
+    /// The detached "Alpha" window (the active-image transparency slider, silx
+    /// `ActiveImageAlphaSlider`), opened from the toolbar's `alpha` button.
+    fn show_alpha_window(&mut self, ui: &mut egui::Ui) {
+        let open_id = egui::Id::new(self.image_plot.plot().id).with("alpha_open");
+        if !ui.data(|d| d.get_temp::<bool>(open_id)).unwrap_or(false) {
+            return;
+        }
+        let mut changed = false;
+        let signals = crate::widget::detached::show_detached(
+            ui.ctx(),
+            open_id.with("win"),
+            "Alpha",
+            egui::vec2(260.0, 80.0),
+            None,
+            |ui| {
+                changed = self.alpha.ui(ui).changed();
+            },
+        );
+        if changed {
             self.upload_image();
         }
+        if signals.close_requested {
+            ui.data_mut(|d| d.insert_temp(open_id, false));
+        }
+    }
 
-        // Profile-tool toggles (silx _ProfileToolBar action group,
-        // ImageView.py:692-697). Clicking the active mode again disables it.
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 2.0;
-            ui.label("profile:");
-            for (label, tooltip, mode) in [
-                ("—", "Row profile (horizontal)", ProfileMode::Horizontal),
-                ("|", "Column profile (vertical)", ProfileMode::Vertical),
-                ("/", "Line profile (drag)", ProfileMode::Line),
-                ("□", "Rectangle profile (drag)", ProfileMode::Rectangle),
-            ] {
-                if ui
-                    .selectable_label(self.profile_mode == mode, label)
-                    .on_hover_text(tooltip)
-                    .clicked()
-                {
-                    let next = if self.profile_mode == mode {
-                        ProfileMode::None
-                    } else {
-                        mode
-                    };
-                    self.set_profile_mode(next);
-                }
-            }
-        });
+    /// The detached "Profile" window, opened from the toolbar's `profile`
+    /// button: pick the profile tool (none / horizontal / vertical / line /
+    /// rectangle). The extracted profile itself still shows in the separate
+    /// [`ProfileWindow`] (silx `ProfileToolBar` split button +
+    /// `ProfileWindow`).
+    fn show_profile_tool_window(&mut self, ui: &mut egui::Ui) {
+        let open_id = egui::Id::new(self.image_plot.plot().id).with("profile_open");
+        if !ui.data(|d| d.get_temp::<bool>(open_id)).unwrap_or(false) {
+            return;
+        }
+        let mut mode = self.profile_mode;
+        let signals = crate::widget::detached::show_detached(
+            ui.ctx(),
+            open_id.with("win"),
+            "Profile",
+            egui::vec2(240.0, 170.0),
+            None,
+            |ui| {
+                ui.radio_value(&mut mode, ProfileMode::None, "none");
+                ui.radio_value(&mut mode, ProfileMode::Horizontal, "— horizontal (row)");
+                ui.radio_value(&mut mode, ProfileMode::Vertical, "| vertical (column)");
+                ui.radio_value(&mut mode, ProfileMode::Line, "/ line (drag)");
+                ui.radio_value(&mut mode, ProfileMode::Rectangle, "□ rectangle (drag)");
+            },
+        );
+        if mode != self.profile_mode {
+            self.set_profile_mode(mode);
+        }
+        if signals.close_requested {
+            ui.data_mut(|d| d.insert_temp(open_id, false));
+        }
+    }
 
+    /// The detached "Mask" window, opened from the toolbar's `mask` button:
+    /// the pencil / eraser / brush / clear / invert / non-finite / threshold
+    /// controls (silx `MaskToolsDockWidget`).
+    fn show_mask_window(&mut self, ui: &mut egui::Ui) {
+        let open_id = egui::Id::new(self.image_plot.plot().id).with("mask_open");
+        if !ui.data(|d| d.get_temp::<bool>(open_id)).unwrap_or(false) {
+            return;
+        }
+        let signals = crate::widget::detached::show_detached(
+            ui.ctx(),
+            open_id.with("win"),
+            "Mask",
+            egui::vec2(340.0, 300.0),
+            None,
+            |ui| {
+                self.show_mask_controls(ui);
+            },
+        );
+        if signals.close_requested {
+            ui.data_mut(|d| d.insert_temp(open_id, false));
+        }
+    }
+
+    /// The mask-tool controls, rendered inside the detached mask window: the
+    /// pencil/eraser draw toggle plus (while drawing) tool select, brush size,
+    /// clear / invert / non-finite, and the threshold group (silx
+    /// `MaskToolsWidget`).
+    fn show_mask_controls(&mut self, ui: &mut egui::Ui) {
         // Mask-draw tool: toggle MaskDraw mode (silx `MaskToolsWidget`
         // activating the plot's pencil draw interaction). Entering it sets the
         // mask tool to Pencil so the primary drag paints; exiting restores Zoom
         // and disables the tool. While active, a brush-size slider and the
         // pencil/eraser/clear controls are exposed.
         let in_mask_draw = self.image_plot.interaction_mode() == PlotInteractionMode::MaskDraw;
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 2.0;
-            ui.label("mask:");
+        ui.horizontal_wrapped(|ui| {
             if ui
-                .selectable_label(in_mask_draw, "✏")
+                .selectable_label(in_mask_draw, "✏ draw")
                 .on_hover_text("Draw mask (pencil): primary drag paints the mask")
                 .clicked()
             {
@@ -11104,9 +11259,13 @@ impl ImageView {
                     "eraser",
                 )
                 .on_hover_text("Erase mask");
-                // silx pencil width: 1-50 slider + 1-1024 spin box, kept in sync
-                // (_BaseMaskToolsWidget.py:822-846 / _pencilWidthChanged). Both
-                // bind the same `brush_size`.
+            }
+        });
+        if in_mask_draw {
+            // silx pencil width: 1-50 slider + 1-1024 spin box, kept in sync
+            // (_BaseMaskToolsWidget.py:822-846 / _pencilWidthChanged). Both
+            // bind the same `brush_size`.
+            ui.horizontal_wrapped(|ui| {
                 ui.add(egui::Slider::new(&mut self.mask.brush_size, 1..=50).text("brush"));
                 ui.add(
                     egui::DragValue::new(&mut self.mask.brush_size)
@@ -11114,6 +11273,8 @@ impl ImageView {
                         .speed(1.0),
                 )
                 .on_hover_text("Brush width in pixels (1-1024)");
+            });
+            ui.horizontal_wrapped(|ui| {
                 if ui.button("clear mask").clicked() {
                     self.mask.clear_all();
                     self.mask.commit();
@@ -11148,18 +11309,15 @@ impl ImageView {
                     self.mask.commit();
                     self.upload_image();
                 }
-            }
-        });
-        // Threshold-masking row (silx threshold group box,
-        // `_BaseMaskToolsWidget._initThresholdGroupBox` / `_maskBtnClicked`):
-        // pick below/between/above, enter the bound(s), and Apply masks the
-        // matching pixels at the current level then commits. Per silx, the min
-        // edit shows for below/between and the max edit for between/above. Only
-        // meaningful when the mask geometry matches the active image.
-        if in_mask_draw {
+            });
+            // Threshold-masking row (silx threshold group box,
+            // `_BaseMaskToolsWidget._initThresholdGroupBox` / `_maskBtnClicked`):
+            // pick below/between/above, enter the bound(s), and Apply masks the
+            // matching pixels at the current level then commits. Per silx, the min
+            // edit shows for below/between and the max edit for between/above. Only
+            // meaningful when the mask geometry matches the active image.
             use crate::widget::mask_tools::ThresholdMode;
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 2.0;
+            ui.horizontal_wrapped(|ui| {
                 ui.label("threshold:");
                 egui::ComboBox::from_id_salt("mask_threshold_mode")
                     .selected_text(match self.mask.threshold_mode {
