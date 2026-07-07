@@ -23,6 +23,10 @@ use crate::render::volume_raycaster::{
     remove_volume_raycaster, set_volume_raycaster, volume_bounds,
 };
 
+/// Upper bound on samples per ray; beyond this a single frame can outrun the
+/// OS GPU-timeout watchdog on modest hardware.
+const MAX_STEPS: u32 = 4096;
+
 /// Interactive GPU direct-volume-rendering widget. See the module docs.
 pub struct VolumeRaycaster {
     id: VolumeId,
@@ -89,9 +93,11 @@ impl VolumeRaycaster {
         }
     }
 
-    /// Number of samples per ray (higher = smoother, slower). Default 256.
+    /// Number of samples per ray (higher = smoother, slower). Default 256,
+    /// clamped to `[1, MAX_STEPS]` — an unbounded count can stall the GPU long
+    /// enough to trip the OS device-timeout reset.
     pub fn set_steps(&mut self, steps: u32) {
-        self.steps = steps.max(1);
+        self.steps = steps.clamp(1, MAX_STEPS);
     }
 
     /// Global opacity multiplier applied to each sample's alpha. Default 1.0.
