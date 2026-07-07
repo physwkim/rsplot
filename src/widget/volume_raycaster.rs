@@ -19,8 +19,8 @@ use crate::core::scene3d::camera::Camera;
 use crate::core::scene3d::interaction::{OrbitDrag, PanDrag, window_to_ndc};
 use crate::core::scene3d::mat4::{Mat4, Vec3};
 use crate::render::volume_raycaster::{
-    VolumeFrame, VolumeId, install_volume_raycaster, paint_volume_raycaster, set_volume_raycaster,
-    volume_bounds,
+    VolumeFrame, VolumeId, install_volume_raycaster, paint_volume_raycaster,
+    remove_volume_raycaster, set_volume_raycaster, volume_bounds,
 };
 
 /// Interactive GPU direct-volume-rendering widget. See the module docs.
@@ -107,6 +107,15 @@ impl VolumeRaycaster {
     /// Re-frame the camera to the current volume bounds.
     pub fn reset_view(&mut self) {
         self.camera.reset_camera(self.bounds);
+    }
+
+    /// Free this view's uploaded GPU volume (texture, bind group, uniforms). Its
+    /// VRAM is otherwise held for the app's lifetime, since the shared resources
+    /// keep one entry per id. After this the view paints nothing until the next
+    /// [`set_volume`](Self::set_volume).
+    pub fn remove(&mut self, render_state: &RenderState) {
+        remove_volume_raycaster(render_state, self.id);
+        self.has_volume = false;
     }
 
     /// Lay the view over the available space, handle orbit/pan/zoom, and paint.

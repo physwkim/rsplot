@@ -338,6 +338,20 @@ pub fn set_volume_raycaster(
     );
 }
 
+/// Drop view `id`'s GPU resources (texture, bind group, uniform buffer),
+/// freeing their VRAM. A no-op if `id` was never uploaded or the pipeline is not
+/// installed. Call when a raycaster view goes away so its texture does not linger
+/// in `callback_resources` for the app's lifetime.
+pub fn remove_volume_raycaster(render_state: &RenderState, id: VolumeId) {
+    let mut renderer = render_state.renderer.write();
+    if let Some(res) = renderer
+        .callback_resources
+        .get_mut::<VolumeRaycasterResources>()
+    {
+        res.scenes.remove(&id);
+    }
+}
+
 /// egui paint callback: write this frame's uniforms in `prepare`, ray-march in
 /// `paint`.
 struct VolumeCallback {
