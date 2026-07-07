@@ -135,14 +135,17 @@ impl VolumeRaycaster {
 
         // Begin a gesture at the press origin (before egui's drag threshold moves
         // the pointer), mirroring `SceneWidget`. No geometry to pick against, so
-        // orbit pivots on the box centre and pan sits on the far plane.
+        // orbit pivots on the box centre and pan sits on the box-centre depth
+        // plane (the same NDC-z the wheel zoom anchors on) — anchoring on the far
+        // plane would make the pan drift faster than the cursor.
         if response.drag_started_by(PointerButton::Primary)
             && let Some(p) = press_origin
         {
             let ctrl = ui.ctx().input(|i| i.modifiers.command);
             let win = to_local(p);
             if ctrl {
-                self.pan = Some(PanDrag::begin(win, size_px, 1.0));
+                let ndc_z = self.camera.matrix().transform_point(center, true).z;
+                self.pan = Some(PanDrag::begin(win, size_px, ndc_z));
             } else {
                 self.orbit = Some(OrbitDrag::begin(&self.camera, win, center));
             }
