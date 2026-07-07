@@ -3735,6 +3735,11 @@ pub struct PlotWidget {
     /// like silx does; `1.0` before the first frame (where snapping already
     /// returns `None` for lack of a cached transform).
     last_pixels_per_point: f32,
+    /// Whether the control toolbar renders compact — the essential buttons
+    /// plus a "⋯" overflow menu holding the rest — or the full flat row.
+    /// Compact by default so the toolbar stays a single line and the plot
+    /// keeps its height.
+    toolbar_compact: bool,
 }
 
 impl PlotWidget {
@@ -3773,6 +3778,7 @@ impl PlotWidget {
             ruler_prev_mode: None,
             median_filter_original: None,
             last_pixels_per_point: 1.0,
+            toolbar_compact: true,
         }
     }
 
@@ -6471,10 +6477,85 @@ impl PlotWidget {
     }
 
     fn show_toolbar_controls(&mut self, ui: &mut egui::Ui, out: &mut ToolbarResponse) {
+        // Essential controls, always in the row: reset zoom, the box-zoom /
+        // pan interaction modes, Y invert, and keep-aspect.
         if toolbar_icon_button(ui, ToolbarIcon::Home, false, "Reset zoom").clicked() {
             self.reset_zoom();
             out.reset_zoom = true;
         }
+        let mode = self.interaction_mode();
+        if toolbar_icon_button(
+            ui,
+            ToolbarIcon::Zoom,
+            mode == PlotInteractionMode::Zoom,
+            "Box zoom",
+        )
+        .clicked()
+        {
+            self.set_interaction_mode(PlotInteractionMode::Zoom);
+            out.interaction_mode_changed = true;
+        }
+        if toolbar_icon_button(
+            ui,
+            ToolbarIcon::Pan,
+            mode == PlotInteractionMode::Pan,
+            "Pan",
+        )
+        .clicked()
+        {
+            self.set_interaction_mode(PlotInteractionMode::Pan);
+            out.interaction_mode_changed = true;
+        }
+        let mut y_inv = self.is_y_inverted();
+        if toolbar_icon_button(ui, ToolbarIcon::InvertY, y_inv, "Invert Y axis").clicked() {
+            y_inv = !y_inv;
+            self.set_y_inverted(y_inv);
+            out.y_inverted_changed = true;
+        }
+        let mut aspect = self.is_keep_data_aspect_ratio();
+        if toolbar_icon_button(ui, ToolbarIcon::Aspect, aspect, "Keep data aspect ratio").clicked()
+        {
+            aspect = !aspect;
+            self.set_keep_data_aspect_ratio(aspect);
+            out.aspect_changed = true;
+        }
+
+        if self.toolbar_compact {
+            // Everything else folds into one overflow menu so the toolbar
+            // stays a single row and the plot keeps its height.
+            ui.menu_button("⋯", |ui| {
+                ui.set_max_width(240.0);
+                ui.horizontal_wrapped(|ui| {
+                    self.show_toolbar_extended(ui, out);
+                });
+            })
+            .response
+            .on_hover_text("More plot controls");
+        } else {
+            self.show_toolbar_extended(ui, out);
+        }
+
+        // The print dialog only signals the choice; this owner performs it.
+        // Pumped here every frame — the Print button may sit inside the (now
+        // closed) overflow menu while its dialog is still open. GPU readback,
+        // printer submission, and the rfd file dialog are native shims; their
+        // results are ignored here (the toolbar only reports).
+        if let Some(action) = self.print_dialog.show(ui.ctx()) {
+            match action {
+                crate::widget::print_dialog::PrintDialogAction::Print { printer } => {
+                    let _ = self.print_graph_to(&printer, DEFAULT_SAVE_SIZE);
+                }
+                crate::widget::print_dialog::PrintDialogAction::SaveToFile => {
+                    let _ = self.save_dialog(DEFAULT_SAVE_SIZE);
+                }
+            }
+        }
+    }
+
+    /// The non-essential control-toolbar buttons: rendered flat in the row
+    /// when the toolbar is full, or inside the "⋯" overflow menu when compact
+    /// ([`Self::set_toolbar_compact`]).
+    fn show_toolbar_extended(&mut self, ui: &mut egui::Ui, out: &mut ToolbarResponse) {
         if toolbar_icon_button(ui, ToolbarIcon::ZoomIn, false, "Zoom in").clicked() {
             crate::widget::actions::control::zoom_in(self);
             out.zoom_in = true;
@@ -6502,17 +6583,6 @@ impl PlotWidget {
             self.set_interaction_mode(PlotInteractionMode::Select);
             out.interaction_mode_changed = true;
         }
-        if toolbar_icon_button(
-            ui,
-            ToolbarIcon::Zoom,
-            mode == PlotInteractionMode::Zoom,
-            "Box zoom",
-        )
-        .clicked()
-        {
-            self.set_interaction_mode(PlotInteractionMode::Zoom);
-            out.interaction_mode_changed = true;
-        }
         // Zoom-axes menu (silx `ZoomEnabledAxesMenu`): choose which axes a box
         // zoom affects. Both checked by default; unchecking one keeps that
         // axis's range when a box zoom is applied. rsplot's box zoom is left-axis
@@ -6529,17 +6599,6 @@ impl PlotWidget {
         })
         .response
         .on_hover_text("Choose which axes a box zoom affects");
-        if toolbar_icon_button(
-            ui,
-            ToolbarIcon::Pan,
-            mode == PlotInteractionMode::Pan,
-            "Pan",
-        )
-        .clicked()
-        {
-            self.set_interaction_mode(PlotInteractionMode::Pan);
-            out.interaction_mode_changed = true;
-        }
 
         ui.separator();
 
@@ -6548,13 +6607,6 @@ impl PlotWidget {
             x_inv = !x_inv;
             self.set_x_inverted(x_inv);
             out.x_inverted_changed = true;
-        }
-
-        let mut y_inv = self.is_y_inverted();
-        if toolbar_icon_button(ui, ToolbarIcon::InvertY, y_inv, "Invert Y axis").clicked() {
-            y_inv = !y_inv;
-            self.set_y_inverted(y_inv);
-            out.y_inverted_changed = true;
         }
 
         ui.separator();
@@ -6633,14 +6685,6 @@ impl PlotWidget {
 
         ui.separator();
 
-        let mut aspect = self.is_keep_data_aspect_ratio();
-        if toolbar_icon_button(ui, ToolbarIcon::Aspect, aspect, "Keep data aspect ratio").clicked()
-        {
-            aspect = !aspect;
-            self.set_keep_data_aspect_ratio(aspect);
-            out.aspect_changed = true;
-        }
-
         let mut cursor = self.graph_cursor();
         if toolbar_icon_button(ui, ToolbarIcon::Cursor, cursor, "Show cursor coordinates").clicked()
         {
@@ -6690,23 +6734,24 @@ impl PlotWidget {
         if toolbar_icon_button(ui, ToolbarIcon::Print, false, "Print figure").clicked() {
             // silx `PrintAction` opens QPrintDialog; here the click opens the
             // printer-selection dialog (printer list + "Save to file…"), and the
-            // dialog's choice is applied below.
+            // dialog's choice is applied by `show_toolbar_controls`, which pumps
+            // the dialog every frame (this button may live inside the closed
+            // overflow menu).
             self.print_dialog.open_with_system_printers();
             out.print = true;
         }
-        // The print dialog only signals the choice; this owner performs it.
-        // GPU readback, printer submission, and the rfd file dialog are native
-        // shims; their results are ignored here (the toolbar only reports).
-        if let Some(action) = self.print_dialog.show(ui.ctx()) {
-            match action {
-                crate::widget::print_dialog::PrintDialogAction::Print { printer } => {
-                    let _ = self.print_graph_to(&printer, DEFAULT_SAVE_SIZE);
-                }
-                crate::widget::print_dialog::PrintDialogAction::SaveToFile => {
-                    let _ = self.save_dialog(DEFAULT_SAVE_SIZE);
-                }
-            }
-        }
+    }
+
+    /// Whether the control toolbar is compact — the essential buttons plus a
+    /// "⋯" overflow menu (the default) — or the full flat row.
+    pub fn toolbar_compact(&self) -> bool {
+        self.toolbar_compact
+    }
+
+    /// Choose between the compact control toolbar (essential buttons + "⋯"
+    /// overflow menu, the default) and the full flat row.
+    pub fn set_toolbar_compact(&mut self, compact: bool) {
+        self.toolbar_compact = compact;
     }
 
     /// Set graph limits.
