@@ -50,9 +50,10 @@ impl VolumeRaycaster {
     /// into `render_state` (idempotent). The camera looks down `-z`; the first
     /// [`set_volume`](Self::set_volume) frames it to the volume.
     ///
-    /// Each on-screen view must use a distinct `id`: the id keys shared GPU state
-    /// including a uniform buffer that is written once per frame, so two views
-    /// sharing an id would both render with the last one's camera.
+    /// The `id` keys the uploaded 3D texture, so distinct volumes need distinct
+    /// ids (two views sharing an id share the last-uploaded texture). Cameras are
+    /// not shared: each paint builds its own uniforms, so same-id views still
+    /// render with their own viewpoint.
     pub fn new(render_state: &RenderState, id: VolumeId) -> Self {
         install_volume_raycaster(render_state);
         let camera = Camera::new(
@@ -119,9 +120,9 @@ impl VolumeRaycaster {
         self.camera.reset_camera(self.bounds);
     }
 
-    /// Free this view's uploaded GPU volume (texture, bind group, uniforms). Its
-    /// VRAM is otherwise held for the app's lifetime, since the shared resources
-    /// keep one entry per id. After this the view paints nothing until the next
+    /// Free this view's uploaded GPU volume (the 3D texture). Its VRAM is
+    /// otherwise held for the app's lifetime, since the shared resources keep one
+    /// entry per id. After this the view paints nothing until the next
     /// [`set_volume`](Self::set_volume).
     pub fn remove(&mut self, render_state: &RenderState) {
         remove_volume_raycaster(render_state, self.id);
