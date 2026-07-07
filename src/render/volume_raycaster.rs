@@ -58,6 +58,25 @@ pub fn volume_bounds(depth: usize, height: usize, width: usize) -> ([f32; 3], [f
     ([-half[0], -half[1], -half[2]], half)
 }
 
+/// Premultiply a straight-alpha RGBA8 buffer (`rgb *= a/255`, rounded), so the
+/// linear sampler interpolates premultiplied colour: a transparent voxel becomes
+/// `(0,0,0,0)` and interpolating it against an opaque colour keeps the hue
+/// instead of dragging it toward black. A trailing partial pixel (len not a
+/// multiple of 4) is dropped.
+fn premultiply_rgba(rgba: &[u8]) -> Vec<u8> {
+    rgba.chunks_exact(4)
+        .flat_map(|px| {
+            let a = px[3] as u16;
+            [
+                ((px[0] as u16 * a + 127) / 255) as u8,
+                ((px[1] as u16 * a + 127) / 255) as u8,
+                ((px[2] as u16 * a + 127) / 255) as u8,
+                px[3],
+            ]
+        })
+        .collect()
+}
+
 struct VolumePipeline {
     pipeline: wgpu::RenderPipeline,
     bgl: wgpu::BindGroupLayout,
@@ -181,7 +200,9 @@ impl VolumeGpu {
     }
 
     /// Upload a `(depth, height, width)` RGBA8 volume (row-major, straight
-    /// alpha), (re)building the 3D texture and bind group.
+    /// alpha), (re)building the 3D texture and bind group. The straight alpha is
+    /// premultiplied before upload so the linear sampler interpolates
+    /// premultiplied colour (no dark fringe at colour/transparent boundaries).
     fn upload(
         &mut self,
         device: &wgpu::Device,
@@ -192,6 +213,7 @@ impl VolumeGpu {
     ) {
         let (depth, height, width) = dims;
         let (w, h, d) = (width as u32, height as u32, depth as u32);
+        let premul = premultiply_rgba(rgba);
         let extent = wgpu::Extent3d {
             width: w,
             height: h,
@@ -214,7 +236,7 @@ impl VolumeGpu {
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
-            rgba,
+            &premul,
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(w * 4),
@@ -363,4 +385,31 @@ pub fn paint_volume_raycaster(ui: &mut egui::Ui, rect: egui::Rect, frame: Volume
         rect,
         VolumeCallback { frame },
     ));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::premultiply_rgba;
+
+    #[test]
+    fn premultiply_zeroes_transparent_and_keeps_opaque() {
+        // Opaque red is unchanged; fully transparent becomes (0,0,0,0) so the
+        // linear filter cannot bleed its colour; half-alpha halves rgb.
+        let src = [
+            255, 0, 0, 255, // opaque red
+            200, 100, 50, 0, // transparent → all zero
+            255, 255, 255, 128, // half coverage → ~half
+        ];
+        let out = premultiply_rgba(&src);
+        assert_eq!(&out[0..4], &[255, 0, 0, 255]);
+        assert_eq!(&out[4..8], &[0, 0, 0, 0]);
+        assert_eq!(out[11], 128); // alpha preserved
+        assert_eq!(out[8], 128); // 255*128/255 rounded
+    }
+
+    #[test]
+    fn premultiply_drops_trailing_partial_pixel() {
+        let src = [255, 0, 0, 255, 1, 2]; // 6 bytes: one pixel + 2 stragglers
+        assert_eq!(premultiply_rgba(&src).len(), 4);
+    }
 }

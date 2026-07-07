@@ -2,8 +2,11 @@
 //
 // A full-screen triangle generates one camera ray per pixel from the inverse
 // view-projection matrix. Each ray is clipped to the volume's axis-aligned box
-// and marched in fixed steps, sampling straight-alpha RGBA and accumulating
-// PREMULTIPLIED colour so the result blends with `PREMULTIPLIED_ALPHA_BLENDING`
+// and marched in fixed steps. The 3D texture holds PREMULTIPLIED RGBA (the
+// uploader premultiplies straight alpha) so the hardware linear filter
+// interpolates premultiplied colour — a colour/transparent boundary stays the
+// right hue instead of bleeding toward black. Samples accumulate front-to-back
+// into premultiplied colour that blends with `PREMULTIPLIED_ALPHA_BLENDING`
 // straight into egui's render pass (no offscreen target, no depth).
 
 struct Uniforms {
@@ -80,11 +83,15 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     for (var i = 0; i < steps; i = i + 1) {
         let p = ro + rd * t;
         let uvw = (p - u.vol_min.xyz) / extent;
-        let s = textureSampleLevel(vol_tex, vol_samp, uvw, 0.0);
+        let s = textureSampleLevel(vol_tex, vol_samp, uvw, 0.0); // premultiplied rgb, coverage a
         if s.a > cull_floor {
-            let a = clamp(s.a * alpha_scale, 0.0, 1.0);
-            let w = (1.0 - acc.a) * a;
-            acc = vec4<f32>(acc.rgb + s.rgb * w, acc.a + w);
+            // Scale coverage by the user opacity knob, then rescale the
+            // premultiplied colour to that coverage (gain = sa/s.a). Compositing
+            // stays in premultiplied space, so no dark fringe at boundaries.
+            let sa = clamp(s.a * alpha_scale, 0.0, 1.0);
+            let gain = sa / max(s.a, 1e-6);
+            let w = 1.0 - acc.a;
+            acc = vec4<f32>(acc.rgb + s.rgb * gain * w, acc.a + sa * w);
         }
         if acc.a >= 0.995 {
             break;
