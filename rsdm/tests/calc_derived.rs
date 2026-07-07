@@ -12,6 +12,13 @@ use std::time::{Duration, Instant};
 
 use rsdm::{Engine, PvValue};
 
+/// Poll deadline for the async calc pipeline to settle. Generous on purpose:
+/// `wait_for` returns as soon as the condition holds, so a large deadline only
+/// bounds the failure path and never slows a passing run — but the `calc://`
+/// chain (child connect → value poll → expr eval → republish) can take well
+/// over a second on a loaded CI runner, and a 2 s deadline flaked on macOS.
+const WAIT: Duration = Duration::from_secs(30);
+
 /// Poll `cond` until it holds or `timeout` elapses; returns the final result.
 fn wait_for(mut cond: impl FnMut() -> bool, timeout: Duration) -> bool {
     let start = Instant::now();
@@ -44,7 +51,7 @@ fn calc_sums_two_local_children_and_recomputes_on_write() {
 
     // Both children configure via the direct handles → calc connects.
     assert!(
-        wait_for(|| calc.is_connected(), Duration::from_secs(2)),
+        wait_for(|| calc.is_connected(), WAIT),
         "calc channel never connected (children did not all connect)"
     );
 
@@ -52,7 +59,7 @@ fn calc_sums_two_local_children_and_recomputes_on_write() {
     assert!(
         wait_for(
             || matches!(calc.read(|s| s.value.clone()), Some(PvValue::Float(v)) if v.abs() < 1e-9),
-            Duration::from_secs(2)
+            WAIT
         ),
         "did not observe the initial derived value 0.0 (got {:?})",
         calc.read(|s| s.value.clone())
@@ -64,7 +71,7 @@ fn calc_sums_two_local_children_and_recomputes_on_write() {
     assert!(
         wait_for(
             || matches!(calc.read(|s| s.value.clone()), Some(PvValue::Float(v)) if (v - 5.0).abs() < 1e-9),
-            Duration::from_secs(2)
+            WAIT
         ),
         "did not observe the recomputed sum 5.0 (got {:?})",
         calc.read(|s| s.value.clone())
@@ -87,13 +94,13 @@ fn calc_update_list_restricts_which_child_triggers_recompute() {
         .expect("connect child b");
 
     assert!(
-        wait_for(|| calc.is_connected(), Duration::from_secs(2)),
+        wait_for(|| calc.is_connected(), WAIT),
         "calc channel never connected"
     );
     assert!(
         wait_for(
             || matches!(calc.read(|s| s.value.clone()), Some(PvValue::Float(v)) if v.abs() < 1e-9),
-            Duration::from_secs(2)
+            WAIT
         ),
         "did not observe the initial derived value 0.0"
     );
@@ -113,7 +120,7 @@ fn calc_update_list_restricts_which_child_triggers_recompute() {
     assert!(
         wait_for(
             || matches!(calc.read(|s| s.value.clone()), Some(PvValue::Float(v)) if (v - 6.0).abs() < 1e-9),
-            Duration::from_secs(2)
+            WAIT
         ),
         "a (in update list) did not trigger a recompute to 6.0 (got {:?})",
         calc.read(|s| s.value.clone())
@@ -128,7 +135,7 @@ fn calc_update_list_restricts_which_child_triggers_recompute() {
 fn wait_for_float(calc: &rsdm::Channel, expected: f64) -> bool {
     wait_for(
         || matches!(calc.read(|s| s.value.clone()), Some(PvValue::Float(v)) if (v - expected).abs() < 1e-9),
-        Duration::from_secs(2),
+        WAIT,
     )
 }
 
@@ -203,7 +210,7 @@ fn medm_ternary_functions_and_encoded_and_evaluate() {
         .connect("loc://medm_t_b?type=float&init=0")
         .expect("connect child b");
     assert!(
-        wait_for(|| calc.is_connected(), Duration::from_secs(2)),
+        wait_for(|| calc.is_connected(), WAIT),
         "medm ternary channel never connected"
     );
 
