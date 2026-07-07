@@ -24,7 +24,6 @@ pub type VolumeId = u64;
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct VolumeUniforms {
     inv_mvp: [[f32; 4]; 4],
-    cam_pos: [f32; 4],
     vol_min: [f32; 4],
     vol_max: [f32; 4],
     params: [f32; 4],
@@ -37,7 +36,6 @@ pub struct VolumeFrame {
     pub id: VolumeId,
     /// Inverse of the camera clip matrix, column-major (`Mat4::to_gpu_cols`).
     pub inv_mvp: [[f32; 4]; 4],
-    pub cam_pos: [f32; 3],
     /// `[step_count, alpha_scale, cull_floor]`.
     pub params: [f32; 3],
 }
@@ -272,7 +270,6 @@ impl VolumeGpu {
     fn write_uniforms(&self, queue: &wgpu::Queue, frame: &VolumeFrame) {
         let u = VolumeUniforms {
             inv_mvp: frame.inv_mvp,
-            cam_pos: [frame.cam_pos[0], frame.cam_pos[1], frame.cam_pos[2], 1.0],
             vol_min: [self.vol_min[0], self.vol_min[1], self.vol_min[2], 0.0],
             vol_max: [self.vol_max[0], self.vol_max[1], self.vol_max[2], 0.0],
             params: [frame.params[0], frame.params[1], frame.params[2], 0.0],

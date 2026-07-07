@@ -12,7 +12,6 @@
 struct Uniforms {
     // Inverse of the camera clip matrix P·V (OpenGL clip, z in [-1, 1]).
     inv_mvp: mat4x4<f32>,
-    cam_pos: vec4<f32>, // world-space camera position (xyz; w unused)
     vol_min: vec4<f32>, // world-space AABB min (xyz)
     vol_max: vec4<f32>, // world-space AABB max (xyz)
     // x = step count, y = alpha scale, z = sample-alpha cull floor, w unused.

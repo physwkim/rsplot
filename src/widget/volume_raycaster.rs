@@ -192,11 +192,9 @@ impl VolumeRaycaster {
             .matrix()
             .inverse()
             .map_or_else(|| Mat4::IDENTITY.to_gpu_cols(), |m| m.to_gpu_cols());
-        let pos = self.camera.extrinsic.position();
         let frame = VolumeFrame {
             id: self.id,
             inv_mvp,
-            cam_pos: [pos.x, pos.y, pos.z],
             params: [self.steps as f32, self.alpha_scale, self.cull_floor],
         };
         paint_volume_raycaster(ui, rect, frame);
