@@ -1,0 +1,14 @@
+# Normalize line endings to LF on checkout across all platforms. Without this,
+# Windows (git core.autocrlf=true on the CI runners) checks text files out as
+# CRLF, so the adl2rsdm converter — which emits LF-only source — drifts from
+# its committed `.rs`/`.adl` fixtures and the drift tests fail. Forcing LF
+# everywhere keeps generated output and fixtures byte-identical on all three
+# CI OSes. Binary assets are auto-detected and left untouched.
+* text=auto eol=lf
+
+# Belt-and-suspenders: never touch these binaries.
+*.png binary
+*.tif binary
+*.tiff binary
+*.h5 binary
+*.hdf5 binary
