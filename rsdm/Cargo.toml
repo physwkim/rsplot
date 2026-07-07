@@ -1,6 +1,6 @@
 [package]
 name = "rsdm"
-version = "0.5.0"
+version = "0.5.1"
 edition = "2024"
 rust-version = "1.92"
 license = "MIT OR Apache-2.0"
@@ -53,7 +53,7 @@ calc = ["dep:evalexpr", "dep:epics-base-rs"]
 # `version` (alongside `path`) is required so `cargo publish` records a
 # crates.io dependency on the published rsplot; the path is used for local
 # workspace builds. Keep this in lockstep with rsplot's version.
-rsplot = { path = "..", version = "0.5.0" }
+rsplot = { path = "..", version = "0.5.1" }
 # Async runtime for the data engine. The connection tasks live on a tokio
 # runtime the `Engine` owns; widgets read shared state on the GUI thread. `net`
 # is enabled so `enable_all()` (and the EPICS backends, later) work.
