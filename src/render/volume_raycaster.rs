@@ -320,6 +320,19 @@ pub fn set_volume_raycaster(
     height: usize,
     width: usize,
 ) {
+    // Guard the wgpu texture invariants: non-empty extent and exactly one RGBA8
+    // texel per voxel. An invalid call is a no-op (keeping any prior upload)
+    // rather than a wgpu validation panic; debug builds trip an assert so the
+    // caller bug is caught.
+    let expected = depth.saturating_mul(height).saturating_mul(width) * 4;
+    if depth == 0 || height == 0 || width == 0 || rgba.len() != expected {
+        debug_assert!(
+            false,
+            "set_volume_raycaster: bad volume ({depth}x{height}x{width}, {} bytes, expected {expected})",
+            rgba.len()
+        );
+        return;
+    }
     let mut renderer = render_state.renderer.write();
     let res: &mut VolumeRaycasterResources = renderer
         .callback_resources
