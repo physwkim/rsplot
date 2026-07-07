@@ -12,6 +12,7 @@ pub mod gpu_scene3d;
 pub mod jpeg;
 pub mod save;
 pub mod scene3d_items;
+pub mod volume_raycaster;
 
 // Headless WGSL validation of the shaders in `shaders/` (naga parse + validate,
 // no GPU). Test-only; see `shaders.rs`.

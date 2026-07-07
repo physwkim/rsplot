@@ -11,6 +11,22 @@ library), **rsdm** (a PyDM-style EPICS display layer built on rsplot), and
 
 ## [Unreleased]
 
+### Added — `rsplot`
+
+- **`VolumeRaycaster`** — an interactive GPU direct-volume-rendering widget.
+  Ray-marches a `(depth, height, width)` RGBA8 volume in a fragment shader
+  (`shaders/volume_raycaster.wgsl`): a full-screen triangle un-projects each
+  pixel through the inverse camera matrix, slab-tests the volume box, and
+  front-to-back alpha-composites samples of a 3-D texture straight into egui's
+  render pass (premultiplied-alpha blend, no offscreen target or depth buffer).
+  Orbit / pan / wheel-zoom reuse the existing `Camera` + `OrbitDrag` / `PanDrag`
+  interaction state machines. Transfer knobs: `set_alpha_scale` (global opacity),
+  `set_steps` (samples per ray), `set_cull_floor` (skip near-transparent
+  samples). Unlike `ScalarFieldView` (iso-surface *geometry*), this renders the
+  volume itself — every voxel's colour and opacity contribute along the ray.
+  Naga-validated headlessly plus an `egui_kittest` wgpu render test (opaque
+  volume ⇒ visible colour, transparent volume ⇒ nothing).
+
 ## [0.4.2] - 2026-07-02
 
 Follow-up patch refining the 0.4.1 trackpad-momentum fix. `rsplot` only; `rsdm`

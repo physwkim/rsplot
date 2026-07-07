@@ -110,3 +110,11 @@ fn scene3d_image_wgsl_is_valid() {
         include_str!("shaders/scene3d_image.wgsl"),
     );
 }
+
+#[test]
+fn volume_raycaster_wgsl_is_valid() {
+    validate_wgsl(
+        "volume_raycaster.wgsl",
+        include_str!("shaders/volume_raycaster.wgsl"),
+    );
+}

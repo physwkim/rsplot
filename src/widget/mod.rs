@@ -40,3 +40,4 @@ pub mod stack_profile_window;
 pub mod stats_widget;
 pub mod sync;
 pub mod tool_buttons;
+pub mod volume_raycaster;

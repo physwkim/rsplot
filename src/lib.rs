@@ -194,6 +194,7 @@ pub use crate::widget::sync::SyncAxes;
 pub use crate::widget::tool_buttons::{
     AxisScaleToolButton, ProfileToolButton, RulerToolButton, SymbolToolButton, SymbolToolChange,
 };
+pub use crate::widget::volume_raycaster::VolumeRaycaster;
 
 // Plotting-library convention: re-export so downstreams use the same
 // egui/egui-wgpu without version skew.
