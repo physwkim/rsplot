@@ -9335,9 +9335,19 @@ impl CompareImages {
     ///
     /// Call this before [`Self::show`].
     pub fn show_toolbar(&mut self, ui: &mut egui::Ui) -> CompareMode {
-        ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing.x = 2.0;
-
+        // One control row (matching the rest of the image-widget family): the
+        // shared Plot2D control toolbar (zoom in/out, axis invert, keep-aspect,
+        // reset, grid, save/copy) followed by the compare-specific mode and
+        // alignment buttons. `show_toolbar_with`'s closure only exposes the
+        // bare `PlotWidget`, so the buttons edit local copies that are applied
+        // to `self` after the row.
+        let mut mode = self.mode;
+        let mut alignment = self.alignment;
+        let mut split = self.split;
+        let mut split_changed = false;
+        let mut keypoints = self.keypoints_visible;
+        let has_data = !self.data_a.is_empty();
+        let _ = self.inner.show_toolbar_with(ui, |ui, _| {
             for (label, tooltip, m) in [
                 ("A", "Show only image A", CompareMode::OnlyA),
                 ("B", "Show only image B", CompareMode::OnlyB),
@@ -9364,27 +9374,22 @@ impl CompareImages {
                 ),
             ] {
                 if ui
-                    .selectable_label(self.mode == m, label)
+                    .selectable_label(mode == m, label)
                     .on_hover_text(tooltip)
                     .clicked()
-                    && self.mode != m
                 {
-                    self.mode = m;
-                    self.dirty = true;
+                    mode = m;
                 }
             }
 
-            let is_split = matches!(
-                self.mode,
-                CompareMode::HalfHalf | CompareMode::SplitHorizontal
-            );
-            if is_split && !self.data_a.is_empty() {
+            let is_split = matches!(mode, CompareMode::HalfHalf | CompareMode::SplitHorizontal);
+            if is_split && has_data {
                 ui.add_space(4.0);
                 if ui
-                    .add(egui::Slider::new(&mut self.split, 0.0..=1.0).text("split"))
+                    .add(egui::Slider::new(&mut split, 0.0..=1.0).text("split"))
                     .changed()
                 {
-                    self.dirty = true;
+                    split_changed = true;
                 }
             }
 
@@ -9413,28 +9418,35 @@ impl CompareImages {
                 ),
             ] {
                 if ui
-                    .selectable_label(self.alignment == a, label)
+                    .selectable_label(alignment == a, label)
                     .on_hover_text(tooltip)
                     .clicked()
-                    && self.alignment != a
                 {
-                    self.alignment = a;
-                    self.dirty = true;
+                    alignment = a;
                 }
             }
 
             // Keypoint-overlay toggle (silx `setKeypointsVisible`); only has
             // matched keypoints to show in the AUTO alignment.
             ui.add_space(8.0);
-            let mut visible = self.keypoints_visible;
-            if ui
-                .checkbox(&mut visible, "kp")
-                .on_hover_text("Show the matched SIFT keypoints (AUTO alignment)")
-                .changed()
-            {
-                self.set_keypoints_visible(visible);
-            }
+            ui.checkbox(&mut keypoints, "kp")
+                .on_hover_text("Show the matched SIFT keypoints (AUTO alignment)");
         });
+        if mode != self.mode {
+            self.mode = mode;
+            self.dirty = true;
+        }
+        if alignment != self.alignment {
+            self.alignment = alignment;
+            self.dirty = true;
+        }
+        if split_changed {
+            self.split = split;
+            self.dirty = true;
+        }
+        if keypoints != self.keypoints_visible {
+            self.set_keypoints_visible(keypoints);
+        }
 
         self.mode
     }
