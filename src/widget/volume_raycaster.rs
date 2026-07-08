@@ -19,9 +19,13 @@ use crate::core::scene3d::camera::Camera;
 use crate::core::scene3d::interaction::{OrbitDrag, PanDrag, window_to_ndc};
 use crate::core::scene3d::mat4::{Mat4, Vec3};
 use crate::render::volume_raycaster::{
-    VolumeFrame, VolumeId, install_volume_raycaster, paint_volume_raycaster, set_volume_raycaster,
-    volume_bounds,
+    VolumeFrame, VolumeId, install_volume_raycaster, paint_volume_raycaster,
+    remove_volume_raycaster, set_volume_raycaster, volume_bounds,
 };
+
+/// Upper bound on samples per ray; beyond this a single frame can outrun the
+/// OS GPU-timeout watchdog on modest hardware.
+const MAX_STEPS: u32 = 4096;
 
 /// Interactive GPU direct-volume-rendering widget. See the module docs.
 pub struct VolumeRaycaster {
@@ -45,6 +49,11 @@ impl VolumeRaycaster {
     /// Create a raycaster bound to scene key `id`, installing the shared pipeline
     /// into `render_state` (idempotent). The camera looks down `-z`; the first
     /// [`set_volume`](Self::set_volume) frames it to the volume.
+    ///
+    /// The `id` keys the uploaded 3D texture, so distinct volumes need distinct
+    /// ids (two views sharing an id share the last-uploaded texture). Cameras are
+    /// not shared: each paint builds its own uniforms, so same-id views still
+    /// render with their own viewpoint.
     pub fn new(render_state: &RenderState, id: VolumeId) -> Self {
         install_volume_raycaster(render_state);
         let camera = Camera::new(
@@ -89,9 +98,11 @@ impl VolumeRaycaster {
         }
     }
 
-    /// Number of samples per ray (higher = smoother, slower). Default 256.
+    /// Number of samples per ray (higher = smoother, slower). Default 256,
+    /// clamped to `[1, MAX_STEPS]` — an unbounded count can stall the GPU long
+    /// enough to trip the OS device-timeout reset.
     pub fn set_steps(&mut self, steps: u32) {
-        self.steps = steps.max(1);
+        self.steps = steps.clamp(1, MAX_STEPS);
     }
 
     /// Global opacity multiplier applied to each sample's alpha. Default 1.0.
@@ -107,6 +118,15 @@ impl VolumeRaycaster {
     /// Re-frame the camera to the current volume bounds.
     pub fn reset_view(&mut self) {
         self.camera.reset_camera(self.bounds);
+    }
+
+    /// Free this view's uploaded GPU volume (the 3D texture). Its VRAM is
+    /// otherwise held for the app's lifetime, since the shared resources keep one
+    /// entry per id. After this the view paints nothing until the next
+    /// [`set_volume`](Self::set_volume).
+    pub fn remove(&mut self, render_state: &RenderState) {
+        remove_volume_raycaster(render_state, self.id);
+        self.has_volume = false;
     }
 
     /// Lay the view over the available space, handle orbit/pan/zoom, and paint.
@@ -126,14 +146,17 @@ impl VolumeRaycaster {
 
         // Begin a gesture at the press origin (before egui's drag threshold moves
         // the pointer), mirroring `SceneWidget`. No geometry to pick against, so
-        // orbit pivots on the box centre and pan sits on the far plane.
+        // orbit pivots on the box centre and pan sits on the box-centre depth
+        // plane (the same NDC-z the wheel zoom anchors on) — anchoring on the far
+        // plane would make the pan drift faster than the cursor.
         if response.drag_started_by(PointerButton::Primary)
             && let Some(p) = press_origin
         {
             let ctrl = ui.ctx().input(|i| i.modifiers.command);
             let win = to_local(p);
             if ctrl {
-                self.pan = Some(PanDrag::begin(win, size_px, 1.0));
+                let ndc_z = self.camera.matrix().transform_point(center, true).z;
+                self.pan = Some(PanDrag::begin(win, size_px, ndc_z));
             } else {
                 self.orbit = Some(OrbitDrag::begin(&self.camera, win, center));
             }
@@ -174,11 +197,9 @@ impl VolumeRaycaster {
             .matrix()
             .inverse()
             .map_or_else(|| Mat4::IDENTITY.to_gpu_cols(), |m| m.to_gpu_cols());
-        let pos = self.camera.extrinsic.position();
         let frame = VolumeFrame {
             id: self.id,
             inv_mvp,
-            cam_pos: [pos.x, pos.y, pos.z],
             params: [self.steps as f32, self.alpha_scale, self.cull_floor],
         };
         paint_volume_raycaster(ui, rect, frame);

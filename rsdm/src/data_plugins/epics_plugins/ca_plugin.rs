@@ -365,14 +365,30 @@ async fn on_connect(
                 .filter(|e| !e.strings.is_empty())
                 .map(|e| latin1_strings(&e.strings));
             *enum_cache = strings.clone();
-            // The connect-time snapshot carries the initial value, so post it as
-            // a value event (not a bare snapshot update) — the first strip-chart
-            // sample. Always a value event: PyDM clears its value cache on
-            // (re)connect, so the first callback after connect emits
-            // unconditionally (pyepics_plugin_component.py:192-199 → :102).
+            // The connect-time snapshot carries the initial value. Post it as a
+            // value event (the first strip-chart sample) — but gate it on the
+            // same `last_value` change check the monitor branch uses, not
+            // unconditionally. The value monitor and this metadata fetch both
+            // deliver the connect-time value, and the runtime fixes neither
+            // their order nor whether `on_connect` runs once or twice (a
+            // native-type-change / reconnect event re-enters it). Posting here
+            // unconditionally re-emits a value the monitor — or a prior
+            // `on_connect` — already delivered on this connection; if a value
+            // subscriber was created in between (the strip-chart / event-plot
+            // `subscribe_values` case) that duplicate leaks to it as a spurious
+            // sample. Emit only on an actual change; otherwise refresh the CTRL
+            // metadata (units/precision/enum strings the TIME-class monitor
+            // lacks) without a sample. PyDM clear_cache parity is preserved: a
+            // reconnect clears `last_value` (the Disconnected arm), so the first
+            // value after a reconnect still emits (pyepics_plugin_component.py:
+            // 192-199 → :102).
             let value = epics_to_pv(&snap.value, strings.as_deref());
-            *last_value = Some(value.clone());
-            writer.post_value(move |s| apply_metadata(s, &snap, value, strings));
+            if last_value.as_ref() != Some(&value) {
+                *last_value = Some(value.clone());
+                writer.post_value(move |s| apply_metadata(s, &snap, value, strings));
+            } else {
+                writer.update(move |s| apply_metadata(s, &snap, value, strings));
+            }
         }
         Err(_) => {
             // Connected, but the metadata read failed; reflect the connection so

@@ -9,6 +9,66 @@ This is a workspace of three crates released together: **rsplot** (the plotting
 library), **rsdm** (a PyDM-style EPICS display layer built on rsplot), and
 **adl2rsdm** (a MEDM `.adl` → RsDM-Rust-source converter).
 
+## [0.5.2] - 2026-07-08
+
+A correctness and robustness pass over the `VolumeRaycaster` shipped in 0.5.1,
+from a post-release review, plus two `rsdm` data-engine race fixes surfaced by
+the cross-platform CI. `adl2rsdm` is re-released in lockstep (no functional
+change).
+
+### Fixed — `rsplot`
+
+- **Dark fringe around opaque regions is gone.** The 3-D volume texture stored
+  straight-alpha RGBA, so the linear sampler bled a transparent voxel's `rgb=0`
+  into neighbouring colour at a boundary, darkening it. The volume is now
+  premultiplied on upload and composited in premultiplied space, so the filter
+  interpolates colour that keeps its hue. (`premultiply_rgba` is unit-tested.)
+- **Opacity no longer depends on the ray step count.** Per-sample coverage was
+  composited as-is, so raising `set_steps` also made the whole volume more
+  opaque. Each sample's coverage is now Beer-Lambert–corrected to a 256-step
+  baseline, so opacity depends only on the data and `set_alpha_scale`; the
+  default view is unchanged.
+- **`set_steps` is clamped to `[1, 4096]`.** A very large value marched every ray
+  that many times in one frame and could trip the OS GPU-timeout watchdog and
+  reset the device.
+- **Invalid volumes are rejected up front.** `set_volume` now validates the
+  extent and that the RGBA length matches `depth·height·width·4`, so a bad call
+  is a no-op (keeping any prior upload) instead of a wgpu validation panic deep
+  in the render backend.
+- **Ctrl/Cmd-pan tracks the pointer one-to-one.** The pan was anchored on the far
+  plane, so the volume moved faster than the cursor; it is now anchored at the
+  box-centre depth (the same depth the wheel zoom uses).
+- **Same `VolumeId` painted twice in one frame keeps each camera.** The per-id
+  uniform buffer was shared between `prepare` and `paint`, so two callbacks with
+  one id both rendered from whichever prepared last (e.g. the same volume in two
+  panels). Dynamic camera state moved to per-callback buffers.
+
+### Changed — `rsplot`
+
+- **`VolumeRaycaster::remove` / `remove_volume_raycaster(id)`** free a volume's
+  GPU resources (3-D texture, bind group, uniform buffer); previously an id's
+  VRAM was held for the app's lifetime with no way to release it.
+- Dropped the unused `cam_pos` uniform (the shader un-projects rays through
+  `inv_mvp`), shrinking the per-frame uniform buffer.
+
+### Fixed — `rsdm`
+
+- **`ca://` no longer leaks a duplicate initial sample.** The connect-time
+  metadata fetch posted the initial value unconditionally, but the connection
+  task can run its connect handler more than once (the CA client emits a native
+  DBR-type "change" on the first connect, re-entering it). The second post
+  re-emitted a value the value monitor had already delivered, and a strip-chart /
+  event-plot `subscribe_values` created in between received it as a spurious
+  sample. The connect-time value is now gated on an actual change, like the
+  monitor path.
+- **`calc://` always publishes its initial derived value.** The poll loop
+  consumed a child's recompute trigger even on ticks where not every child was
+  connected yet, so if the last child to connect was not itself a triggering
+  variable (an `update` list excluding it), the first all-connected tick saw no
+  change and never ran the initial evaluation — the calc stayed connected but
+  valueless. Child stamp changes are now folded in only once every child is
+  connected, so the initial evaluation is order-independent.
+
 ## [0.5.1] - 2026-07-07
 
 A feature-bearing patch over the `0.5.0` crate rename: a new volume-rendering

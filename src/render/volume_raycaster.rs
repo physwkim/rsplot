@@ -12,6 +12,7 @@
 //! [`paint_volume_raycaster`] registers the per-frame paint callback.
 
 use std::collections::HashMap;
+use std::sync::Mutex;
 
 use egui_wgpu::{RenderState, wgpu};
 
@@ -24,7 +25,6 @@ pub type VolumeId = u64;
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct VolumeUniforms {
     inv_mvp: [[f32; 4]; 4],
-    cam_pos: [f32; 4],
     vol_min: [f32; 4],
     vol_max: [f32; 4],
     params: [f32; 4],
@@ -37,7 +37,6 @@ pub struct VolumeFrame {
     pub id: VolumeId,
     /// Inverse of the camera clip matrix, column-major (`Mat4::to_gpu_cols`).
     pub inv_mvp: [[f32; 4]; 4],
-    pub cam_pos: [f32; 3],
     /// `[step_count, alpha_scale, cull_floor]`.
     pub params: [f32; 3],
 }
@@ -56,6 +55,25 @@ pub fn volume_bounds(depth: usize, height: usize, width: usize) -> ([f32; 3], [f
     // x ↔ width, y ↔ height, z ↔ depth.
     let half = [dx / longest * 0.5, dy / longest * 0.5, dz / longest * 0.5];
     ([-half[0], -half[1], -half[2]], half)
+}
+
+/// Premultiply a straight-alpha RGBA8 buffer (`rgb *= a/255`, rounded), so the
+/// linear sampler interpolates premultiplied colour: a transparent voxel becomes
+/// `(0,0,0,0)` and interpolating it against an opaque colour keeps the hue
+/// instead of dragging it toward black. A trailing partial pixel (len not a
+/// multiple of 4) is dropped.
+fn premultiply_rgba(rgba: &[u8]) -> Vec<u8> {
+    rgba.chunks_exact(4)
+        .flat_map(|px| {
+            let a = px[3] as u16;
+            [
+                ((px[0] as u16 * a + 127) / 255) as u8,
+                ((px[1] as u16 * a + 127) / 255) as u8,
+                ((px[2] as u16 * a + 127) / 255) as u8,
+                px[3],
+            ]
+        })
+        .collect()
 }
 
 struct VolumePipeline {
@@ -155,43 +173,40 @@ impl VolumePipeline {
     }
 }
 
-/// Per-view GPU state: the uniform buffer, the uploaded 3D texture, its bind
-/// group and the world-space box the texture occupies.
+/// Per-view GPU state: the uploaded 3D texture and the world-space box it
+/// occupies. Uniforms and the bind group are NOT stored here — each paint
+/// callback builds its own in `prepare` (see [`VolumeCallback`]), so two
+/// callbacks sharing a [`VolumeId`] in one frame no longer clobber a shared
+/// uniform buffer.
 struct VolumeGpu {
-    uniform_buf: wgpu::Buffer,
-    bind_group: Option<wgpu::BindGroup>,
+    texture: Option<wgpu::Texture>,
     vol_min: [f32; 3],
     vol_max: [f32; 3],
 }
 
 impl VolumeGpu {
-    fn new(device: &wgpu::Device) -> Self {
-        let uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("rsplot volume raycaster uniforms"),
-            size: std::mem::size_of::<VolumeUniforms>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+    fn new() -> Self {
         Self {
-            uniform_buf,
-            bind_group: None,
+            texture: None,
             vol_min: [-0.5, -0.5, -0.5],
             vol_max: [0.5, 0.5, 0.5],
         }
     }
 
     /// Upload a `(depth, height, width)` RGBA8 volume (row-major, straight
-    /// alpha), (re)building the 3D texture and bind group.
+    /// alpha), (re)building the 3D texture. The straight alpha is premultiplied
+    /// before upload so the linear sampler interpolates premultiplied colour (no
+    /// dark fringe at colour/transparent boundaries).
     fn upload(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        pipeline: &VolumePipeline,
         rgba: &[u8],
         dims: (usize, usize, usize),
     ) {
         let (depth, height, width) = dims;
         let (w, h, d) = (width as u32, height as u32, depth as u32);
+        let premul = premultiply_rgba(rgba);
         let extent = wgpu::Extent3d {
             width: w,
             height: h,
@@ -214,7 +229,7 @@ impl VolumeGpu {
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
-            rgba,
+            &premul,
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(w * 4),
@@ -222,17 +237,49 @@ impl VolumeGpu {
             },
             extent,
         );
+        self.texture = Some(texture);
+        (self.vol_min, self.vol_max) = volume_bounds(depth, height, width);
+    }
+
+    /// Build a bind group for one frame: a fresh uniform buffer holding this
+    /// frame's camera and this view's box, plus the view's texture and the shared
+    /// sampler. `None` until a volume has been uploaded. Called once per paint in
+    /// `prepare`, so each callback owns its uniforms rather than sharing one
+    /// per-id buffer.
+    fn frame_bind_group(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        pipeline: &VolumePipeline,
+        frame: &VolumeFrame,
+    ) -> Option<wgpu::BindGroup> {
+        let texture = self.texture.as_ref()?;
+        let u = VolumeUniforms {
+            inv_mvp: frame.inv_mvp,
+            vol_min: [self.vol_min[0], self.vol_min[1], self.vol_min[2], 0.0],
+            vol_max: [self.vol_max[0], self.vol_max[1], self.vol_max[2], 0.0],
+            params: [frame.params[0], frame.params[1], frame.params[2], 0.0],
+        };
+        let uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("rsplot volume raycaster uniforms"),
+            size: std::mem::size_of::<VolumeUniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        queue.write_buffer(&uniform_buf, 0, bytemuck::bytes_of(&u));
         let view = texture.create_view(&wgpu::TextureViewDescriptor {
             dimension: Some(wgpu::TextureViewDimension::D3),
             ..Default::default()
         });
-        self.bind_group = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
+        // The bind group holds strong refs to the uniform buffer and view, so
+        // both live as long as the callback keeps the bind group.
+        Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("rsplot volume raycaster bind group"),
             layout: &pipeline.bgl,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: self.uniform_buf.as_entire_binding(),
+                    resource: uniform_buf.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
@@ -243,19 +290,7 @@ impl VolumeGpu {
                     resource: wgpu::BindingResource::Sampler(&pipeline.sampler),
                 },
             ],
-        }));
-        (self.vol_min, self.vol_max) = volume_bounds(depth, height, width);
-    }
-
-    fn write_uniforms(&self, queue: &wgpu::Queue, frame: &VolumeFrame) {
-        let u = VolumeUniforms {
-            inv_mvp: frame.inv_mvp,
-            cam_pos: [frame.cam_pos[0], frame.cam_pos[1], frame.cam_pos[2], 1.0],
-            vol_min: [self.vol_min[0], self.vol_min[1], self.vol_min[2], 0.0],
-            vol_max: [self.vol_max[0], self.vol_max[1], self.vol_max[2], 0.0],
-            params: [frame.params[0], frame.params[1], frame.params[2], 0.0],
-        };
-        queue.write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&u));
+        }))
     }
 }
 
@@ -298,34 +333,64 @@ pub fn set_volume_raycaster(
     height: usize,
     width: usize,
 ) {
+    // Guard the wgpu texture invariants: non-empty extent and exactly one RGBA8
+    // texel per voxel. An invalid call is a no-op (keeping any prior upload)
+    // rather than a wgpu validation panic; debug builds trip an assert so the
+    // caller bug is caught.
+    let expected = depth.saturating_mul(height).saturating_mul(width) * 4;
+    if depth == 0 || height == 0 || width == 0 || rgba.len() != expected {
+        debug_assert!(
+            false,
+            "set_volume_raycaster: bad volume ({depth}x{height}x{width}, {} bytes, expected {expected})",
+            rgba.len()
+        );
+        return;
+    }
     let mut renderer = render_state.renderer.write();
     let res: &mut VolumeRaycasterResources = renderer
         .callback_resources
         .get_mut()
         .expect("VolumeRaycasterResources not installed — call install_volume_raycaster() first");
-    let VolumeRaycasterResources { pipeline, scenes } = res;
-    let scene = scenes
-        .entry(id)
-        .or_insert_with(|| VolumeGpu::new(&render_state.device));
+    let scene = res.scenes.entry(id).or_insert_with(VolumeGpu::new);
     scene.upload(
         &render_state.device,
         &render_state.queue,
-        pipeline,
         rgba,
         (depth, height, width),
     );
 }
 
-/// egui paint callback: write this frame's uniforms in `prepare`, ray-march in
-/// `paint`.
+/// Drop view `id`'s GPU resources (the 3D texture), freeing its VRAM. A no-op if
+/// `id` was never uploaded or the pipeline is not installed. Call when a
+/// raycaster view goes away so its texture does not linger in
+/// `callback_resources` for the app's lifetime.
+pub fn remove_volume_raycaster(render_state: &RenderState, id: VolumeId) {
+    let mut renderer = render_state.renderer.write();
+    if let Some(res) = renderer
+        .callback_resources
+        .get_mut::<VolumeRaycasterResources>()
+    {
+        res.scenes.remove(&id);
+    }
+}
+
+/// egui paint callback. `prepare` builds this frame's own bind group (fresh
+/// uniform buffer for the camera + the view's texture) and stashes it in `ready`;
+/// `paint` ray-marches with it. Because the bind group is per-callback rather
+/// than a shared per-id buffer, two callbacks with the same [`VolumeId`] in one
+/// frame each render with their own camera.
 struct VolumeCallback {
     frame: VolumeFrame,
+    /// Built in `prepare`, consumed in `paint`. `Mutex` only to satisfy the
+    /// `CallbackTrait: Send + Sync` bound — prepare and paint run in sequence on
+    /// the render thread, never concurrently.
+    ready: Mutex<Option<wgpu::BindGroup>>,
 }
 
 impl egui_wgpu::CallbackTrait for VolumeCallback {
     fn prepare(
         &self,
-        _device: &wgpu::Device,
+        device: &wgpu::Device,
         queue: &wgpu::Queue,
         _screen: &egui_wgpu::ScreenDescriptor,
         _encoder: &mut wgpu::CommandEncoder,
@@ -334,7 +399,8 @@ impl egui_wgpu::CallbackTrait for VolumeCallback {
         if let Some(res) = resources.get::<VolumeRaycasterResources>()
             && let Some(scene) = res.scenes.get(&self.frame.id)
         {
-            scene.write_uniforms(queue, &self.frame);
+            let bg = scene.frame_bind_group(device, queue, &res.pipeline, &self.frame);
+            *self.ready.lock().unwrap() = bg;
         }
         Vec::new()
     }
@@ -345,9 +411,11 @@ impl egui_wgpu::CallbackTrait for VolumeCallback {
         render_pass: &mut wgpu::RenderPass<'static>,
         resources: &egui_wgpu::CallbackResources,
     ) {
+        // Hold the guard through the draw so the bind group (and the uniform
+        // buffer it owns) stay alive while the pass records.
+        let ready = self.ready.lock().unwrap();
         if let Some(res) = resources.get::<VolumeRaycasterResources>()
-            && let Some(scene) = res.scenes.get(&self.frame.id)
-            && let Some(bind_group) = &scene.bind_group
+            && let Some(bind_group) = ready.as_ref()
         {
             render_pass.set_pipeline(&res.pipeline.pipeline);
             render_pass.set_bind_group(0, bind_group, &[]);
@@ -358,9 +426,44 @@ impl egui_wgpu::CallbackTrait for VolumeCallback {
 
 /// Register the raycaster paint callback for `frame` over `rect`. A no-op on
 /// screen until [`set_volume_raycaster`] has uploaded a volume for `frame.id`.
+///
+/// Each callback builds its own uniform buffer + bind group in `prepare` (keyed
+/// off `frame`, not shared per id), so painting the same [`VolumeId`] twice in
+/// one frame — two panels of the same volume from different cameras — renders
+/// each with its own viewpoint.
 pub fn paint_volume_raycaster(ui: &mut egui::Ui, rect: egui::Rect, frame: VolumeFrame) {
     ui.painter().add(egui_wgpu::Callback::new_paint_callback(
         rect,
-        VolumeCallback { frame },
+        VolumeCallback {
+            frame,
+            ready: Mutex::new(None),
+        },
     ));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::premultiply_rgba;
+
+    #[test]
+    fn premultiply_zeroes_transparent_and_keeps_opaque() {
+        // Opaque red is unchanged; fully transparent becomes (0,0,0,0) so the
+        // linear filter cannot bleed its colour; half-alpha halves rgb.
+        let src = [
+            255, 0, 0, 255, // opaque red
+            200, 100, 50, 0, // transparent → all zero
+            255, 255, 255, 128, // half coverage → ~half
+        ];
+        let out = premultiply_rgba(&src);
+        assert_eq!(&out[0..4], &[255, 0, 0, 255]);
+        assert_eq!(&out[4..8], &[0, 0, 0, 0]);
+        assert_eq!(out[11], 128); // alpha preserved
+        assert_eq!(out[8], 128); // 255*128/255 rounded
+    }
+
+    #[test]
+    fn premultiply_drops_trailing_partial_pixel() {
+        let src = [255, 0, 0, 255, 1, 2]; // 6 bytes: one pixel + 2 stragglers
+        assert_eq!(premultiply_rgba(&src).len(), 4);
+    }
 }

@@ -2,14 +2,16 @@
 //
 // A full-screen triangle generates one camera ray per pixel from the inverse
 // view-projection matrix. Each ray is clipped to the volume's axis-aligned box
-// and marched in fixed steps, sampling straight-alpha RGBA and accumulating
-// PREMULTIPLIED colour so the result blends with `PREMULTIPLIED_ALPHA_BLENDING`
+// and marched in fixed steps. The 3D texture holds PREMULTIPLIED RGBA (the
+// uploader premultiplies straight alpha) so the hardware linear filter
+// interpolates premultiplied colour — a colour/transparent boundary stays the
+// right hue instead of bleeding toward black. Samples accumulate front-to-back
+// into premultiplied colour that blends with `PREMULTIPLIED_ALPHA_BLENDING`
 // straight into egui's render pass (no offscreen target, no depth).
 
 struct Uniforms {
     // Inverse of the camera clip matrix P·V (OpenGL clip, z in [-1, 1]).
     inv_mvp: mat4x4<f32>,
-    cam_pos: vec4<f32>, // world-space camera position (xyz; w unused)
     vol_min: vec4<f32>, // world-space AABB min (xyz)
     vol_max: vec4<f32>, // world-space AABB max (xyz)
     // x = step count, y = alpha scale, z = sample-alpha cull floor, w unused.
@@ -19,6 +21,12 @@ struct Uniforms {
 @group(0) @binding(0) var<uniform> u: Uniforms;
 @group(0) @binding(1) var vol_tex: texture_3d<f32>;
 @group(0) @binding(2) var vol_samp: sampler;
+
+// Reference sample count for the opacity correction: at this many steps a
+// sample's coverage is used as-is, and other step counts are corrected so the
+// accumulated opacity stays the same. Matches the widget's default `steps`, so
+// the default view is unchanged.
+const REF_STEPS: f32 = 256.0;
 
 struct VsOut {
     @builtin(position) clip: vec4<f32>,
@@ -80,11 +88,19 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     for (var i = 0; i < steps; i = i + 1) {
         let p = ro + rd * t;
         let uvw = (p - u.vol_min.xyz) / extent;
-        let s = textureSampleLevel(vol_tex, vol_samp, uvw, 0.0);
+        let s = textureSampleLevel(vol_tex, vol_samp, uvw, 0.0); // premultiplied rgb, coverage a
         if s.a > cull_floor {
-            let a = clamp(s.a * alpha_scale, 0.0, 1.0);
-            let w = (1.0 - acc.a) * a;
-            acc = vec4<f32>(acc.rgb + s.rgb * w, acc.a + w);
+            // Scale coverage by the user opacity knob, then correct it for the
+            // step count so accumulated opacity is invariant to `steps`
+            // (transmittance (1-sa)^steps held to the REF_STEPS baseline).
+            let sa = clamp(s.a * alpha_scale, 0.0, 1.0);
+            let sa_c = 1.0 - pow(1.0 - sa, REF_STEPS / f32(steps));
+            // Rescale the premultiplied colour to the corrected coverage
+            // (gain = sa_c/s.a). Compositing stays in premultiplied space, so no
+            // dark fringe at boundaries.
+            let gain = sa_c / max(s.a, 1e-6);
+            let w = 1.0 - acc.a;
+            acc = vec4<f32>(acc.rgb + s.rgb * gain * w, acc.a + sa_c * w);
         }
         if acc.a >= 0.995 {
             break;
