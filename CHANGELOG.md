@@ -9,11 +9,12 @@ This is a workspace of three crates released together: **rsplot** (the plotting
 library), **rsdm** (a PyDM-style EPICS display layer built on rsplot), and
 **adl2rsdm** (a MEDM `.adl` → RsDM-Rust-source converter).
 
-## [0.5.2] - 2026-07-07
+## [0.5.2] - 2026-07-08
 
 A correctness and robustness pass over the `VolumeRaycaster` shipped in 0.5.1,
-from a post-release review. `rsplot` only; `rsdm` and `adl2rsdm` are re-released
-in lockstep (no functional change).
+from a post-release review, plus two `rsdm` data-engine race fixes surfaced by
+the cross-platform CI. `adl2rsdm` is re-released in lockstep (no functional
+change).
 
 ### Fixed — `rsplot`
 
@@ -49,6 +50,24 @@ in lockstep (no functional change).
   VRAM was held for the app's lifetime with no way to release it.
 - Dropped the unused `cam_pos` uniform (the shader un-projects rays through
   `inv_mvp`), shrinking the per-frame uniform buffer.
+
+### Fixed — `rsdm`
+
+- **`ca://` no longer leaks a duplicate initial sample.** The connect-time
+  metadata fetch posted the initial value unconditionally, but the connection
+  task can run its connect handler more than once (the CA client emits a native
+  DBR-type "change" on the first connect, re-entering it). The second post
+  re-emitted a value the value monitor had already delivered, and a strip-chart /
+  event-plot `subscribe_values` created in between received it as a spurious
+  sample. The connect-time value is now gated on an actual change, like the
+  monitor path.
+- **`calc://` always publishes its initial derived value.** The poll loop
+  consumed a child's recompute trigger even on ticks where not every child was
+  connected yet, so if the last child to connect was not itself a triggering
+  variable (an `update` list excluding it), the first all-connected tick saw no
+  change and never ran the initial evaluation — the calc stayed connected but
+  valueless. Child stamp changes are now folded in only once every child is
+  connected, so the initial evaluation is order-independent.
 
 ## [0.5.1] - 2026-07-07
 
