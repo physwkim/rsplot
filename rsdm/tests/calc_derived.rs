@@ -127,6 +127,47 @@ fn calc_update_list_restricts_which_child_triggers_recompute() {
     );
 }
 
+/// Regression for the lost initial-evaluation edge: a child whose value lands
+/// before *every* child is connected must not have its recompute trigger
+/// silently consumed. With `update=a`, connect `a` first and let the 50 ms poll
+/// loop observe it (over several ticks) while `b` is still a bare, disconnected
+/// child; then connect `b`. `b` is not in the update list, so `b`'s own
+/// connection cannot be the trigger — only the pending change to `a` can. The
+/// initial evaluation must still run on the first all-connected tick.
+///
+/// Before the fix the poll loop folded `a`'s change into `prev_stamps` on a
+/// not-all-connected tick, so the first all-connected tick saw no triggering
+/// change and never published — the calc stayed connected but valueless, and
+/// this timed out. This is the deterministic form of the child-connect-order
+/// flake that hit `calc://` on CI.
+#[test]
+fn calc_publishes_initial_value_when_update_var_connects_before_others() {
+    let engine = Engine::new();
+    let calc = engine
+        .connect("calc://early?expr=a+b&a=loc://calc_early_a&b=loc://calc_early_b&update=a")
+        .expect("connect calc channel");
+    // Connect the update variable `a` first, then let the poll loop run several
+    // 50 ms ticks with `a` connected but `b` still bare and disconnected.
+    let _a = engine
+        .connect("loc://calc_early_a?type=float&init=2")
+        .expect("connect child a");
+    std::thread::sleep(Duration::from_millis(300));
+    // Now connect `b` (not in the update list): only the pending change to `a`
+    // can trigger the initial evaluation.
+    let _b = engine
+        .connect("loc://calc_early_b?type=float&init=3")
+        .expect("connect child b");
+
+    assert!(
+        wait_for(
+            || matches!(calc.read(|s| s.value.clone()), Some(PvValue::Float(v)) if (v - 5.0).abs() < 1e-9),
+            WAIT
+        ),
+        "initial derived value a+b = 2+3 = 5.0 was never published (got {:?})",
+        calc.read(|s| s.value.clone())
+    );
+}
+
 // ---------------------------------------------------------------------------
 // MEDM CALC dialect (`?dialect=medm`) — the adl2rsdm visibility-gate language.
 // ---------------------------------------------------------------------------

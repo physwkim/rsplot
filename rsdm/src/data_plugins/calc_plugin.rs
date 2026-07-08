@@ -279,23 +279,38 @@ async fn run_channel(
             _ = ticker.tick() => {
                 let all_connected = children.iter().all(|(_, ch)| ch.is_connected());
 
-                // Note every child whose value changed; a change to a variable
-                // in the `update` list (or any variable when no list is given)
-                // triggers a recompute.
-                let mut trigger = false;
-                for (i, (name, ch)) in children.iter().enumerate() {
-                    let stamp = ch.stamp();
-                    if stamp != prev_stamps[i] {
-                        prev_stamps[i] = stamp;
-                        if update.as_ref().is_none_or(|u| u.iter().any(|n| n == name)) {
-                            trigger = true;
-                        }
-                    }
-                }
-
                 if all_connected != connected {
                     connected = all_connected;
                     writer.update(move |s| s.connected = all_connected);
+                }
+
+                // Note every child whose value changed; a change to a variable
+                // in the `update` list (or any variable when no list is given)
+                // triggers a recompute.
+                //
+                // Fold stamp changes into `prev_stamps` ONLY while every child
+                // is connected — i.e. only while a recompute could actually
+                // run. A child's initial value often lands a tick or more
+                // before the last child connects; consuming that change here
+                // (advancing `prev_stamps` regardless of `all_connected`, the
+                // old behaviour) dropped its trigger, so the first
+                // all-connected tick saw no change and the initial value was
+                // never published — the calc stayed connected but valueless
+                // until the next child write. Leaving `prev_stamps` at
+                // `u64::MAX` until the first all-connected tick makes that tick
+                // observe every child as changed and run the initial eval, with
+                // no dependence on the child-connect vs poll-tick interleaving.
+                let mut trigger = false;
+                if all_connected {
+                    for (i, (name, ch)) in children.iter().enumerate() {
+                        let stamp = ch.stamp();
+                        if stamp != prev_stamps[i] {
+                            prev_stamps[i] = stamp;
+                            if update.as_ref().is_none_or(|u| u.iter().any(|n| n == name)) {
+                                trigger = true;
+                            }
+                        }
+                    }
                 }
 
                 if all_connected && trigger
