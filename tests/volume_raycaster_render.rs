@@ -9,8 +9,18 @@ use rsplot::egui;
 use rsplot::egui_wgpu::RenderState;
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::Mutex;
 
 const WIN: f32 = 320.0;
+
+/// Serializes the two GPU tests in this binary. `cargo test` runs them on
+/// parallel threads, so each would create and tear down its own wgpu device at
+/// the same time; on the Windows CI runner's DX12 software adapter (WARP) that
+/// concurrent device create/destroy faults with STATUS_ACCESS_VIOLATION (a
+/// native crash in the adapter, not in rsplot). Holding this lock across each
+/// test's whole render keeps exactly one device alive at a time. Poison is
+/// recovered (a failed assertion in one test must not wedge the other).
+static GPU: Mutex<()> = Mutex::new(());
 
 /// An `n³` RGBA8 volume, every voxel `(r, g, b, a)`.
 fn solid(n: usize, rgba: [u8; 4]) -> Vec<u8> {
@@ -66,6 +76,7 @@ fn red_pixels_for(rgba: [u8; 4]) -> usize {
 
 #[test]
 fn opaque_volume_ray_marches_to_colour() {
+    let _gpu = GPU.lock().unwrap_or_else(|e| e.into_inner());
     let red = red_pixels_for([255, 0, 0, 255]);
     assert!(
         red > 500,
@@ -75,6 +86,7 @@ fn opaque_volume_ray_marches_to_colour() {
 
 #[test]
 fn transparent_volume_renders_nothing() {
+    let _gpu = GPU.lock().unwrap_or_else(|e| e.into_inner());
     let red = red_pixels_for([255, 0, 0, 0]); // alpha 0 everywhere
     assert!(
         red < 50,
