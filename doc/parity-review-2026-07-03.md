@@ -3263,7 +3263,7 @@ Both findings share one structural misunderstanding: **`silx.math.histogram.Hist
 
 ### R4-5: Colormap-dialog data histogram counts the range-max sample that silx drops
 
-Severity: Medium
+Severity: Medium — **FIXED** (`eeca82c`)
 
 Rust: `src/core/histogram.rs:66-67` — the comment `// Last bin is inclusive of xmax (numpy/Histogramnd convention).` precedes `let idx = ((((t - xmin) / span) * nbins as f64) as usize).min(nbins - 1);`, folding a sample equal to `xmax` into the last bin. The test at `histogram.rs:118-127` asserts the two boundary `5.0` samples are counted (`sum == 4`), encoding the wrong upstream behaviour.
 
@@ -3271,15 +3271,19 @@ Reference: `silx/gui/dialog/ColormapDialog.py:1288` calls `Histogramnd(data, n_b
 
 Impact: for an image whose maximum value occurs on many pixels (saturated/quantized detector frames), the top histogram bin in the colormap dialog / inline `HistogramColorBar` shows more counts than silx, and total counts exceed silx's. Both the comment and the regression test assert the wrong reference — a textbook principle-4 (test skepticism) case.
 
+Fix (`eeca82c`): the admission rule moved into one `bin_index(t, xmin, xmax, span, nbins) -> Option<usize>`, so the half-open extent `[xmin, xmax)` is uniform. The `span > 0.0` special case disappeared with it: a degenerate extent now admits nothing, which is what `ColormapDialog.computeHistogram` does — it has no degenerate guard (`ColormapDialog.py:1264-1288`) and `Histogramnd` rejects every coordinate at `g_max`. Bin arithmetic multiplies before dividing, as C does. Tests are per boundary of `bin_index`; 5 of 6 fail against the old binning.
+
 ### R4-6: Scatter BINNED_STATISTIC includes the max-edge points that silx drops
 
-Severity: Medium
+Severity: Medium — **FIXED** (`0fa3d00`)
 
 Rust: `src/core/scatter_viz.rs:1132-1133` docstring `matching Histogramnd's inclusive last edge`, and `scatter_viz.rs:1184-1190` — `if c >= cols { c = cols - 1; }` / `if r >= rows { r = rows - 1; }` clamp points at `x == x_max` / `y == y_max` into the last column/row.
 
 Reference: `silx/gui/plot/items/scatter.py:502-504` builds `Histogramnd(points, histo_range=ranges, n_bins=shape, weights=values)` with no `last_bin_closed` (default `False`). With `ranges = min_max(x/y)` (`scatter.py:489`), every point on the maximum X edge and maximum Y edge equals the range max and is dropped from all bins.
 
-Impact: in `Visualization.BINNED_STATISTIC` the entire rightmost column and topmost row of bins differ — rsplot's `mean`/`count`/`sum` include the max-edge points, silx's exclude them (those bins read `NaN`). For a regular grid this is a systematic full-edge discrepancy, and `BinnedStatistic::pick` returns points silx would not have binned.
+Impact: in `Visualization.BINNED_STATISTIC` the entire rightmost column and topmost row of bins differ — rsplot's `mean`/`count`/`sum` include the max-edge points, silx's exclude them (those bins read `NaN`). For a regular grid this is a systematic full-edge discrepancy, and `BinnedStatistic::pick` returns points silx would not have binned. Corroboration: `BinnedStatistic::pick` already used the strict upper bound through `grid_cell`, so counting and picking disagreed about the max point.
+
+Fix (`0fa3d00`): both axes route through the now-`pub(crate)` `histogram::bin_index` — silx calls one `Histogramnd` for both sites, so the rule has one home. The `else { 1.0 }` unit-bin fallback is gone; `scale` is `span / n_bins` unconditionally, matching the bin size silx derives from the edge array (`scatter.py:504-507`), and `grid_cell` already rejects a zero scale. A degenerate axis extent therefore yields an empty grid, as in silx. `actions::analysis::pixel_intensity_histogram` was audited and left inclusive: its silx source passes `last_bin_closed=True` (`actions/histogram.py:279`).
 
 ### Category C — plot3d + VolumeRaycaster (vs silx.gui.plot3d)
 
