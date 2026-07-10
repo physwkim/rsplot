@@ -3323,6 +3323,19 @@ The `ca://` fix (`6ba4a4e`) **verifies as PyDM-faithful**: PyDM's `send_new_valu
 
 ### R4-10: `calc://` publishes an initial value the update-list gate makes PyDM withhold — (introduced by `c020401`)
 
+**NOT FIXED — deliberate divergence, recorded.** Adopting PyDM's gate exactly
+would re-open the CI flake this finding's own commit closed: PyDM's
+`callback_value` drops any value callback that predates full connection and
+`callback_conn` never re-arms the recompute, so PyDM's own initial calc value
+is order-dependent — with `loc://` children (which post their initial value at
+connect, `local_plugin.rs:84`) it is a race. That is a reference-side quirk of
+the kind `port-translation-lessons` Lesson 1 says a parity audit cannot
+adjudicate, not a contract worth importing. rsdm keeps its eager initial
+evaluation: the first all-connected tick always evaluates. The R4 trigger
+rework preserves this behaviour structurally (a queued pre-connect value event
+is held, not collapsed) instead of via the `u64::MAX` sentinel `c020401` used.
+Documented at `calc_plugin.rs` `initial_eval_done`.
+
 Severity: Medium
 
 Rust: `rsdm/src/data_plugins/calc_plugin.rs:303-330` — the fix leaves `prev_stamps` at `u64::MAX` until the first all-connected tick, so that tick sees every child's stamp as changed; if any update-listed child has a value, `trigger` is set (`:305-313`) and `evaluate` publishes (`:316-329`). The commit frames "connected but valueless until the next child write" as a bug and makes the initial eval hold by construction.
@@ -3333,6 +3346,13 @@ Impact: when the last child to connect is not in the `update` list and the updat
 
 ### R4-11: `calc://` does not re-emit its value on a child connection-state change
 
+**FIXED (R4, structural).** The poll loop tracks per-child connection state and,
+on any change, re-emits the last computed value via `post_value` (or, when no
+value has been computed yet, updates the `connected` flag only) — PyDM
+`callback_conn` → `_send_update(self.connected, self._value)` with
+`receive_new_data`'s `None` skip. Regression:
+`child_connection_change_reemits_the_last_value` (fails on the old code).
+
 Severity: Low
 
 Rust: `rsdm/src/data_plugins/calc_plugin.rs:282-284` — a child connect/disconnect changes `all_connected`, published with `writer.update(move |s| s.connected = all_connected)` (a connection-only update, no value event). A calc value reaches subscribers only through the separate stamp-triggered `post_value` recompute (`:316-329`), which fires only for an update-listed child whose stamp moved.
@@ -3342,6 +3362,17 @@ Reference: `pydm/data_plugins/calc_plugin.py:156-157` — `callback_conn` runs `
 Impact: on any child reconnect (or a non-update-var child connecting), PyDM re-emits the calc's last computed value to value subscribers; rsdm emits nothing (only the `connected` flag flips). A strip chart on a calc channel misses the resample PyDM injects on child connection churn.
 
 ### R4-12: `calc://` retriggers on a child's alarm/metadata change, not just its value
+
+**FIXED (R4, structural).** The trigger primitive was replaced: the poll loop
+now drains a per-child `Channel::subscribe_values` queue instead of sampling
+`Channel::stamp()`. `StateWriter::update` (alarm, metadata, connection) posts
+no value event — an invariant already pinned by
+`channel.rs::update_does_not_emit_a_value_event` — so an alarm-only or
+DBE_PROPERTY callback can no longer recompute or advance a `prev_res`
+accumulator. This is what PyDM gets for free by binding only `value_slot`.
+The same change makes the trigger durable (a queue, not a collapsing counter),
+which is why R4-10's sentinel could be deleted. Regression:
+`alarm_only_child_update_does_not_retrigger_the_calc` (fails on the old code).
 
 Severity: Medium
 

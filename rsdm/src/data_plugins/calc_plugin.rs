@@ -87,10 +87,20 @@
 //!
 //! **No async wake on child updates.** The snapshot model publishes child values
 //! through an `Arc<RwLock<ChannelState>>` + an egui repaint, not a tokio waker,
-//! so the connection task **polls** each child's update `stamp` on a fixed
-//! interval and recomputes when a triggering variable changed. This is the
-//! right-sized fit for a handful of children at GUI rates; a notification
-//! subsystem in `channel.rs` for this one plugin would not be.
+//! so the connection task **drains** each child's value-event queue
+//! ([`Channel::subscribe_values`]) on a fixed interval and recomputes when a
+//! triggering variable emitted a value. It subscribes to value events rather
+//! than sampling `Channel::stamp()` because `stamp` bumps on *any* state change
+//! — an alarm-only or metadata-only update would otherwise recompute and
+//! republish, double-counting a `prev_res` accumulator. PyDM binds only
+//! `connection_slot`/`value_slot` on its calc children (`calc_plugin.py:84-89`),
+//! so alarm severity and ctrl metadata never reach its recompute either. The
+//! queues additionally make the trigger durable: an event arriving before the
+//! last child connects waits in the queue instead of collapsing into a counter.
+//!
+//! A child connection change re-emits the last computed value, matching PyDM's
+//! `callback_conn` → `_send_update(self.connected, self._value)`
+//! (`calc_plugin.py:156-157`).
 //!
 //! The plugin has no [`Engine`] handle of its own; the engine injects a
 //! [`ChildConnector`] (capturing a `Weak` to the engine internals) so opening a
@@ -112,14 +122,19 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::address::PvAddress;
-use crate::channel::{Channel, PvValue, StateWriter};
+use crate::channel::{Channel, PvValue, StateWriter, ValueSubscription};
 use crate::data_plugins::{ConnectionCtx, DataPlugin};
 use crate::engine::EngineError;
 
-/// How often the connection task polls its children for new values. Children
-/// publish via a shared state cell + egui repaint (no async waker), so the calc
-/// task samples their update stamps at this cadence.
+/// How often the connection task drains its children's value events. Children
+/// publish via a shared state cell + queued value events (no async waker), so
+/// the calc task drains those queues at this cadence.
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+/// Per-child value-event queue depth. The task only asks "did this child emit a
+/// value since the last tick", so overflow costs nothing; the depth exists to
+/// bound memory for a child that publishes far faster than [`POLL_INTERVAL`].
+const VALUE_QUEUE_CAP: usize = 16;
 
 /// Opens a child channel by address, returning the live [`Channel`]. The engine
 /// supplies one that captures a `Weak` to its internals, so the plugin can open
@@ -263,11 +278,42 @@ async fn run_channel(
     // Warn at most once per connection when evaluation errors (fail-visible).
     let mut warned_eval = false;
 
-    // `u64::MAX` can never equal a real stamp, so the first poll after a child
-    // first publishes registers as a change and triggers the initial eval.
-    let mut prev_stamps = vec![u64::MAX; children.len()];
-    let mut connected = false;
+    // Trigger on *value events*, not on `Channel::stamp()`. `stamp` bumps on
+    // every state change — including alarm-only (DBE_ALARM) and metadata-only
+    // (DBE_PROPERTY) updates — so polling it recomputed and republished on a
+    // child's alarm churn, double-counting `prev_res` accumulators. PyDM binds
+    // only `connection_slot`/`value_slot` on its calc children
+    // (`calc_plugin.py:84-89`), so a child's alarm severity or ctrl metadata
+    // never reaches the recompute. A per-child value subscription reproduces
+    // that by construction: `update` (metadata) posts no value event.
+    //
+    // The queues also make the trigger durable. `stamp` is a collapsing
+    // counter, so a child's initial value landing before the last child
+    // connected had to be preserved with a sentinel; a queue simply holds the
+    // event until the tick that can act on it, whatever the child-connect vs
+    // poll-tick interleaving.
+    let subs: Vec<ValueSubscription> = children
+        .iter()
+        .map(|(_, ch)| ch.subscribe_values(VALUE_QUEUE_CAP))
+        .collect();
+    // Which children may arm a recompute: the `update` list, or all of them.
+    let triggers: Vec<bool> = children
+        .iter()
+        .map(|(name, _)| update.as_ref().is_none_or(|u| u.iter().any(|n| n == name)))
+        .collect();
+
+    let mut child_connected = vec![false; children.len()];
     let mut prev_value: Option<PvValue> = None;
+    // A listened child emitted a value that has not been folded into a
+    // recompute yet. Survives across ticks, so no edge is lost.
+    let mut pending_trigger = false;
+    // Deliberate divergence from PyDM, recorded as R4-10: the first
+    // all-connected tick always evaluates. PyDM's `callback_value` gate
+    // (`calc_plugin.py:141-142`) drops any value callback that predates full
+    // connection and never re-arms from `callback_conn`, so a calc whose
+    // update-var connects before the others stays connected-but-valueless
+    // until that var next changes. rsdm publishes the initial derived value.
+    let mut initial_eval_done = false;
 
     let mut ticker = tokio::time::interval(POLL_INTERVAL);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -277,56 +323,63 @@ async fn run_channel(
             _ = cancel.cancelled() => break,
 
             _ = ticker.tick() => {
-                let all_connected = children.iter().all(|(_, ch)| ch.is_connected());
-
-                if all_connected != connected {
-                    connected = all_connected;
-                    writer.update(move |s| s.connected = all_connected);
-                }
-
-                // Note every child whose value changed; a change to a variable
-                // in the `update` list (or any variable when no list is given)
-                // triggers a recompute.
-                //
-                // Fold stamp changes into `prev_stamps` ONLY while every child
-                // is connected — i.e. only while a recompute could actually
-                // run. A child's initial value often lands a tick or more
-                // before the last child connects; consuming that change here
-                // (advancing `prev_stamps` regardless of `all_connected`, the
-                // old behaviour) dropped its trigger, so the first
-                // all-connected tick saw no change and the initial value was
-                // never published — the calc stayed connected but valueless
-                // until the next child write. Leaving `prev_stamps` at
-                // `u64::MAX` until the first all-connected tick makes that tick
-                // observe every child as changed and run the initial eval, with
-                // no dependence on the child-connect vs poll-tick interleaving.
-                let mut trigger = false;
-                if all_connected {
-                    for (i, (name, ch)) in children.iter().enumerate() {
-                        let stamp = ch.stamp();
-                        if stamp != prev_stamps[i] {
-                            prev_stamps[i] = stamp;
-                            if update.as_ref().is_none_or(|u| u.iter().any(|n| n == name)) {
-                                trigger = true;
-                            }
-                        }
+                // Drain first: an event that arrived before the last child
+                // connected must still arm the recompute. Only the *presence*
+                // of a value event matters, so an overflowed queue is harmless.
+                for (i, sub) in subs.iter().enumerate() {
+                    let mut got_value = false;
+                    sub.drain(|_| got_value = true);
+                    if got_value && triggers[i] {
+                        pending_trigger = true;
                     }
                 }
 
-                if all_connected && trigger
-                    && let Some(value) = evaluate(
+                let all_connected = children.iter().all(|(_, ch)| ch.is_connected());
+                let mut conn_changed = false;
+                for (i, (_, ch)) in children.iter().enumerate() {
+                    let now = ch.is_connected();
+                    if now != child_connected[i] {
+                        child_connected[i] = now;
+                        conn_changed = true;
+                    }
+                }
+
+                if conn_changed {
+                    // PyDM `callback_conn` runs `_send_update(self.connected,
+                    // self._value)` on *every* child connection change
+                    // (`calc_plugin.py:156-157`), and `receive_new_data`
+                    // (`:236-240`) re-emits the value unless it is None.
+                    match prev_value.clone() {
+                        Some(value) => writer.post_value(move |s| {
+                            s.connected = all_connected;
+                            s.value = Some(value);
+                        }),
+                        None => writer.update(move |s| s.connected = all_connected),
+                    }
+                }
+
+                if all_connected && !initial_eval_done {
+                    initial_eval_done = true;
+                    pending_trigger = true;
+                }
+
+                if all_connected && pending_trigger {
+                    // Clear before evaluating: a failing expression must not
+                    // re-arm itself into a hot retry every tick.
+                    pending_trigger = false;
+                    if let Some(value) = evaluate(
                         &id,
                         &evaluator,
                         &children,
                         prev_value.as_ref(),
                         &mut warned_eval,
-                    )
-                {
-                    prev_value = Some(value.clone());
-                    writer.post_value(move |s| {
-                        s.connected = true;
-                        s.value = Some(value);
-                    });
+                    ) {
+                        prev_value = Some(value.clone());
+                        writer.post_value(move |s| {
+                            s.connected = true;
+                            s.value = Some(value);
+                        });
+                    }
                 }
             }
 
@@ -1410,5 +1463,153 @@ mod tests {
         assert_eq!(medm_var_index("AA"), None);
         assert_eq!(medm_var_index("1"), None);
         assert_eq!(medm_var_index(""), None);
+    }
+
+    // -- trigger model (R4-10 / R4-11 / R4-12) -------------------------------
+    //
+    // These drive `run_channel` against hand-built children so a child can post
+    // an alarm/metadata-only update (`StateWriter::update`), which no `loc://`
+    // child ever does. Cases are one per trigger-model boundary.
+
+    use crate::channel::channel_pair;
+
+    /// Longer than `POLL_INTERVAL` (50 ms), so every case observes at least one
+    /// full drain/evaluate tick.
+    const SETTLE: Duration = Duration::from_millis(200);
+
+    struct Harness {
+        calc: Channel,
+        cancel: CancellationToken,
+        // Kept alive so `run_channel`'s `writes.recv()` never returns `None`
+        // (which would break its loop).
+        _writes_tx: mpsc::UnboundedSender<PvValue>,
+    }
+
+    impl Drop for Harness {
+        fn drop(&mut self) {
+            self.cancel.cancel();
+        }
+    }
+
+    /// Spawn `run_channel` for `expr` over `children`, restricted to `update`.
+    fn spawn_calc(
+        expr: &str,
+        update: Option<Vec<String>>,
+        children: Vec<(String, Channel)>,
+    ) -> Harness {
+        let config = CalcConfig {
+            expr: expr.to_owned(),
+            dialect: Dialect::Evalexpr,
+            vars: children
+                .iter()
+                .map(|(n, _)| (n.clone(), format!("loc://{n}")))
+                .collect(),
+            update,
+        };
+        let (calc, calc_writer) = channel_pair("calc://t");
+        let (writes_tx, writes_rx) = mpsc::unbounded_channel();
+        let cancel = CancellationToken::new();
+        tokio::spawn(run_channel(
+            "calc://t".to_owned(),
+            config,
+            children,
+            calc_writer,
+            writes_rx,
+            cancel.clone(),
+        ));
+        Harness {
+            calc,
+            cancel,
+            _writes_tx: writes_tx,
+        }
+    }
+
+    fn connect_with(writer: &StateWriter, v: f64) {
+        writer.post_value(move |s| {
+            s.connected = true;
+            s.value = Some(PvValue::Float(v));
+        });
+    }
+
+    /// Boundary: a child's alarm/metadata-only change bumps `Channel::stamp()`
+    /// but emits no value event, so it must NOT recompute. PyDM binds only
+    /// `value_slot` on calc children (`calc_plugin.py:84-89`). The old
+    /// stamp-polling trigger republished here, double-counting accumulators.
+    #[tokio::test]
+    async fn alarm_only_child_update_does_not_retrigger_the_calc() {
+        let (a, a_writer) = channel_pair("loc://a");
+        let harness = spawn_calc("a", None, vec![("a".to_owned(), a)]);
+        let events = harness.calc.subscribe_values(16);
+
+        connect_with(&a_writer, 1.0);
+        tokio::time::sleep(SETTLE).await;
+        let mut n = 0;
+        events.drain(|_| n += 1);
+        assert_eq!(n, 1, "one publish for the initial evaluation");
+
+        // Metadata/alarm only: bumps the child's stamp, emits no value event.
+        a_writer.update(|s| s.severity = crate::channel::AlarmSeverity::Minor);
+        tokio::time::sleep(SETTLE).await;
+        let mut n = 0;
+        events.drain(|_| n += 1);
+        assert_eq!(n, 0, "alarm-only child update must not republish the calc");
+    }
+
+    /// Boundary: a child connection-state change re-emits the last computed
+    /// value, matching PyDM `callback_conn` → `_send_update(self.connected,
+    /// self._value)` (`calc_plugin.py:156-157`). The old code only flipped the
+    /// `connected` flag with no value event.
+    #[tokio::test]
+    async fn child_connection_change_reemits_the_last_value() {
+        let (a, a_writer) = channel_pair("loc://a");
+        let harness = spawn_calc("a", None, vec![("a".to_owned(), a)]);
+        let events = harness.calc.subscribe_values(16);
+
+        connect_with(&a_writer, 7.0);
+        tokio::time::sleep(SETTLE).await;
+        let mut got = Vec::new();
+        events.drain(|e| got.push(e.value.as_f64().expect("numeric")));
+        assert_eq!(got, vec![7.0], "initial evaluation");
+
+        // Child drops: connection change, no new value.
+        a_writer.update(|s| s.connected = false);
+        tokio::time::sleep(SETTLE).await;
+        let mut got = Vec::new();
+        events.drain(|e| got.push(e.value.as_f64().expect("numeric")));
+        assert_eq!(got, vec![7.0], "child disconnect re-emits the last value");
+    }
+
+    /// Boundary: a triggering child's value that lands BEFORE the last child
+    /// connects must still arm the recompute. The queue holds the event; the
+    /// old collapsing `stamp` counter needed a `u64::MAX` sentinel to survive
+    /// this interleaving, and lost the edge without it.
+    #[tokio::test]
+    async fn value_arriving_before_all_children_connect_still_triggers() {
+        let (a, a_writer) = channel_pair("loc://a");
+        let (b, b_writer) = channel_pair("loc://b");
+        let harness = spawn_calc(
+            "a + b",
+            Some(vec!["a".to_owned()]),
+            vec![("a".to_owned(), a), ("b".to_owned(), b)],
+        );
+        let events = harness.calc.subscribe_values(16);
+
+        // The update-var connects and publishes first; `b` is still down.
+        connect_with(&a_writer, 2.0);
+        tokio::time::sleep(SETTLE).await;
+        let mut n = 0;
+        events.drain(|_| n += 1);
+        assert_eq!(n, 0, "no publish while a child is disconnected");
+
+        // `b` is NOT in the update list, so only the queued `a` event (and the
+        // first all-connected evaluation) can produce the initial value.
+        connect_with(&b_writer, 3.0);
+        tokio::time::sleep(SETTLE).await;
+        let mut got = Vec::new();
+        events.drain(|e| got.push(e.value.as_f64().expect("numeric")));
+        assert!(
+            got.contains(&5.0),
+            "initial derived value a+b = 2+3 = 5.0 was never published (got {got:?})"
+        );
     }
 }

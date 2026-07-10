@@ -598,6 +598,22 @@ impl Channel {
     }
 }
 
+/// Build a `(Channel, StateWriter)` pair on a standalone connection with a
+/// dangling pool weak (the pool prune in `Drop` is a no-op), for tests that
+/// drive the value-event path without an [`crate::Engine`]. The write queue,
+/// listener channel and cancel token are dropped here; the connection owns what
+/// it needs, and no plugin task is listening.
+#[cfg(test)]
+pub(crate) fn channel_pair(address: &str) -> (Channel, StateWriter) {
+    let (conn, writer, _writes, _listeners, _cancel) = Connection::new(
+        crate::address::PvAddress::parse(address),
+        RepaintHook::default(),
+        Weak::new(),
+        address.to_owned(),
+    );
+    (Channel::new(conn), writer)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -676,19 +692,10 @@ mod tests {
         assert_eq!(s.stamp, 0);
     }
 
-    /// Build a connected `(Channel, StateWriter)` pair with a dangling pool weak
-    /// (the pool prune in `Drop` is a no-op) for exercising the value-event path.
+    /// The value-event tests all use one address; the crate-internal helper is
+    /// parameterized because the calc plugin's tests need distinct children.
     fn channel_pair() -> (Channel, StateWriter) {
-        let (conn, writer, _writes, _listeners, _cancel) = Connection::new(
-            crate::address::PvAddress::parse("loc://value_events"),
-            RepaintHook::default(),
-            Weak::new(),
-            "loc://value_events".to_owned(),
-        );
-        // Keep the write queue / cancel token alive for the test's lifetime by
-        // leaking them into the Channel's connection (they live on `conn`); the
-        // returned receivers are only dropped here, which is harmless.
-        (Channel::new(conn), writer)
+        super::channel_pair("loc://value_events")
     }
 
     fn drain_values(sub: &ValueSubscription) -> Vec<f64> {
