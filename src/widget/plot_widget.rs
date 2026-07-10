@@ -1055,14 +1055,17 @@ fn apply_interaction(
             && let Some(p) = response.hover_pos()
             && area.contains(p)
         {
-            // silx `_onWheel` (PlotInteraction.py:1894-1913): all axes zoom
-            // when keep-aspect is on; otherwise the per-axis zoom flags apply,
+            // silx `_onWheel` (PlotInteraction.py:1905-1917): keep-aspect zooms
+            // every axis; otherwise Shift/Alt override the per-axis zoom flags,
             // and with every axis disabled the wheel does not zoom at all.
-            let enabled = if plot.keep_aspect {
-                (true, true)
-            } else {
-                (plot.zoom_x_enabled(), plot.zoom_y_enabled())
-            };
+            let (shift, alt) = ui.input(|i| (i.modifiers.shift, i.modifiers.alt));
+            let enabled = interaction::wheel_enabled_axes(
+                plot.keep_aspect,
+                shift,
+                alt,
+                plot.zoom_x_enabled(),
+                plot.zoom_y_enabled(),
+            );
             if enabled != (false, false) {
                 let centre = view.pixel_to_data(p);
                 // The y2 zoom centre is the same pixel mapped through the

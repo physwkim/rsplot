@@ -322,6 +322,35 @@ pub fn constrain_zoom_axes(
 /// how many frames it spans (`egui/src/input_state/wheel_state.rs`).
 const WHEEL_NOTCH_POINTS: f64 = 40.0;
 
+/// Which axes a wheel zoom moves, as `(x, y)` — `y` also governs y2, exactly as
+/// silx's `EnabledAxes(…, yaxis=shiftPressed, y2axis=shiftPressed)` does.
+///
+/// silx `_onWheel` (`PlotInteraction.py:1905-1917`): keep-aspect zooms every
+/// axis and ignores both the flags and the modifiers. Otherwise Shift or Alt
+/// *overrides* the per-axis zoom flags — Alt zooms X, Shift zooms Y/Y2, both
+/// together zoom both — and with neither held the flags apply. The axes-menu
+/// labels advertise the chords ("X axis (Alt+Wheel)", "Y left axis
+/// (Shift+Wheel)", `tools/menus.py:55-57`).
+///
+/// `(false, false)` means the wheel does not zoom at all (silx
+/// `enabledAxes.isDisabled()`).
+#[must_use]
+pub fn wheel_enabled_axes(
+    keep_aspect: bool,
+    shift: bool,
+    alt: bool,
+    zoom_x: bool,
+    zoom_y: bool,
+) -> (bool, bool) {
+    if keep_aspect {
+        (true, true)
+    } else if shift || alt {
+        (alt, shift)
+    } else {
+        (zoom_x, zoom_y)
+    }
+}
+
 /// Convert an egui wheel delta (`smooth_scroll_delta.y`, points) to a zoom
 /// factor for [`zoom_about`]. Scrolling up (`> 0`) zooms in (`factor < 1`).
 ///
@@ -2229,6 +2258,52 @@ mod tests {
             constrain_zoom_axes(zoomed, current, false, false),
             current
         ));
+    }
+
+    /// One case per branch of silx's `_onWheel` axis selection, not one per
+    /// user gesture.
+    #[test]
+    fn wheel_enabled_axes_follows_silx_modifier_override() {
+        // Keep-aspect wins over every flag and every modifier.
+        assert_eq!(
+            wheel_enabled_axes(true, false, false, false, false),
+            (true, true)
+        );
+        assert_eq!(
+            wheel_enabled_axes(true, true, false, false, false),
+            (true, true)
+        );
+
+        // No modifier: the per-axis zoom flags apply verbatim.
+        assert_eq!(
+            wheel_enabled_axes(false, false, false, true, true),
+            (true, true)
+        );
+        assert_eq!(
+            wheel_enabled_axes(false, false, false, true, false),
+            (true, false)
+        );
+        assert_eq!(
+            wheel_enabled_axes(false, false, false, false, false),
+            (false, false),
+            "both disabled: the wheel does not zoom"
+        );
+
+        // Alt zooms X only, Shift zooms Y (and Y2) only — overriding the flags,
+        // so a disabled axis still zooms when its chord is held.
+        assert_eq!(
+            wheel_enabled_axes(false, false, true, false, true),
+            (true, false)
+        );
+        assert_eq!(
+            wheel_enabled_axes(false, true, false, true, false),
+            (false, true)
+        );
+        // Both chords together zoom both axes.
+        assert_eq!(
+            wheel_enabled_axes(false, true, true, false, false),
+            (true, true)
+        );
     }
 
     #[test]
