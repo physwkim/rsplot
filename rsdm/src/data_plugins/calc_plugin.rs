@@ -70,8 +70,14 @@
 //! - Operands `E`–`L` not bound to an explicit child are record metadata of the
 //!   **first** channel (operand `A`, MEDM `records[0]`; `utils.c:4498-4505`):
 //!   `E`,`F` = 0, `G` = element count, `H` = hopr, `I` = alarm status,
-//!   `J` = severity, `K` = precision, `L` = lopr. rsdm's `ChannelState` carries
-//!   no EPICS alarm-status code, so `I` binds `0.0` (documented gap).
+//!   `J` = severity, `K` = precision, `L` = lopr.
+//! - Because `I` and `J` are metadata, they change with no value event, and an
+//!   expression reading either must re-evaluate on that change. MEDM arms
+//!   exactly those two monitors and no others: `setDynamicAttrMonitorFlags`
+//!   (`utils.c:4621-4630`) sets `monitorStatusChanged` iff `calcUsesStatus(calc)`
+//!   and `monitorSeverityChanged` iff `calcUsesSeverity(calc)`, and never
+//!   monitors `hopr`/`precision`/`lopr` (H/K/L). [`MedmMonitors`] is that
+//!   decision, made once at connect.
 //! - The `expr` query value is **percent-decoded** (`%26` → `&`, `%25` → `%`),
 //!   because the raw query splits on `&`; `adl2rsdm` encodes exactly those two
 //!   bytes. The plain (PyDM) dialect stays raw — PyDM does not decode either.
@@ -87,10 +93,20 @@
 //!
 //! **No async wake on child updates.** The snapshot model publishes child values
 //! through an `Arc<RwLock<ChannelState>>` + an egui repaint, not a tokio waker,
-//! so the connection task **polls** each child's update `stamp` on a fixed
-//! interval and recomputes when a triggering variable changed. This is the
-//! right-sized fit for a handful of children at GUI rates; a notification
-//! subsystem in `channel.rs` for this one plugin would not be.
+//! so the connection task **drains** each child's value-event queue
+//! ([`Channel::subscribe_values`]) on a fixed interval and recomputes when a
+//! triggering variable emitted a value. It subscribes to value events rather
+//! than sampling `Channel::stamp()` because `stamp` bumps on *any* state change
+//! — an alarm-only or metadata-only update would otherwise recompute and
+//! republish, double-counting a `prev_res` accumulator. PyDM binds only
+//! `connection_slot`/`value_slot` on its calc children (`calc_plugin.py:84-89`),
+//! so alarm severity and ctrl metadata never reach its recompute either. The
+//! queues additionally make the trigger durable: an event arriving before the
+//! last child connects waits in the queue instead of collapsing into a counter.
+//!
+//! A child connection change re-emits the last computed value, matching PyDM's
+//! `callback_conn` → `_send_update(self.connected, self._value)`
+//! (`calc_plugin.py:156-157`).
 //!
 //! The plugin has no [`Engine`] handle of its own; the engine injects a
 //! [`ChildConnector`] (capturing a `Weak` to the engine internals) so opening a
@@ -112,14 +128,19 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::address::PvAddress;
-use crate::channel::{Channel, PvValue, StateWriter};
+use crate::channel::{AlarmSeverity, Channel, PvValue, StateWriter, ValueSubscription};
 use crate::data_plugins::{ConnectionCtx, DataPlugin};
 use crate::engine::EngineError;
 
-/// How often the connection task polls its children for new values. Children
-/// publish via a shared state cell + egui repaint (no async waker), so the calc
-/// task samples their update stamps at this cadence.
+/// How often the connection task drains its children's value events. Children
+/// publish via a shared state cell + queued value events (no async waker), so
+/// the calc task drains those queues at this cadence.
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+/// Per-child value-event queue depth. The task only asks "did this child emit a
+/// value since the last tick", so overflow costs nothing; the depth exists to
+/// bound memory for a child that publishes far faster than [`POLL_INTERVAL`].
+const VALUE_QUEUE_CAP: usize = 16;
 
 /// Opens a child channel by address, returning the live [`Channel`]. The engine
 /// supplies one that captures a `Weak` to its internals, so the plugin can open
@@ -196,6 +217,13 @@ enum Evaluator {
     Medm {
         compiled: medm_calc::CompiledExpr,
         operand_indices: Vec<usize>,
+        /// Index into `children` of the record whose metadata backs operands
+        /// `E`–`L` (MEDM `records[0]`): operand `A` when a child binds it, else
+        /// the first listed child. `None` only when there are no children.
+        first_child: Option<usize>,
+        /// The first record's metadata this expression puts a monitor on,
+        /// beyond the always-present value monitor.
+        monitors: MedmMonitors,
     },
     /// MEDM dialect whose expression failed to compile (or a variable is not a
     /// single `A`–`U` letter): fail-visible — `1.0` was published at task
@@ -221,10 +249,19 @@ impl Evaluator {
                     };
                     operand_indices.push(idx);
                 }
+                // MEDM's `records[0]`: operand A when bound, else the first
+                // listed child (MEDM requires channel A for a valid calc —
+                // `utils.c:4543` — so A is the normal case).
+                let first_child = operand_indices
+                    .iter()
+                    .position(|&idx| idx == 0)
+                    .or((!config.vars.is_empty()).then_some(0));
                 match medm_calc::compile(&config.expr) {
                     Ok(compiled) => Self::Medm {
                         compiled,
                         operand_indices,
+                        first_child,
+                        monitors: MedmMonitors::of(&config.expr),
                     },
                     Err(err) => {
                         log::warn!(
@@ -263,11 +300,57 @@ async fn run_channel(
     // Warn at most once per connection when evaluation errors (fail-visible).
     let mut warned_eval = false;
 
-    // `u64::MAX` can never equal a real stamp, so the first poll after a child
-    // first publishes registers as a change and triggers the initial eval.
-    let mut prev_stamps = vec![u64::MAX; children.len()];
-    let mut connected = false;
+    // Trigger on *value events*, not on `Channel::stamp()`. `stamp` bumps on
+    // every state change — including alarm-only (DBE_ALARM) and metadata-only
+    // (DBE_PROPERTY) updates — so polling it recomputed and republished on a
+    // child's alarm churn, double-counting `prev_res` accumulators. PyDM binds
+    // only `connection_slot`/`value_slot` on its calc children
+    // (`calc_plugin.py:84-89`), so a child's alarm severity or ctrl metadata
+    // never reaches the recompute. A per-child value subscription reproduces
+    // that by construction: `update` (metadata) posts no value event.
+    //
+    // The queues also make the trigger durable. `stamp` is a collapsing
+    // counter, so a child's initial value landing before the last child
+    // connected had to be preserved with a sentinel; a queue simply holds the
+    // event until the tick that can act on it, whatever the child-connect vs
+    // poll-tick interleaving.
+    let subs: Vec<ValueSubscription> = children
+        .iter()
+        .map(|(_, ch)| ch.subscribe_values(VALUE_QUEUE_CAP))
+        .collect();
+    // Which children may arm a recompute: the `update` list, or all of them.
+    let triggers: Vec<bool> = children
+        .iter()
+        .map(|(name, _)| update.as_ref().is_none_or(|u| u.iter().any(|n| n == name)))
+        .collect();
+
+    // Under the MEDM dialect the first record's status (`I`) and severity (`J`)
+    // arrive without a value event, so an expression reading either must be
+    // re-evaluated on their change. Which of the two is watched was decided once
+    // at connect, as MEDM decides it once in `setDynamicAttrMonitorFlags`. The
+    // PyDM dialect has no metadata operands and stays value-only.
+    let metadata_watch = match &evaluator {
+        Evaluator::Medm {
+            first_child: Some(i),
+            monitors,
+            ..
+        } if !monitors.is_empty() => Some((*monitors, &children[*i].1)),
+        _ => None,
+    };
+    let mut prev_metadata: Option<MedmSample> = None;
+
+    let mut child_connected = vec![false; children.len()];
     let mut prev_value: Option<PvValue> = None;
+    // A listened child emitted a value that has not been folded into a
+    // recompute yet. Survives across ticks, so no edge is lost.
+    let mut pending_trigger = false;
+    // Deliberate divergence from PyDM, recorded as R4-10: the first
+    // all-connected tick always evaluates. PyDM's `callback_value` gate
+    // (`calc_plugin.py:141-142`) drops any value callback that predates full
+    // connection and never re-arms from `callback_conn`, so a calc whose
+    // update-var connects before the others stays connected-but-valueless
+    // until that var next changes. rsdm publishes the initial derived value.
+    let mut initial_eval_done = false;
 
     let mut ticker = tokio::time::interval(POLL_INTERVAL);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -277,56 +360,73 @@ async fn run_channel(
             _ = cancel.cancelled() => break,
 
             _ = ticker.tick() => {
-                let all_connected = children.iter().all(|(_, ch)| ch.is_connected());
-
-                if all_connected != connected {
-                    connected = all_connected;
-                    writer.update(move |s| s.connected = all_connected);
-                }
-
-                // Note every child whose value changed; a change to a variable
-                // in the `update` list (or any variable when no list is given)
-                // triggers a recompute.
-                //
-                // Fold stamp changes into `prev_stamps` ONLY while every child
-                // is connected — i.e. only while a recompute could actually
-                // run. A child's initial value often lands a tick or more
-                // before the last child connects; consuming that change here
-                // (advancing `prev_stamps` regardless of `all_connected`, the
-                // old behaviour) dropped its trigger, so the first
-                // all-connected tick saw no change and the initial value was
-                // never published — the calc stayed connected but valueless
-                // until the next child write. Leaving `prev_stamps` at
-                // `u64::MAX` until the first all-connected tick makes that tick
-                // observe every child as changed and run the initial eval, with
-                // no dependence on the child-connect vs poll-tick interleaving.
-                let mut trigger = false;
-                if all_connected {
-                    for (i, (name, ch)) in children.iter().enumerate() {
-                        let stamp = ch.stamp();
-                        if stamp != prev_stamps[i] {
-                            prev_stamps[i] = stamp;
-                            if update.as_ref().is_none_or(|u| u.iter().any(|n| n == name)) {
-                                trigger = true;
-                            }
-                        }
+                // Drain first: an event that arrived before the last child
+                // connected must still arm the recompute. Only the *presence*
+                // of a value event matters, so an overflowed queue is harmless.
+                for (i, sub) in subs.iter().enumerate() {
+                    let mut got_value = false;
+                    sub.drain(|_| got_value = true);
+                    if got_value && triggers[i] {
+                        pending_trigger = true;
                     }
                 }
 
-                if all_connected && trigger
-                    && let Some(value) = evaluate(
+                if let Some((monitors, ch)) = metadata_watch {
+                    let now = monitors.sample(ch);
+                    // Arm on a *change*, so the first observation does not
+                    // fabricate a trigger the initial evaluation already covers.
+                    if prev_metadata.is_some_and(|was| was != now) {
+                        pending_trigger = true;
+                    }
+                    prev_metadata = Some(now);
+                }
+
+                let all_connected = children.iter().all(|(_, ch)| ch.is_connected());
+                let mut conn_changed = false;
+                for (i, (_, ch)) in children.iter().enumerate() {
+                    let now = ch.is_connected();
+                    if now != child_connected[i] {
+                        child_connected[i] = now;
+                        conn_changed = true;
+                    }
+                }
+
+                if conn_changed {
+                    // PyDM `callback_conn` runs `_send_update(self.connected,
+                    // self._value)` on *every* child connection change
+                    // (`calc_plugin.py:156-157`), and `receive_new_data`
+                    // (`:236-240`) re-emits the value unless it is None.
+                    match prev_value.clone() {
+                        Some(value) => writer.post_value(move |s| {
+                            s.connected = all_connected;
+                            s.value = Some(value);
+                        }),
+                        None => writer.update(move |s| s.connected = all_connected),
+                    }
+                }
+
+                if all_connected && !initial_eval_done {
+                    initial_eval_done = true;
+                    pending_trigger = true;
+                }
+
+                if all_connected && pending_trigger {
+                    // Clear before evaluating: a failing expression must not
+                    // re-arm itself into a hot retry every tick.
+                    pending_trigger = false;
+                    if let Some(value) = evaluate(
                         &id,
                         &evaluator,
                         &children,
                         prev_value.as_ref(),
                         &mut warned_eval,
-                    )
-                {
-                    prev_value = Some(value.clone());
-                    writer.post_value(move |s| {
-                        s.connected = true;
-                        s.value = Some(value);
-                    });
+                    ) {
+                        prev_value = Some(value.clone());
+                        writer.post_value(move |s| {
+                            s.connected = true;
+                            s.value = Some(value);
+                        });
+                    }
                 }
             }
 
@@ -355,21 +455,25 @@ fn evaluate(
         Evaluator::Medm {
             compiled,
             operand_indices,
-        } => Some(match eval_medm(compiled, children, operand_indices, prev) {
-            Ok(result) => PvValue::Float(result),
-            Err(err) => {
-                // Fail-visible on evaluation errors too, warning once (MEDM
-                // hides here — utils.c:4519-4523; see the module docs).
-                if !*warned_eval {
-                    *warned_eval = true;
-                    log::warn!(
-                        "{id}: MEDM CALC evaluation failed ({err:?}); \
+            first_child,
+            ..
+        } => Some(
+            match eval_medm(compiled, children, operand_indices, *first_child, prev) {
+                Ok(result) => PvValue::Float(result),
+                Err(err) => {
+                    // Fail-visible on evaluation errors too, warning once (MEDM
+                    // hides here — utils.c:4519-4523; see the module docs).
+                    if !*warned_eval {
+                        *warned_eval = true;
+                        log::warn!(
+                            "{id}: MEDM CALC evaluation failed ({err:?}); \
                          publishing 1.0 (fail-visible)"
-                    );
+                        );
+                    }
+                    PvValue::Float(1.0)
                 }
-                PvValue::Float(1.0)
-            }
-        }),
+            },
+        ),
         Evaluator::Invalid => None,
     }
 }
@@ -719,6 +823,7 @@ fn eval_medm(
     compiled: &medm_calc::CompiledExpr,
     children: &[(String, Channel)],
     operand_indices: &[usize],
+    first_child: Option<usize>,
     prev: Option<&PvValue>,
 ) -> Result<f64, medm_calc::CalcError> {
     let mut inputs = medm_calc::NumericInputs::new();
@@ -730,15 +835,7 @@ fn eval_medm(
         child_bound[idx] = true;
     }
 
-    // The "first channel" whose metadata backs E–L: operand A when a child
-    // binds it, else the first listed child (MEDM requires channel A for a
-    // valid calc — utils.c:4543 — so A is the normal case).
-    let first = operand_indices
-        .iter()
-        .position(|&idx| idx == 0)
-        .or(if children.is_empty() { None } else { Some(0) })
-        .map(|i| &children[i].1);
-    if let Some(ch) = first {
+    if let Some(ch) = first_child.map(|i| &children[i].1) {
         ch.read(|s| {
             if !child_bound[6] {
                 // G: element count (scalar = 1; no value yet = 0, as an MEDM
@@ -748,7 +845,10 @@ fn eval_medm(
             if !child_bound[7] {
                 inputs.vars[7] = s.display_limits.map(|(_, hopr)| hopr).unwrap_or(0.0);
             }
-            // I (8): EPICS alarm STATUS — not carried by ChannelState; 0.0.
+            if !child_bound[8] {
+                // I: EPICS alarm STATUS (the record's `STAT` field).
+                inputs.vars[8] = f64::from(s.status);
+            }
             if !child_bound[9] {
                 inputs.vars[9] = f64::from(s.severity.as_code());
             }
@@ -763,6 +863,60 @@ fn eval_medm(
 
     inputs.prev_val = prev.and_then(PvValue::as_f64).unwrap_or(0.0);
     medm_calc::eval(compiled, &mut inputs)
+}
+
+/// Whether `expr` reads the calc operand `letter`, by MEDM's own scan
+/// (`calcUsesStatus` / `calcUsesSeverity`, `medm/utils.c:4647-4694`): the letter
+/// in either case, at the start of the expression or not preceded by an ASCII
+/// letter — the guard that keeps `sin`, `asin`, `min`, `nint`, `pi` from
+/// looking like operand `I`.
+fn calc_uses_operand(expr: &str, letter: char) -> bool {
+    let bytes = expr.as_bytes();
+    let want = letter.to_ascii_uppercase();
+    bytes.iter().enumerate().any(|(i, &b)| {
+        (b as char).to_ascii_uppercase() == want && (i == 0 || !bytes[i - 1].is_ascii_alphabetic())
+    })
+}
+
+/// Which of the first record's metadata fields MEDM puts a monitor on for this
+/// expression, beyond the value monitor it always sets. `setDynamicAttrMonitorFlags`
+/// (`medm/utils.c:4621-4630`) adds `monitorStatusChanged` iff the expression uses
+/// operand `I` and `monitorSeverityChanged` iff it uses `J`, and nothing else —
+/// `hopr`/`precision`/`lopr` (H/K/L) are read but never monitored, so they never
+/// retrigger. Decided once, at connect, as MEDM decides it once.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct MedmMonitors {
+    status: bool,
+    severity: bool,
+}
+
+/// The monitored fields as read on one tick. An unmonitored field is `None`, so
+/// it cannot differ between ticks and cannot arm a recompute — the monitor set
+/// gates the comparison by construction rather than by a branch at the read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct MedmSample {
+    status: Option<i16>,
+    severity: Option<AlarmSeverity>,
+}
+
+impl MedmMonitors {
+    fn of(expr: &str) -> Self {
+        Self {
+            status: calc_uses_operand(expr, 'I'),
+            severity: calc_uses_operand(expr, 'J'),
+        }
+    }
+
+    fn is_empty(self) -> bool {
+        !self.status && !self.severity
+    }
+
+    fn sample(self, ch: &Channel) -> MedmSample {
+        ch.read(|s| MedmSample {
+            status: self.status.then_some(s.status),
+            severity: self.severity.then_some(s.severity),
+        })
+    }
 }
 
 /// The calc-operand index for an MEDM-dialect variable name: a single letter
@@ -1185,7 +1339,7 @@ mod tests {
         );
         // No NUL: the whole buffer decodes.
         assert_eq!(
-            pv_to_evalexpr(&PvValue::Bytes(Arc::from([b'o', b'k'].as_slice()))),
+            pv_to_evalexpr(&PvValue::Bytes(Arc::from(b"ok".as_slice()))),
             Some(Value::String("ok".to_owned()))
         );
     }
@@ -1410,5 +1564,316 @@ mod tests {
         assert_eq!(medm_var_index("AA"), None);
         assert_eq!(medm_var_index("1"), None);
         assert_eq!(medm_var_index(""), None);
+    }
+
+    // -- trigger model (R4-10 / R4-11 / R4-12) -------------------------------
+    //
+    // These drive `run_channel` against hand-built children so a child can post
+    // an alarm/metadata-only update (`StateWriter::update`), which no `loc://`
+    // child ever does. Cases are one per trigger-model boundary.
+
+    use crate::channel::channel_pair;
+
+    /// Longer than `POLL_INTERVAL` (50 ms), so every case observes at least one
+    /// full drain/evaluate tick.
+    const SETTLE: Duration = Duration::from_millis(200);
+
+    struct Harness {
+        calc: Channel,
+        cancel: CancellationToken,
+        // Kept alive so `run_channel`'s `writes.recv()` never returns `None`
+        // (which would break its loop).
+        _writes_tx: mpsc::UnboundedSender<PvValue>,
+    }
+
+    impl Drop for Harness {
+        fn drop(&mut self) {
+            self.cancel.cancel();
+        }
+    }
+
+    /// Spawn `run_channel` for `expr` over `children`, restricted to `update`.
+    fn spawn_calc(
+        expr: &str,
+        update: Option<Vec<String>>,
+        children: Vec<(String, Channel)>,
+    ) -> Harness {
+        spawn_calc_dialect(expr, Dialect::Evalexpr, update, children)
+    }
+
+    fn spawn_calc_dialect(
+        expr: &str,
+        dialect: Dialect,
+        update: Option<Vec<String>>,
+        children: Vec<(String, Channel)>,
+    ) -> Harness {
+        let config = CalcConfig {
+            expr: expr.to_owned(),
+            dialect,
+            vars: children
+                .iter()
+                .map(|(n, _)| (n.clone(), format!("loc://{n}")))
+                .collect(),
+            update,
+        };
+        let (calc, calc_writer) = channel_pair("calc://t");
+        let (writes_tx, writes_rx) = mpsc::unbounded_channel();
+        let cancel = CancellationToken::new();
+        tokio::spawn(run_channel(
+            "calc://t".to_owned(),
+            config,
+            children,
+            calc_writer,
+            writes_rx,
+            cancel.clone(),
+        ));
+        Harness {
+            calc,
+            cancel,
+            _writes_tx: writes_tx,
+        }
+    }
+
+    fn connect_with(writer: &StateWriter, v: f64) {
+        writer.post_value(move |s| {
+            s.connected = true;
+            s.value = Some(PvValue::Float(v));
+        });
+    }
+
+    /// One case per boundary of MEDM's `calcUsesStatus`/`calcUsesSeverity` scan
+    /// (`utils.c:4647-4694`), which is a letter match guarded only by "not
+    /// preceded by an ASCII letter".
+    #[test]
+    fn calc_uses_operand_matches_medms_scan() {
+        assert!(calc_uses_operand("J", 'J'), "the whole expression");
+        assert!(calc_uses_operand("j#0", 'J'), "lower case");
+        assert!(calc_uses_operand("A+J", 'J'), "preceded by an operator");
+        assert!(calc_uses_operand("A?J:0", 'J'), "preceded by punctuation");
+        assert!(calc_uses_operand("2J", 'J'), "preceded by a digit");
+        assert!(!calc_uses_operand("A#0", 'J'), "absent");
+        assert!(!calc_uses_operand("", 'J'), "empty");
+        // The guard exists so function names do not read as operand I.
+        assert!(!calc_uses_operand("SIN(A)", 'I'));
+        assert!(!calc_uses_operand("min(A,B)", 'I'));
+        assert!(!calc_uses_operand("nint(A)", 'I'));
+        assert!(calc_uses_operand("I#0", 'I'), "operand I on its own");
+    }
+
+    /// Boundary: the expression reads operand `J`, so the first record's
+    /// severity — which arrives with no value event — must re-evaluate it.
+    /// MEDM sets `monitorSeverityChanged` for exactly this case
+    /// (`utils.c:4624-4628`).
+    #[tokio::test]
+    async fn medm_expr_reading_severity_reevaluates_on_a_severity_change() {
+        let (a, a_writer) = channel_pair("loc://a");
+        let h = spawn_calc_dialect("J", Dialect::Medm, None, vec![("A".into(), a)]);
+        connect_with(&a_writer, 0.0);
+        tokio::time::sleep(SETTLE).await;
+        assert_eq!(
+            h.calc.read(|s| s.value.clone()),
+            Some(PvValue::Float(0.0)),
+            "NO_ALARM"
+        );
+
+        // `update` posts no value event; only the severity moves.
+        a_writer.update(|s| s.severity = AlarmSeverity::Major);
+        tokio::time::sleep(SETTLE).await;
+        assert_eq!(
+            h.calc.read(|s| s.value.clone()),
+            Some(PvValue::Float(2.0)),
+            "MAJOR must re-evaluate J"
+        );
+    }
+
+    /// Boundary: the expression reads operand `I` (alarm status), which arrives
+    /// with no value event. MEDM sets `monitorStatusChanged` for exactly this
+    /// case (`calcUsesStatus`), so the status change must re-evaluate.
+    #[tokio::test]
+    async fn medm_expr_reading_status_reevaluates_on_a_status_change() {
+        let (a, a_writer) = channel_pair("loc://a");
+        let h = spawn_calc_dialect("I", Dialect::Medm, None, vec![("A".into(), a)]);
+        connect_with(&a_writer, 0.0);
+        tokio::time::sleep(SETTLE).await;
+        assert_eq!(
+            h.calc.read(|s| s.value.clone()),
+            Some(PvValue::Float(0.0)),
+            "NO_ALARM status"
+        );
+
+        // `update` posts no value event; only the status moves.
+        a_writer.update(|s| s.status = 7); // HIGH_ALARM
+        tokio::time::sleep(SETTLE).await;
+        assert_eq!(
+            h.calc.read(|s| s.value.clone()),
+            Some(PvValue::Float(7.0)),
+            "a status change must re-evaluate I"
+        );
+    }
+
+    /// Boundary: the expression reads neither `I` nor `J`, so status, severity
+    /// and every other metadata change arm nothing — MEDM leaves both
+    /// `monitorStatusChanged` and `monitorSeverityChanged` false. This is the
+    /// same rule that keeps `hopr`/`precision`/`lopr` from ever retriggering.
+    #[tokio::test]
+    async fn medm_expr_reading_no_metadata_ignores_every_metadata_change() {
+        let (a, a_writer) = channel_pair("loc://a");
+        let h = spawn_calc_dialect("A", Dialect::Medm, None, vec![("A".into(), a)]);
+        connect_with(&a_writer, 5.0);
+        tokio::time::sleep(SETTLE).await;
+        let stamp = h.calc.stamp();
+        assert_eq!(h.calc.read(|s| s.value.clone()), Some(PvValue::Float(5.0)));
+
+        a_writer.update(|s| s.severity = AlarmSeverity::Major);
+        a_writer.update(|s| s.status = 7);
+        a_writer.update(|s| s.precision = Some(7));
+        tokio::time::sleep(SETTLE).await;
+        assert_eq!(
+            h.calc.stamp(),
+            stamp,
+            "metadata-only churn must not republish"
+        );
+    }
+
+    /// Boundary: the expression reads `J` but not `I`, so only the severity is
+    /// monitored. A status change on the same record must arm nothing — the
+    /// half of MEDM's per-operand monitor set that a single "watch metadata"
+    /// flag would get wrong.
+    #[tokio::test]
+    async fn medm_expr_reading_severity_ignores_a_status_change() {
+        let (a, a_writer) = channel_pair("loc://a");
+        let h = spawn_calc_dialect("J", Dialect::Medm, None, vec![("A".into(), a)]);
+        connect_with(&a_writer, 0.0);
+        tokio::time::sleep(SETTLE).await;
+        let stamp = h.calc.stamp();
+
+        a_writer.update(|s| s.status = 7);
+        tokio::time::sleep(SETTLE).await;
+        assert_eq!(
+            h.calc.stamp(),
+            stamp,
+            "J is monitored, I is not: a status change must not republish"
+        );
+    }
+
+    /// `calcUsesStatus` / `calcUsesSeverity` decide the monitor set from the
+    /// expression alone. Boundary: each letter present, absent, and hidden
+    /// inside an identifier.
+    #[test]
+    fn medm_monitors_follow_calc_uses_status_and_severity() {
+        let m = |e: &str| MedmMonitors::of(e);
+        assert_eq!(
+            m("A"),
+            MedmMonitors {
+                status: false,
+                severity: false
+            }
+        );
+        assert_eq!(
+            m("I"),
+            MedmMonitors {
+                status: true,
+                severity: false
+            }
+        );
+        assert_eq!(
+            m("J"),
+            MedmMonitors {
+                status: false,
+                severity: true
+            }
+        );
+        assert_eq!(
+            m("I#J"),
+            MedmMonitors {
+                status: true,
+                severity: true
+            }
+        );
+        // `sin`/`nint` end in a letter-preceded `i`/`n`; neither is operand I.
+        assert!(m("sin(A)").is_empty());
+        assert!(m("nint(A)").is_empty());
+    }
+
+    /// Boundary: a child's alarm/metadata-only change bumps `Channel::stamp()`
+    /// but emits no value event, so it must NOT recompute. PyDM binds only
+    /// `value_slot` on calc children (`calc_plugin.py:84-89`). The old
+    /// stamp-polling trigger republished here, double-counting accumulators.
+    #[tokio::test]
+    async fn alarm_only_child_update_does_not_retrigger_the_calc() {
+        let (a, a_writer) = channel_pair("loc://a");
+        let harness = spawn_calc("a", None, vec![("a".to_owned(), a)]);
+        let events = harness.calc.subscribe_values(16);
+
+        connect_with(&a_writer, 1.0);
+        tokio::time::sleep(SETTLE).await;
+        let mut n = 0;
+        events.drain(|_| n += 1);
+        assert_eq!(n, 1, "one publish for the initial evaluation");
+
+        // Metadata/alarm only: bumps the child's stamp, emits no value event.
+        a_writer.update(|s| s.severity = crate::channel::AlarmSeverity::Minor);
+        tokio::time::sleep(SETTLE).await;
+        let mut n = 0;
+        events.drain(|_| n += 1);
+        assert_eq!(n, 0, "alarm-only child update must not republish the calc");
+    }
+
+    /// Boundary: a child connection-state change re-emits the last computed
+    /// value, matching PyDM `callback_conn` → `_send_update(self.connected,
+    /// self._value)` (`calc_plugin.py:156-157`). The old code only flipped the
+    /// `connected` flag with no value event.
+    #[tokio::test]
+    async fn child_connection_change_reemits_the_last_value() {
+        let (a, a_writer) = channel_pair("loc://a");
+        let harness = spawn_calc("a", None, vec![("a".to_owned(), a)]);
+        let events = harness.calc.subscribe_values(16);
+
+        connect_with(&a_writer, 7.0);
+        tokio::time::sleep(SETTLE).await;
+        let mut got = Vec::new();
+        events.drain(|e| got.push(e.value.as_f64().expect("numeric")));
+        assert_eq!(got, vec![7.0], "initial evaluation");
+
+        // Child drops: connection change, no new value.
+        a_writer.update(|s| s.connected = false);
+        tokio::time::sleep(SETTLE).await;
+        let mut got = Vec::new();
+        events.drain(|e| got.push(e.value.as_f64().expect("numeric")));
+        assert_eq!(got, vec![7.0], "child disconnect re-emits the last value");
+    }
+
+    /// Boundary: a triggering child's value that lands BEFORE the last child
+    /// connects must still arm the recompute. The queue holds the event; the
+    /// old collapsing `stamp` counter needed a `u64::MAX` sentinel to survive
+    /// this interleaving, and lost the edge without it.
+    #[tokio::test]
+    async fn value_arriving_before_all_children_connect_still_triggers() {
+        let (a, a_writer) = channel_pair("loc://a");
+        let (b, b_writer) = channel_pair("loc://b");
+        let harness = spawn_calc(
+            "a + b",
+            Some(vec!["a".to_owned()]),
+            vec![("a".to_owned(), a), ("b".to_owned(), b)],
+        );
+        let events = harness.calc.subscribe_values(16);
+
+        // The update-var connects and publishes first; `b` is still down.
+        connect_with(&a_writer, 2.0);
+        tokio::time::sleep(SETTLE).await;
+        let mut n = 0;
+        events.drain(|_| n += 1);
+        assert_eq!(n, 0, "no publish while a child is disconnected");
+
+        // `b` is NOT in the update list, so only the queued `a` event (and the
+        // first all-connected evaluation) can produce the initial value.
+        connect_with(&b_writer, 3.0);
+        tokio::time::sleep(SETTLE).await;
+        let mut got = Vec::new();
+        events.drain(|e| got.push(e.value.as_f64().expect("numeric")));
+        assert!(
+            got.contains(&5.0),
+            "initial derived value a+b = 2+3 = 5.0 was never published (got {got:?})"
+        );
     }
 }

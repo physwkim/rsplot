@@ -643,6 +643,23 @@ fn validate_image_len(width: u32, height: u32, actual: usize) -> Result<usize, P
     }
 }
 
+/// Whether the Reset-Zoom button is enabled, and the tooltip it carries, from
+/// the X and Y autoscale flags.
+///
+/// silx `ResetZoomAction._autoscaleChanged` (`actions/control.py:83-95`):
+/// `setEnabled(x or y)`, and the tooltip names the single autoscaled axis when
+/// exactly one is on. With neither on the tooltip falls back to the both-on
+/// wording — the button is disabled, so it is never read.
+#[must_use]
+fn reset_zoom_affordance(x_autoscale: bool, y_autoscale: bool) -> (bool, &'static str) {
+    let tooltip = match (x_autoscale, y_autoscale) {
+        (true, false) => "Auto-scale the x-axis of the graph only",
+        (false, true) => "Auto-scale the y-axis of the graph only",
+        _ => "Auto-scale the graph",
+    };
+    (x_autoscale || y_autoscale, tooltip)
+}
+
 fn toolbar_icon_button(
     ui: &mut egui::Ui,
     icon: ToolbarIcon,
@@ -688,7 +705,7 @@ fn draw_toolbar_button(
 }
 
 fn draw_toolbar_icon(painter: &egui::Painter, rect: egui::Rect, icon: ToolbarIcon, color: Color32) {
-    let stroke = egui::Stroke::new(1.6, color);
+    let stroke = egui::Stroke::new(1.6_f32, color);
     match icon {
         ToolbarIcon::Home => draw_home_icon(painter, rect, stroke),
         ToolbarIcon::Select => draw_select_icon(painter, rect, stroke),
@@ -3351,7 +3368,7 @@ fn draw_legend_row(ui: &egui::Ui, p: LegendRowDraw<'_>) {
             egui::pos2(row_rect.left(), row_rect.bottom()),
             egui::pos2(row_rect.right(), row_rect.bottom()),
         ],
-        egui::Stroke::new(1.0, visuals.widgets.noninteractive.bg_stroke.color),
+        egui::Stroke::new(1.0_f32, visuals.widgets.noninteractive.bg_stroke.color),
     );
 }
 
@@ -3371,7 +3388,7 @@ fn draw_legend_swatch(
             let a = egui::pos2(rect.left() + 4.0, y);
             let b = egui::pos2(rect.right() - 4.0, y);
             if visual.line_style.draws_line() {
-                let stroke = egui::Stroke::new(2.0, visual.color);
+                let stroke = egui::Stroke::new(2.0_f32, visual.color);
                 match visual.line_style.painter_dashes(stroke.width) {
                     None => {
                         painter.line_segment([a, b], stroke);
@@ -3408,7 +3425,7 @@ fn draw_legend_swatch(
                 painter.rect_stroke(
                     bar,
                     0.0,
-                    egui::Stroke::new(1.0, visual.color),
+                    egui::Stroke::new(1.0_f32, visual.color),
                     egui::StrokeKind::Inside,
                 );
             }
@@ -3448,7 +3465,7 @@ fn draw_legend_swatch(
             painter.add(egui::Shape::convex_polygon(
                 points,
                 visual.color.linear_multiply(0.45),
-                egui::Stroke::new(1.0, visual.color),
+                egui::Stroke::new(1.0_f32, visual.color),
             ));
         }
         PlotItemKind::Shape => {
@@ -3456,13 +3473,13 @@ fn draw_legend_swatch(
             painter.rect_stroke(
                 shape,
                 0.0,
-                egui::Stroke::new(1.5, visual.color),
+                egui::Stroke::new(1.5_f32, visual.color),
                 egui::StrokeKind::Inside,
             );
         }
         PlotItemKind::Marker => {
             let center = rect.center();
-            let stroke = egui::Stroke::new(1.8, visual.color);
+            let stroke = egui::Stroke::new(1.8_f32, visual.color);
             painter.line_segment(
                 [
                     egui::pos2(center.x - 7.0, center.y),
@@ -3495,7 +3512,7 @@ fn draw_legend_symbol(
     color: Color32,
 ) {
     let c = center;
-    let stroke = egui::Stroke::new(1.5, color);
+    let stroke = egui::Stroke::new(1.5_f32, color);
     // Apex-then-arms helper for the open carets.
     let caret = |apex: egui::Pos2, arm_a: egui::Pos2, arm_b: egui::Pos2| {
         painter.line_segment([apex, arm_a], stroke);
@@ -3653,14 +3670,14 @@ fn draw_legend_eye(
         crate::core::color::with_alpha(color, 180)
     };
     if visible {
-        painter.circle_stroke(egui::pos2(cx, cy), r, egui::Stroke::new(1.5, eye_color));
+        painter.circle_stroke(egui::pos2(cx, cy), r, egui::Stroke::new(1.5_f32, eye_color));
         painter.circle_filled(egui::pos2(cx, cy), r * 0.45, eye_color);
     } else {
         let dim = crate::core::color::with_alpha(color, 80);
-        painter.circle_stroke(egui::pos2(cx, cy), r, egui::Stroke::new(1.5, dim));
+        painter.circle_stroke(egui::pos2(cx, cy), r, egui::Stroke::new(1.5_f32, dim));
         painter.line_segment(
             [egui::pos2(cx - r * 1.3, cy), egui::pos2(cx + r * 1.3, cy)],
-            egui::Stroke::new(1.5, dim),
+            egui::Stroke::new(1.5_f32, dim),
         );
     }
 }
@@ -4157,6 +4174,14 @@ impl PlotWidget {
         }
     }
 
+    /// The single owner for every view-limits commit: each axis range passes
+    /// through [`clamp_axis_limits`] here, so no caller can install an
+    /// inverted, degenerate, or float32-unsafe range and the `Transform`
+    /// precondition (`min < max`, positive under log) holds by construction.
+    /// silx enforces the same invariant by running `Axis._checkLimits` on X, Y
+    /// and — when present — Y2 inside `PlotWidget.setLimits`
+    /// (`PlotWidget.py:2723-2730` → `items/axis.py:145-154` →
+    /// `_utils/panzoom.py:49-75`).
     fn set_limits_internal(
         &mut self,
         xmin: f64,
@@ -4165,6 +4190,13 @@ impl PlotWidget {
         ymax: f64,
         y2: Option<(f64, f64)>,
     ) {
+        let x_log = self.backend.plot().x_scale == Scale::Log10;
+        let y_log = self.backend.plot().y_scale == Scale::Log10;
+        let (xmin, xmax) = clamp_axis_limits(xmin, xmax, x_log);
+        let (ymin, ymax) = clamp_axis_limits(ymin, ymax, y_log);
+        // silx scales the right axis with the left Y log state (`setLimits`
+        // takes `getYAxis(axis="right")`, whose `_isLogarithmic` tracks left).
+        let y2 = y2.map(|(lo, hi)| clamp_axis_limits(lo, hi, y_log));
         let before = self.limits_snapshot();
         self.backend.set_limits(xmin, xmax, ymin, ymax, y2);
         self.push_limits_changed_if(before);
@@ -6479,7 +6511,16 @@ impl PlotWidget {
     fn show_toolbar_controls(&mut self, ui: &mut egui::Ui, out: &mut ToolbarResponse) {
         // Essential controls, always in the row: reset zoom, the box-zoom /
         // pan interaction modes, Y invert, and keep-aspect.
-        if toolbar_icon_button(ui, ToolbarIcon::Home, false, "Reset zoom").clicked() {
+        // silx greys out Reset Zoom when neither axis autoscales, and names the
+        // single autoscaled axis in the tooltip (`actions/control.py:83-95`).
+        let plot = self.backend.plot();
+        let (enabled, tooltip) = reset_zoom_affordance(plot.x_autoscale(), plot.y_autoscale());
+        let clicked = ui
+            .add_enabled_ui(enabled, |ui| {
+                toolbar_icon_button(ui, ToolbarIcon::Home, false, tooltip).clicked()
+            })
+            .inner;
+        if clicked {
             self.reset_zoom();
             out.reset_zoom = true;
         }
@@ -6818,13 +6859,23 @@ impl PlotWidget {
                 self.set_limits_internal(xmin, xmax, ymin, ymax, self.backend.plot().y2);
             }
             YAxis::Right => {
-                let before = self.limits_snapshot();
-                self.backend.plot_mut().y2 = Some((ymin, ymax));
-                self.push_limits_changed_if(before);
+                // Route through the owner so y2 gets the same `_checkLimits`
+                // repair X and Y get; X/Y are re-committed unchanged.
+                let (xmin, xmax, cur_ymin, cur_ymax) = self.backend.plot().limits;
+                self.set_limits_internal(xmin, xmax, cur_ymin, cur_ymax, Some((ymin, ymax)));
             }
             YAxis::Extra(n) => {
+                // Extra axes carry their own scale, so they repair against it.
+                let is_log = self
+                    .backend
+                    .plot()
+                    .extra_axes()
+                    .get(n)
+                    .map(|ax| ax.scale == Scale::Log10)
+                    .unwrap_or(false);
+                let (lo, hi) = clamp_axis_limits(ymin, ymax, is_log);
                 if let Some(ax) = self.backend.plot_mut().extra_axis_mut(n) {
-                    ax.range = Some((ymin, ymax));
+                    ax.range = Some((lo, hi));
                 }
             }
         }
@@ -6917,8 +6968,8 @@ impl PlotWidget {
                 }
             }
         };
-        // silx writes via Axis.setLimits → _checkLimits (checkAxisLimits).
-        let (lo, hi) = clamp_axis_limits(lo, hi, true);
+        // `set_graph_x_limits` funnels into `set_limits_internal`, which runs
+        // the `_checkLimits` repair; the axis is already Log10 by this point.
         self.set_graph_x_limits(lo, hi);
     }
 
@@ -6968,8 +7019,8 @@ impl PlotWidget {
                 }
             }
         };
-        // silx writes via Axis.setLimits → _checkLimits (checkAxisLimits).
-        let (lo, hi) = clamp_axis_limits(lo, hi, true);
+        // `set_graph_y_limits` funnels into `set_limits_internal`, which runs
+        // the `_checkLimits` repair; the axis is already Log10 by this point.
         self.set_graph_y_limits(lo, hi, YAxis::Left);
     }
 
@@ -11769,7 +11820,7 @@ impl ImageView {
             roi,
             (self.width, self.height),
             self.profile_window.line_width(),
-            egui::Stroke::new(1.5, PROFILE_OVERLAY_COLOR),
+            egui::Stroke::new(1.5_f32, PROFILE_OVERLAY_COLOR),
         );
     }
 
@@ -12639,7 +12690,7 @@ impl ScatterView {
             roi,
             (0, 0),
             1,
-            egui::Stroke::new(1.5, PROFILE_OVERLAY_COLOR),
+            egui::Stroke::new(1.5_f32, PROFILE_OVERLAY_COLOR),
         );
     }
 
@@ -14048,7 +14099,7 @@ impl StackView {
             roi,
             (self.width, self.height),
             self.profile_window.line_width(),
-            egui::Stroke::new(1.5, PROFILE_OVERLAY_COLOR),
+            egui::Stroke::new(1.5_f32, PROFILE_OVERLAY_COLOR),
         );
     }
 
@@ -15179,6 +15230,30 @@ mod tests {
         plot.set_y_autoscale(false);
         apply_widget_reset(&mut plot, data_bounds((10.0, 20.0), (-5.0, 5.0), None));
         assert_eq!(plot.limits, (10.0, 20.0, 0.0, 1.0));
+    }
+
+    /// One case per combination of the two autoscale flags, matching silx's
+    /// `_autoscaleChanged` table (`actions/control.py:83-95`).
+    #[test]
+    fn reset_zoom_affordance_matches_silx_enable_and_tooltip() {
+        assert_eq!(
+            reset_zoom_affordance(true, true),
+            (true, "Auto-scale the graph")
+        );
+        assert_eq!(
+            reset_zoom_affordance(true, false),
+            (true, "Auto-scale the x-axis of the graph only")
+        );
+        assert_eq!(
+            reset_zoom_affordance(false, true),
+            (true, "Auto-scale the y-axis of the graph only")
+        );
+        // Disabled, and silx reuses the both-on wording rather than inventing a
+        // fourth string.
+        assert_eq!(
+            reset_zoom_affordance(false, false),
+            (false, "Auto-scale the graph")
+        );
     }
 
     #[test]
@@ -16384,10 +16459,11 @@ mod tests {
     #[test]
     fn scatter_binned_statistic_mode_means_and_nan_empty() {
         // Item 2: BINNED_STATISTIC converts (x,y,value) to per-bin means;
-        // two points in bin (0,0) average, an empty bin is NaN.
-        let x = [0.0, 0.5, 2.0];
-        let y = [0.0, 0.5, 2.0];
-        let v = [10.0, 30.0, 7.0];
+        // two points in bin (0,0) average, an empty bin is NaN. The corner
+        // point (2,2) pins the extent and is dropped by the open upper edge.
+        let x = [0.0, 0.5, 1.5, 2.0];
+        let y = [0.0, 0.5, 1.5, 2.0];
+        let v = [10.0, 30.0, 7.0, 99.0];
         let img = scatter_grid_image(ScatterVisualization::BinnedStatistic, &x, &y, &v, (2, 2))
             .expect("binned");
         assert_eq!(img.shape, (2, 2));

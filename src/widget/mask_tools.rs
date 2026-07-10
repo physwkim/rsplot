@@ -1013,7 +1013,7 @@ impl MaskToolsWidget {
         ));
         painter.with_clip_rect(area).add(egui::Shape::dashed_line(
             &outline,
-            egui::Stroke::new(1.5, self.color),
+            egui::Stroke::new(1.5_f32, self.color),
             6.0,
             4.0,
         ));

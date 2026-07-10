@@ -467,7 +467,7 @@ impl HistogramColorBar {
         painter.rect_stroke(
             bar_rect,
             egui::CornerRadius::ZERO,
-            Stroke::new(1.0, fg),
+            Stroke::new(1.0_f32, fg),
             egui::StrokeKind::Inside,
         );
 
@@ -497,7 +497,7 @@ impl HistogramColorBar {
         let outline = Color32::WHITE;
         painter.line_segment(
             [pos2(columns.hist_left, y), pos2(bar_rect.right(), y)],
-            Stroke::new(1.5, accent),
+            Stroke::new(1.5_f32, accent),
         );
         let tri = vec![
             pos2(bar_rect.left() - 2.0 * HANDLE_TRI, y - HANDLE_TRI),
@@ -507,7 +507,7 @@ impl HistogramColorBar {
         painter.add(Shape::convex_polygon(
             tri,
             accent,
-            Stroke::new(1.0, outline),
+            Stroke::new(1.0_f32, outline),
         ));
 
         // Value label right of the strip, clamped inside the bar span. RIGHT-

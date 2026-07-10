@@ -676,6 +676,9 @@ fn apply_nt_metadata(s: &mut ChannelState, root: &PvField) {
         // the signed wire value into its `u16` domain first.
         s.severity = AlarmSeverity::from_epics(sev.clamp(0, 3) as u16);
     }
+    if let Some(stat) = scalar_field(root, "alarm.status").and_then(scalar_i64) {
+        s.status = stat.clamp(i64::from(i16::MIN), i64::from(i16::MAX)) as i16;
+    }
     if let Some(ts) = timestamp_of(root) {
         s.timestamp = Some(ts);
     }

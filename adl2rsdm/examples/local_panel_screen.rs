@@ -176,6 +176,7 @@ impl Screen {
             place(ui, __frame_origin_16, sx, sy, egui::Order::Middle, egui::Id::new(15u64), 0.0, 18.0, 152.0, 16.0, |ui| {
                 {
                     ui.style_mut().override_font_id = Some(egui::FontId::proportional(10.0 * sy));
+                    ui.style_mut().visuals.override_text_color = Some(Color32::from_rgb(0, 0, 255));
                     ui.with_layout(egui::Layout::centered_and_justified(egui::Direction::LeftToRight), |ui| {
                         let spacing = ui.spacing_mut();
                         spacing.interact_size = egui::Vec2::ZERO;
@@ -341,7 +342,7 @@ fn related_display_icon(ui: &egui::Ui, rect: egui::Rect, fg: egui::Color32, bg: 
     let side = (rect.height().min(rect.width()) - 8.0).max(4.0);
     let icon = egui::Rect::from_center_size(rect.center(), egui::Vec2::splat(side));
     let p = |x: f32, y: f32| icon.min + egui::vec2(x, y) * (side / 25.0);
-    let stroke = egui::Stroke::new(1.0, fg);
+    let stroke = egui::Stroke::new(1.0_f32, fg);
     let painter = ui.painter();
     painter.line_segment([p(16.0, 9.0), p(22.0, 9.0)], stroke);
     painter.line_segment([p(22.0, 9.0), p(22.0, 22.0)], stroke);

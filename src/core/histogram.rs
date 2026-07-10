@@ -5,6 +5,29 @@
 //! inline `HistogramColorBar`; this is the single home for the binning logic so
 //! the two never drift.
 
+/// Index of the bin holding `t`, or `None` when `t` is outside the grid.
+///
+/// The grid is the `nbins` uniform bins over the half-open extent
+/// `[xmin, xmax)`, `span == xmax - xmin`. `Histogramnd` rejects a coordinate
+/// below `g_min`, and rejects a coordinate at or above `g_max` unless
+/// `last_bin_closed` is set (`math/histogramnd/src/histogramnd_template.c:174-222`).
+/// `ColormapDialog.computeHistogram` does not set it (`ColormapDialog.py:1288`),
+/// so `t == xmax` is dropped rather than folded into the last bin — and a
+/// degenerate extent (`span == 0`) admits no sample at all.
+///
+/// The arithmetic multiplies before dividing, as C does, so the bin boundaries
+/// fall on the same samples.
+///
+/// This is the one home for `Histogramnd`'s admission rule; every caller that
+/// mirrors a silx `Histogramnd(...)` without `last_bin_closed` uses it.
+pub(crate) fn bin_index(t: f64, xmin: f64, xmax: f64, span: f64, nbins: usize) -> Option<usize> {
+    if !t.is_finite() || t < xmin || t >= xmax {
+        return None;
+    }
+    let idx = ((t - xmin) * nbins as f64 / span) as usize;
+    (idx < nbins).then_some(idx)
+}
+
 /// Compute the data-distribution histogram of a flattened scalar image.
 ///
 /// `data` is the flattened scalar image. `range` optionally fixes the histogram
@@ -18,6 +41,8 @@
 /// when there is no finite data / no valid range (silx returns `(None, None)`).
 /// The bin count is `clamp(2, min(256, floor(sqrt(N))))` — silx `nbins` (the
 /// integer-data 256-bin special case does not apply to scalar `f64` images).
+///
+/// The histogram extent is half-open, `[xmin, xmax)` — see [`bin_index`].
 pub fn compute_histogram(
     data: &[f64],
     range: Option<(f64, f64)>,
@@ -57,22 +82,9 @@ pub fn compute_histogram(
     let nbins = ((data.len() as f64).sqrt().floor() as usize).clamp(2, 256);
     let span = xmax - xmin;
     let mut counts = vec![0u64; nbins];
-    if span > 0.0 {
-        for &v in data {
-            let t = xform(v);
-            if !t.is_finite() || t < xmin || t > xmax {
-                continue;
-            }
-            // Last bin is inclusive of `xmax` (numpy/Histogramnd convention).
-            let idx = ((((t - xmin) / span) * nbins as f64) as usize).min(nbins - 1);
+    for &v in data {
+        if let Some(idx) = bin_index(xform(v), xmin, xmax, span, nbins) {
             counts[idx] += 1;
-        }
-    } else {
-        // Degenerate (all-equal) range: every finite sample lands in bin 0.
-        for &v in data {
-            if xform(v).is_finite() {
-                counts[0] += 1;
-            }
         }
     }
 
@@ -97,8 +109,9 @@ mod tests {
         let (counts, edges) = compute_histogram(&data, None, false).expect("histogram");
         assert_eq!(counts.len(), 10);
         assert_eq!(edges.len(), 11);
-        // Every finite sample is binned exactly once.
-        assert_eq!(counts.iter().sum::<u64>(), 100);
+        // Every sample below the upper edge is binned exactly once; 99.0 sits
+        // *on* the open upper edge and is dropped.
+        assert_eq!(counts.iter().sum::<u64>(), 99);
         // Extent spans the finite data min/max.
         assert_eq!(edges[0], 0.0);
         assert_eq!(*edges.last().unwrap(), 99.0);
@@ -114,16 +127,42 @@ mod tests {
         assert_eq!(e1.len(), 3);
     }
 
+    /// One case per boundary of `bin_index`, not one per user story.
+    /// `nbins = 2` over `[0, 5]` gives bins `[0, 2.5)` and `[2.5, 5)`.
     #[test]
-    fn compute_histogram_uses_supplied_range_and_counts_in_range() {
-        // With an explicit range, out-of-range samples are dropped; the last bin
-        // is inclusive of the upper edge.
+    fn bin_index_boundaries_match_histogramnd() {
+        let bin = |t: f64| bin_index(t, 0.0, 5.0, 5.0, 2);
+
+        assert_eq!(bin(-0.001), None, "below the lower edge");
+        assert_eq!(bin(0.0), Some(0), "on the lower edge: closed");
+        assert_eq!(bin(2.4999), Some(0), "just below the interior edge");
+        assert_eq!(
+            bin(2.5),
+            Some(1),
+            "on the interior edge: belongs to the upper bin"
+        );
+        assert_eq!(bin(4.9999), Some(1), "just below the upper edge");
+        assert_eq!(bin(5.0), None, "on the upper edge: open, so dropped");
+        assert_eq!(bin(5.001), None, "above the upper edge");
+        assert_eq!(bin(f64::NAN), None, "non-finite");
+        assert_eq!(bin(f64::INFINITY), None, "non-finite");
+
+        // Degenerate extent: `t >= xmax` for every `t`, so nothing is admitted
+        // and `span == 0` is never divided by.
+        assert_eq!(bin_index(7.0, 7.0, 7.0, 0.0, 2), None);
+    }
+
+    #[test]
+    fn compute_histogram_uses_supplied_range_and_drops_the_open_upper_edge() {
+        // With an explicit range, out-of-range samples are dropped, and so are
+        // samples sitting exactly on the (open) upper edge.
         let data = vec![-5.0, 0.0, 2.5, 5.0, 5.0, 10.0];
         let (counts, edges) = compute_histogram(&data, Some((0.0, 5.0)), false).expect("histogram");
         assert_eq!(edges[0], 0.0);
         assert_eq!(*edges.last().unwrap(), 5.0);
-        // -5.0 and 10.0 are outside [0, 5]; 0.0, 2.5, 5.0, 5.0 are inside.
-        assert_eq!(counts.iter().sum::<u64>(), 4);
+        // Admitted: 0.0, 2.5. Dropped: -5.0 (below), 5.0 twice (open upper
+        // edge), 10.0 (above).
+        assert_eq!(counts.iter().sum::<u64>(), 2);
     }
 
     #[test]
@@ -137,7 +176,8 @@ mod tests {
         assert!((edges[0] - 1.0).abs() < 1e-9, "{}", edges[0]);
         assert!((edges[1] - 10f64.powf(1.5)).abs() < 1e-6, "{}", edges[1]);
         assert!((edges[2] - 1000.0).abs() < 1e-6, "{}", edges[2]);
-        assert_eq!(counts.iter().sum::<u64>(), 4);
+        // 1000.0 transforms to the open upper edge (log10 = 3) and is dropped.
+        assert_eq!(counts.iter().sum::<u64>(), 3);
     }
 
     #[test]
@@ -147,12 +187,14 @@ mod tests {
     }
 
     #[test]
-    fn compute_histogram_degenerate_range_counts_all_in_first_bin() {
-        // All-equal data: zero-width extent -> every finite sample into bin 0.
+    fn compute_histogram_degenerate_range_admits_no_sample() {
+        // All-equal data: the extent collapses, so every sample sits on the
+        // open upper edge. `ColormapDialog.computeHistogram` has no guard for
+        // this (`ColormapDialog.py:1264-1288`) and `Histogramnd` drops them
+        // all, leaving an empty histogram over a zero-width extent.
         let data = vec![7.0; 5];
         let (counts, edges) = compute_histogram(&data, None, false).expect("histogram");
-        assert_eq!(counts[0], 5);
-        assert_eq!(counts.iter().sum::<u64>(), 5);
+        assert_eq!(counts.iter().sum::<u64>(), 0);
         assert_eq!(edges[0], 7.0);
         assert_eq!(*edges.last().unwrap(), 7.0);
     }

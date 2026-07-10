@@ -584,13 +584,13 @@ pub fn draw_axes_with_x_tick_mode(
     x_time_offset: f64,
 ) {
     let area = t.area;
-    let axis = Stroke::new(1.0, style.axis);
-    let grid = Stroke::new(1.0, style.grid);
+    let axis = Stroke::new(1.0_f32, style.axis);
+    let grid = Stroke::new(1.0_f32, style.grid);
     // `style.grid` is itself translucent (alpha 28), so a premultiplied read +
     // rewrap would crush the minor-grid RGB toward black; `with_alpha` keeps the
     // straight RGB and just halves the alpha.
     let minor_grid = Stroke::new(
-        1.0,
+        1.0_f32,
         crate::core::color::with_alpha(style.grid, style.grid.a() / 2),
     );
     let font = FontId::proportional(11.0);
@@ -690,7 +690,7 @@ pub fn draw_axes_with_x_tick_mode(
 /// (`doc/design.md` §13 A5).
 pub fn draw_y2_ticks(painter: &Painter, t: &Transform, style: &Style) {
     let area = t.area;
-    let axis = Stroke::new(1.0, style.axis);
+    let axis = Stroke::new(1.0_f32, style.axis);
     let font = FontId::proportional(11.0);
     let tick_len = 4.0;
 
@@ -727,7 +727,7 @@ pub fn draw_extra_y_ticks(
     style: &Style,
 ) {
     let area = t.area;
-    let axis = Stroke::new(1.0, style.axis);
+    let axis = Stroke::new(1.0_f32, style.axis);
     let font = FontId::proportional(11.0);
     let tick_len = 4.0;
 
@@ -1048,7 +1048,7 @@ fn draw_roi_handles(
             HandleKind::Translate | HandleKind::Center => {
                 // '+' glyph (silx translate handle symbol).
                 let r = 4.0;
-                let stroke = Stroke::new(1.5, color);
+                let stroke = Stroke::new(1.5_f32, color);
                 painter.line_segment([pos2(p.x - r, p.y), pos2(p.x + r, p.y)], stroke);
                 painter.line_segment([pos2(p.x, p.y - r), pos2(p.x, p.y + r)], stroke);
             }
@@ -1837,7 +1837,7 @@ pub fn draw_crosshair(
     x_time_zone: TimeZone,
 ) {
     let area = t.area;
-    let line = Stroke::new(1.0, style.axis);
+    let line = Stroke::new(1.0_f32, style.axis);
     painter.vline(pos.x, area.y_range(), line);
     painter.hline(area.x_range(), pos.y, line);
 
@@ -1917,12 +1917,12 @@ pub fn draw_colorbar(painter: &Painter, rect: Rect, cmap: &Colormap, style: &Sty
     painter.rect_stroke(
         rect,
         egui::CornerRadius::ZERO,
-        Stroke::new(1.0, style.axis),
+        Stroke::new(1.0_f32, style.axis),
         egui::StrokeKind::Inside,
     );
 
     let font = FontId::proportional(11.0);
-    let axis = Stroke::new(1.0, style.axis);
+    let axis = Stroke::new(1.0_f32, style.axis);
     if cmap.vmax <= cmap.vmin {
         return;
     }

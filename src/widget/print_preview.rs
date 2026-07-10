@@ -487,7 +487,7 @@ impl PrintPreview {
                 painter.rect_stroke(
                     scr,
                     egui::CornerRadius::ZERO,
-                    egui::Stroke::new(1.0, Color32::RED),
+                    egui::Stroke::new(1.0_f32, Color32::RED),
                     egui::StrokeKind::Inside,
                 );
                 let h = Self::handle_rect(it.rect);

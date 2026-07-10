@@ -2,10 +2,12 @@
 //
 // A full-screen triangle generates one camera ray per pixel from the inverse
 // view-projection matrix. Each ray is clipped to the volume's axis-aligned box
-// and marched in fixed steps. The 3D texture holds PREMULTIPLIED RGBA (the
-// uploader premultiplies straight alpha) so the hardware linear filter
-// interpolates premultiplied colour — a colour/transparent boundary stays the
-// right hue instead of bleeding toward black. Samples accumulate front-to-back
+// and marched in fixed steps. The 3D texture holds PREMULTIPLIED RGBA in
+// `Rgba16Float` (the uploader premultiplies straight alpha) so the hardware
+// linear filter interpolates premultiplied colour — a colour/transparent
+// boundary stays the right hue instead of bleeding toward black — while the
+// product `rgb·a` keeps enough precision for `fs_main` to divide the straight
+// colour back out at low coverage. Samples accumulate front-to-back
 // into premultiplied colour that blends with `PREMULTIPLIED_ALPHA_BLENDING`
 // straight into egui's render pass (no offscreen target, no depth).
 
@@ -22,10 +24,15 @@ struct Uniforms {
 @group(0) @binding(1) var vol_tex: texture_3d<f32>;
 @group(0) @binding(2) var vol_samp: sampler;
 
-// Reference sample count for the opacity correction: at this many steps a
-// sample's coverage is used as-is, and other step counts are corrected so the
-// accumulated opacity stays the same. Matches the widget's default `steps`, so
-// the default view is unchanged.
+// The reference sample spacing is `box_diagonal / REF_STEPS`, a WORLD distance:
+// a voxel's authored coverage is the opacity it contributes over exactly that
+// much traversed thickness. Every sample is corrected from the ray's actual
+// spacing `dt` to that reference (see `fs_main`), which makes the accumulated
+// opacity depend on the traversed path length and not on the sample count.
+//
+// REF_STEPS matches the widget's default `steps`, so a ray crossing the full
+// box diagonal at the default step count is unchanged from an uncorrected
+// march.
 const REF_STEPS: f32 = 256.0;
 
 struct VsOut {
@@ -82,6 +89,9 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let cull_floor = u.params.z;
     let extent = u.vol_max.xyz - u.vol_min.xyz;
     let dt = (tfar - tnear) / f32(steps);
+    // World-space reference spacing (see REF_STEPS). Positive for any non-empty
+    // box; `intersect_box` already rejected the degenerate ray.
+    let dt_ref = length(extent) / REF_STEPS;
 
     var acc = vec4<f32>(0.0, 0.0, 0.0, 0.0); // premultiplied rgb + alpha
     var t = tnear + dt * 0.5;
@@ -90,14 +100,19 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         let uvw = (p - u.vol_min.xyz) / extent;
         let s = textureSampleLevel(vol_tex, vol_samp, uvw, 0.0); // premultiplied rgb, coverage a
         if s.a > cull_floor {
-            // Scale coverage by the user opacity knob, then correct it for the
-            // step count so accumulated opacity is invariant to `steps`
-            // (transmittance (1-sa)^steps held to the REF_STEPS baseline).
+            // Scale coverage by the user opacity knob, then correct it from the
+            // reference spacing to this ray's actual spacing `dt`
+            // (Beer–Lambert: transmittance (1-sa)^(dt/dt_ref) per sample, so the
+            // chord transmittance is (1-sa)^(L/dt_ref) — a function of the
+            // traversed thickness L alone, not of the sample count).
             let sa = clamp(s.a * alpha_scale, 0.0, 1.0);
-            let sa_c = 1.0 - pow(1.0 - sa, REF_STEPS / f32(steps));
+            let sa_c = 1.0 - pow(1.0 - sa, dt / dt_ref);
             // Rescale the premultiplied colour to the corrected coverage
             // (gain = sa_c/s.a). Compositing stays in premultiplied space, so no
-            // dark fringe at boundaries.
+            // dark fringe at boundaries. The division recovers the straight
+            // colour, which is why the texture is Rgba16Float and not Rgba8Unorm:
+            // an 8-bit product `rgb·a` only resolves the quotient to steps of
+            // 1/a, i.e. 3 colour levels at the coverage a=3/255 a march uses.
             let gain = sa_c / max(s.a, 1e-6);
             let w = 1.0 - acc.a;
             acc = vec4<f32>(acc.rgb + s.rgb * gain * w, acc.a + sa_c * w);

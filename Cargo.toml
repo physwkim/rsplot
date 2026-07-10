@@ -1,6 +1,6 @@
 [package]
 name = "rsplot"
-version = "0.5.2"
+version = "0.5.3"
 edition = "2024"
 rust-version = "1.92"
 license = "MIT OR Apache-2.0"
@@ -24,6 +24,9 @@ resolver = "3"
 egui = "0.34"
 egui-wgpu = "0.34"
 bytemuck = { version = "1", features = ["derive"] }
+# f16 encoding for the volume ray-caster's premultiplied 3D texture. Already in
+# the tree transitively (via wgpu), so this pins no new major version.
+half = "2"
 colorous = "1"
 # PNG encoding for save_graph (offscreen readback → file). Already in the tree
 # transitively via egui's image loading, so this pins no new major version.

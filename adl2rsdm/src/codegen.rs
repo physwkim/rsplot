@@ -22,7 +22,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
-use crate::adl_parser::{Color, Geometry, MedmScreen, MedmWidget, parse_in_dir};
+use crate::adl_parser::{Color, Geometry, MedmScreen, MedmWidget, parse_embedded_in_dir};
 use crate::symbols::{self, ZLayer};
 
 /// Maximum embedded-display nesting depth inlined at code-gen time, a backstop
@@ -191,6 +191,11 @@ struct Builder {
     /// The convert-time `--macro` table ([`Options::macros`]); cached here so
     /// `emit_new` can pass it as the root instance's runtime table.
     macros: Vec<(String, String)>,
+    /// The **host** display's colour table, the single owner of every `clr`/`bclr`
+    /// index in this screen and in every file it embeds, at any depth: MEDM's
+    /// `parseCompositeFile` skips a child's own `"color map"` and parses the
+    /// child's elements into the parent `displayInfo` (`medmComposite.c:694-707`).
+    color_table: Vec<Color>,
     /// Converted related-display targets ([`Options::rd_modules`]); cached so
     /// `emit_related_display` can turn a click into an *open* of the sibling
     /// module's screen rather than a log line.
@@ -276,6 +281,7 @@ pub fn generate(screen: &MedmScreen, options: &Options) -> Generated {
         macros: options.macros.clone(),
         rd_modules: options.rd_modules.clone(),
         child_module: options.child_module,
+        color_table: screen.color_table.clone(),
         ..Default::default()
     };
     for widget in &screen.widgets {
@@ -1084,8 +1090,14 @@ fn drawing_size_builder(geom: Geometry) -> String {
 /// `begin`/`path` angles are parsed to degrees (`beginAngle`/`pathAngle`); RsDM's
 /// arc keeps MEDM's X11 convention (0° at 3 o'clock, CCW positive), so the
 /// parsed values are used directly (no Qt-style negation). An opaque fill paints
-/// a pie wedge; `outline` paints an open stroked arc. Defaults: begin 0°, span
-/// 360° when the keys are absent (a degenerate arc still draws a visible sweep).
+/// a pie wedge; `outline` paints an open stroked arc.
+///
+/// When a key is absent MEDM keeps the value `createDlArc` seeded before
+/// parsing: `begin = 0`, `path = 90*64` (`medm/medmArc.c:258-259`, reached via
+/// `parseArc`'s `createDlArc(NULL)` at `medmArc.c:277`) — that is 0° and 90°,
+/// the angles being stored in 1/64°. PyDM agrees: `adl2pydm` omits `spanAngle`
+/// for an absent `path` (`output_handler.py:559`) and `PyDMDrawingArc` seeds
+/// `_span_angle = deg_to_qt(90)` (`drawing.py:1271`).
 fn emit_arc(b: &mut Builder, widget: &MedmWidget, options: &Options, z: ZLayer) {
     let Some(geom) = widget.geometry else {
         skip_no_geometry(b, widget);
@@ -1093,7 +1105,7 @@ fn emit_arc(b: &mut Builder, widget: &MedmWidget, options: &Options, z: ZLayer) 
     };
     let (addr, placeholder) = dynamic_channel(b, widget, options, "shape");
     let begin = angle_deg(widget, "beginAngle", 0.0);
-    let span = angle_deg(widget, "pathAngle", 360.0);
+    let span = angle_deg(widget, "pathAngle", 90.0);
     let new_call = format!(
         "RsdmDrawing::new(&engine, {}, DrawingShape::Arc {{ begin_deg: {}, span_deg: {} }})",
         medm_str(b, &addr),
@@ -2205,7 +2217,13 @@ fn emit_embedded_display(b: &mut Builder, widget: &MedmWidget, options: &Options
         }
     };
 
-    let mut target = parse_in_dir(&text, canonical.parent());
+    // The child's `clr`/`bclr` indices resolve against the HOST display's
+    // colormap, never its own: `parseCompositeFile` skips the child's
+    // `"color map"` block and parses its elements into the parent `displayInfo`
+    // (`medm/medmComposite.c:694-707`). `b.color_table` is the top-level
+    // display's, so this holds at every nesting depth, as it does in MEDM.
+    let host_colormap = b.color_table.clone();
+    let mut target = parse_embedded_in_dir(&text, canonical.parent(), &host_colormap);
     // Resolve the target's channels in the embedded directory (so a nested
     // embedded display resolves relative to *its* file). Per MEDM
     // `compositeFileParse`, a non-empty macro string on the `composite file`
@@ -3804,7 +3822,7 @@ fn related_display_icon(ui: &egui::Ui, rect: egui::Rect, fg: egui::Color32, bg: 
     let side = (rect.height().min(rect.width()) - 8.0).max(4.0);
     let icon = egui::Rect::from_center_size(rect.center(), egui::Vec2::splat(side));
     let p = |x: f32, y: f32| icon.min + egui::vec2(x, y) * (side / 25.0);
-    let stroke = egui::Stroke::new(1.0, fg);
+    let stroke = egui::Stroke::new(1.0_f32, fg);
     let painter = ui.painter();
     painter.line_segment([p(16.0, 9.0), p(22.0, 9.0)], stroke);
     painter.line_segment([p(22.0, 9.0), p(22.0, 22.0)], stroke);
@@ -8384,6 +8402,33 @@ image {
         generate(&parse(DEFERRED), &Options::default())
     }
 
+    /// An `arc` block with no `begin`/`path` keeps the values `createDlArc`
+    /// seeded before parsing: 0° and 90° (`medm/medmArc.c:258-259`). A full
+    /// 360° sweep is what MEDM draws only when the file says so.
+    #[test]
+    fn arc_without_angles_falls_back_to_medms_zero_and_ninety_degrees() {
+        const NO_ANGLES: &str = r#"
+arc {
+	object {
+		x=10
+		y=10
+		width=40
+		height=40
+	}
+	"basic attribute" {
+		clr=3
+	}
+}
+"#;
+        let g = generate(&parse(NO_ANGLES), &Options::default());
+        assert!(
+            g.source
+                .contains("DrawingShape::Arc { begin_deg: 0.0, span_deg: 90.0 }"),
+            "absent angles must not become a 360° sweep:\n{}",
+            g.source
+        );
+    }
+
     #[test]
     fn arc_and_polyline_emit_real_drawings_at_the_background_layer() {
         let g = deferred();
@@ -8640,6 +8685,83 @@ composite {
             g.warnings.iter().any(|w| w.contains("inlined child.adl")),
             "{:?}",
             g.warnings
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `parseCompositeFile` skips the child's `"color map"` and parses its
+    /// elements into the parent `displayInfo` (`medm/medmComposite.c:694-707`),
+    /// so `clr=1` in the child names the *host* palette's entry 1.
+    #[test]
+    fn embedded_display_colours_children_from_the_host_colormap() {
+        let dir = embed_tmpdir("cmap");
+        // Child palette: index 1 = pure red. Host palette: index 1 = pure blue.
+        std::fs::write(
+            dir.join("child.adl"),
+            r#"
+"color map" {
+	colors {
+		ffffff,
+		ff0000,
+	}
+}
+display {
+	object {
+		x=0
+		y=0
+		width=120
+		height=24
+	}
+	clr=1
+	bclr=0
+}
+text {
+	object {
+		x=4
+		y=2
+		width=110
+		height=18
+	}
+	textix="hi"
+	"basic attribute" {
+		clr=1
+	}
+}
+"#,
+        )
+        .unwrap();
+        let parent = r#"
+"color map" {
+	colors {
+		ffffff,
+		0000ff,
+	}
+}
+composite {
+	object {
+		x=30
+		y=40
+		width=120
+		height=24
+	}
+	"composite file"="child.adl"
+}
+"#;
+        let options = Options {
+            protocol: String::new(),
+            source_dir: Some(dir.clone()),
+            ..Options::default()
+        };
+        let g = generate(&parse(parent), &options);
+        assert!(
+            g.source.contains("Color32::from_rgb(0, 0, 255)"),
+            "embedded child must take the host palette's index 1 (blue):\n{}",
+            g.source
+        );
+        assert!(
+            !g.source.contains("Color32::from_rgb(255, 0, 0)"),
+            "the child's own palette must be discarded, as parseAndSkip does:\n{}",
+            g.source
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

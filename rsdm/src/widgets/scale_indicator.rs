@@ -262,7 +262,7 @@ impl RsdmScaleIndicator {
         painter.rect_filled(rect, egui::CornerRadius::ZERO, self.background);
 
         let horizontal = self.orientation == Orientation::Horizontal;
-        let tick_stroke = Stroke::new(1.0, self.tick_color);
+        let tick_stroke = Stroke::new(1.0_f32, self.tick_color);
         for tp in division_proportions(self.num_divisions) {
             let (a, b) = self.axis_line(rect, tp, horizontal);
             painter.line_segment([a, b], tick_stroke);
@@ -281,7 +281,7 @@ impl RsdmScaleIndicator {
             );
         } else {
             let (a, b) = self.axis_line(rect, self.pos(p), horizontal);
-            painter.line_segment([a, b], Stroke::new(3.0, bar_color));
+            painter.line_segment([a, b], Stroke::new(3.0_f32, bar_color));
         }
     }
 

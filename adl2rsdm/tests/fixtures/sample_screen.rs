@@ -98,7 +98,7 @@ impl Screen {
             .with_fill(Color32::from_rgb(255, 0, 0))
             .with_size(egui::Vec2::new(60.0, 60.0))
             .with_placeholder_channel();
-        let w13 = RsdmDrawing::new(&engine, "loc://adl2rsdm_shape_1", DrawingShape::Arc { begin_deg: 0.0, span_deg: 360.0 })
+        let w13 = RsdmDrawing::new(&engine, "loc://adl2rsdm_shape_1", DrawingShape::Arc { begin_deg: 0.0, span_deg: 90.0 })
             .expect("adl2rsdm: connect loc://adl2rsdm_shape_1 (arc)")
             .with_fill(Color32::from_rgb(0, 255, 0))
             .with_size(egui::Vec2::new(60.0, 60.0))

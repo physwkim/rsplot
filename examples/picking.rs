@@ -62,7 +62,7 @@ impl eframe::App for PickingApp {
             {
                 let painter = ui.painter();
                 let c = out.transform.data_to_pixel(pick.x, pick.y);
-                painter.circle_stroke(c, 9.0, Stroke::new(2.0, Color32::WHITE));
+                painter.circle_stroke(c, 9.0, Stroke::new(2.0_f32, Color32::WHITE));
                 painter.text(
                     c + vec2(12.0, -12.0),
                     Align2::LEFT_BOTTOM,

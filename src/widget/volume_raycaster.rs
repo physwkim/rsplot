@@ -19,8 +19,8 @@ use crate::core::scene3d::camera::Camera;
 use crate::core::scene3d::interaction::{OrbitDrag, PanDrag, window_to_ndc};
 use crate::core::scene3d::mat4::{Mat4, Vec3};
 use crate::render::volume_raycaster::{
-    VolumeFrame, VolumeId, install_volume_raycaster, paint_volume_raycaster,
-    remove_volume_raycaster, set_volume_raycaster, volume_bounds,
+    VolumeFrame, VolumeId, acquire_volume_raycaster, install_volume_raycaster,
+    paint_volume_raycaster, release_volume_raycaster, set_volume_raycaster, volume_bounds,
 };
 
 /// Upper bound on samples per ray; beyond this a single frame can outrun the
@@ -30,6 +30,14 @@ const MAX_STEPS: u32 = 4096;
 /// Interactive GPU direct-volume-rendering widget. See the module docs.
 pub struct VolumeRaycaster {
     id: VolumeId,
+    /// Kept so [`Drop`] can release this handle's claim on `id` without the
+    /// caller having to remember to. Cheap: `RenderState` is a bundle of `Arc`s.
+    render_state: RenderState,
+    /// Whether this handle currently holds a claim on `id`'s GPU entry. `new`
+    /// takes one, [`remove`](VolumeRaycaster::remove) and [`Drop`] give it back,
+    /// and [`set_volume`](VolumeRaycaster::set_volume) takes it again — so the
+    /// entry outlives exactly the handles that need it.
+    claimed: bool,
     camera: Camera,
     /// World-space axis-aligned box the volume occupies (centred, aspect-kept).
     bounds: (Vec3, Vec3),
@@ -53,9 +61,12 @@ impl VolumeRaycaster {
     /// The `id` keys the uploaded 3D texture, so distinct volumes need distinct
     /// ids (two views sharing an id share the last-uploaded texture). Cameras are
     /// not shared: each paint builds its own uniforms, so same-id views still
-    /// render with their own viewpoint.
+    /// render with their own viewpoint. The texture is claimed for as long as any
+    /// view holding the id is alive, so dropping one such view leaves the others
+    /// rendering.
     pub fn new(render_state: &RenderState, id: VolumeId) -> Self {
         install_volume_raycaster(render_state);
+        acquire_volume_raycaster(render_state, id);
         let camera = Camera::new(
             30.0,
             0.1,
@@ -67,6 +78,8 @@ impl VolumeRaycaster {
         );
         Self {
             id,
+            render_state: render_state.clone(),
+            claimed: true,
             camera,
             bounds: (Vec3::new(-0.5, -0.5, -0.5), Vec3::new(0.5, 0.5, 0.5)),
             has_volume: false,
@@ -89,6 +102,10 @@ impl VolumeRaycaster {
         height: usize,
         width: usize,
     ) {
+        if !self.claimed {
+            acquire_volume_raycaster(render_state, self.id);
+            self.claimed = true;
+        }
         set_volume_raycaster(render_state, self.id, rgba, depth, height, width);
         let (mn, mx) = volume_bounds(depth, height, width);
         self.bounds = (Vec3::from_array(mn), Vec3::from_array(mx));
@@ -120,12 +137,16 @@ impl VolumeRaycaster {
         self.camera.reset_camera(self.bounds);
     }
 
-    /// Free this view's uploaded GPU volume (the 3D texture). Its VRAM is
-    /// otherwise held for the app's lifetime, since the shared resources keep one
-    /// entry per id. After this the view paints nothing until the next
-    /// [`set_volume`](Self::set_volume).
+    /// Give back this view's claim on the shared 3D texture, freeing its VRAM
+    /// once no other view holds the same [`VolumeId`]. After this the view paints
+    /// nothing until the next [`set_volume`](Self::set_volume), which claims the
+    /// texture again. Dropping the view does the same, so calling this is only
+    /// needed to release early.
     pub fn remove(&mut self, render_state: &RenderState) {
-        remove_volume_raycaster(render_state, self.id);
+        if self.claimed {
+            release_volume_raycaster(render_state, self.id);
+            self.claimed = false;
+        }
         self.has_volume = false;
     }
 
@@ -204,6 +225,18 @@ impl VolumeRaycaster {
         };
         paint_volume_raycaster(ui, rect, frame);
         response
+    }
+}
+
+/// Releasing the claim on drop is what makes the claim count track the live
+/// views: without it a forgotten [`remove`](VolumeRaycaster::remove) would pin
+/// the id's texture in `callback_resources` for the app's lifetime.
+impl Drop for VolumeRaycaster {
+    fn drop(&mut self) {
+        if self.claimed {
+            release_volume_raycaster(&self.render_state, self.id);
+            self.claimed = false;
+        }
     }
 }
 

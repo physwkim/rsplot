@@ -106,7 +106,7 @@ impl ColorBarWidget {
     /// from [`Self::ui`] so callers that own a painter (e.g. chrome) can reuse
     /// the drawing without re-allocating.
     pub fn paint(&self, painter: &egui::Painter, rect: Rect, fg: Color32) {
-        let stroke = Stroke::new(1.0, fg);
+        let stroke = Stroke::new(1.0_f32, fg);
         // Reserve the legend strip first; the bar + ticks fill what remains.
         let (bar_area, legend_area) = self.split_legend(rect);
         let bar_rect = self.bar_rect(bar_area);
@@ -232,7 +232,7 @@ impl ColorBarWidget {
         let length = self.bar_length(bar_rect) as f64;
         let nticks = optimal_nb_ticks(length, DEFAULT_TICK_DENSITY);
         let layout = self.tick_layout(nticks);
-        let stroke = Stroke::new(1.0, fg);
+        let stroke = Stroke::new(1.0_f32, fg);
         let font = FontId::proportional(TICK_FONT_SIZE);
 
         for &v in &layout.sub_ticks {

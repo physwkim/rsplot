@@ -341,7 +341,7 @@ impl RsdmByteIndicator {
     /// Paint one bit indicator into `rect` (the shared painter of the flow
     /// and exact-rect paths).
     fn paint_bit(&self, painter: &egui::Painter, rect: egui::Rect, color: Color32) {
-        let outline = egui::Stroke::new(1.0, Color32::from_gray(60));
+        let outline = egui::Stroke::new(1.0_f32, Color32::from_gray(60));
         if self.circles {
             let radius = rect.width().min(rect.height()) / 2.0 - 1.0;
             painter.circle(rect.center(), radius, color, outline);

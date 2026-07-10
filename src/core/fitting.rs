@@ -2651,10 +2651,7 @@ pub fn estimate_multi_gaussian(
         // (fittheories.py:361-364).
         let delta: Vec<f64> = y.iter().zip(bg.iter()).map(|(&a, &b)| a - b).collect();
         let maxv = delta.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-        match delta.iter().position(|&v| v == maxv) {
-            Some(p) => vec![p],
-            None => return None,
-        }
+        vec![delta.iter().position(|&v| v == maxv)?]
     } else {
         found.iter().map(|p| p.index).collect()
     };
