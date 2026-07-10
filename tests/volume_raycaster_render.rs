@@ -1,6 +1,8 @@
-//! Headless end-to-end check for `VolumeRaycaster`: an opaque RGBA volume must
-//! ray-march to visible colour, and an all-transparent volume must not. Uses the
-//! same `egui_kittest` wgpu harness as the scene tests (no window).
+//! Headless end-to-end checks for `VolumeRaycaster`: an opaque RGBA volume must
+//! ray-march to visible colour, an all-transparent volume must not, and the 3D
+//! texture a `VolumeId` names must live exactly as long as the views holding
+//! that id. Uses the same `egui_kittest` wgpu harness as the scene tests (no
+//! window).
 
 use egui_kittest::Harness;
 use egui_kittest::wgpu::{WgpuTestRenderer, create_render_state, default_wgpu_setup};
@@ -72,6 +74,67 @@ fn red_pixels_for(rgba: [u8; 4]) -> usize {
     let image = harness.render().expect("headless wgpu render");
     let (iw, ih) = (image.width() as usize, image.height() as usize);
     count_red(image.as_raw(), iw, ih)
+}
+
+/// Render one view (already built and uploaded) and count its red pixels.
+fn red_pixels_of(rs: &RenderState, view: VolumeRaycaster) -> usize {
+    let view = Rc::new(RefCell::new(view));
+    let renderer = WgpuTestRenderer::from_render_state(rs.clone());
+    let ui_view = view.clone();
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(WIN, WIN))
+        .with_pixels_per_point(1.0)
+        .renderer(renderer)
+        .build_ui(move |ui| {
+            ui_view.borrow_mut().show(ui);
+        });
+    harness.step();
+    let image = harness.render().expect("headless wgpu render");
+    let (iw, ih) = (image.width() as usize, image.height() as usize);
+    count_red(image.as_raw(), iw, ih)
+}
+
+/// Boundary: two live claims on one id, one given back. `remove` used to drop the
+/// shared entry outright, so the surviving view's ray-march found no texture and
+/// painted nothing.
+#[test]
+fn remove_keeps_the_texture_while_another_same_id_view_lives() {
+    let _gpu = GPU.lock().unwrap_or_else(|e| e.into_inner());
+    let rs = create_render_state(default_wgpu_setup());
+
+    let mut uploader = VolumeRaycaster::new(&rs, 21);
+    uploader.set_volume(&rs, &solid(16, [255, 0, 0, 255]), 16, 16, 16);
+    let survivor = VolumeRaycaster::new(&rs, 21); // second claim on the same volume
+    uploader.remove(&rs);
+
+    let red = red_pixels_of(&rs, survivor);
+    assert!(
+        red > 500,
+        "one view's remove() must not free a texture another view still renders; \
+         only {red} red px"
+    );
+}
+
+/// Boundary: the last claim goes. Dropping the view must free the entry, so a
+/// fresh view taking the same id starts empty — it used to inherit the dead
+/// view's texture, which is the same leak that pinned the VRAM for the app's
+/// lifetime.
+#[test]
+fn dropping_the_last_view_frees_the_texture() {
+    let _gpu = GPU.lock().unwrap_or_else(|e| e.into_inner());
+    let rs = create_render_state(default_wgpu_setup());
+
+    let mut uploader = VolumeRaycaster::new(&rs, 22);
+    uploader.set_volume(&rs, &solid(16, [255, 0, 0, 255]), 16, 16, 16);
+    drop(uploader);
+
+    let reused = VolumeRaycaster::new(&rs, 22); // same id, nothing uploaded
+    let red = red_pixels_of(&rs, reused);
+    assert!(
+        red < 50,
+        "the last view's drop must free id 22's texture; {red} red px leaked into \
+         a fresh view that uploaded nothing"
+    );
 }
 
 #[test]

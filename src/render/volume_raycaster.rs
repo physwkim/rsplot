@@ -195,6 +195,9 @@ struct VolumeGpu {
     texture: Option<wgpu::Texture>,
     vol_min: [f32; 3],
     vol_max: [f32; 3],
+    /// Live claims on this id — see [`acquire_volume_raycaster`]. The entry, and
+    /// with it the texture, exists exactly while this is non-zero.
+    claims: u32,
 }
 
 impl VolumeGpu {
@@ -203,6 +206,7 @@ impl VolumeGpu {
             texture: None,
             vol_min: [-0.5, -0.5, -0.5],
             vol_max: [0.5, 0.5, 0.5],
+            claims: 0,
         }
     }
 
@@ -338,8 +342,46 @@ pub fn install_volume_raycaster(render_state: &RenderState) {
     renderer.callback_resources.insert(resources);
 }
 
+/// Take a claim on view `id`'s GPU entry, creating it if this is the first.
+///
+/// The entry — and the VRAM of the texture it holds — lives exactly as long as
+/// its claims: it is created here and dropped by the
+/// [`release_volume_raycaster`] that takes the count back to zero. Nothing else
+/// inserts or removes an entry, so a view can never free a texture another view
+/// with the same [`VolumeId`] is still rendering. Requires
+/// [`install_volume_raycaster`] first.
+pub fn acquire_volume_raycaster(render_state: &RenderState, id: VolumeId) {
+    let mut renderer = render_state.renderer.write();
+    let res: &mut VolumeRaycasterResources = renderer
+        .callback_resources
+        .get_mut()
+        .expect("VolumeRaycasterResources not installed — call install_volume_raycaster() first");
+    res.scenes.entry(id).or_insert_with(VolumeGpu::new).claims += 1;
+}
+
+/// Drop one claim on view `id`, freeing its 3D texture once the last claim goes.
+/// A no-op if `id` holds no claim or the pipeline is not installed.
+pub fn release_volume_raycaster(render_state: &RenderState, id: VolumeId) {
+    let mut renderer = render_state.renderer.write();
+    let Some(res) = renderer
+        .callback_resources
+        .get_mut::<VolumeRaycasterResources>()
+    else {
+        return;
+    };
+    let Some(scene) = res.scenes.get_mut(&id) else {
+        return;
+    };
+    scene.claims = scene.claims.saturating_sub(1);
+    if scene.claims == 0 {
+        res.scenes.remove(&id);
+    }
+}
+
 /// Upload view `id`'s volume as a `(depth, height, width)` RGBA8 texture
-/// (row-major, straight alpha). Requires [`install_volume_raycaster`] first.
+/// (row-major, straight alpha). Requires a claim from
+/// [`acquire_volume_raycaster`]; without one the call is a no-op, so an upload
+/// can never resurrect an entry whose last holder released it.
 pub fn set_volume_raycaster(
     render_state: &RenderState,
     id: VolumeId,
@@ -366,27 +408,16 @@ pub fn set_volume_raycaster(
         .callback_resources
         .get_mut()
         .expect("VolumeRaycasterResources not installed — call install_volume_raycaster() first");
-    let scene = res.scenes.entry(id).or_insert_with(VolumeGpu::new);
+    let Some(scene) = res.scenes.get_mut(&id) else {
+        debug_assert!(false, "set_volume_raycaster: id {id} holds no claim");
+        return;
+    };
     scene.upload(
         &render_state.device,
         &render_state.queue,
         rgba,
         (depth, height, width),
     );
-}
-
-/// Drop view `id`'s GPU resources (the 3D texture), freeing its VRAM. A no-op if
-/// `id` was never uploaded or the pipeline is not installed. Call when a
-/// raycaster view goes away so its texture does not linger in
-/// `callback_resources` for the app's lifetime.
-pub fn remove_volume_raycaster(render_state: &RenderState, id: VolumeId) {
-    let mut renderer = render_state.renderer.write();
-    if let Some(res) = renderer
-        .callback_resources
-        .get_mut::<VolumeRaycasterResources>()
-    {
-        res.scenes.remove(&id);
-    }
 }
 
 /// egui paint callback. `prepare` builds this frame's own bind group (fresh
