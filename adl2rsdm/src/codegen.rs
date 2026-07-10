@@ -1084,8 +1084,14 @@ fn drawing_size_builder(geom: Geometry) -> String {
 /// `begin`/`path` angles are parsed to degrees (`beginAngle`/`pathAngle`); RsDM's
 /// arc keeps MEDM's X11 convention (0° at 3 o'clock, CCW positive), so the
 /// parsed values are used directly (no Qt-style negation). An opaque fill paints
-/// a pie wedge; `outline` paints an open stroked arc. Defaults: begin 0°, span
-/// 360° when the keys are absent (a degenerate arc still draws a visible sweep).
+/// a pie wedge; `outline` paints an open stroked arc.
+///
+/// When a key is absent MEDM keeps the value `createDlArc` seeded before
+/// parsing: `begin = 0`, `path = 90*64` (`medm/medmArc.c:258-259`, reached via
+/// `parseArc`'s `createDlArc(NULL)` at `medmArc.c:277`) — that is 0° and 90°,
+/// the angles being stored in 1/64°. PyDM agrees: `adl2pydm` omits `spanAngle`
+/// for an absent `path` (`output_handler.py:559`) and `PyDMDrawingArc` seeds
+/// `_span_angle = deg_to_qt(90)` (`drawing.py:1271`).
 fn emit_arc(b: &mut Builder, widget: &MedmWidget, options: &Options, z: ZLayer) {
     let Some(geom) = widget.geometry else {
         skip_no_geometry(b, widget);
@@ -1093,7 +1099,7 @@ fn emit_arc(b: &mut Builder, widget: &MedmWidget, options: &Options, z: ZLayer) 
     };
     let (addr, placeholder) = dynamic_channel(b, widget, options, "shape");
     let begin = angle_deg(widget, "beginAngle", 0.0);
-    let span = angle_deg(widget, "pathAngle", 360.0);
+    let span = angle_deg(widget, "pathAngle", 90.0);
     let new_call = format!(
         "RsdmDrawing::new(&engine, {}, DrawingShape::Arc {{ begin_deg: {}, span_deg: {} }})",
         medm_str(b, &addr),
@@ -8382,6 +8388,33 @@ image {
 
     fn deferred() -> Generated {
         generate(&parse(DEFERRED), &Options::default())
+    }
+
+    /// An `arc` block with no `begin`/`path` keeps the values `createDlArc`
+    /// seeded before parsing: 0° and 90° (`medm/medmArc.c:258-259`). A full
+    /// 360° sweep is what MEDM draws only when the file says so.
+    #[test]
+    fn arc_without_angles_falls_back_to_medms_zero_and_ninety_degrees() {
+        const NO_ANGLES: &str = r#"
+arc {
+	object {
+		x=10
+		y=10
+		width=40
+		height=40
+	}
+	"basic attribute" {
+		clr=3
+	}
+}
+"#;
+        let g = generate(&parse(NO_ANGLES), &Options::default());
+        assert!(
+            g.source
+                .contains("DrawingShape::Arc { begin_deg: 0.0, span_deg: 90.0 }"),
+            "absent angles must not become a 360° sweep:\n{}",
+            g.source
+        );
     }
 
     #[test]
