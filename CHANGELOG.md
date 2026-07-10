@@ -9,6 +9,87 @@ This is a workspace of three crates released together: **rsplot** (the plotting
 library), **rsdm** (a PyDM-style EPICS display layer built on rsplot), and
 **adl2rsdm** (a MEDM `.adl` → RsDM-Rust-source converter).
 
+## [0.5.3] - 2026-07-10
+
+A regression release. A workspace-wide upstream-parity audit (silx / PyDM /
+adl2pydm + MEDM C) found that three of the fixes 0.5.2 shipped were wrong, and
+turned up ten further divergences from the reference behaviour. All are fixed
+here. `VolumeRaycaster` users should upgrade: the volume it rendered in 0.5.2
+carried no thickness cue and lost the hue of faint voxels.
+
+### Fixed — `rsplot`
+
+- **Volume opacity depends on the thickness a ray crosses again.** 0.5.2's
+  "Beer-Lambert" correction divided by the *step count*, an exponent carrying no
+  world distance, so every ray accumulated the same transmittance whatever chord
+  it traversed: a uniform volume rendered as a flat silhouette, and at the
+  default 256 steps the correction was exactly the identity. Each sample is now
+  corrected from a reference *spacing* (`box_diagonal / 256`, a world distance),
+  which keeps the step-count invariance 0.5.2 was after while restoring the
+  density cue. A ray crossing the full box diagonal at the default step count
+  renders exactly as before.
+- **Faint voxels keep their colour.** The premultiplied 3-D texture 0.5.2
+  introduced stored the product `rgb · a` in 8 bits, and the shader must divide
+  the coverage back out to recover the straight colour — a product that at
+  coverage `a` resolves the quotient only to steps of `1/a`. An authored
+  `(255, 128, 0)` voxel at `a = 3/255` read back as `(255, 170, 0)`; at
+  `a = 1/255` no hue survived at all. The texture is now `Rgba16Float`, which
+  carries the straight colour exactly at every coverage while the filter still
+  interpolates premultiplied colour (no return of the dark fringe). **This
+  doubles the volume texture's VRAM.**
+- **`VolumeRaycaster::remove` no longer blanks another view.** Two views sharing
+  a `VolumeId` share one texture, by design; `remove` freed it outright, so the
+  survivor silently rendered nothing. The texture is now claim-counted and lives
+  exactly as long as the views holding its id. Dropping a view releases its
+  claim too, so a `VolumeRaycaster` that is simply dropped no longer pins its
+  VRAM for the app's lifetime.
+- **Alt+Wheel zooms X only and Shift+Wheel zooms Y/Y2 only**, the silx bindings
+  the axes menu already advertised. Plain wheel and keep-aspect are unchanged.
+- **Middle-button drag pans in every interaction mode**, as in silx. The
+  existing right-button pan is kept.
+- **The Reset-Zoom toolbar button disables when neither axis autoscales**, and
+  its tooltip names the single autoscaling axis when exactly one is on.
+- **Programmatic `set_limits` and toolbar Zoom-In/Out repair their limits.**
+  Inverted, degenerate or float32-overflowing ranges reached the transform
+  unrepaired; every view-limits commit now runs the same clamp, including the
+  Y2 and extra-axis paths.
+- **The colormap dialog's histogram drops samples equal to the range maximum**,
+  as `Histogramnd` does with its default half-open last bin.
+- **`Scatter` BINNED_STATISTIC drops points on the max edge** instead of
+  clamping them into the last bin, matching `scipy.stats.binned_statistic_2d`
+  as silx calls it. A degenerate extent now admits no point rather than
+  collapsing every point into bin 0.
+
+### Fixed — `rsdm`
+
+- **`calc://` re-evaluates when a child connects or disconnects.** PyDM
+  re-emits on a connection-state change; rsdm only watched values.
+- **`calc://` no longer retriggers on a child's alarm or metadata change**, only
+  on an actual value change, as PyDM's `update` list specifies.
+- **A `dialect = medm` expression reading operand `J` re-evaluates on a severity
+  change.** MEDM's `setDynamicAttrMonitorFlags` adds `monitorSeverityChanged`
+  exactly when the expression uses `J`; rsdm evaluated `J` but never watched it,
+  so a severity transition left the calc showing a stale value. (Introduced
+  during this audit's own `calc://` fix; never published.)
+
+### Fixed — `adl2rsdm`
+
+- **Embedded-display and composite-file children take the host screen's
+  colormap.** MEDM's `parseCompositeFile` parses and discards the child file's
+  `"color map"` block and resolves the children's `clr`/`bclr` against the
+  parent display's palette; adl2rsdm used the child's own. Screens on the
+  default palette are unaffected; those with a custom palette rendered every
+  embedded widget in the wrong colours.
+- **An arc with no `path` spans 90°, not 360°** — MEDM's `createDlArc` default.
+
+### Changed — `rsplot`
+
+- The volume 3-D texture is `Rgba16Float` rather than `Rgba8Unorm`, doubling its
+  VRAM. See the faint-voxel fix above for why an 8-bit texture cannot carry the
+  data.
+- `VolumeRaycaster` now holds a clone of its `RenderState` (a bundle of `Arc`s)
+  so it can release its texture claim on drop.
+
 ## [0.5.2] - 2026-07-08
 
 A correctness and robustness pass over the `VolumeRaycaster` shipped in 0.5.1,
