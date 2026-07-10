@@ -832,6 +832,36 @@ pub fn parse(text: &str) -> MedmScreen {
 /// `clr`/`bclr` indices resolve to the file's colours during this parse (MEDM
 /// `executeDlDisplay` → `parseAndExtractExternalColormap`, medmDisplay.c:386-427).
 pub fn parse_in_dir(text: &str, source_dir: Option<&Path>) -> MedmScreen {
+    parse_impl(text, source_dir, None)
+}
+
+/// Parse a `.adl` that is being **embedded** into a host display, resolving every
+/// `clr`/`bclr` index against `host_colormap` instead of the file's own table.
+///
+/// MEDM's `parseCompositeFile` (`medm/medmComposite.c:687-700`) reads the child's
+/// `display` block and its `"color map"` block with `parseAndSkip` — both are
+/// discarded — and appends the child's elements straight into the **parent**
+/// `displayInfo`, whose colormap therefore colours them. The child's `file`
+/// block is not skipped: `medmComposite.c:684` copies its version number over,
+/// which is what selects the old-format attribute rolling.
+///
+/// The host table is the top-level display's, at any nesting depth: a composite
+/// file that itself embeds another passes the same `displayInfo` down.
+pub fn parse_embedded_in_dir(
+    text: &str,
+    source_dir: Option<&Path>,
+    host_colormap: &[Color],
+) -> MedmScreen {
+    parse_impl(text, source_dir, Some(host_colormap))
+}
+
+/// `host_colormap` is `Some` when this document is embedded into a host display
+/// that owns the colour table — see [`parse_embedded_in_dir`].
+fn parse_impl(
+    text: &str,
+    source_dir: Option<&Path>,
+    host_colormap: Option<&[Color]>,
+) -> MedmScreen {
     let buf: Vec<&str> = text.lines().collect();
     let blocks = locate_blocks(&buf);
 
@@ -842,8 +872,15 @@ pub fn parse_in_dir(text: &str, source_dir: Option<&Path>) -> MedmScreen {
     if let Some(block) = named_block("file", &blocks) {
         parse_file(&block_content(&buf, block), &mut screen);
     }
-    if let Some(block) = named_block("color map", &blocks) {
-        screen.color_table = parse_color_map(&block_content(&buf, block));
+    // An embedded document's own colour table is parsed and thrown away, as
+    // `parseCompositeFile` does; the host's is installed in its place.
+    match host_colormap {
+        Some(table) => screen.color_table = table.to_vec(),
+        None => {
+            if let Some(block) = named_block("color map", &blocks) {
+                screen.color_table = parse_color_map(&block_content(&buf, block));
+            }
+        }
     }
     if let Some(block) = named_block("display", &blocks) {
         let content = block_content(&buf, block);
@@ -853,7 +890,7 @@ pub fn parse_in_dir(text: &str, source_dir: Option<&Path>) -> MedmScreen {
         // dir, file absent, unparsable) fall to the built-in default 65-colour
         // palette (createDlColormap) and record the file so codegen warns. A BLANK
         // `cmap` falls straight to the default palette.
-        if screen.color_table.is_empty() {
+        if host_colormap.is_none() && screen.color_table.is_empty() {
             let cmap = locate_assignments(&content)
                 .get("cmap")
                 .map(|s| s.trim().to_string())

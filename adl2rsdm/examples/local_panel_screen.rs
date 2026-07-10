@@ -176,6 +176,7 @@ impl Screen {
             place(ui, __frame_origin_16, sx, sy, egui::Order::Middle, egui::Id::new(15u64), 0.0, 18.0, 152.0, 16.0, |ui| {
                 {
                     ui.style_mut().override_font_id = Some(egui::FontId::proportional(10.0 * sy));
+                    ui.style_mut().visuals.override_text_color = Some(Color32::from_rgb(0, 0, 255));
                     ui.with_layout(egui::Layout::centered_and_justified(egui::Direction::LeftToRight), |ui| {
                         let spacing = ui.spacing_mut();
                         spacing.interact_size = egui::Vec2::ZERO;
