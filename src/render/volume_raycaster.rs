@@ -15,6 +15,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use egui_wgpu::{RenderState, wgpu};
+use half::f16;
 
 /// Identifies one raycaster view within the shared resources (caller-assigned,
 /// like `Scene3dId`).
@@ -57,22 +58,34 @@ pub fn volume_bounds(depth: usize, height: usize, width: usize) -> ([f32; 3], [f
     ([-half[0], -half[1], -half[2]], half)
 }
 
-/// Premultiply a straight-alpha RGBA8 buffer (`rgb *= a/255`, rounded), so the
-/// linear sampler interpolates premultiplied colour: a transparent voxel becomes
-/// `(0,0,0,0)` and interpolating it against an opaque colour keeps the hue
-/// instead of dragging it toward black. A trailing partial pixel (len not a
-/// multiple of 4) is dropped.
+/// Premultiply a straight-alpha RGBA8 buffer into `Rgba16Float` texels (`rgb *=
+/// a`, both normalised to `[0, 1]`), so the linear sampler interpolates
+/// premultiplied colour: a transparent voxel becomes `(0,0,0,0)` and
+/// interpolating it against an opaque colour keeps the hue instead of dragging
+/// it toward black. A trailing partial pixel (len not a multiple of 4) is
+/// dropped.
+///
+/// The shader divides the sampled colour back out by the sampled coverage to
+/// recover the straight RGB (`gain = sa_c / s.a`), so the *product* `rgb · a`
+/// must carry the straight RGB to the input's own 8-bit precision. An 8-bit
+/// product cannot: at coverage `a` it quantises the recoverable straight value
+/// to steps of `1/a`, which for the low coverages a ray-march is built on
+/// (`a = 3/255`) is three colour levels total. `f16` holds every `c·a/255²` to
+/// ~0.05% relative, so the recovered RGB is exact to well under one 8-bit step
+/// at every coverage down to 1/255.
 fn premultiply_rgba(rgba: &[u8]) -> Vec<u8> {
     rgba.chunks_exact(4)
         .flat_map(|px| {
-            let a = px[3] as u16;
-            [
-                ((px[0] as u16 * a + 127) / 255) as u8,
-                ((px[1] as u16 * a + 127) / 255) as u8,
-                ((px[2] as u16 * a + 127) / 255) as u8,
-                px[3],
-            ]
+            let a = f32::from(px[3]) / 255.0;
+            let texel = [
+                f16::from_f32(f32::from(px[0]) / 255.0 * a),
+                f16::from_f32(f32::from(px[1]) / 255.0 * a),
+                f16::from_f32(f32::from(px[2]) / 255.0 * a),
+                f16::from_f32(a),
+            ];
+            texel.map(f16::to_le_bytes)
         })
+        .flatten()
         .collect()
 }
 
@@ -195,8 +208,10 @@ impl VolumeGpu {
 
     /// Upload a `(depth, height, width)` RGBA8 volume (row-major, straight
     /// alpha), (re)building the 3D texture. The straight alpha is premultiplied
-    /// before upload so the linear sampler interpolates premultiplied colour (no
-    /// dark fringe at colour/transparent boundaries).
+    /// into `Rgba16Float` before upload so the linear sampler interpolates
+    /// premultiplied colour (no dark fringe at colour/transparent boundaries)
+    /// while the product still carries the straight RGB at low coverage — see
+    /// [`premultiply_rgba`]. Costs twice the VRAM of an 8-bit texture.
     fn upload(
         &mut self,
         device: &wgpu::Device,
@@ -218,7 +233,7 @@ impl VolumeGpu {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D3,
-            format: wgpu::TextureFormat::Rgba8Unorm,
+            format: wgpu::TextureFormat::Rgba16Float,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
@@ -232,7 +247,7 @@ impl VolumeGpu {
             &premul,
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(w * 4),
+                bytes_per_row: Some(w * 8), // Rgba16Float
                 rows_per_image: Some(h),
             },
             extent,
@@ -444,6 +459,15 @@ pub fn paint_volume_raycaster(ui: &mut egui::Ui, rect: egui::Rect, frame: Volume
 #[cfg(test)]
 mod tests {
     use super::premultiply_rgba;
+    use half::f16;
+
+    /// Decode one `Rgba16Float` texel back to `[f32; 4]`, as the sampler does.
+    fn texel(out: &[u8], i: usize) -> [f32; 4] {
+        std::array::from_fn(|c| {
+            let o = i * 8 + c * 2;
+            f16::from_le_bytes([out[o], out[o + 1]]).to_f32()
+        })
+    }
 
     #[test]
     fn premultiply_zeroes_transparent_and_keeps_opaque() {
@@ -455,15 +479,36 @@ mod tests {
             255, 255, 255, 128, // half coverage → ~half
         ];
         let out = premultiply_rgba(&src);
-        assert_eq!(&out[0..4], &[255, 0, 0, 255]);
-        assert_eq!(&out[4..8], &[0, 0, 0, 0]);
-        assert_eq!(out[11], 128); // alpha preserved
-        assert_eq!(out[8], 128); // 255*128/255 rounded
+        assert_eq!(texel(&out, 0), [1.0, 0.0, 0.0, 1.0]);
+        assert_eq!(texel(&out, 1), [0.0; 4]);
+        let half = texel(&out, 2);
+        assert!((half[3] - 128.0 / 255.0).abs() < 1e-3, "alpha preserved");
+        assert!((half[0] - half[3]).abs() < 1e-3, "white × a == a");
+    }
+
+    /// The shader recovers the straight RGB as `s.rgb / s.a`. Boundary: the
+    /// lowest coverages, where an 8-bit premultiplied product would quantise
+    /// that quotient to steps of `1/a` — at `a = 3` the recovered channel could
+    /// only be 0, 1/3, 2/3 or 1, so `200/255 = 0.784` would read as `0.667`.
+    #[test]
+    fn premultiply_recovers_the_straight_rgb_at_the_lowest_coverages() {
+        for a in [1u8, 2, 3, 4, 8, 128, 255] {
+            for c in [1u8, 37, 128, 200, 254, 255] {
+                let out = premultiply_rgba(&[c, 0, 0, a]);
+                let t = texel(&out, 0);
+                let recovered = t[0] / t[3];
+                let want = f32::from(c) / 255.0;
+                assert!(
+                    (recovered - want).abs() < 0.5 / 255.0,
+                    "a={a} c={c}: recovered {recovered}, want {want}"
+                );
+            }
+        }
     }
 
     #[test]
     fn premultiply_drops_trailing_partial_pixel() {
         let src = [255, 0, 0, 255, 1, 2]; // 6 bytes: one pixel + 2 stragglers
-        assert_eq!(premultiply_rgba(&src).len(), 4);
+        assert_eq!(premultiply_rgba(&src).len(), 8); // one Rgba16Float texel
     }
 }

@@ -1,7 +1,8 @@
 //! `VolumeRaycaster` has no silx counterpart — `plot3d/items/volume.py` ships an
 //! `Isosurface` and a `CutPlane`, never a GPU direct-volume ray-caster — so its
-//! opacity model has no upstream contract to diff against. These tests pin the
-//! *physics* instead, which is the only contract there is.
+//! sample model has no upstream contract to diff against. These tests pin the
+//! *physics* instead, which is the only contract there is: what a marched ray
+//! accumulates, in opacity and in colour.
 //!
 //! Beer–Lambert: a ray's transmittance through a uniform medium depends on the
 //! thickness it traverses and not on how many samples the march happens to take.
@@ -13,6 +14,10 @@
 //!
 //! Holding only (2) is what the step-count-ratio correction did; a uniform volume
 //! then read as a flat silhouette.
+//!
+//! Colour: each sample contributes its *straight* RGB at the corrected coverage,
+//! so a uniform slab composites its authored hue no matter how faint its voxels
+//! are.
 //!
 //! The default camera looks straight down `-Z` (`VolumeRaycaster::new`), and
 //! `volume_bounds` normalises the longest axis to one unit, so shrinking `depth`
@@ -32,13 +37,14 @@ const WIN: f32 = 320.0;
 /// faults on the Windows CI runner's DX12 software adapter.
 static GPU: Mutex<()> = Mutex::new(());
 
-/// A `depth × 16 × 16` RGBA8 volume, every voxel `(255, 0, 0, alpha)`.
-fn slab(depth: usize, alpha: u8) -> Vec<u8> {
-    let mut v = Vec::with_capacity(depth * 16 * 16 * 4);
-    for _ in 0..depth * 16 * 16 {
-        v.extend_from_slice(&[255, 0, 0, alpha]);
-    }
-    v
+/// A `depth × 16 × 16` RGBA8 volume, every voxel `voxel`.
+fn slab(depth: usize, voxel: [u8; 4]) -> Vec<u8> {
+    voxel
+        .iter()
+        .copied()
+        .cycle()
+        .take(depth * 16 * 16 * 4)
+        .collect()
 }
 
 struct App {
@@ -47,13 +53,19 @@ struct App {
 
 /// Red channel of the centre pixel after rendering a `depth × 16 × 16` slab of
 /// uniform-alpha red voxels at `steps` samples per ray.
+fn centre_red(depth: usize, alpha: u8, steps: u32) -> u8 {
+    centre_rgb(depth, [255, 0, 0, alpha], steps)[0]
+}
+
+/// RGB of the centre pixel after rendering a `depth × 16 × 16` slab of uniform
+/// `voxel`s at `steps` samples per ray.
 ///
 /// The centre pixel's ray crosses the box through its middle, so its chord is
 /// the slab's Z extent — `depth / 16` of a unit, by `volume_bounds`.
-fn centre_red(depth: usize, alpha: u8, steps: u32) -> u8 {
+fn centre_rgb(depth: usize, voxel: [u8; 4], steps: u32) -> [u8; 3] {
     let rs = create_render_state(default_wgpu_setup());
     let mut view = VolumeRaycaster::new(&rs, 11);
-    view.set_volume(&rs, &slab(depth, alpha), depth, 16, 16);
+    view.set_volume(&rs, &slab(depth, voxel), depth, 16, 16);
     view.set_steps(steps);
     let app = Rc::new(RefCell::new(App { view }));
     let renderer = WgpuTestRenderer::from_render_state(rs);
@@ -69,13 +81,19 @@ fn centre_red(depth: usize, alpha: u8, steps: u32) -> u8 {
     let image = harness.render().expect("headless wgpu render");
     let (iw, ih) = (image.width() as usize, image.height() as usize);
     let centre = (ih / 2) * iw + iw / 2;
-    image.as_raw()[centre * 4]
+    let raw = image.as_raw();
+    [raw[centre * 4], raw[centre * 4 + 1], raw[centre * 4 + 2]]
 }
 
-/// Red channel the centre pixel shows with nothing painted over it: an
+/// The RGB the centre pixel shows with nothing painted over it: an
 /// all-transparent volume composites to the harness background exactly there.
+fn background_rgb() -> [u8; 3] {
+    centre_rgb(16, [255, 0, 0, 0], 256)
+}
+
+/// Red channel of that background.
 fn background_red() -> u8 {
-    centre_red(16, 0, 256)
+    background_rgb()[0]
 }
 
 /// Analytic accumulated opacity of the centre ray through a `depth × 16 × 16`
@@ -143,4 +161,37 @@ fn opacity_is_invariant_to_the_step_count() {
         hi - lo <= 3,
         "step count must not change the accumulated opacity, got {reds:?}"
     );
+}
+
+/// Boundary: the lowest coverage a march is built on. A uniform slab must
+/// composite its authored hue — each sample contributes its *straight* RGB at
+/// the corrected coverage, so the accumulated colour is
+/// `straight_rgb · opacity` over the background, independent of `alpha`.
+///
+/// The 3D texture stores the *premultiplied* colour so the linear filter cannot
+/// bleed a transparent voxel's hue, and `fs_main` divides the coverage back out
+/// to recover the straight RGB. In `Rgba8Unorm` that product resolved the
+/// quotient only to steps of `1/alpha`: at `alpha = 3` the stored green of an
+/// orange voxel was `round(128·3/255) = 2`, so the shader read `2/3 = 0.667`
+/// where the authored green is `128/255 = 0.502` — a 35-level hue shift in the
+/// composite, which this test measures directly.
+#[test]
+fn low_coverage_voxels_composite_their_authored_hue() {
+    let _gpu = GPU.lock().unwrap_or_else(|e| e.into_inner());
+    const VOXEL: [u8; 4] = [255, 128, 0, 3]; // faint orange
+
+    let bg = background_rgb();
+    let opacity = analytic_opacity(16, VOXEL[3]);
+    let got = centre_rgb(16, VOXEL, 256);
+
+    for c in 0..3 {
+        let straight = f64::from(VOXEL[c]) / 255.0;
+        let bg_c = f64::from(bg[c]) / 255.0;
+        let expect = (straight * opacity + bg_c * (1.0 - opacity)) * 255.0;
+        assert!(
+            (f64::from(got[c]) - expect).abs() <= 2.0,
+            "channel {c}: expected {expect:.1}, got {} (all channels {got:?})",
+            got[c]
+        );
+    }
 }

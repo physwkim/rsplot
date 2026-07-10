@@ -2,10 +2,12 @@
 //
 // A full-screen triangle generates one camera ray per pixel from the inverse
 // view-projection matrix. Each ray is clipped to the volume's axis-aligned box
-// and marched in fixed steps. The 3D texture holds PREMULTIPLIED RGBA (the
-// uploader premultiplies straight alpha) so the hardware linear filter
-// interpolates premultiplied colour — a colour/transparent boundary stays the
-// right hue instead of bleeding toward black. Samples accumulate front-to-back
+// and marched in fixed steps. The 3D texture holds PREMULTIPLIED RGBA in
+// `Rgba16Float` (the uploader premultiplies straight alpha) so the hardware
+// linear filter interpolates premultiplied colour — a colour/transparent
+// boundary stays the right hue instead of bleeding toward black — while the
+// product `rgb·a` keeps enough precision for `fs_main` to divide the straight
+// colour back out at low coverage. Samples accumulate front-to-back
 // into premultiplied colour that blends with `PREMULTIPLIED_ALPHA_BLENDING`
 // straight into egui's render pass (no offscreen target, no depth).
 
@@ -107,7 +109,10 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
             let sa_c = 1.0 - pow(1.0 - sa, dt / dt_ref);
             // Rescale the premultiplied colour to the corrected coverage
             // (gain = sa_c/s.a). Compositing stays in premultiplied space, so no
-            // dark fringe at boundaries.
+            // dark fringe at boundaries. The division recovers the straight
+            // colour, which is why the texture is Rgba16Float and not Rgba8Unorm:
+            // an 8-bit product `rgb·a` only resolves the quotient to steps of
+            // 1/a, i.e. 3 colour levels at the coverage a=3/255 a march uses.
             let gain = sa_c / max(s.a, 1e-6);
             let w = 1.0 - acc.a;
             acc = vec4<f32>(acc.rgb + s.rgb * gain * w, acc.a + sa_c * w);
