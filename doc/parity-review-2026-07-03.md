@@ -3390,13 +3390,17 @@ Impact: a calc over CA children recomputes and republishes on every DBE_ALARM (a
 
 ### R4-13: Dynamic-attribute CALC binds only channels A–D; MEDM's reserved metadata operands G–L are unbound
 
-Severity: Medium
+Severity: Medium — **NOT A DEFECT (withdrawn)**; it did surface a real one, filed below as R4-16
 
 Rust: `adl2rsdm/src/codegen.rs:371-376` — `VIS_CHANNEL_KEYS` has exactly four entries (`chan→A`, `chanB→B`, `chanC→C`, `chanD→D`), and `visibility_gate_address` (`:438-459`) emits `calc://…?dialect=medm&expr=<medm calc>&A=…&B=…&C=…&D=…&update=…`. Only A–D are ever bound; a `vis="calc"` expression referencing E–L gets nothing for them.
 
 Reference: `medm/utils.c:4491-4505` (MEDM C, authoritative). In `calcVisibility`'s `V_CALC` arm MEDM fills a 12-slot `valueArray`: A–D from the four channel records, then `valueArray[4]=0` (E), `[5]=0` (F), `[6]=pr->elementCount` (G), `[7]=pr->hopr` (H), `[8]=pr->status` (I), `[9]=pr->severity` (J), `[10]=pr->precision` (K), `[11]=pr->lopr` (L) — the metadata of the *first* channel (record A). These are the standard EPICS calc-record letters and are documented, usable visibility operands.
 
-Impact: a common alarm-driven visibility rule such as `calc="J"` (show when severity ≠ 0) or `calc="I#0"` (status) evaluates with J/I unbound — the rsdm `dialect=medm` engine has no value for those letters, so the gate is permanently false (or fails to compile → hidden). The widget is hidden forever where MEDM would show/hide it by the live severity/status/precision of channel A. adl2pydm shares this gap, but MEDM C is the authority.
+Impact (as filed): a common alarm-driven visibility rule such as `calc="J"` (show when severity ≠ 0) or `calc="I#0"` (status) evaluates with J/I unbound — the rsdm `dialect=medm` engine has no value for those letters, so the gate is permanently false (or fails to compile → hidden).
+
+**Withdrawn.** The premise is false. `E`–`L` are not channels, so `VIS_CHANNEL_KEYS` is right to carry only `chan`/`chanB`/`chanC`/`chanD`; the *plugin* fills the metadata operands. `eval_medm` (`rsdm/src/data_plugins/calc_plugin.rs`) already binds `G` = element count, `H` = hopr, `J` = severity, `K` = precision, `L` = lopr from the first record, exactly as `utils.c:4498-4505` does, and `medm_calc::compile` accepts a bare `J`. Only `I` (EPICS alarm *status*) is unbound, at `0.0` — a gap already documented in the module docs, because `ChannelState` carries no status code. Principle 4 (test skepticism) applies to review findings too: the cited Rust lines were read without reading the consumer that gives them meaning.
+
+What the check did surface is a live defect on the trigger side, filed as **R4-16**.
 
 ### R4-14: Composite-file / embedded-display children are coloured by the child file's own colormap; MEDM resolves them against the parent display's colormap
 
@@ -3410,13 +3414,25 @@ Impact: when a host screen uses a non-default colormap (inline `"color map"` or 
 
 ### R4-15: Absent arc `path` defaults to a 360° span; MEDM's default is 90°
 
-Severity: Low
+Severity: Low — **FIXED** (`33dee07`)
 
 Rust: `adl2rsdm/src/codegen.rs:1096` — `let span = angle_deg(widget, "pathAngle", 360.0);`. When the `.adl` arc has no `path` key, the emitted `DrawingShape::Arc` gets `span_deg: 360` (a full circle); `begin` defaults to 0 (correct).
 
 Reference: `medm/medmArc.c:258-259` (MEDM C, authoritative). `createDlArc` initialises `dlArc->begin = 0; dlArc->path = 90*64;` — the default span for an arc with no `path` key is **90°**. (adl2pydm defaults `pathAngle` to 0 and then omits the span entirely — also wrong, differently.)
 
 Impact: a hand-authored or truncated `.adl` arc omitting `path` draws a full 360° disc instead of MEDM's 90° wedge. MEDM's own writer always emits `path`, so MEDM-generated files never hit this; the divergence is confined to the absent-key contract.
+
+### R4-16: MEDM-dialect calc reading operand `J` never re-evaluates on a severity change
+
+Severity: Medium — **FIXED** (`3f9660e`). Introduced by `976c39c` (this round's R4-11/R4-12 fix); never published.
+
+Rust: `rsdm/src/data_plugins/calc_plugin.rs` — `run_channel` arms `pending_trigger` only from per-child `ValueSubscription` drains. `Channel::update` posts no value event, so a severity-only change reaches no trigger. Under `dialect=medm` the operands `E`–`L` are record *metadata*, so `eval_medm` would read a fresh severity that nothing asks it to read.
+
+Reference: `medm/utils.c:4621-4630` — under `V_CALC` `setDynamicAttrMonitorFlags` sets `monitorValueChanged` on the main record, then `monitorStatusChanged` **iff** `calcUsesStatus(attr->calc)` and `monitorSeverityChanged` **iff** `calcUsesSeverity(attr->calc)` (`utils.c:4647-4694`). `medmUpdateChannelCb` (`medmCA.c:1034-1048`) calls `updateValueCb` on a severity change only when that flag is set. MEDM never monitors `hopr`/`precision`/`lopr`, so H/K/L do not retrigger.
+
+Impact: `vis="calc"` with `calc="J"` (the standard "show while in alarm" gate) latched at the severity observed on the first evaluation. The pre-`976c39c` stamp poll got this right by accident, while wrongly retriggering on H/K/L churn; the value-only rule got it wrong in the other direction. Neither matched MEDM's per-operand monitor set.
+
+Fix (`3f9660e`): `Evaluator::Medm` gains `watch_severity = calc_uses_operand(expr, 'J')` and `first_child`, both decided once at connect as MEDM decides them once in `setDynamicAttrMonitorFlags`; the loop arms `pending_trigger` on a severity *change* of that record. `calc_uses_operand` ports MEDM's letter scan verbatim (either case, not preceded by an ASCII letter — the guard that keeps `sin`/`min`/`nint`/`pi` from reading as operand `I`). The status half has no counterpart: `ChannelState` carries no EPICS status code, the same gap that pins `I` to `0.0`. The PyDM dialect keeps the value-only trigger by construction — it has no metadata operands, so no watch is built.
 
 ## Cleared During Review
 
