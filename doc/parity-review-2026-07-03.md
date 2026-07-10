@@ -3171,6 +3171,204 @@ C reference: `medm/utils.c:3444-3459` — `performMacroSubstitutions` emits noth
 
 Impact: for `args="P=$(X)"` with `X` undefined in the parent, MEDM's child receives `P=""` (child `$(P)val` → `val`); the generated code's child receives `P="$(X)"` (child channel becomes `$(X)val`) — different child channel names and dedup key. Convert-time `substitute_macros` passthrough (the parse path) is correct and unaffected.
 
+## Round 4 Open Findings (R4-1..R4-15)
+
+Round 4, 2026-07-10. Baseline: branch `chore/bump-epics-0.22`, HEAD `4a49b2b`
+— **64 commits after the R3 baseline `0a51e4e`**, none of which had been
+parity-audited: the 0.5.0–0.5.2 `VolumeRaycaster` hardening pass, the two
+`rsdm` data-engine race fixes (`6ba4a4e` ca://, `c020401` calc://), and the
+`epics-rs` 0.21 → 0.22.1 dependency bump (`4a49b2b`). All 133 prior findings
+(R1-1..R1-40 / R2-1..R2-69 / R3-1..R3-24) are closed.
+
+Same 5-agent split (A: plot interaction/view, B: items/colormap/fit,
+C: plot3d + VolumeRaycaster, D: rsdm↔PyDM, E: adl2rsdm↔adl2pydm+MEDM C),
+reference→Rust direction. Agent-local numbers renumbered to the contiguous
+R4-1..R4-15 below (A: 1–4, B: 5–6, C: 7–9, D: 10–12, E: 13–15).
+
+Two lenses were added this round, both carried over from the R3 convergence
+verdict:
+
+1. **New-delta lens.** The `VolumeRaycaster` hardening and the two race fixes
+   were written to close CI flakes and rendering artifacts — *not* to match an
+   upstream contract. They were audited against the reference for the first
+   time here. Three of the 15 findings (R4-7, R4-9, R4-10) are divergences
+   *introduced* by those changes.
+2. **Under-swept-fix lens.** R3 named "fix closed the cited line but not the
+   sibling call site in the same reference function" as the dominant residual
+   mechanism (10/24). R4-2 is exactly that shape relative to R1-3.
+
+Reference paths on this machine (the `~/codes/*` paths in the R1 header are
+stale): silx `~/work/silx/src/silx`, PyDM `~/work/pydm/pydm`, adl2pydm
+`~/work/adl2pydm/adl2pydm`, MEDM C `~/work/epics-extensions/medm/medm`.
+
+### Category A — plot interaction, view state, zoom/pan, toolbar (vs silx PlotInteraction/PlotWidget)
+
+### R4-1: Wheel-zoom ignores the Shift/Alt per-axis modifier override
+
+Severity: Medium
+
+Rust: `src/widget/plot_widget.rs:1053-1088` — the wheel handler builds `enabled` from only `plot.keep_aspect` and `zoom_x_enabled()`/`zoom_y_enabled()`; it never reads `ui.input(|i| i.modifiers)`. Shift+Wheel and Alt+Wheel zoom both axes identically to a plain wheel.
+
+Reference: `silx/gui/plot/PlotInteraction.py:1908-1918` — when keep-aspect is off, `_onWheel` overrides `enabledAxes` from the keyboard modifiers: `shiftPressed or altPressed` ⇒ `EnabledAxes(xaxis=altPressed, yaxis=shiftPressed, y2axis=shiftPressed)`, so Alt+Wheel zooms X only and Shift+Wheel zooms Y/Y2 only. `tools/menus.py:55-57` documents these bindings in the axes-menu labels ("X axis (Alt+Wheel)", "Y left axis (Shift+Wheel)").
+
+Impact: the documented Alt+Wheel (X-only) and Shift+Wheel (Y-only) zoom gestures do not exist in rsplot; both modifier chords zoom both axes.
+
+### R4-2: Programmatic `set_limits` / toolbar Zoom-In/Out skip silx's `checkAxisLimits` repair — (R1-3 sibling)
+
+Severity: Medium
+
+Rust: `src/widget/high_level.rs:4160-4171` (`set_limits_internal`) forwards straight to `src/render/backend_wgpu.rs:697-700`, which writes `self.plot.limits = (xmin, xmax, ymin, ymax)` raw — no ordering swap, no degenerate expansion, no float32 clamp. The public `set_limits`, `set_graph_x_limits` (`:6797`), `set_graph_y_limits` (`:6814`), and the toolbar `actions::control::apply_zoom` (`src/widget/actions/control.rs:124-147`) all commit through this path. `scale_1d_range` (`control.rs:75-95`) omits the clamp, its doc claiming it is "the separately-tracked float32-safety zoom item", but no downstream site applies it. Contrast `high_level.rs:6921,6972`, where the log-toggle fix manually calls `clamp_axis_limits` before `set_graph_*_limits` precisely because that setter does not.
+
+Reference: `silx/gui/plot/PlotWidget.py:2723-2730` — `setLimits` runs `getXAxis()._checkLimits(...)` / `getYAxis()._checkLimits(...)` on every call; `items/axis.py:145-154` routes to `_utils/panzoom.py:49-75` `checkAxisLimits`, which clips both bounds to `[FLOAT32_SAFE_MIN/MINPOS, FLOAT32_SAFE_MAX]`, swaps when `vmax < vmin`, and expands when `vmax == vmin`. `applyZoomToPlot` additionally clamps inside `scale1DRange` (`panzoom.py:108-116`), giving toolbar zoom two independent float32 guards.
+
+Impact: a caller passing inverted (`max < min`) or equal bounds to `set_graph_x_limits`/`set_limits` gets an un-repaired collapsed/inverted view; repeated toolbar Zoom-Out grows the range past the float32-safe window with zero clamping where silx clamps at two layers. The `Transform` precondition (`min < max`, positive for log) can be violated, NaN-ing the render.
+
+### R4-3: Middle-button drag pan is unported; pan is bound to the right button instead
+
+Severity: Low
+
+Rust: `src/widget/plot_widget.rs:1018-1037` — pan-drag fires only for `PointerButton::Secondary` (right) or, in Pan mode, `Primary`. `PointerButton::Middle` is read only for `mouseClicked` emission (`:1512,1534`); a middle-button drag pans nothing, and the right button carries pan in every mode.
+
+Reference: `silx/gui/plot/PlotInteraction.py:1190-1192` — `ItemsInteraction` sets `dragButtons=(LEFT_BTN, MIDDLE_BTN)` with `clickButtons=(LEFT_BTN, RIGHT_BTN)`; `beginDrag` routes `MIDDLE_BTN` to `self._pan.beginDrag` (`:1365-1367`). Because `ZoomAndSelect`/`PanAndSelect`/`DrawSelectMode` all inherit this, middle-button drag pans in *every* interaction mode, and the right button is reserved for the click/context event.
+
+Impact: silx's universal middle-drag pan (pan while in zoom/draw/select mode) does not exist in rsplot; the pan gesture is relocated to the right button, which silx reserves for context/click.
+
+### R4-4: Reset-Zoom toolbar button never disables and its tooltip is static
+
+Severity: Low
+
+Rust: `src/widget/high_level.rs:6482` — the Home (Reset zoom) button is drawn unconditionally with a fixed `"Reset zoom"` tooltip; there is no gating on the X/Y autoscale flags and no dynamic tooltip.
+
+Reference: `silx/gui/plot/actions/control.py:82-95` — `ResetZoomAction._autoscaleChanged` calls `setEnabled(xAxis.isAutoScale() or yAxis.isAutoScale())`, greying the action out when both axes have autoscale off, and rewrites the tooltip per combination ("Auto-scale the x-axis of the graph only" / "…y-axis only" / "Auto-scale the graph"), re-evaluated on `sigAutoScaleChanged`.
+
+Impact: with both axes' autoscale disabled, silx shows a disabled Reset-Zoom button; rsplot shows it enabled with a generic tooltip. The click is a no-op in both, but the affordance state and the informative tooltip diverge.
+
+### Category B — items, colormap, ticks, fit, stats (vs silx items / silx.math)
+
+Both findings share one structural misunderstanding: **`silx.math.histogram.Histogramnd` defaults to `last_bin_closed=False`** (upper edge half-open, `[…, xmax[`), but the Rust ports clamp the max sample into the last bin. The pixel-intensity histogram is a **distinct, correct** site — its silx source (`actions/histogram.py:279`) passes `last_bin_closed=True` explicitly, so its inclusive behaviour must be preserved. Fixing this is not a blanket substitution.
+
+### R4-5: Colormap-dialog data histogram counts the range-max sample that silx drops
+
+Severity: Medium
+
+Rust: `src/core/histogram.rs:66-67` — the comment `// Last bin is inclusive of xmax (numpy/Histogramnd convention).` precedes `let idx = ((((t - xmin) / span) * nbins as f64) as usize).min(nbins - 1);`, folding a sample equal to `xmax` into the last bin. The test at `histogram.rs:118-127` asserts the two boundary `5.0` samples are counted (`sum == 4`), encoding the wrong upstream behaviour.
+
+Reference: `silx/gui/dialog/ColormapDialog.py:1288` calls `Histogramnd(data, n_bins=nbins, histo_range=data_range)` with **no** `last_bin_closed` argument, so it takes the default `False` (`silx/math/histogram.py:163`). Per that module's own doc (`histogram.py:134`), the last bin is `[…, xmax[` — a value exactly equal to `xmax` falls in **no** bin and is not counted.
+
+Impact: for an image whose maximum value occurs on many pixels (saturated/quantized detector frames), the top histogram bin in the colormap dialog / inline `HistogramColorBar` shows more counts than silx, and total counts exceed silx's. Both the comment and the regression test assert the wrong reference — a textbook principle-4 (test skepticism) case.
+
+### R4-6: Scatter BINNED_STATISTIC includes the max-edge points that silx drops
+
+Severity: Medium
+
+Rust: `src/core/scatter_viz.rs:1132-1133` docstring `matching Histogramnd's inclusive last edge`, and `scatter_viz.rs:1184-1190` — `if c >= cols { c = cols - 1; }` / `if r >= rows { r = rows - 1; }` clamp points at `x == x_max` / `y == y_max` into the last column/row.
+
+Reference: `silx/gui/plot/items/scatter.py:502-504` builds `Histogramnd(points, histo_range=ranges, n_bins=shape, weights=values)` with no `last_bin_closed` (default `False`). With `ranges = min_max(x/y)` (`scatter.py:489`), every point on the maximum X edge and maximum Y edge equals the range max and is dropped from all bins.
+
+Impact: in `Visualization.BINNED_STATISTIC` the entire rightmost column and topmost row of bins differ — rsplot's `mean`/`count`/`sum` include the max-edge points, silx's exclude them (those bins read `NaN`). For a regular grid this is a systematic full-edge discrepancy, and `BinnedStatistic::pick` returns points silx would not have binned.
+
+### Category C — plot3d + VolumeRaycaster (vs silx.gui.plot3d)
+
+**Framing (negative space).** silx's plot3d has **no GPU direct-volume ray-caster**. Its only volume path (`items/volume.py`) is `Isosurface` (marching-cubes geometry) + `CutPlane` (a `sampler2D` textured slice), composited with straight-alpha blending `glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)` (`scene/viewport.py:356-357`) and a straight-alpha cut-plane shader (`scene/cutplane.py:77,89`). rsplot's `VolumeRaycaster` is therefore an **rsplot-original widget with no upstream compositing contract**; its 0.5.0–0.5.2 hardening commits are internally motivated and can only be checked against the physics they invoke and against internal consistency. These three are **reference-independent defects**, not parity gaps.
+
+The GPU render test `tests/volume_raycaster_render.rs` asserts only two red-pixel counts (`>500` opaque, `<50` transparent) and proves nothing about compositing, correction exponent, or thickness behaviour.
+
+### R4-7: "Beer–Lambert" opacity correction normalizes by step count, not path length — volume opacity is independent of traversed thickness — (introduced by `4da9ddc`)
+
+Severity: Medium
+
+Rust: `src/render/shaders/volume_raycaster.wgsl:80-97` — `dt = (tfar - tnear) / f32(steps)` then `sa_c = 1.0 - pow(1.0 - sa, REF_STEPS / f32(steps))`. The correction exponent is a *count* ratio `REF_STEPS(256)/steps`; `steps` is a fixed count, so `dt` (world-space sample spacing) varies per ray with the box chord length, yet `dt` never enters the opacity. At the default `steps == REF_STEPS == 256` the exponent is exactly 1, so `sa_c == sa` and **no correction runs at all**.
+
+Reference: `silx/gui/plot3d/items/volume.py` (whole file) — no ray-march/`sampler3D` compositing exists. The physical contract the commit message invokes is `transmittance ∝ exp(-τ · pathlength)`: opacity must grow with traversed thickness.
+
+Impact: a ray grazing a thin edge of a uniform-alpha volume accumulates the same transmittance `(1-sa)^256` as a ray through the full diameter. The render has step-count invariance (the commit's literal goal) but no density/thickness cue, so uniform volumes read as flat silhouettes. Correct fixed-count DVR uses exponent `dt / dt_ref` with `dt_ref` a fixed world distance.
+
+### R4-8: 8-bit premultiplied storage plus in-shader un-premultiply (`gain = sa_c / s.a`) amplifies quantization at low alpha — (introduced by `1c68900`)
+
+Severity: Low
+
+Rust: `src/render/volume_raycaster.rs:65-77` stores `rgb_premul = round(straight_rgb · a / 255)` as `Rgba8Unorm`; `src/render/shaders/volume_raycaster.wgsl:101-103` reconstructs corrected premultiplied colour via `gain = sa_c / max(s.a, 1e-6)` and `acc.rgb + s.rgb * gain * w`. When the opacity correction or `alpha_scale` is active (`steps ≠ 256` or `alpha_scale ≠ 1`), `gain ≠ 1` divides the ±0.5/255 quantization error of `s.rgb` by the small interpolated `s.a`; at `s.a ≈ 4/255` the per-channel relative error reaches ~12%.
+
+Reference: `silx/gui/plot3d/scene/cutplane.py:77-89` — silx stores and samples straight-alpha colour and applies `color.a *= alpha` with no premultiply→un-premultiply round trip, so it has no low-alpha amplification path.
+
+Impact: faint (low-alpha) voxels acquire visible colour error whenever `set_steps` (≠256) or `set_alpha_scale` (≠1) is used. At the exact defaults `gain == 1`, so the base render is unaffected — the defect is conditional on the two knobs the hardening pass added.
+
+### R4-9: `remove()` frees a texture shared by another same-id view, silently blanking the survivor — (introduced by `a6354aa`)
+
+Severity: Low
+
+Rust: `src/widget/volume_raycaster.rs:127-130` → `src/render/volume_raycaster.rs:367-375` — `remove_volume_raycaster` does `res.scenes.remove(&id)`, dropping the one `VolumeGpu`/`wgpu::Texture` keyed by `id`. The type docs (`volume_raycaster.rs:52-56`) explicitly allow two `VolumeRaycaster` instances to share a `VolumeId` ("two views sharing an id share the last-uploaded texture"). One view calling `remove()` deletes the shared texture; the other keeps `has_volume = true` but `frame_bind_group` now returns `None`, so its paint callback becomes a silent no-op with no signal.
+
+Reference: `silx/gui/plot3d/items/volume.py:213-455` — each `Isosurface`/`ScalarField3D` owns its own resources; there is no shared-key texture cache whose free path a sibling item can trip.
+
+Impact: the per-id VRAM-free path collides with the shared-id design — removing one view can blank a still-live view's render, undetectably from the caller.
+
+### Category D — rsdm channels, data plugins, engine (vs PyDM)
+
+The `ca://` fix (`6ba4a4e`) **verifies as PyDM-faithful**: PyDM's `send_new_value` gates on `not np.array_equal(value, self._value)` and `clear_cache` on connect makes reconnect re-emit; rsdm mirrors both. The `pva` path is confirmed not in the family (`value_marked(None)` → first Data always emits, no separate connect-time post). The dep bump (`4a49b2b`) is version-only. All three D findings sit in `calc_plugin.rs`, where the audited `c020401` change lives.
+
+### R4-10: `calc://` publishes an initial value the update-list gate makes PyDM withhold — (introduced by `c020401`)
+
+Severity: Medium
+
+Rust: `rsdm/src/data_plugins/calc_plugin.rs:303-330` — the fix leaves `prev_stamps` at `u64::MAX` until the first all-connected tick, so that tick sees every child's stamp as changed; if any update-listed child has a value, `trigger` is set (`:305-313`) and `evaluate` publishes (`:316-329`). The commit frames "connected but valueless until the next child write" as a bug and makes the initial eval hold by construction.
+
+Reference: `pydm/data_plugins/calc_plugin.py:141-142` — `callback_value` sets `self._calculate` (the only recompute trigger) **only** when `self.connected` AND `name in self.listen_for_update`; `callback_conn` (`:144-157`) never sets it. PyDM's initial evaluation therefore happens only when an update-listed child's *value callback* fires *after* all children are connected.
+
+Impact: when the last child to connect is not in the `update` list and the update-var's only value callback predates that connection — the exact scenario of the new `calc_publishes_initial_value_when_update_var_connects_before_others` regression test — PyDM does **not** evaluate; the calc channel stays connected with value `None` until the update-var next changes. rsdm now publishes an initial value there. A strip chart on the calc gets a first sample PyDM would not deliver. The CI flake was closed by diverging from PyDM's documented "skip until a listened var updates" gate.
+
+### R4-11: `calc://` does not re-emit its value on a child connection-state change
+
+Severity: Low
+
+Rust: `rsdm/src/data_plugins/calc_plugin.rs:282-284` — a child connect/disconnect changes `all_connected`, published with `writer.update(move |s| s.connected = all_connected)` (a connection-only update, no value event). A calc value reaches subscribers only through the separate stamp-triggered `post_value` recompute (`:316-329`), which fires only for an update-listed child whose stamp moved.
+
+Reference: `pydm/data_plugins/calc_plugin.py:156-157` — `callback_conn` runs `self._send_update(self.connected, self._value)` on **every** child connection-state change, and `receive_new_data` (`:236-240`) re-emits `new_value_signal[type(val)]` whenever that carried value is not `None`.
+
+Impact: on any child reconnect (or a non-update-var child connecting), PyDM re-emits the calc's last computed value to value subscribers; rsdm emits nothing (only the `connected` flag flips). A strip chart on a calc channel misses the resample PyDM injects on child connection churn.
+
+### R4-12: `calc://` retriggers on a child's alarm/metadata change, not just its value
+
+Severity: Medium
+
+Rust: `rsdm/src/data_plugins/calc_plugin.rs:305-313` — the trigger keys on `ch.stamp()`. But `Channel::stamp()` (`channel.rs:580-582`) returns `state.stamp`, and `StateWriter::update` bumps that stamp for **every** state change (`channel.rs:377-384`), including alarm-only and metadata-only updates. A CA child's DBE_ALARM callback publishes via `writer.update(move |s| apply_alarm(s, &snap))` (`ca_plugin.rs:273`) and its DBE_PROPERTY refetch via `writer.update` (`ca_plugin.rs:288/423`) — both bump the child stamp with no value change. Each then trips `trigger` and runs `post_value` (`calc_plugin.rs:316-329`), which emits unconditionally (no `value != prev_value` guard).
+
+Reference: `pydm/data_plugins/calc_plugin.py:84-89` — the calc's child `PyDMChannel` binds only `connection_slot` and `value_slot`, not the severity/unit/prec/limit slots. `callback_value` (`:121-142`) is the sole path that sets `self._calculate`, and it fires only on a real value emission (`new_value_signal`). A child's alarm-severity or ctrl-metadata change never reaches the calc's recompute.
+
+Impact: a calc over CA children recomputes and republishes on every DBE_ALARM (alarm deadband) and DBE_PROPERTY (units/precision/limit) callback of a triggering child, leaking duplicate samples into any strip chart on the calc. For an accumulator expression using `prev_res` (e.g. `prev_res + A`), each alarm-only child callback **double-counts** — a correctness divergence, not a cosmetic one, since PyDM never advances the accumulator on a non-value change.
+
+### Category E — adl2rsdm parser/codegen/CALC (vs adl2pydm + MEDM C)
+
+### R4-13: Dynamic-attribute CALC binds only channels A–D; MEDM's reserved metadata operands G–L are unbound
+
+Severity: Medium
+
+Rust: `adl2rsdm/src/codegen.rs:371-376` — `VIS_CHANNEL_KEYS` has exactly four entries (`chan→A`, `chanB→B`, `chanC→C`, `chanD→D`), and `visibility_gate_address` (`:438-459`) emits `calc://…?dialect=medm&expr=<medm calc>&A=…&B=…&C=…&D=…&update=…`. Only A–D are ever bound; a `vis="calc"` expression referencing E–L gets nothing for them.
+
+Reference: `medm/utils.c:4491-4505` (MEDM C, authoritative). In `calcVisibility`'s `V_CALC` arm MEDM fills a 12-slot `valueArray`: A–D from the four channel records, then `valueArray[4]=0` (E), `[5]=0` (F), `[6]=pr->elementCount` (G), `[7]=pr->hopr` (H), `[8]=pr->status` (I), `[9]=pr->severity` (J), `[10]=pr->precision` (K), `[11]=pr->lopr` (L) — the metadata of the *first* channel (record A). These are the standard EPICS calc-record letters and are documented, usable visibility operands.
+
+Impact: a common alarm-driven visibility rule such as `calc="J"` (show when severity ≠ 0) or `calc="I#0"` (status) evaluates with J/I unbound — the rsdm `dialect=medm` engine has no value for those letters, so the gate is permanently false (or fails to compile → hidden). The widget is hidden forever where MEDM would show/hide it by the live severity/status/precision of channel A. adl2pydm shares this gap, but MEDM C is the authority.
+
+### R4-14: Composite-file / embedded-display children are coloured by the child file's own colormap; MEDM resolves them against the parent display's colormap
+
+Severity: Medium
+
+Rust: `adl2rsdm/src/codegen.rs:2208` — `emit_embedded_display` does `let mut target = parse_in_dir(&text, canonical.parent());`, so the child `.adl`'s own inline `"color map"` block is parsed and every child widget's `clr`/`bclr` index is resolved against *that* table (`:2244-2265`). Each embedded file uses its own colormap.
+
+Reference: `medm/medmComposite.c:694-707` (MEDM C, authoritative). `compositeFileParse` reads the child's `"color map"` token and calls `parseAndSkip(displayInfo)` — the child colormap is deliberately **discarded**. The children are appended into the parent `displayInfo->dlElementList`, so their colour indices resolve against the **parent display's** colormap at draw time.
+
+Impact: when a host screen uses a non-default colormap (inline `"color map"` or an external `cmap`) and embeds a child carrying a different (or the default) colormap, every embedded widget's `clr`/`bclr` renders with the wrong colours — MEDM indexes the host palette, adl2rsdm indexes the child's. Screens on the default palette are unaffected; facility screens with custom palettes are.
+
+### R4-15: Absent arc `path` defaults to a 360° span; MEDM's default is 90°
+
+Severity: Low
+
+Rust: `adl2rsdm/src/codegen.rs:1096` — `let span = angle_deg(widget, "pathAngle", 360.0);`. When the `.adl` arc has no `path` key, the emitted `DrawingShape::Arc` gets `span_deg: 360` (a full circle); `begin` defaults to 0 (correct).
+
+Reference: `medm/medmArc.c:258-259` (MEDM C, authoritative). `createDlArc` initialises `dlArc->begin = 0; dlArc->path = 90*64;` — the default span for an arc with no `path` key is **90°**. (adl2pydm defaults `pathAngle` to 0 and then omits the span entirely — also wrong, differently.)
+
+Impact: a hand-authored or truncated `.adl` arc omitting `path` draws a full 360° disc instead of MEDM's 90° wedge. MEDM's own writer always emits `path`, so MEDM-generated files never hit this; the divergence is confined to the absent-key contract.
+
 ## Cleared During Review
 
 Fix round 2026-07-03/04 (one commit per finding; branch merged fast-forward
@@ -3663,3 +3861,96 @@ implemented; this whole cluster is now closed):**
   under-swept fixes (10/24), which a fixes-from-reported-defects
   `rg`-the-whole-reference-function discipline on the next fix round
   would close as a class rather than one site at a time.
+
+- 2026-07-10: **round 4 opened**; same 5 read-only agents (A: plot
+  interaction/view/toolbar, B: items/colormap/ticks/fit/stats, C: plot3d +
+  VolumeRaycaster, D: rsdm↔PyDM, E: adl2rsdm↔adl2pydm+MEDM C). Baseline
+  `4a49b2b` (branch `chore/bump-epics-0.22`), **64 commits after the R3
+  baseline `0a51e4e`** — the 0.5.0–0.5.2 VolumeRaycaster hardening, the two
+  rsdm race fixes, and the epics-rs 0.21→0.22.1 bump, none previously
+  audited. Two lenses added: a **new-delta lens** (audit the unaudited 64
+  commits) and the **under-swept-fix lens** the R3 verdict called for.
+  Reference paths corrected to `~/work/*` (the `~/codes/*` paths in the R1
+  header do not exist on this machine).
+
+- 2026-07-10: round 4 consolidated — **15 findings** (High 0, Medium 9,
+  Low 6), renumbered R4-1..R4-15 (A: 1–4, B: 5–6, C: 7–9, D: 10–12,
+  E: 13–15).
+
+  Thematic clusters:
+  - **The new deltas introduced three of the fifteen.** R4-7 (step-count,
+    not path-length, opacity normalization — and at the default `steps=256`
+    the correction is the identity), R4-9 (per-id VRAM free collides with
+    the documented shared-id design, silently blanking a live view), R4-10
+    (`calc://` now publishes an initial value PyDM withholds). All three
+    were written to close a CI flake or a rendering artifact, none against
+    a reference. The lesson is not "the fixes were wrong" but that
+    *flake-driven and artifact-driven changes bypass the parity contract by
+    construction* and must be audited as new surface.
+  - **`VolumeRaycaster` has no upstream contract at all.** silx's plot3d
+    ships Isosurface + CutPlane with straight-alpha blending and no GPU
+    ray-caster. R4-7/8/9 are therefore **reference-independent defects**,
+    not parity gaps — the audit direction cannot help here, and the two
+    red-pixel-count assertions in `tests/volume_raycaster_render.rs` prove
+    nothing about compositing. This surface needs physics-level golden
+    tests (analytic transmittance for a known chord), not more parity
+    rounds.
+  - **`Histogramnd` upper-edge convention inverted (rsplot):** R4-5 + R4-6
+    both clamp the max sample into the last bin, and *both* carry a comment
+    asserting the opposite of what silx does; R4-5's regression test
+    encodes the wrong reference. One invariant — "`Histogramnd`'s upper
+    edge is exclusive unless `last_bin_closed=True`" — closes both. The
+    `pixel_intensity_histogram` site is genuinely inclusive (its silx
+    source passes `last_bin_closed=True`) and must NOT be swept with them.
+  - **Under-swept fix confirmed once more:** R4-2 is R1-3's sibling. R1-3
+    repaired the context-menu reset path's degenerate `(v,v)`; the
+    programmatic `set_limits`/`set_graph_*_limits` and toolbar zoom paths
+    still commit raw limits with no swap/expand/float32 clamp, where silx
+    applies `checkAxisLimits` on *every* `setLimits` and clamps toolbar
+    zoom at a second layer. One owner for "commit a view-limits change"
+    would close R1-3 + R4-2 together.
+  - **`calc://` trigger model is the wrong primitive (rsdm):** R4-10, R4-11
+    and R4-12 are three faces of one thing — the poll loop triggers on
+    `Channel::stamp()`, but `stamp` means "any state change" (value, alarm,
+    metadata), whereas PyDM's calc triggers on a *value emission* of a
+    listened child and re-emits on *connection* change. Polling a
+    monotonic counter cannot express either. A value-event subscription per
+    child (the primitive `subscribe_values` already provides) would close
+    all three structurally rather than by three more gates.
+  - **adl2rsdm: the reference is MEDM, not adl2pydm.** R4-13 (calc letters
+    G–L unbound) and R4-15 (arc `path` absent-key default) are gaps
+    adl2pydm *shares*; only reading the MEDM C surfaced them. R4-14
+    (embedded child uses its own colormap) is the remaining half of the
+    `compositeFileParse` feature R3-16/17 opened.
+
+  Classification (per port-translation-lessons):
+  - **Reference-independent defects** (real regardless of upstream):
+    R4-7, R4-8, R4-9 (VolumeRaycaster — no upstream exists), R4-12 (calc
+    accumulator double-counts on alarm-only callbacks), and R4-2's
+    consequence (raw limits can violate the `Transform` precondition and
+    NaN the render).
+  - **Reference-faithful gaps** (adopt upstream posture): R4-2, R4-4, R4-5,
+    R4-6, R4-10 (port is *more eager* than PyDM), R4-11 (port is *more
+    conservative* than PyDM).
+  - **Interop-contract gaps** (the `.adl` format is the contract): R4-13,
+    R4-14, R4-15.
+  - **Unimplemented surface** (port, or record a scope decision): R4-1
+    (Shift/Alt wheel modifiers), R4-3 (middle-drag pan).
+
+  **Convergence verdict:** R1 40 → R2 69 → R3 24 → R4 15. Count still
+  falling, severity ceiling still Medium (0 High for the second round
+  running). But the round is NOT evidence of convergence on the *audited*
+  surface: 3 of 15 findings are defects the last 64 commits *introduced*,
+  and one whole surface (`VolumeRaycaster`) turned out to have no reference
+  to converge against. Per port-translation-lessons this is cycle 4 of an
+  expected 5–6 before the language-gap categories close structurally. The
+  two structural closures that would collapse the largest families are
+  (a) a single owner for view-limits commits (R1-3 + R4-2), and (b)
+  replacing `calc://`'s stamp-polling trigger with per-child value-event
+  subscription (R4-10 + R4-11 + R4-12).
+
+  **Process note:** the reference trees were absent at the paths recorded in
+  the R1 header (`~/codes/*`); they live under `~/work/*` on this machine.
+  Categories D and E were nearly skipped for want of PyDM/adl2pydm — the
+  audit was held until the user supplied them rather than proceeding on
+  assumption. Keep the corrected paths in the R4 header current.
