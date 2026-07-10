@@ -643,6 +643,23 @@ fn validate_image_len(width: u32, height: u32, actual: usize) -> Result<usize, P
     }
 }
 
+/// Whether the Reset-Zoom button is enabled, and the tooltip it carries, from
+/// the X and Y autoscale flags.
+///
+/// silx `ResetZoomAction._autoscaleChanged` (`actions/control.py:83-95`):
+/// `setEnabled(x or y)`, and the tooltip names the single autoscaled axis when
+/// exactly one is on. With neither on the tooltip falls back to the both-on
+/// wording — the button is disabled, so it is never read.
+#[must_use]
+fn reset_zoom_affordance(x_autoscale: bool, y_autoscale: bool) -> (bool, &'static str) {
+    let tooltip = match (x_autoscale, y_autoscale) {
+        (true, false) => "Auto-scale the x-axis of the graph only",
+        (false, true) => "Auto-scale the y-axis of the graph only",
+        _ => "Auto-scale the graph",
+    };
+    (x_autoscale || y_autoscale, tooltip)
+}
+
 fn toolbar_icon_button(
     ui: &mut egui::Ui,
     icon: ToolbarIcon,
@@ -6494,7 +6511,16 @@ impl PlotWidget {
     fn show_toolbar_controls(&mut self, ui: &mut egui::Ui, out: &mut ToolbarResponse) {
         // Essential controls, always in the row: reset zoom, the box-zoom /
         // pan interaction modes, Y invert, and keep-aspect.
-        if toolbar_icon_button(ui, ToolbarIcon::Home, false, "Reset zoom").clicked() {
+        // silx greys out Reset Zoom when neither axis autoscales, and names the
+        // single autoscaled axis in the tooltip (`actions/control.py:83-95`).
+        let plot = self.backend.plot();
+        let (enabled, tooltip) = reset_zoom_affordance(plot.x_autoscale(), plot.y_autoscale());
+        let clicked = ui
+            .add_enabled_ui(enabled, |ui| {
+                toolbar_icon_button(ui, ToolbarIcon::Home, false, tooltip).clicked()
+            })
+            .inner;
+        if clicked {
             self.reset_zoom();
             out.reset_zoom = true;
         }
@@ -15204,6 +15230,30 @@ mod tests {
         plot.set_y_autoscale(false);
         apply_widget_reset(&mut plot, data_bounds((10.0, 20.0), (-5.0, 5.0), None));
         assert_eq!(plot.limits, (10.0, 20.0, 0.0, 1.0));
+    }
+
+    /// One case per combination of the two autoscale flags, matching silx's
+    /// `_autoscaleChanged` table (`actions/control.py:83-95`).
+    #[test]
+    fn reset_zoom_affordance_matches_silx_enable_and_tooltip() {
+        assert_eq!(
+            reset_zoom_affordance(true, true),
+            (true, "Auto-scale the graph")
+        );
+        assert_eq!(
+            reset_zoom_affordance(true, false),
+            (true, "Auto-scale the x-axis of the graph only")
+        );
+        assert_eq!(
+            reset_zoom_affordance(false, true),
+            (true, "Auto-scale the y-axis of the graph only")
+        );
+        // Disabled, and silx reuses the both-on wording rather than inventing a
+        // fourth string.
+        assert_eq!(
+            reset_zoom_affordance(false, false),
+            (false, "Auto-scale the graph")
+        );
     }
 
     #[test]
