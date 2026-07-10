@@ -3527,7 +3527,28 @@ Reference: `medm/utils.c:4621-4630` — under `V_CALC` `setDynamicAttrMonitorFla
 
 Impact: `vis="calc"` with `calc="J"` (the standard "show while in alarm" gate) latched at the severity observed on the first evaluation. The pre-`976c39c` stamp poll got this right by accident, while wrongly retriggering on H/K/L churn; the value-only rule got it wrong in the other direction. Neither matched MEDM's per-operand monitor set.
 
-Fix (`3f9660e`): `Evaluator::Medm` gains `watch_severity = calc_uses_operand(expr, 'J')` and `first_child`, both decided once at connect as MEDM decides them once in `setDynamicAttrMonitorFlags`; the loop arms `pending_trigger` on a severity *change* of that record. `calc_uses_operand` ports MEDM's letter scan verbatim (either case, not preceded by an ASCII letter — the guard that keeps `sin`/`min`/`nint`/`pi` from reading as operand `I`). The status half has no counterpart: `ChannelState` carries no EPICS status code, the same gap that pins `I` to `0.0`. The PyDM dialect keeps the value-only trigger by construction — it has no metadata operands, so no watch is built.
+Fix (`3f9660e`, completed by `d3f1e19`): `Evaluator::Medm` gains `first_child`
+and `monitors: MedmMonitors`, both decided once at connect as MEDM decides them
+once in `setDynamicAttrMonitorFlags`; the loop arms `pending_trigger` on a
+*change* of the monitored fields. `calc_uses_operand` ports MEDM's letter scan
+verbatim (either case, not preceded by an ASCII letter — the guard that keeps
+`sin`/`min`/`nint`/`pi` from reading as operand `I`).
+
+`3f9660e` closed only the severity half: `ChannelState` carried no EPICS alarm
+status, so operand `I` bound a constant `0.0` and `monitorStatusChanged` had
+nothing to watch. `d3f1e19` closes the status half at source — both wire types
+already carry it (`epics-ca-rs` `snap.alarm.status`, `epics-pva-rs`
+`alarm.status`), so `ChannelState::status` lands beside `severity` and is
+written at the same three plugin sites. With both operands available the flag
+pair collapses into one owner, `MedmMonitors`, whose `sample` reads only the
+monitored fields — an unmonitored field stays `None` and cannot arm a
+recompute, so the monitor set gates the comparison by construction rather than
+by a branch at the read. The PyDM dialect builds no monitors at all: it has no
+metadata operands.
+
+Boundary tests: `I` monitored, `J` monitored but not `I` (a status change must
+stay inert — passes against the old code, a preservation test), neither
+monitored, and `MedmMonitors::of` against `sin`/`nint`.
 
 ## Cleared During Review
 

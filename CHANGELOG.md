@@ -66,11 +66,19 @@ carried no thickness cue and lost the hue of faint voxels.
   re-emits on a connection-state change; rsdm only watched values.
 - **`calc://` no longer retriggers on a child's alarm or metadata change**, only
   on an actual value change, as PyDM's `update` list specifies.
-- **A `dialect = medm` expression reading operand `J` re-evaluates on a severity
-  change.** MEDM's `setDynamicAttrMonitorFlags` adds `monitorSeverityChanged`
-  exactly when the expression uses `J`; rsdm evaluated `J` but never watched it,
-  so a severity transition left the calc showing a stale value. (Introduced
-  during this audit's own `calc://` fix; never published.)
+- **A `dialect = medm` expression reading operand `I` or `J` re-evaluates on an
+  alarm status / severity change.** MEDM's `setDynamicAttrMonitorFlags` adds
+  `monitorStatusChanged` and `monitorSeverityChanged` exactly when the
+  expression uses those operands. rsdm never watched severity, so a transition
+  left the calc showing a stale value, and it had no alarm status to read at all
+  — operand `I` bound a constant `0.0`. Both are now monitored, and only when
+  the expression reads them.
+
+### Added — `rsdm`
+
+- **`ChannelState::status`** carries the wire alarm status — the record's `STAT`
+  for `ca://`, the pvAccess `alarm.status` enum for `pva://`. It backs the MEDM
+  calc operand `I`.
 
 ### Fixed — `adl2rsdm`
 
