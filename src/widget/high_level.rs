@@ -4157,6 +4157,14 @@ impl PlotWidget {
         }
     }
 
+    /// The single owner for every view-limits commit: each axis range passes
+    /// through [`clamp_axis_limits`] here, so no caller can install an
+    /// inverted, degenerate, or float32-unsafe range and the `Transform`
+    /// precondition (`min < max`, positive under log) holds by construction.
+    /// silx enforces the same invariant by running `Axis._checkLimits` on X, Y
+    /// and — when present — Y2 inside `PlotWidget.setLimits`
+    /// (`PlotWidget.py:2723-2730` → `items/axis.py:145-154` →
+    /// `_utils/panzoom.py:49-75`).
     fn set_limits_internal(
         &mut self,
         xmin: f64,
@@ -4165,6 +4173,13 @@ impl PlotWidget {
         ymax: f64,
         y2: Option<(f64, f64)>,
     ) {
+        let x_log = self.backend.plot().x_scale == Scale::Log10;
+        let y_log = self.backend.plot().y_scale == Scale::Log10;
+        let (xmin, xmax) = clamp_axis_limits(xmin, xmax, x_log);
+        let (ymin, ymax) = clamp_axis_limits(ymin, ymax, y_log);
+        // silx scales the right axis with the left Y log state (`setLimits`
+        // takes `getYAxis(axis="right")`, whose `_isLogarithmic` tracks left).
+        let y2 = y2.map(|(lo, hi)| clamp_axis_limits(lo, hi, y_log));
         let before = self.limits_snapshot();
         self.backend.set_limits(xmin, xmax, ymin, ymax, y2);
         self.push_limits_changed_if(before);
@@ -6818,13 +6833,23 @@ impl PlotWidget {
                 self.set_limits_internal(xmin, xmax, ymin, ymax, self.backend.plot().y2);
             }
             YAxis::Right => {
-                let before = self.limits_snapshot();
-                self.backend.plot_mut().y2 = Some((ymin, ymax));
-                self.push_limits_changed_if(before);
+                // Route through the owner so y2 gets the same `_checkLimits`
+                // repair X and Y get; X/Y are re-committed unchanged.
+                let (xmin, xmax, cur_ymin, cur_ymax) = self.backend.plot().limits;
+                self.set_limits_internal(xmin, xmax, cur_ymin, cur_ymax, Some((ymin, ymax)));
             }
             YAxis::Extra(n) => {
+                // Extra axes carry their own scale, so they repair against it.
+                let is_log = self
+                    .backend
+                    .plot()
+                    .extra_axes()
+                    .get(n)
+                    .map(|ax| ax.scale == Scale::Log10)
+                    .unwrap_or(false);
+                let (lo, hi) = clamp_axis_limits(ymin, ymax, is_log);
                 if let Some(ax) = self.backend.plot_mut().extra_axis_mut(n) {
-                    ax.range = Some((ymin, ymax));
+                    ax.range = Some((lo, hi));
                 }
             }
         }
@@ -6917,8 +6942,8 @@ impl PlotWidget {
                 }
             }
         };
-        // silx writes via Axis.setLimits → _checkLimits (checkAxisLimits).
-        let (lo, hi) = clamp_axis_limits(lo, hi, true);
+        // `set_graph_x_limits` funnels into `set_limits_internal`, which runs
+        // the `_checkLimits` repair; the axis is already Log10 by this point.
         self.set_graph_x_limits(lo, hi);
     }
 
@@ -6968,8 +6993,8 @@ impl PlotWidget {
                 }
             }
         };
-        // silx writes via Axis.setLimits → _checkLimits (checkAxisLimits).
-        let (lo, hi) = clamp_axis_limits(lo, hi, true);
+        // `set_graph_y_limits` funnels into `set_limits_internal`, which runs
+        // the `_checkLimits` repair; the axis is already Log10 by this point.
         self.set_graph_y_limits(lo, hi, YAxis::Left);
     }
 

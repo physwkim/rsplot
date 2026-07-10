@@ -3215,6 +3215,20 @@ Impact: the documented Alt+Wheel (X-only) and Shift+Wheel (Y-only) zoom gestures
 
 ### R4-2: Programmatic `set_limits` / toolbar Zoom-In/Out skip silx's `checkAxisLimits` repair — (R1-3 sibling)
 
+**FIXED (R4, structural).** `set_limits_internal` is now the single owner of
+every view-limits commit and runs `clamp_axis_limits` on X, Y and Y2, so the
+`Transform` precondition holds by construction rather than by each caller
+remembering to repair. Two bypasses the `rg` sweep found beyond the cited
+sites were routed through the owner: `set_graph_y_limits(YAxis::Right)` wrote
+`plot.y2` raw, and `YAxis::Extra(n)` wrote `ax.range` raw (the latter repairs
+against the extra axis' own `scale`). The two hand-rolled `clamp_axis_limits`
+calls in `set_x_log`/`set_y_log` — workarounds for the missing owner — were
+removed, and `scale_1d_range`'s doc no longer claims the float32 clip is
+"separately tracked". Boundary regression tests in `tests/view_limits_repair.rs`
+(inverted / degenerate-zero / degenerate-positive / float32-overflow / y2 /
+extra-axis / repeated toolbar zoom-out): 7/7 fail without the fix, pass with.
+Closes R1-3's family.
+
 Severity: Medium
 
 Rust: `src/widget/high_level.rs:4160-4171` (`set_limits_internal`) forwards straight to `src/render/backend_wgpu.rs:697-700`, which writes `self.plot.limits = (xmin, xmax, ymin, ymax)` raw — no ordering swap, no degenerate expansion, no float32 clamp. The public `set_limits`, `set_graph_x_limits` (`:6797`), `set_graph_y_limits` (`:6814`), and the toolbar `actions::control::apply_zoom` (`src/widget/actions/control.rs:124-147`) all commit through this path. `scale_1d_range` (`control.rs:75-95`) omits the clamp, its doc claiming it is "the separately-tracked float32-safety zoom item", but no downstream site applies it. Contrast `high_level.rs:6921,6972`, where the log-toggle fix manually calls `clamp_axis_limits` before `set_graph_*_limits` precisely because that setter does not.

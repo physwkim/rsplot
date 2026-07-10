@@ -67,9 +67,10 @@ pub const ZOOM_STEP: f64 = 1.1;
 /// axis guarantees `min`/`max`/`center > 0` by construction): the three inputs
 /// are mapped through `log10`, scaled linearly there, then mapped back via
 /// `10^x` — identical to silx's log branch. silx additionally clips the result
-/// to the float32 safe range; that clip is the separately-tracked float32-safety
-/// zoom item and is intentionally not applied here. Pure and deterministic so the
-/// zoom math is unit-testable without a GPU backend.
+/// to the float32 safe range; here that clip belongs to the view-limits owner
+/// (`set_limits_internal`), which every commit path funnels through, so this
+/// function stays pure and deterministic and the zoom math is unit-testable
+/// without a GPU backend.
 ///
 /// [`Scale::Log10`]: crate::core::transform::Scale::Log10
 pub fn scale_1d_range(min: f64, max: f64, center: f64, scale: f64, is_log: bool) -> (f64, f64) {
