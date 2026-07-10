@@ -9,9 +9,12 @@
 //!
 //! Mouse mapping follows the active interaction mode: select mode uses primary
 //! drag for ROI handles, zoom mode uses primary drag for box zoom, pan mode uses
-//! primary drag for panning. Secondary drag pans in every mode; a secondary
-//! *click* opens a zoom context menu (Zoom Back / Reset Zoom). Wheel zoom
-//! remains available.
+//! primary drag for panning. Middle drag pans in every mode, as in silx
+//! (`ItemsInteraction`'s `dragButtons=(LEFT_BTN, MIDDLE_BTN)`). Secondary drag
+//! also pans — a recorded deviation, since silx reserves the right button for
+//! click/context — and a secondary *click* opens a zoom context menu (Zoom Back
+//! / Reset Zoom). Wheel zoom remains available, with Alt/Shift selecting the
+//! X/Y axis.
 
 use egui::{PointerButton, Pos2, Rect, Sense, Stroke, Ui};
 
@@ -1011,14 +1014,28 @@ fn apply_interaction(
         }
     }
 
-    // Pan: secondary-drag always pans; pan mode also binds primary-drag to pan.
-    // A marker drag pre-empts the primary-drag pan (secondary-drag pan is
-    // unaffected, matching silx — only the item-drag branch competes with the
-    // primary pan).
+    // Pan: middle-drag always pans, in every interaction mode — silx's
+    // `ItemsInteraction` sets `dragButtons=(LEFT_BTN, MIDDLE_BTN)` and routes
+    // MIDDLE to `Pan.beginDrag` (`PlotInteraction.py:1190-1192,1365-1367`), and
+    // `ZoomAndSelect`/`PanAndSelect`/`DrawSelectMode` all inherit it. Pan mode
+    // also binds primary-drag to pan.
+    //
+    // Secondary-drag pans too. That is a recorded rsplot deviation — silx
+    // reserves the right button for click/context (`clickButtons=(LEFT_BTN,
+    // RIGHT_BTN)`) — kept because the ROI gating contract depends on it
+    // (`doc/parity-roadmap.md:1175`) and the context menu opens on release
+    // regardless (see the `context_menu` registration below).
+    //
+    // A marker drag pre-empts the primary-drag pan only; middle and secondary
+    // pans are unaffected, matching silx — only the item-drag branch competes
+    // with the primary pan.
     let primary_pan = mode == PlotInteractionMode::Pan
         && !marker_dragging
         && response.dragged_by(PointerButton::Primary);
-    if response.dragged_by(PointerButton::Secondary) || primary_pan {
+    if response.dragged_by(PointerButton::Middle)
+        || response.dragged_by(PointerButton::Secondary)
+        || primary_pan
+    {
         // Push the pre-pan view once, at the start of the pan gesture, so
         // zoom-back can restore it (silx pushes on box-zoom; here the limits
         // history also captures pan gestures — push on drag-start, not every
@@ -2093,6 +2110,54 @@ mod tests {
         assert!(frac_left > 0.0, "downward drag raises the data Y window");
     }
 
+    /// silx routes MIDDLE_BTN to `Pan.beginDrag` from `ItemsInteraction`
+    /// (`PlotInteraction.py:1365-1367`), which `ZoomAndSelect`, `PanAndSelect`
+    /// and `DrawSelectMode` all inherit — so the gesture must pan in *every*
+    /// mode, including the modes whose primary drag is spoken for.
+    #[test]
+    fn middle_drag_pans_in_every_interaction_mode() {
+        let screen = egui::vec2(200.0, 200.0);
+        for mode in [
+            PlotInteractionMode::Zoom,
+            PlotInteractionMode::Pan,
+            PlotInteractionMode::Select,
+            PlotInteractionMode::MaskDraw,
+            PlotInteractionMode::RoiCreate(interaction::RoiDrawKind::Rect),
+        ] {
+            let ctx = egui::Context::default();
+            let mut plot = Plot::new(0);
+            plot.limits = (0.0, 10.0, 0.0, 10.0);
+
+            let (_r0, area) = run_mode_frame(&ctx, &mut plot, mode, screen_input(screen));
+            let start = area.center();
+            let end = start + egui::vec2(20.0, 0.0);
+
+            let _ = run_mode_frame(
+                &ctx,
+                &mut plot,
+                mode,
+                press_button_at(screen, start, egui::PointerButton::Middle),
+            );
+            let _ = run_mode_frame(&ctx, &mut plot, mode, move_to(screen, end));
+            let _ = run_mode_frame(
+                &ctx,
+                &mut plot,
+                mode,
+                release_button_at(screen, end, egui::PointerButton::Middle),
+            );
+
+            let (x0, x1, _, _) = plot.limits;
+            assert!(
+                (x1 - x0 - 10.0).abs() <= 1e-9,
+                "{mode:?}: span preserved: {x0} {x1}"
+            );
+            assert!(
+                x0 < -1e-9,
+                "{mode:?}: rightward middle drag must move the X window left, got {x0}"
+            );
+        }
+    }
+
     #[test]
     fn click_emits_clicked_event_with_correct_data_coords() {
         let ctx = egui::Context::default();
@@ -2474,11 +2539,15 @@ mod tests {
     }
 
     fn press_at(screen: egui::Vec2, p: Pos2) -> egui::RawInput {
+        press_button_at(screen, p, egui::PointerButton::Primary)
+    }
+
+    fn press_button_at(screen: egui::Vec2, p: Pos2, button: egui::PointerButton) -> egui::RawInput {
         let mut raw = screen_input(screen);
         raw.events.push(egui::Event::PointerMoved(p));
         raw.events.push(egui::Event::PointerButton {
             pos: p,
-            button: egui::PointerButton::Primary,
+            button,
             pressed: true,
             modifiers: egui::Modifiers::default(),
         });
@@ -2492,10 +2561,18 @@ mod tests {
     }
 
     fn release_at(screen: egui::Vec2, p: Pos2) -> egui::RawInput {
+        release_button_at(screen, p, egui::PointerButton::Primary)
+    }
+
+    fn release_button_at(
+        screen: egui::Vec2,
+        p: Pos2,
+        button: egui::PointerButton,
+    ) -> egui::RawInput {
         let mut raw = screen_input(screen);
         raw.events.push(egui::Event::PointerButton {
             pos: p,
-            button: egui::PointerButton::Primary,
+            button,
             pressed: false,
             modifiers: egui::Modifiers::default(),
         });
