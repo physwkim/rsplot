@@ -72,6 +72,13 @@
 //!   `E`,`F` = 0, `G` = element count, `H` = hopr, `I` = alarm status,
 //!   `J` = severity, `K` = precision, `L` = lopr. rsdm's `ChannelState` carries
 //!   no EPICS alarm-status code, so `I` binds `0.0` (documented gap).
+//! - Because `J` is metadata, an expression that reads it re-evaluates on the
+//!   first record's **severity**, which arrives with no value event. MEDM arms
+//!   exactly that monitor and no other: `setDynamicAttrMonitorFlags`
+//!   (`utils.c:4621-4630`) sets `monitorSeverityChanged` only when
+//!   `calcUsesSeverity(calc)`, and never monitors `hopr`/`precision`/`lopr`
+//!   (H/K/L). Its `monitorStatusChanged` twin has no rsdm counterpart — the
+//!   same missing status code that pins `I` to `0.0`.
 //! - The `expr` query value is **percent-decoded** (`%26` → `&`, `%25` → `%`),
 //!   because the raw query splits on `&`; `adl2rsdm` encodes exactly those two
 //!   bytes. The plain (PyDM) dialect stays raw — PyDM does not decode either.
@@ -122,7 +129,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::address::PvAddress;
-use crate::channel::{Channel, PvValue, StateWriter, ValueSubscription};
+use crate::channel::{AlarmSeverity, Channel, PvValue, StateWriter, ValueSubscription};
 use crate::data_plugins::{ConnectionCtx, DataPlugin};
 use crate::engine::EngineError;
 
@@ -211,6 +218,15 @@ enum Evaluator {
     Medm {
         compiled: medm_calc::CompiledExpr,
         operand_indices: Vec<usize>,
+        /// Index into `children` of the record whose metadata backs operands
+        /// `E`–`L` (MEDM `records[0]`): operand `A` when a child binds it, else
+        /// the first listed child. `None` only when there are no children.
+        first_child: Option<usize>,
+        /// The expression reads operand `J`, so the first record's *severity*
+        /// arms a recompute even without a value change — MEDM sets
+        /// `monitorSeverityChanged` for exactly this case
+        /// (`setDynamicAttrMonitorFlags`, `medm/utils.c:4621-4630`).
+        watch_severity: bool,
     },
     /// MEDM dialect whose expression failed to compile (or a variable is not a
     /// single `A`–`U` letter): fail-visible — `1.0` was published at task
@@ -236,10 +252,19 @@ impl Evaluator {
                     };
                     operand_indices.push(idx);
                 }
+                // MEDM's `records[0]`: operand A when bound, else the first
+                // listed child (MEDM requires channel A for a valid calc —
+                // `utils.c:4543` — so A is the normal case).
+                let first_child = operand_indices
+                    .iter()
+                    .position(|&idx| idx == 0)
+                    .or((!config.vars.is_empty()).then_some(0));
                 match medm_calc::compile(&config.expr) {
                     Ok(compiled) => Self::Medm {
                         compiled,
                         operand_indices,
+                        first_child,
+                        watch_severity: calc_uses_operand(&config.expr, 'J'),
                     },
                     Err(err) => {
                         log::warn!(
@@ -302,6 +327,22 @@ async fn run_channel(
         .map(|(name, _)| update.as_ref().is_none_or(|u| u.iter().any(|n| n == name)))
         .collect();
 
+    // MEDM's `monitorSeverityChanged`: under the MEDM dialect an expression that
+    // reads operand `J` re-evaluates on the first record's severity, which
+    // arrives without a value event (`utils.c:4621-4630`). Nothing else does —
+    // MEDM never monitors `hopr`/`precision`/`lopr` (H/K/L), and operand `I`
+    // (status) has no source in `ChannelState`, the gap `eval_medm` documents.
+    // The PyDM dialect has no metadata operands and stays value-only.
+    let severity_watch = match &evaluator {
+        Evaluator::Medm {
+            first_child: Some(i),
+            watch_severity: true,
+            ..
+        } => Some(&children[*i].1),
+        _ => None,
+    };
+    let mut prev_severity: Option<AlarmSeverity> = None;
+
     let mut child_connected = vec![false; children.len()];
     let mut prev_value: Option<PvValue> = None;
     // A listened child emitted a value that has not been folded into a
@@ -332,6 +373,16 @@ async fn run_channel(
                     if got_value && triggers[i] {
                         pending_trigger = true;
                     }
+                }
+
+                if let Some(ch) = severity_watch {
+                    let now = ch.read(|s| s.severity);
+                    // Arm on a *change*, so the first observation does not
+                    // fabricate a trigger the initial evaluation already covers.
+                    if prev_severity.is_some_and(|was| was != now) {
+                        pending_trigger = true;
+                    }
+                    prev_severity = Some(now);
                 }
 
                 let all_connected = children.iter().all(|(_, ch)| ch.is_connected());
@@ -408,21 +459,25 @@ fn evaluate(
         Evaluator::Medm {
             compiled,
             operand_indices,
-        } => Some(match eval_medm(compiled, children, operand_indices, prev) {
-            Ok(result) => PvValue::Float(result),
-            Err(err) => {
-                // Fail-visible on evaluation errors too, warning once (MEDM
-                // hides here — utils.c:4519-4523; see the module docs).
-                if !*warned_eval {
-                    *warned_eval = true;
-                    log::warn!(
-                        "{id}: MEDM CALC evaluation failed ({err:?}); \
+            first_child,
+            ..
+        } => Some(
+            match eval_medm(compiled, children, operand_indices, *first_child, prev) {
+                Ok(result) => PvValue::Float(result),
+                Err(err) => {
+                    // Fail-visible on evaluation errors too, warning once (MEDM
+                    // hides here — utils.c:4519-4523; see the module docs).
+                    if !*warned_eval {
+                        *warned_eval = true;
+                        log::warn!(
+                            "{id}: MEDM CALC evaluation failed ({err:?}); \
                          publishing 1.0 (fail-visible)"
-                    );
+                        );
+                    }
+                    PvValue::Float(1.0)
                 }
-                PvValue::Float(1.0)
-            }
-        }),
+            },
+        ),
         Evaluator::Invalid => None,
     }
 }
@@ -772,6 +827,7 @@ fn eval_medm(
     compiled: &medm_calc::CompiledExpr,
     children: &[(String, Channel)],
     operand_indices: &[usize],
+    first_child: Option<usize>,
     prev: Option<&PvValue>,
 ) -> Result<f64, medm_calc::CalcError> {
     let mut inputs = medm_calc::NumericInputs::new();
@@ -783,15 +839,7 @@ fn eval_medm(
         child_bound[idx] = true;
     }
 
-    // The "first channel" whose metadata backs E–L: operand A when a child
-    // binds it, else the first listed child (MEDM requires channel A for a
-    // valid calc — utils.c:4543 — so A is the normal case).
-    let first = operand_indices
-        .iter()
-        .position(|&idx| idx == 0)
-        .or(if children.is_empty() { None } else { Some(0) })
-        .map(|i| &children[i].1);
-    if let Some(ch) = first {
+    if let Some(ch) = first_child.map(|i| &children[i].1) {
         ch.read(|s| {
             if !child_bound[6] {
                 // G: element count (scalar = 1; no value yet = 0, as an MEDM
@@ -816,6 +864,19 @@ fn eval_medm(
 
     inputs.prev_val = prev.and_then(PvValue::as_f64).unwrap_or(0.0);
     medm_calc::eval(compiled, &mut inputs)
+}
+
+/// Whether `expr` reads the calc operand `letter`, by MEDM's own scan
+/// (`calcUsesStatus` / `calcUsesSeverity`, `medm/utils.c:4647-4694`): the letter
+/// in either case, at the start of the expression or not preceded by an ASCII
+/// letter — the guard that keeps `sin`, `asin`, `min`, `nint`, `pi` from
+/// looking like operand `I`.
+fn calc_uses_operand(expr: &str, letter: char) -> bool {
+    let bytes = expr.as_bytes();
+    let want = letter.to_ascii_uppercase();
+    bytes.iter().enumerate().any(|(i, &b)| {
+        (b as char).to_ascii_uppercase() == want && (i == 0 || !bytes[i - 1].is_ascii_alphabetic())
+    })
 }
 
 /// The calc-operand index for an MEDM-dialect variable name: a single letter
@@ -1497,9 +1558,18 @@ mod tests {
         update: Option<Vec<String>>,
         children: Vec<(String, Channel)>,
     ) -> Harness {
+        spawn_calc_dialect(expr, Dialect::Evalexpr, update, children)
+    }
+
+    fn spawn_calc_dialect(
+        expr: &str,
+        dialect: Dialect,
+        update: Option<Vec<String>>,
+        children: Vec<(String, Channel)>,
+    ) -> Harness {
         let config = CalcConfig {
             expr: expr.to_owned(),
-            dialect: Dialect::Evalexpr,
+            dialect,
             vars: children
                 .iter()
                 .map(|(n, _)| (n.clone(), format!("loc://{n}")))
@@ -1529,6 +1599,73 @@ mod tests {
             s.connected = true;
             s.value = Some(PvValue::Float(v));
         });
+    }
+
+    /// One case per boundary of MEDM's `calcUsesStatus`/`calcUsesSeverity` scan
+    /// (`utils.c:4647-4694`), which is a letter match guarded only by "not
+    /// preceded by an ASCII letter".
+    #[test]
+    fn calc_uses_operand_matches_medms_scan() {
+        assert!(calc_uses_operand("J", 'J'), "the whole expression");
+        assert!(calc_uses_operand("j#0", 'J'), "lower case");
+        assert!(calc_uses_operand("A+J", 'J'), "preceded by an operator");
+        assert!(calc_uses_operand("A?J:0", 'J'), "preceded by punctuation");
+        assert!(calc_uses_operand("2J", 'J'), "preceded by a digit");
+        assert!(!calc_uses_operand("A#0", 'J'), "absent");
+        assert!(!calc_uses_operand("", 'J'), "empty");
+        // The guard exists so function names do not read as operand I.
+        assert!(!calc_uses_operand("SIN(A)", 'I'));
+        assert!(!calc_uses_operand("min(A,B)", 'I'));
+        assert!(!calc_uses_operand("nint(A)", 'I'));
+        assert!(calc_uses_operand("I#0", 'I'), "operand I on its own");
+    }
+
+    /// Boundary: the expression reads operand `J`, so the first record's
+    /// severity — which arrives with no value event — must re-evaluate it.
+    /// MEDM sets `monitorSeverityChanged` for exactly this case
+    /// (`utils.c:4624-4628`).
+    #[tokio::test]
+    async fn medm_expr_reading_severity_reevaluates_on_a_severity_change() {
+        let (a, a_writer) = channel_pair("loc://a");
+        let h = spawn_calc_dialect("J", Dialect::Medm, None, vec![("A".into(), a)]);
+        connect_with(&a_writer, 0.0);
+        tokio::time::sleep(SETTLE).await;
+        assert_eq!(
+            h.calc.read(|s| s.value.clone()),
+            Some(PvValue::Float(0.0)),
+            "NO_ALARM"
+        );
+
+        // `update` posts no value event; only the severity moves.
+        a_writer.update(|s| s.severity = AlarmSeverity::Major);
+        tokio::time::sleep(SETTLE).await;
+        assert_eq!(
+            h.calc.read(|s| s.value.clone()),
+            Some(PvValue::Float(2.0)),
+            "MAJOR must re-evaluate J"
+        );
+    }
+
+    /// Boundary: the expression does not read `J`, so a severity change arms
+    /// nothing — MEDM leaves `monitorSeverityChanged` false. This is the same
+    /// rule that keeps `hopr`/`precision`/`lopr` from ever retriggering.
+    #[tokio::test]
+    async fn medm_expr_not_reading_severity_ignores_a_severity_change() {
+        let (a, a_writer) = channel_pair("loc://a");
+        let h = spawn_calc_dialect("A", Dialect::Medm, None, vec![("A".into(), a)]);
+        connect_with(&a_writer, 5.0);
+        tokio::time::sleep(SETTLE).await;
+        let stamp = h.calc.stamp();
+        assert_eq!(h.calc.read(|s| s.value.clone()), Some(PvValue::Float(5.0)));
+
+        a_writer.update(|s| s.severity = AlarmSeverity::Major);
+        a_writer.update(|s| s.precision = Some(7));
+        tokio::time::sleep(SETTLE).await;
+        assert_eq!(
+            h.calc.stamp(),
+            stamp,
+            "metadata-only churn must not republish"
+        );
     }
 
     /// Boundary: a child's alarm/metadata-only change bumps `Channel::stamp()`
