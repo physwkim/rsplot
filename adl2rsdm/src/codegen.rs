@@ -3822,7 +3822,7 @@ fn related_display_icon(ui: &egui::Ui, rect: egui::Rect, fg: egui::Color32, bg: 
     let side = (rect.height().min(rect.width()) - 8.0).max(4.0);
     let icon = egui::Rect::from_center_size(rect.center(), egui::Vec2::splat(side));
     let p = |x: f32, y: f32| icon.min + egui::vec2(x, y) * (side / 25.0);
-    let stroke = egui::Stroke::new(1.0, fg);
+    let stroke = egui::Stroke::new(1.0_f32, fg);
     let painter = ui.painter();
     painter.line_segment([p(16.0, 9.0), p(22.0, 9.0)], stroke);
     painter.line_segment([p(22.0, 9.0), p(22.0, 22.0)], stroke);

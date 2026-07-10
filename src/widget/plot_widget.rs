@@ -738,7 +738,7 @@ fn draw_selection_polygon(
                 // approximation silx renders for the hatch fill).
                 let clipped = painter.with_clip_rect(bb);
                 for (a, b) in interaction::hatch_lines(bb, 6.0) {
-                    clipped.line_segment([a, b], Stroke::new(1.0, style.color));
+                    clipped.line_segment([a, b], Stroke::new(1.0_f32, style.color));
                 }
             }
             FillMode::None => {}
@@ -746,7 +746,7 @@ fn draw_selection_polygon(
     }
 
     // Dashed outline (silx linestyle="--").
-    let stroke = Stroke::new(1.5, style.color);
+    let stroke = Stroke::new(1.5_f32, style.color);
     let mut outline = pix.to_vec();
     if closed && outline.len() >= 2 {
         outline.push(outline[0]);

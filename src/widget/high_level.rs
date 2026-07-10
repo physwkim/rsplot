@@ -705,7 +705,7 @@ fn draw_toolbar_button(
 }
 
 fn draw_toolbar_icon(painter: &egui::Painter, rect: egui::Rect, icon: ToolbarIcon, color: Color32) {
-    let stroke = egui::Stroke::new(1.6, color);
+    let stroke = egui::Stroke::new(1.6_f32, color);
     match icon {
         ToolbarIcon::Home => draw_home_icon(painter, rect, stroke),
         ToolbarIcon::Select => draw_select_icon(painter, rect, stroke),
@@ -3368,7 +3368,7 @@ fn draw_legend_row(ui: &egui::Ui, p: LegendRowDraw<'_>) {
             egui::pos2(row_rect.left(), row_rect.bottom()),
             egui::pos2(row_rect.right(), row_rect.bottom()),
         ],
-        egui::Stroke::new(1.0, visuals.widgets.noninteractive.bg_stroke.color),
+        egui::Stroke::new(1.0_f32, visuals.widgets.noninteractive.bg_stroke.color),
     );
 }
 
@@ -3388,7 +3388,7 @@ fn draw_legend_swatch(
             let a = egui::pos2(rect.left() + 4.0, y);
             let b = egui::pos2(rect.right() - 4.0, y);
             if visual.line_style.draws_line() {
-                let stroke = egui::Stroke::new(2.0, visual.color);
+                let stroke = egui::Stroke::new(2.0_f32, visual.color);
                 match visual.line_style.painter_dashes(stroke.width) {
                     None => {
                         painter.line_segment([a, b], stroke);
@@ -3425,7 +3425,7 @@ fn draw_legend_swatch(
                 painter.rect_stroke(
                     bar,
                     0.0,
-                    egui::Stroke::new(1.0, visual.color),
+                    egui::Stroke::new(1.0_f32, visual.color),
                     egui::StrokeKind::Inside,
                 );
             }
@@ -3465,7 +3465,7 @@ fn draw_legend_swatch(
             painter.add(egui::Shape::convex_polygon(
                 points,
                 visual.color.linear_multiply(0.45),
-                egui::Stroke::new(1.0, visual.color),
+                egui::Stroke::new(1.0_f32, visual.color),
             ));
         }
         PlotItemKind::Shape => {
@@ -3473,13 +3473,13 @@ fn draw_legend_swatch(
             painter.rect_stroke(
                 shape,
                 0.0,
-                egui::Stroke::new(1.5, visual.color),
+                egui::Stroke::new(1.5_f32, visual.color),
                 egui::StrokeKind::Inside,
             );
         }
         PlotItemKind::Marker => {
             let center = rect.center();
-            let stroke = egui::Stroke::new(1.8, visual.color);
+            let stroke = egui::Stroke::new(1.8_f32, visual.color);
             painter.line_segment(
                 [
                     egui::pos2(center.x - 7.0, center.y),
@@ -3512,7 +3512,7 @@ fn draw_legend_symbol(
     color: Color32,
 ) {
     let c = center;
-    let stroke = egui::Stroke::new(1.5, color);
+    let stroke = egui::Stroke::new(1.5_f32, color);
     // Apex-then-arms helper for the open carets.
     let caret = |apex: egui::Pos2, arm_a: egui::Pos2, arm_b: egui::Pos2| {
         painter.line_segment([apex, arm_a], stroke);
@@ -3670,14 +3670,14 @@ fn draw_legend_eye(
         crate::core::color::with_alpha(color, 180)
     };
     if visible {
-        painter.circle_stroke(egui::pos2(cx, cy), r, egui::Stroke::new(1.5, eye_color));
+        painter.circle_stroke(egui::pos2(cx, cy), r, egui::Stroke::new(1.5_f32, eye_color));
         painter.circle_filled(egui::pos2(cx, cy), r * 0.45, eye_color);
     } else {
         let dim = crate::core::color::with_alpha(color, 80);
-        painter.circle_stroke(egui::pos2(cx, cy), r, egui::Stroke::new(1.5, dim));
+        painter.circle_stroke(egui::pos2(cx, cy), r, egui::Stroke::new(1.5_f32, dim));
         painter.line_segment(
             [egui::pos2(cx - r * 1.3, cy), egui::pos2(cx + r * 1.3, cy)],
-            egui::Stroke::new(1.5, dim),
+            egui::Stroke::new(1.5_f32, dim),
         );
     }
 }
@@ -11820,7 +11820,7 @@ impl ImageView {
             roi,
             (self.width, self.height),
             self.profile_window.line_width(),
-            egui::Stroke::new(1.5, PROFILE_OVERLAY_COLOR),
+            egui::Stroke::new(1.5_f32, PROFILE_OVERLAY_COLOR),
         );
     }
 
@@ -12690,7 +12690,7 @@ impl ScatterView {
             roi,
             (0, 0),
             1,
-            egui::Stroke::new(1.5, PROFILE_OVERLAY_COLOR),
+            egui::Stroke::new(1.5_f32, PROFILE_OVERLAY_COLOR),
         );
     }
 
@@ -14099,7 +14099,7 @@ impl StackView {
             roi,
             (self.width, self.height),
             self.profile_window.line_width(),
-            egui::Stroke::new(1.5, PROFILE_OVERLAY_COLOR),
+            egui::Stroke::new(1.5_f32, PROFILE_OVERLAY_COLOR),
         );
     }
 

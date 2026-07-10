@@ -1339,7 +1339,7 @@ mod tests {
         );
         // No NUL: the whole buffer decodes.
         assert_eq!(
-            pv_to_evalexpr(&PvValue::Bytes(Arc::from([b'o', b'k'].as_slice()))),
+            pv_to_evalexpr(&PvValue::Bytes(Arc::from(b"ok".as_slice()))),
             Some(Value::String("ok".to_owned()))
         );
     }

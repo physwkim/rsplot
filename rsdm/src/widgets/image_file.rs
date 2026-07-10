@@ -108,7 +108,7 @@ impl RsdmImage {
         painter.rect_stroke(
             rect,
             egui::CornerRadius::ZERO,
-            egui::Stroke::new(1.0, Color32::from_rgb(180, 60, 60)),
+            egui::Stroke::new(1.0_f32, Color32::from_rgb(180, 60, 60)),
             egui::StrokeKind::Inside,
         );
         painter.text(

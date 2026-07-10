@@ -567,7 +567,7 @@ impl ColormapDialog {
         }
 
         // vmin / vmax markers where they fall within the data range.
-        let marker = egui::Stroke::new(1.0, ui.visuals().text_color());
+        let marker = egui::Stroke::new(1.0_f32, ui.visuals().text_color());
         for v in [vmin, vmax] {
             if v >= dmin && v <= dmax {
                 let x = x_of(v);

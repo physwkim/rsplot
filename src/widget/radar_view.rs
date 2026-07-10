@@ -438,7 +438,7 @@ impl RadarView {
         painter.rect_stroke(
             data_px,
             0.0,
-            Stroke::new(1.0, DATA_STROKE),
+            Stroke::new(1.0_f32, DATA_STROKE),
             egui::StrokeKind::Inside,
         );
 
@@ -446,7 +446,7 @@ impl RadarView {
         painter.rect_stroke(
             view_px,
             0.0,
-            Stroke::new(2.0, VISIBLE_STROKE),
+            Stroke::new(2.0_f32, VISIBLE_STROKE),
             egui::StrokeKind::Inside,
         );
     }

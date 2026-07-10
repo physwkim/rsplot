@@ -131,7 +131,7 @@ impl RsdmMultiStateIndicator {
                 let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
                 if ui.is_rect_visible(rect) {
                     // PyDM paints a red 1 px border around the state-coloured fill.
-                    let border = egui::Stroke::new(1.0, Color32::RED);
+                    let border = egui::Stroke::new(1.0_f32, Color32::RED);
                     if self.render_as_rectangle {
                         ui.painter().rect(
                             rect,
