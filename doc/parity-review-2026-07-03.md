@@ -3171,7 +3171,7 @@ C reference: `medm/utils.c:3444-3459` — `performMacroSubstitutions` emits noth
 
 Impact: for `args="P=$(X)"` with `X` undefined in the parent, MEDM's child receives `P=""` (child `$(P)val` → `val`); the generated code's child receives `P="$(X)"` (child channel becomes `$(X)val`) — different child channel names and dedup key. Convert-time `substitute_macros` passthrough (the parse path) is correct and unaffected.
 
-## Round 4 Open Findings (R4-1..R4-15)
+## Round 4 Findings (R4-1..R4-16)
 
 Round 4, 2026-07-10. Baseline: branch `chore/bump-epics-0.22`, HEAD `4a49b2b`
 — **64 commits after the R3 baseline `0a51e4e`**, none of which had been
@@ -3205,13 +3205,20 @@ stale): silx `~/work/silx/src/silx`, PyDM `~/work/pydm/pydm`, adl2pydm
 
 ### R4-1: Wheel-zoom ignores the Shift/Alt per-axis modifier override
 
-Severity: Medium
+Severity: Medium — **FIXED** (`a1b680f`)
 
 Rust: `src/widget/plot_widget.rs:1053-1088` — the wheel handler builds `enabled` from only `plot.keep_aspect` and `zoom_x_enabled()`/`zoom_y_enabled()`; it never reads `ui.input(|i| i.modifiers)`. Shift+Wheel and Alt+Wheel zoom both axes identically to a plain wheel.
 
 Reference: `silx/gui/plot/PlotInteraction.py:1908-1918` — when keep-aspect is off, `_onWheel` overrides `enabledAxes` from the keyboard modifiers: `shiftPressed or altPressed` ⇒ `EnabledAxes(xaxis=altPressed, yaxis=shiftPressed, y2axis=shiftPressed)`, so Alt+Wheel zooms X only and Shift+Wheel zooms Y/Y2 only. `tools/menus.py:55-57` documents these bindings in the axes-menu labels ("X axis (Alt+Wheel)", "Y left axis (Shift+Wheel)").
 
 Impact: the documented Alt+Wheel (X-only) and Shift+Wheel (Y-only) zoom gestures do not exist in rsplot; both modifier chords zoom both axes.
+
+Fix (`a1b680f`): the modifier override is now one pure rule,
+`interaction::wheel_enabled_axes(keep_aspect, shift, alt, zoom_x, zoom_y)`,
+mirroring `_onWheel`'s three-branch cascade exactly — keep-aspect wins, then
+`shift || alt` overrides both axes from the modifiers, then the per-axis flags.
+Box zoom is untouched: `_getAxesExtent` never reads modifiers either.
+`wheel_enabled_axes_follows_silx_modifier_override` covers one case per branch.
 
 ### R4-2: Programmatic `set_limits` / toolbar Zoom-In/Out skip silx's `checkAxisLimits` repair — (R1-3 sibling)
 
@@ -3239,7 +3246,7 @@ Impact: a caller passing inverted (`max < min`) or equal bounds to `set_graph_x_
 
 ### R4-3: Middle-button drag pan is unported; pan is bound to the right button instead
 
-Severity: Low
+Severity: Low — **FIXED** (`b53d26c`)
 
 Rust: `src/widget/plot_widget.rs:1018-1037` — pan-drag fires only for `PointerButton::Secondary` (right) or, in Pan mode, `Primary`. `PointerButton::Middle` is read only for `mouseClicked` emission (`:1512,1534`); a middle-button drag pans nothing, and the right button carries pan in every mode.
 
@@ -3247,9 +3254,17 @@ Reference: `silx/gui/plot/PlotInteraction.py:1190-1192` — `ItemsInteraction` s
 
 Impact: silx's universal middle-drag pan (pan while in zoom/draw/select mode) does not exist in rsplot; the pan gesture is relocated to the right button, which silx reserves for context/click.
 
+Fix (`b53d26c`): the pan condition now admits `PointerButton::Middle` in every
+interaction mode, matching `ItemsInteraction.beginDrag` routing MIDDLE to
+`Pan.beginDrag` (`PlotInteraction.py:1365-1367`). The pre-existing
+secondary-button pan is kept — a recorded deliberate divergence
+(`doc/parity-roadmap.md:1175`), not a silx binding.
+`middle_drag_pans_in_every_interaction_mode` exercises Zoom, Pan, Select,
+MaskDraw and RoiCreate.
+
 ### R4-4: Reset-Zoom toolbar button never disables and its tooltip is static
 
-Severity: Low
+Severity: Low — **FIXED** (`d8b5fb5`)
 
 Rust: `src/widget/high_level.rs:6482` — the Home (Reset zoom) button is drawn unconditionally with a fixed `"Reset zoom"` tooltip; there is no gating on the X/Y autoscale flags and no dynamic tooltip.
 
@@ -3260,6 +3275,14 @@ Impact: with both axes' autoscale disabled, silx shows a disabled Reset-Zoom but
 ### Category B — items, colormap, ticks, fit, stats (vs silx items / silx.math)
 
 Both findings share one structural misunderstanding: **`silx.math.histogram.Histogramnd` defaults to `last_bin_closed=False`** (upper edge half-open, `[…, xmax[`), but the Rust ports clamp the max sample into the last bin. The pixel-intensity histogram is a **distinct, correct** site — its silx source (`actions/histogram.py:279`) passes `last_bin_closed=True` explicitly, so its inclusive behaviour must be preserved. Fixing this is not a blanket substitution.
+
+Fix (`d8b5fb5`): `reset_zoom_affordance(x_autoscale, y_autoscale) -> (bool,
+&str)` is the whole of `ResetZoomAction._autoscaleChanged`
+(`actions/control.py:83-95`): enabled iff either axis autoscales, and the
+tooltip names the single autoscaling axis when exactly one is on. Note both-on
+and neither-on share the generic "Auto-scale the graph" text — silx's own
+`else` branch. `reset_zoom_affordance_matches_silx_enable_and_tooltip` pins all
+four combinations.
 
 ### R4-5: Colormap-dialog data histogram counts the range-max sample that silx drops
 
@@ -3293,33 +3316,92 @@ The GPU render test `tests/volume_raycaster_render.rs` asserts only two red-pixe
 
 ### R4-7: "Beer–Lambert" opacity correction normalizes by step count, not path length — volume opacity is independent of traversed thickness — (introduced by `4da9ddc`)
 
-Severity: Medium
+**FIXED (R4, structural).** `c4cf5c3`. The correction exponent is now
+`dt / dt_ref` with `dt_ref = length(extent) / REF_STEPS` — a *world distance*,
+not a count ratio — so a chord of length `L` accumulates transmittance
+`(1 - sa)^(L / dt_ref)`: a function of the traversed thickness alone, still
+independent of the sample count. `REF_STEPS` matches the widget's default
+`steps`, so a ray crossing the full box diagonal at defaults renders exactly as
+before.
 
-Rust: `src/render/shaders/volume_raycaster.wgsl:80-97` — `dt = (tfar - tnear) / f32(steps)` then `sa_c = 1.0 - pow(1.0 - sa, REF_STEPS / f32(steps))`. The correction exponent is a *count* ratio `REF_STEPS(256)/steps`; `steps` is a fixed count, so `dt` (world-space sample spacing) varies per ray with the box chord length, yet `dt` never enters the opacity. At the default `steps == REF_STEPS == 256` the exponent is exactly 1, so `sa_c == sa` and **no correction runs at all**.
+`VolumeRaycaster` has **no silx counterpart** (`plot3d/items/volume.py` ships
+only `Isosurface` and `CutPlane`; there is no GPU direct-volume ray-caster), so
+this finding — like R4-8 and R4-9 — is *reference-independent*: it was found by
+holding the code to the physics its own commit message invokes, not to an
+upstream line. `tests/volume_opacity_physics.rs` pins that physics as two
+properties: thickness dependence (analytic Beer–Lambert golden for four slab
+depths) and step-count invariance. The old exponent renders all four depths at
+red `225` — a literal flat silhouette; the thickness test fails against it and
+the step-count test is a preservation test that passes against both.
 
-Reference: `silx/gui/plot3d/items/volume.py` (whole file) — no ray-march/`sampler3D` compositing exists. The physical contract the commit message invokes is `transmittance ∝ exp(-τ · pathlength)`: opacity must grow with traversed thickness.
+### R4-8: Premultiplied `Rgba8Unorm` storage cannot survive the shader's un-premultiply (`gain = sa_c / s.a`) — low-coverage voxels lose their hue — (introduced by `1c68900`)
 
-Impact: a ray grazing a thin edge of a uniform-alpha volume accumulates the same transmittance `(1-sa)^256` as a ray through the full diameter. The render has step-count invariance (the commit's literal goal) but no density/thickness cue, so uniform volumes read as flat silhouettes. Correct fixed-count DVR uses exponent `dt / dt_ref` with `dt_ref` a fixed world distance.
+**RESTATED, then FIXED (R4, structural).** `8be7bb6`.
 
-### R4-8: 8-bit premultiplied storage plus in-shader un-premultiply (`gain = sa_c / s.a`) amplifies quantization at low alpha — (introduced by `1c68900`)
+The finding as first written was wrong on both its mechanism and its scope, and
+verifying it before fixing (principle 4, applied to the review's own claims) is
+what surfaced the real defect:
 
-Severity: Low
+- *Claimed:* `gain = sa_c / s.a` divides the quantization error by a small
+  `s.a`, reaching ~12% at `s.a ≈ 4/255`. **False.** For small `sa`,
+  `sa_c ≈ sa · (dt/dt_ref)`, so `gain ≈ alpha_scale · dt/dt_ref` — bounded near
+  1–2, never `1/s.a`. The error is not amplified by the division.
+- *Claimed:* at the defaults `gain == 1`, so the base render is unaffected and
+  the defect is conditional on `set_steps`/`set_alpha_scale`. **False.** The
+  defect is in the *stored* value and is unconditional.
 
-Rust: `src/render/volume_raycaster.rs:65-77` stores `rgb_premul = round(straight_rgb · a / 255)` as `Rgba8Unorm`; `src/render/shaders/volume_raycaster.wgsl:101-103` reconstructs corrected premultiplied colour via `gain = sa_c / max(s.a, 1e-6)` and `acc.rgb + s.rgb * gain * w`. When the opacity correction or `alpha_scale` is active (`steps ≠ 256` or `alpha_scale ≠ 1`), `gain ≠ 1` divides the ±0.5/255 quantization error of `s.rgb` by the small interpolated `s.a`; at `s.a ≈ 4/255` the per-channel relative error reaches ~12%.
+The real defect: the texture stores the premultiplied product `rgb · a` in 8
+bits, and `fs_main` must divide the coverage back out to recover the straight
+RGB. At coverage `a` an 8-bit product resolves that quotient only to steps of
+`1/a`. At `a = 3/255` — an ordinary coverage for a ray-march — an authored
+`(255, 128, 0)` voxel stores green `round(128·3/255) = 2` and reads back
+`2/3 = 0.667` against the authored `128/255 = 0.502`. At `a = 1/255` the
+recovered RGB is only ever 0 or 1. Measured: a slab of those voxels composited
+green `145` where its hue calls for `110`.
 
-Reference: `silx/gui/plot3d/scene/cutplane.py:77-89` — silx stores and samples straight-alpha colour and applies `color.a *= alpha` with no premultiply→un-premultiply round trip, so it has no low-alpha amplification path.
+Fix: store the same premultiplied colour in `Rgba16Float`. f16 holds every
+`c·a/255²` to ~0.05% relative, so the recovered RGB is exact to well under one
+8-bit step at every coverage down to `1/255`, while the filter still
+interpolates *associated* colour — no return of the dark fringe `1c68900`
+closed. Cost: **the volume texture takes twice the VRAM.** The same-VRAM
+alternative (straight `Rgba8Unorm`, premultiplied in the shader) reopens that
+fringe, so it was rejected: the division is what makes R4-7's correction
+possible at all, and the format must carry it.
 
-Impact: faint (low-alpha) voxels acquire visible colour error whenever `set_steps` (≠256) or `set_alpha_scale` (≠1) is used. At the exact defaults `gain == 1`, so the base render is unaffected — the defect is conditional on the two knobs the hardening pass added.
+Tests: `premultiply_recovers_the_straight_rgb_at_the_lowest_coverages` pins the
+encoder at `a = 1..255`, `low_coverage_voxels_composite_their_authored_hue`
+pins the rendered composite. Both fail against the 8-bit product.
 
 ### R4-9: `remove()` frees a texture shared by another same-id view, silently blanking the survivor — (introduced by `a6354aa`)
 
-Severity: Low
+**FIXED (R4, structural).** `dd1ffbb`. Nothing owned the `VolumeGpu` entry's
+lifetime: `set_volume_raycaster` created it via `entry().or_insert_with` and
+`remove_volume_raycaster` destroyed it unconditionally, so *any* holder of the
+id could free it under the others. The audit for this fix also found the
+mirror-image bypass — a `VolumeRaycaster` that was simply dropped released
+nothing, pinning its texture for the app's lifetime.
 
-Rust: `src/widget/volume_raycaster.rs:127-130` → `src/render/volume_raycaster.rs:367-375` — `remove_volume_raycaster` does `res.scenes.remove(&id)`, dropping the one `VolumeGpu`/`wgpu::Texture` keyed by `id`. The type docs (`volume_raycaster.rs:52-56`) explicitly allow two `VolumeRaycaster` instances to share a `VolumeId` ("two views sharing an id share the last-uploaded texture"). One view calling `remove()` deletes the shared texture; the other keeps `has_volume = true` but `frame_bind_group` now returns `None`, so its paint callback becomes a silent no-op with no signal.
-
-Reference: `silx/gui/plot3d/items/volume.py:213-455` — each `Isosurface`/`ScalarField3D` owns its own resources; there is no shared-key texture cache whose free path a sibling item can trip.
-
-Impact: the per-id VRAM-free path collides with the shared-id design — removing one view can blank a still-live view's render, undetectably from the caller.
+- **Invariant:** `scenes[id]` exists exactly while at least one live
+  `VolumeRaycaster` holds a claim on `id`.
+- **Owner/Gate:** `VolumeRaycaster`. `new` acquires a claim; `remove` and `Drop`
+  give it back; `set_volume` takes it again after a `remove`. The entry is
+  created only by `acquire_volume_raycaster` and destroyed only by the
+  `release_volume_raycaster` that reaches zero.
+- **Bypass audit:** `rg -n 'fn remove_\w+|\.remove\(&'` over `src/render/`,
+  `src/widget/`. `render/volume_raycaster.rs:369` (entry creation) and `:388`
+  (entry destruction) are the same defect and are now the owner's two halves.
+  `scene3d_items.rs:2715`/`:3437` (index-keyed item removal),
+  `backend_wgpu.rs:689` (per-item visibility map) and the `high_level.rs`
+  `remove_*` family (handle-keyed item lists) are distinct: none owns a GPU
+  resource under a shared key.
+- **Structural closure:** `set_volume_raycaster` no longer creates the entry
+  (`entry().or_insert_with` → `get_mut`), so an upload cannot resurrect an id
+  whose last holder released it; and the widget stores its `RenderState` — a
+  bundle of `Arc`s — so `Drop` runs the release without the caller remembering.
+- **Tests:** by claim-count boundary, not by scenario. `2 → 1` (`remove` while
+  another view lives: the survivor must still ray-march) and `1 → 0` (drop of
+  the last view: a fresh view taking the id must start empty). Against the
+  unconditional remove they fail with `0` red px and `92416` leaked red px.
 
 ### Category D — rsdm channels, data plugins, engine (vs PyDM)
 
@@ -3404,13 +3486,26 @@ What the check did surface is a live defect on the trigger side, filed as **R4-1
 
 ### R4-14: Composite-file / embedded-display children are coloured by the child file's own colormap; MEDM resolves them against the parent display's colormap
 
-Severity: Medium
+Severity: Medium — **FIXED** (`fb21fb6`)
 
 Rust: `adl2rsdm/src/codegen.rs:2208` — `emit_embedded_display` does `let mut target = parse_in_dir(&text, canonical.parent());`, so the child `.adl`'s own inline `"color map"` block is parsed and every child widget's `clr`/`bclr` index is resolved against *that* table (`:2244-2265`). Each embedded file uses its own colormap.
 
 Reference: `medm/medmComposite.c:694-707` (MEDM C, authoritative). `compositeFileParse` reads the child's `"color map"` token and calls `parseAndSkip(displayInfo)` — the child colormap is deliberately **discarded**. The children are appended into the parent `displayInfo->dlElementList`, so their colour indices resolve against the **parent display's** colormap at draw time.
 
 Impact: when a host screen uses a non-default colormap (inline `"color map"` or an external `cmap`) and embeds a child carrying a different (or the default) colormap, every embedded widget's `clr`/`bclr` renders with the wrong colours — MEDM indexes the host palette, adl2rsdm indexes the child's. Screens on the default palette are unaffected; facility screens with custom palettes are.
+
+Fix (`fb21fb6`): the host colormap became the single owner. `Builder` carries
+`color_table` (the top-level screen's palette), and `emit_embedded_display`
+parses the child through the new `parse_embedded_in_dir(text, dir,
+host_colormap)`, which installs the host table and never consults the child's
+inline `"color map"` or `cmap` fallback — exactly `parseAndSkip`. Because the
+table flows from the `Builder`, nested embeds inherit the top-level palette at
+every depth, as MEDM's single `displayInfo` does. Regenerating
+`adl2rsdm/examples/local_panel_screen.rs` surfaced the divergence directly:
+`embed_child.adl`'s `text update` carries `clr=3`, which its own three-entry
+palette lacks (so the old code emitted no colour) and the host palette resolves
+to `0000ff`. `embedded_display_colours_children_from_the_host_colormap` fails
+without the fix.
 
 ### R4-15: Absent arc `path` defaults to a 360° span; MEDM's default is 90°
 
@@ -4019,3 +4114,52 @@ implemented; this whole cluster is now closed):**
   Categories D and E were nearly skipped for want of PyDM/adl2pydm — the
   audit was held until the user supplied them rather than proceeding on
   assumption. Keep the corrected paths in the R4 header current.
+
+### Round 4 fix phase — 2026-07-10
+
+All 16 R4 findings are closed. 13 fixed at source, 1 withdrawn, 2 recorded as
+deliberate divergences. One commit per finding, each preceded by the `rg` anchor
+sweep over its structural anchor.
+
+  Fixed: R4-1 `a1b680f`, R4-2 `78b11e4`, R4-3 `b53d26c`, R4-4 `d8b5fb5`,
+         R4-5 `eeca82c`, R4-6 `0fa3d00`, R4-7 `c4cf5c3`, R4-8 `8be7bb6`,
+         R4-9 `dd1ffbb`, R4-11 + R4-12 `976c39c`, R4-14 `fb21fb6`,
+         R4-15 `33dee07`, R4-16 `3f9660e`
+  Withdrawn: R4-13 (not a defect)
+  Deliberate divergence, recorded: R4-10, and MEDM's `monitorStatusChanged`
+         half of R4-16 (rsdm's `ChannelState` carries no EPICS status code, so
+         operand `I` binds 0.0)
+
+**Two findings were wrong, and verifying them before fixing is what found the
+real defects.** Principle 4 (test skepticism) applies to the review's own
+claims, not only to the port's tests:
+
+- **R4-13** claimed `dialect=medm` never binds operands G–L. `eval_medm`
+  already binds them from the first record. Withdrawn — but checking the
+  operand set against `setDynamicAttrMonitorFlags` surfaced R4-16, a real
+  defect the audit had missed, in the code the previous fix (`976c39c`) had
+  just written.
+- **R4-8** claimed the low-alpha error came from `gain = sa_c / s.a` dividing
+  quantization error by a small `s.a`, and that the defaults were unaffected.
+  Both false: `gain ≈ alpha_scale · dt/dt_ref` is bounded near 1–2, and the
+  defect lives in the 8-bit *storage* of the premultiplied product, where it is
+  unconditional. The restated defect is more severe than the one reported.
+
+**`VolumeRaycaster` has no upstream counterpart.** silx `plot3d/items/volume.py`
+ships an `Isosurface` and a `CutPlane`; there is no GPU direct-volume
+ray-caster anywhere in silx. R4-7, R4-8 and R4-9 are therefore
+*reference-independent* findings — they were found by holding the code to the
+physics its own commit messages invoke (Beer–Lambert; premultiplied
+compositing) and to its own documented contract (same-id views share a
+texture), not to an upstream line. Category C's real yield this round was that
+its "parity" audit had no parity to audit, and the physics golden that replaced
+it (`tests/volume_opacity_physics.rs`) is what the next round should extend.
+
+**Structural closures landed.** The two the convergence verdict named:
+(a) `set_limits_internal` as the single owner of every view-limits commit
+(R1-3 + R4-2), and (b) `calc://` replacing stamp-polling with per-child value
+subscriptions (R4-11 + R4-12), which R4-16 then extended to the severity
+operand. A third emerged during the fix phase: `bin_index` as the single home
+of the `Histogramnd` admission rule, shared by the colormap-dialog histogram
+and the scatter binned-statistic grid (R4-5 + R4-6). A fourth closed the
+`VolumeId` texture lifetime under one claim-counted owner (R4-9).
