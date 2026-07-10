@@ -70,15 +70,14 @@
 //! - Operands `E`–`L` not bound to an explicit child are record metadata of the
 //!   **first** channel (operand `A`, MEDM `records[0]`; `utils.c:4498-4505`):
 //!   `E`,`F` = 0, `G` = element count, `H` = hopr, `I` = alarm status,
-//!   `J` = severity, `K` = precision, `L` = lopr. rsdm's `ChannelState` carries
-//!   no EPICS alarm-status code, so `I` binds `0.0` (documented gap).
-//! - Because `J` is metadata, an expression that reads it re-evaluates on the
-//!   first record's **severity**, which arrives with no value event. MEDM arms
-//!   exactly that monitor and no other: `setDynamicAttrMonitorFlags`
-//!   (`utils.c:4621-4630`) sets `monitorSeverityChanged` only when
-//!   `calcUsesSeverity(calc)`, and never monitors `hopr`/`precision`/`lopr`
-//!   (H/K/L). Its `monitorStatusChanged` twin has no rsdm counterpart — the
-//!   same missing status code that pins `I` to `0.0`.
+//!   `J` = severity, `K` = precision, `L` = lopr.
+//! - Because `I` and `J` are metadata, they change with no value event, and an
+//!   expression reading either must re-evaluate on that change. MEDM arms
+//!   exactly those two monitors and no others: `setDynamicAttrMonitorFlags`
+//!   (`utils.c:4621-4630`) sets `monitorStatusChanged` iff `calcUsesStatus(calc)`
+//!   and `monitorSeverityChanged` iff `calcUsesSeverity(calc)`, and never
+//!   monitors `hopr`/`precision`/`lopr` (H/K/L). [`MedmMonitors`] is that
+//!   decision, made once at connect.
 //! - The `expr` query value is **percent-decoded** (`%26` → `&`, `%25` → `%`),
 //!   because the raw query splits on `&`; `adl2rsdm` encodes exactly those two
 //!   bytes. The plain (PyDM) dialect stays raw — PyDM does not decode either.
@@ -222,11 +221,9 @@ enum Evaluator {
         /// `E`–`L` (MEDM `records[0]`): operand `A` when a child binds it, else
         /// the first listed child. `None` only when there are no children.
         first_child: Option<usize>,
-        /// The expression reads operand `J`, so the first record's *severity*
-        /// arms a recompute even without a value change — MEDM sets
-        /// `monitorSeverityChanged` for exactly this case
-        /// (`setDynamicAttrMonitorFlags`, `medm/utils.c:4621-4630`).
-        watch_severity: bool,
+        /// The first record's metadata this expression puts a monitor on,
+        /// beyond the always-present value monitor.
+        monitors: MedmMonitors,
     },
     /// MEDM dialect whose expression failed to compile (or a variable is not a
     /// single `A`–`U` letter): fail-visible — `1.0` was published at task
@@ -264,7 +261,7 @@ impl Evaluator {
                         compiled,
                         operand_indices,
                         first_child,
-                        watch_severity: calc_uses_operand(&config.expr, 'J'),
+                        monitors: MedmMonitors::of(&config.expr),
                     },
                     Err(err) => {
                         log::warn!(
@@ -327,21 +324,20 @@ async fn run_channel(
         .map(|(name, _)| update.as_ref().is_none_or(|u| u.iter().any(|n| n == name)))
         .collect();
 
-    // MEDM's `monitorSeverityChanged`: under the MEDM dialect an expression that
-    // reads operand `J` re-evaluates on the first record's severity, which
-    // arrives without a value event (`utils.c:4621-4630`). Nothing else does —
-    // MEDM never monitors `hopr`/`precision`/`lopr` (H/K/L), and operand `I`
-    // (status) has no source in `ChannelState`, the gap `eval_medm` documents.
-    // The PyDM dialect has no metadata operands and stays value-only.
-    let severity_watch = match &evaluator {
+    // Under the MEDM dialect the first record's status (`I`) and severity (`J`)
+    // arrive without a value event, so an expression reading either must be
+    // re-evaluated on their change. Which of the two is watched was decided once
+    // at connect, as MEDM decides it once in `setDynamicAttrMonitorFlags`. The
+    // PyDM dialect has no metadata operands and stays value-only.
+    let metadata_watch = match &evaluator {
         Evaluator::Medm {
             first_child: Some(i),
-            watch_severity: true,
+            monitors,
             ..
-        } => Some(&children[*i].1),
+        } if !monitors.is_empty() => Some((*monitors, &children[*i].1)),
         _ => None,
     };
-    let mut prev_severity: Option<AlarmSeverity> = None;
+    let mut prev_metadata: Option<MedmSample> = None;
 
     let mut child_connected = vec![false; children.len()];
     let mut prev_value: Option<PvValue> = None;
@@ -375,14 +371,14 @@ async fn run_channel(
                     }
                 }
 
-                if let Some(ch) = severity_watch {
-                    let now = ch.read(|s| s.severity);
+                if let Some((monitors, ch)) = metadata_watch {
+                    let now = monitors.sample(ch);
                     // Arm on a *change*, so the first observation does not
                     // fabricate a trigger the initial evaluation already covers.
-                    if prev_severity.is_some_and(|was| was != now) {
+                    if prev_metadata.is_some_and(|was| was != now) {
                         pending_trigger = true;
                     }
-                    prev_severity = Some(now);
+                    prev_metadata = Some(now);
                 }
 
                 let all_connected = children.iter().all(|(_, ch)| ch.is_connected());
@@ -849,7 +845,10 @@ fn eval_medm(
             if !child_bound[7] {
                 inputs.vars[7] = s.display_limits.map(|(_, hopr)| hopr).unwrap_or(0.0);
             }
-            // I (8): EPICS alarm STATUS — not carried by ChannelState; 0.0.
+            if !child_bound[8] {
+                // I: EPICS alarm STATUS (the record's `STAT` field).
+                inputs.vars[8] = f64::from(s.status);
+            }
             if !child_bound[9] {
                 inputs.vars[9] = f64::from(s.severity.as_code());
             }
@@ -877,6 +876,47 @@ fn calc_uses_operand(expr: &str, letter: char) -> bool {
     bytes.iter().enumerate().any(|(i, &b)| {
         (b as char).to_ascii_uppercase() == want && (i == 0 || !bytes[i - 1].is_ascii_alphabetic())
     })
+}
+
+/// Which of the first record's metadata fields MEDM puts a monitor on for this
+/// expression, beyond the value monitor it always sets. `setDynamicAttrMonitorFlags`
+/// (`medm/utils.c:4621-4630`) adds `monitorStatusChanged` iff the expression uses
+/// operand `I` and `monitorSeverityChanged` iff it uses `J`, and nothing else —
+/// `hopr`/`precision`/`lopr` (H/K/L) are read but never monitored, so they never
+/// retrigger. Decided once, at connect, as MEDM decides it once.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct MedmMonitors {
+    status: bool,
+    severity: bool,
+}
+
+/// The monitored fields as read on one tick. An unmonitored field is `None`, so
+/// it cannot differ between ticks and cannot arm a recompute — the monitor set
+/// gates the comparison by construction rather than by a branch at the read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct MedmSample {
+    status: Option<i16>,
+    severity: Option<AlarmSeverity>,
+}
+
+impl MedmMonitors {
+    fn of(expr: &str) -> Self {
+        Self {
+            status: calc_uses_operand(expr, 'I'),
+            severity: calc_uses_operand(expr, 'J'),
+        }
+    }
+
+    fn is_empty(self) -> bool {
+        !self.status && !self.severity
+    }
+
+    fn sample(self, ch: &Channel) -> MedmSample {
+        ch.read(|s| MedmSample {
+            status: self.status.then_some(s.status),
+            severity: self.severity.then_some(s.severity),
+        })
+    }
 }
 
 /// The calc-operand index for an MEDM-dialect variable name: a single letter
@@ -1646,11 +1686,37 @@ mod tests {
         );
     }
 
-    /// Boundary: the expression does not read `J`, so a severity change arms
-    /// nothing — MEDM leaves `monitorSeverityChanged` false. This is the same
-    /// rule that keeps `hopr`/`precision`/`lopr` from ever retriggering.
+    /// Boundary: the expression reads operand `I` (alarm status), which arrives
+    /// with no value event. MEDM sets `monitorStatusChanged` for exactly this
+    /// case (`calcUsesStatus`), so the status change must re-evaluate.
     #[tokio::test]
-    async fn medm_expr_not_reading_severity_ignores_a_severity_change() {
+    async fn medm_expr_reading_status_reevaluates_on_a_status_change() {
+        let (a, a_writer) = channel_pair("loc://a");
+        let h = spawn_calc_dialect("I", Dialect::Medm, None, vec![("A".into(), a)]);
+        connect_with(&a_writer, 0.0);
+        tokio::time::sleep(SETTLE).await;
+        assert_eq!(
+            h.calc.read(|s| s.value.clone()),
+            Some(PvValue::Float(0.0)),
+            "NO_ALARM status"
+        );
+
+        // `update` posts no value event; only the status moves.
+        a_writer.update(|s| s.status = 7); // HIGH_ALARM
+        tokio::time::sleep(SETTLE).await;
+        assert_eq!(
+            h.calc.read(|s| s.value.clone()),
+            Some(PvValue::Float(7.0)),
+            "a status change must re-evaluate I"
+        );
+    }
+
+    /// Boundary: the expression reads neither `I` nor `J`, so status, severity
+    /// and every other metadata change arm nothing — MEDM leaves both
+    /// `monitorStatusChanged` and `monitorSeverityChanged` false. This is the
+    /// same rule that keeps `hopr`/`precision`/`lopr` from ever retriggering.
+    #[tokio::test]
+    async fn medm_expr_reading_no_metadata_ignores_every_metadata_change() {
         let (a, a_writer) = channel_pair("loc://a");
         let h = spawn_calc_dialect("A", Dialect::Medm, None, vec![("A".into(), a)]);
         connect_with(&a_writer, 5.0);
@@ -1659,6 +1725,7 @@ mod tests {
         assert_eq!(h.calc.read(|s| s.value.clone()), Some(PvValue::Float(5.0)));
 
         a_writer.update(|s| s.severity = AlarmSeverity::Major);
+        a_writer.update(|s| s.status = 7);
         a_writer.update(|s| s.precision = Some(7));
         tokio::time::sleep(SETTLE).await;
         assert_eq!(
@@ -1666,6 +1733,66 @@ mod tests {
             stamp,
             "metadata-only churn must not republish"
         );
+    }
+
+    /// Boundary: the expression reads `J` but not `I`, so only the severity is
+    /// monitored. A status change on the same record must arm nothing — the
+    /// half of MEDM's per-operand monitor set that a single "watch metadata"
+    /// flag would get wrong.
+    #[tokio::test]
+    async fn medm_expr_reading_severity_ignores_a_status_change() {
+        let (a, a_writer) = channel_pair("loc://a");
+        let h = spawn_calc_dialect("J", Dialect::Medm, None, vec![("A".into(), a)]);
+        connect_with(&a_writer, 0.0);
+        tokio::time::sleep(SETTLE).await;
+        let stamp = h.calc.stamp();
+
+        a_writer.update(|s| s.status = 7);
+        tokio::time::sleep(SETTLE).await;
+        assert_eq!(
+            h.calc.stamp(),
+            stamp,
+            "J is monitored, I is not: a status change must not republish"
+        );
+    }
+
+    /// `calcUsesStatus` / `calcUsesSeverity` decide the monitor set from the
+    /// expression alone. Boundary: each letter present, absent, and hidden
+    /// inside an identifier.
+    #[test]
+    fn medm_monitors_follow_calc_uses_status_and_severity() {
+        let m = |e: &str| MedmMonitors::of(e);
+        assert_eq!(
+            m("A"),
+            MedmMonitors {
+                status: false,
+                severity: false
+            }
+        );
+        assert_eq!(
+            m("I"),
+            MedmMonitors {
+                status: true,
+                severity: false
+            }
+        );
+        assert_eq!(
+            m("J"),
+            MedmMonitors {
+                status: false,
+                severity: true
+            }
+        );
+        assert_eq!(
+            m("I#J"),
+            MedmMonitors {
+                status: true,
+                severity: true
+            }
+        );
+        // `sin`/`nint` end in a letter-preceded `i`/`n`; neither is operand I.
+        assert!(m("sin(A)").is_empty());
+        assert!(m("nint(A)").is_empty());
     }
 
     /// Boundary: a child's alarm/metadata-only change bumps `Channel::stamp()`

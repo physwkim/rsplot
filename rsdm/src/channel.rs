@@ -173,6 +173,12 @@ pub struct ChannelState {
     /// Wire alarm severity (see [`ChannelState::effective_severity`] for the
     /// value to use when styling).
     pub severity: AlarmSeverity,
+    /// Wire alarm status: the record's `STAT` field for `ca://` (`DBR_STS_*`
+    /// `status`), and the pvAccess `alarm.status` enum for `pva://` — two
+    /// different code spaces, each reported as its channel type sends it. `0`
+    /// means no alarm in both. Read by the MEDM calc operand `I`
+    /// (`medm/utils.c` `calcVisibility`), which is a `ca://` concept.
+    pub status: i16,
     /// Enumeration strings (CA `DBR_GR/CTRL_ENUM`, pvAccess enum), if any.
     pub enum_strings: Option<Arc<[String]>>,
     /// Engineering units (`EGU`).

@@ -450,6 +450,7 @@ fn apply_property_metadata(
     enum_strings: Option<Arc<[String]>>,
 ) {
     s.severity = AlarmSeverity::from_epics(snap.alarm.severity);
+    s.status = snap.alarm.status as i16;
     if enum_strings.is_some() {
         s.enum_strings = enum_strings;
     }
@@ -487,6 +488,7 @@ fn apply_value(s: &mut ChannelState, snap: &Snapshot, value: PvValue) {
 fn apply_alarm(s: &mut ChannelState, snap: &Snapshot) {
     s.connected = true;
     s.severity = AlarmSeverity::from_epics(snap.alarm.severity);
+    s.status = snap.alarm.status as i16;
     s.timestamp = Some(snap.timestamp.into());
 }
 
