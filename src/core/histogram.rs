@@ -17,7 +17,10 @@
 ///
 /// The arithmetic multiplies before dividing, as C does, so the bin boundaries
 /// fall on the same samples.
-fn bin_index(t: f64, xmin: f64, xmax: f64, span: f64, nbins: usize) -> Option<usize> {
+///
+/// This is the one home for `Histogramnd`'s admission rule; every caller that
+/// mirrors a silx `Histogramnd(...)` without `last_bin_closed` uses it.
+pub(crate) fn bin_index(t: f64, xmin: f64, xmax: f64, span: f64, nbins: usize) -> Option<usize> {
     if !t.is_finite() || t < xmin || t >= xmax {
         return None;
     }

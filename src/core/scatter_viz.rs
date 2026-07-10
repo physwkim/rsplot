@@ -32,6 +32,7 @@
 
 use egui::Color32;
 
+use crate::core::histogram::bin_index;
 use crate::core::triangles::Triangles;
 
 /// Major order of points in a regular grid (silx
@@ -1128,11 +1129,17 @@ impl BinnedStatistic {
 /// compute per-bin mean/count/sum (silx `Visualization.BINNED_STATISTIC`,
 /// `scatter.py::__getHistogramInfo`).
 ///
-/// The grid spans the finite-point bounding box of X and Y. A point is assigned
-/// to the bin `floor((coord - min) / binsize)`, with the upper edge clamped into
-/// the last bin so the maximum point is included (matching `Histogramnd`'s
-/// inclusive last edge). Non-finite points and points with a non-finite value
-/// are skipped.
+/// The grid spans the finite-point bounding box of X and Y. A point is admitted
+/// only when both coordinates fall in the half-open extent `[min, max)` of their
+/// axis: `scatter.py:499-501` calls `Histogramnd` without `last_bin_closed`, so
+/// a point on the upper edge — including the maximum point of either axis — is
+/// dropped, and an axis whose extent is degenerate admits nothing at all. See
+/// [`crate::core::histogram::bin_index`]. Points with a non-finite value are
+/// skipped.
+///
+/// `scale` is the bin size silx derives from the edge array,
+/// `span / n_bins` (`scatter.py:504-507`), which is `0.0` for a degenerate
+/// extent.
 ///
 /// Returns `None` when there are no finite points or `rows`/`cols` is 0.
 ///
@@ -1161,39 +1168,28 @@ pub fn binned_statistic(
         return None; // no finite points
     }
 
-    // Bin sizes; degenerate (single-valued) ranges get a unit bin to avoid /0.
-    let sx = {
-        let span = x_max - x_min;
-        if span > 0.0 { span / cols as f64 } else { 1.0 }
-    };
-    let sy = {
-        let span = y_max - y_min;
-        if span > 0.0 { span / rows as f64 } else { 1.0 }
-    };
+    let x_span = x_max - x_min;
+    let y_span = y_max - y_min;
+    let sx = x_span / cols as f64;
+    let sy = y_span / rows as f64;
 
     let mut count = vec![0u64; rows * cols];
     let mut sum = vec![0.0f64; rows * cols];
 
     for ((&xi, &yi), &vi) in x.iter().zip(y).zip(values) {
-        if !xi.is_finite() || !yi.is_finite() || !vi.is_finite() {
+        if !vi.is_finite() {
             continue;
         }
-        // Column from X, row from Y.
-        let mut c = ((xi - x_min) / sx).floor() as isize;
-        let mut r = ((yi - y_min) / sy).floor() as isize;
-        // Clamp the inclusive upper edge into the last bin.
-        if c >= cols as isize {
-            c = cols as isize - 1;
-        }
-        if r >= rows as isize {
-            r = rows as isize - 1;
-        }
-        if c < 0 || r < 0 {
-            continue; // outside the lower edge (only non-finite would do this)
-        }
-        let idx = r as usize * cols + c as usize;
-        count[idx] += 1;
-        sum[idx] += vi;
+        // Column from X, row from Y. `bin_index` rejects non-finite coordinates
+        // and both open edges of the extent.
+        let (Some(c), Some(r)) = (
+            bin_index(xi, x_min, x_max, x_span, cols),
+            bin_index(yi, y_min, y_max, y_span, rows),
+        ) else {
+            continue;
+        };
+        count[r * cols + c] += 1;
+        sum[r * cols + c] += vi;
     }
 
     let mean: Vec<f64> = count
@@ -1633,18 +1629,24 @@ mod tests {
     #[test]
     fn binned_statistic_2x2_mean_count_sum() {
         // Points in [0,2]x[0,2], 2x2 bins -> bin size 1x1.
-        // Bin layout (row=Y, col=X):
+        // Bin layout (row=Y, col=X), every side half-open:
         //   (r0,c0): x in [0,1), y in [0,1)
-        //   (r0,c1): x in [1,2], y in [0,1)
-        //   (r1,c0): x in [0,1), y in [1,2]
-        //   (r1,c1): x in [1,2], y in [1,2]
+        //   (r0,c1): x in [1,2), y in [0,1)
+        //   (r1,c0): x in [0,1), y in [1,2)
+        //   (r1,c1): x in [1,2), y in [1,2)
         // Place: two points in (r0,c0); one in (r1,c1); leave (r0,c1),(r1,c0) empty.
-        // (0,0) and (2,2) pin the data extent to [0,2]x[0,2] so bins are 1x1.
-        let x = [0.0, 0.5, 2.0];
-        let y = [0.0, 0.5, 2.0];
-        let v = [10.0, 30.0, 7.0];
+        // (0,0) and (2,2) pin the data extent to [0,2]x[0,2] so bins are 1x1;
+        // (2,2) itself sits on the open upper edge and is dropped.
+        let x = [0.0, 0.5, 1.5, 2.0];
+        let y = [0.0, 0.5, 1.5, 2.0];
+        let v = [10.0, 30.0, 7.0, 99.0];
         let bs = binned_statistic(&x, &y, &v, 2, 2).expect("binned");
         assert_eq!(bs.shape, (2, 2));
+        assert_eq!(
+            bs.count.iter().sum::<u64>(),
+            3,
+            "the corner point is dropped"
+        );
 
         // (r0,c0) = index 0: count 2, sum 40, mean 20.
         assert_eq!(bs.count[0], 2);
@@ -1669,25 +1671,44 @@ mod tests {
         assert_eq!(bs.scale, (1.0, 1.0));
     }
 
+    /// One case per boundary of the admission rule, per axis.
     #[test]
-    fn binned_statistic_max_point_clamped_into_last_bin() {
-        // Point exactly at the max edge must land in the last bin, not overflow.
-        let x = [0.0, 2.0];
-        let y = [0.0, 2.0];
-        let v = [1.0, 2.0];
+    fn binned_statistic_drops_points_on_the_open_upper_edge() {
+        // Extent [0,2]x[0,2] with 2x2 unit bins. Only a point strictly inside
+        // both extents is admitted; touching either upper edge drops it, which
+        // is what `Histogramnd` does without `last_bin_closed`.
+        let x = [0.0, 2.0, 2.0, 1.9];
+        let y = [0.0, 2.0, 1.9, 2.0];
+        let v = [1.0, 2.0, 3.0, 4.0];
         let bs = binned_statistic(&x, &y, &v, 2, 2).expect("binned");
-        // (2,2) is the upper corner -> last bin (r1,c1) = index 3.
-        assert_eq!(bs.count[3], 1);
-        assert!((bs.sum[3] - 2.0).abs() < 1e-12);
-        // (0,0) -> first bin.
+        // (0,0) is on the closed lower edge -> first bin.
         assert_eq!(bs.count[0], 1);
+        assert!((bs.sum[0] - 1.0).abs() < 1e-12);
+        // The corner (2,2), and each point touching one upper edge, are dropped.
+        assert_eq!(bs.count[3], 0, "last bin stays empty");
+        assert_eq!(bs.count.iter().sum::<u64>(), 1);
+    }
+
+    #[test]
+    fn binned_statistic_degenerate_extent_admits_no_point() {
+        // Every X is equal: the X extent collapses, so every point sits on the
+        // open upper edge of that axis. silx reports a zero bin size here
+        // (`scatter.py:504-507`) and `Histogramnd` counts nothing.
+        let x = [3.0, 3.0, 3.0];
+        let y = [0.0, 1.0, 2.0];
+        let v = [1.0, 2.0, 3.0];
+        let bs = binned_statistic(&x, &y, &v, 2, 2).expect("binned");
+        assert_eq!(bs.count.iter().sum::<u64>(), 0);
+        assert_eq!(bs.scale.0, 0.0, "degenerate X bin size");
+        assert_eq!(bs.scale.1, 1.0);
     }
 
     #[test]
     fn binned_statistic_select_returns_chosen_grid() {
-        let x = [0.2, 1.5];
-        let y = [0.2, 1.5];
-        let v = [10.0, 7.0];
+        // (2.0, 2.0) pins the extent and is itself dropped by the open edge.
+        let x = [0.2, 1.5, 2.0];
+        let y = [0.2, 1.5, 2.0];
+        let v = [10.0, 7.0, 99.0];
         let bs = binned_statistic(&x, &y, &v, 2, 2).expect("binned");
         let counts = bs.select(BinnedStatisticFunction::Count);
         assert_eq!(counts, vec![1.0, 0.0, 0.0, 1.0]);

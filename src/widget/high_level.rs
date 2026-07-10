@@ -16409,10 +16409,11 @@ mod tests {
     #[test]
     fn scatter_binned_statistic_mode_means_and_nan_empty() {
         // Item 2: BINNED_STATISTIC converts (x,y,value) to per-bin means;
-        // two points in bin (0,0) average, an empty bin is NaN.
-        let x = [0.0, 0.5, 2.0];
-        let y = [0.0, 0.5, 2.0];
-        let v = [10.0, 30.0, 7.0];
+        // two points in bin (0,0) average, an empty bin is NaN. The corner
+        // point (2,2) pins the extent and is dropped by the open upper edge.
+        let x = [0.0, 0.5, 1.5, 2.0];
+        let y = [0.0, 0.5, 1.5, 2.0];
+        let v = [10.0, 30.0, 7.0, 99.0];
         let img = scatter_grid_image(ScatterVisualization::BinnedStatistic, &x, &y, &v, (2, 2))
             .expect("binned");
         assert_eq!(img.shape, (2, 2));
