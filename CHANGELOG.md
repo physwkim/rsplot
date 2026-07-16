@@ -9,6 +9,18 @@ This is a workspace of three crates released together: **rsplot** (the plotting
 library), **rsdm** (a PyDM-style EPICS display layer built on rsplot), and
 **adl2rsdm** (a MEDM `.adl` → RsDM-Rust-source converter).
 
+## [0.5.4] - 2026-07-16
+
+A documentation-only patch release. No code, API, or behaviour changes.
+
+### Added
+
+- **`rsdm` and `adl2rsdm` now carry a README**, which crates.io renders on each
+  crate's page. Both crates previously shipped without a `readme` field or a
+  README file, so their crates.io pages showed nothing while `rsplot`'s
+  rendered normally. crates.io bakes the README per published version, so this
+  is why a new release was cut rather than an edit to 0.5.3.
+
 ## [0.5.3] - 2026-07-10
 
 A regression release. A workspace-wide upstream-parity audit (silx / PyDM /
@@ -492,7 +504,8 @@ instead of Qt `.ui` XML.
 - rsplot is now the root of a three-crate workspace; `rsdm` reaches egui/wgpu
   through `rsplot::egui` to keep a single egui/wgpu in the tree.
 
-[Unreleased]: https://github.com/physwkim/rsplot/compare/v0.5.3...HEAD
+[Unreleased]: https://github.com/physwkim/rsplot/compare/v0.5.4...HEAD
+[0.5.4]: https://github.com/physwkim/rsplot/compare/v0.5.3...v0.5.4
 [0.5.3]: https://github.com/physwkim/rsplot/compare/v0.5.2...v0.5.3
 [0.5.2]: https://github.com/physwkim/rsplot/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/physwkim/rsplot/compare/v0.5.0...v0.5.1
