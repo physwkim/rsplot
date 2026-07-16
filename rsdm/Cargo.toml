@@ -6,6 +6,7 @@ rust-version = "1.92"
 license = "MIT OR Apache-2.0"
 description = "PyDM-style EPICS display widgets and data engine, built on rsplot"
 repository = "https://github.com/physwkim/rsplot"
+readme = "README.md"
 
 # `rsdm` ports PyDM's core engine + widgets (Python/Qt EPICS display manager)
 # onto rsplot's egui/wgpu plotting. egui/egui-wgpu are reached through rsplot's

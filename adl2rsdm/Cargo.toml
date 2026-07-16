@@ -6,6 +6,7 @@ rust-version = "1.92"
 license = "MIT OR Apache-2.0"
 description = "Convert MEDM .adl screen files to RsDM (Rust) display modules"
 repository = "https://github.com/physwkim/rsplot"
+readme = "README.md"
 # The `local_panel` example `include!`s its committed generated screen
 # (`examples/local_panel_screen.rs`); that file is converter OUTPUT, not a target.
 # Disable example autodiscovery so Cargo does not treat it as a second example
