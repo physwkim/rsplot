@@ -79,20 +79,20 @@ image = { version = "0.25", default-features = false, features = [
     "tiff",
 ] }
 
-# EPICS Channel Access backend (feature `ca`). crates.io 0.22.x — an explicit
+# EPICS Channel Access backend (feature `ca`). crates.io 0.24.x — an explicit
 # deviation from rsplot's no-new-dependency rule, scoped to this crate.
-epics-ca-rs = { version = "0.22", optional = true }
+epics-ca-rs = { version = "0.24", optional = true }
 # `Snapshot`/`AlarmInfo`/`DisplayInfo`/`ControlInfo`/`EnumInfo`/`DbrClass`/
 # `EpicsValue` returned by the CA client live here and are not re-exported by
-# epics-ca-rs, so this is a direct dependency. Unified to the same 0.22.x that
+# epics-ca-rs, so this is a direct dependency. Unified to the same 0.24.x that
 # epics-ca-rs pins, so there is one copy in the tree.
-epics-base-rs = { version = "0.22", optional = true }
-# pvAccess backend (feature `pva`). crates.io 0.22.x, same explicit deviation
+epics-base-rs = { version = "0.24", optional = true }
+# pvAccess backend (feature `pva`). crates.io 0.24.x, same explicit deviation
 # from rsplot's no-new-dependency rule, scoped to this crate. The NT
 # value/structure types (`PvField`/`PvStructure`/`ScalarValue`/`NTScalar`) are
 # re-exported by this crate, so no extra epics-base-rs surface is pulled in for
 # `pva` alone.
-epics-pva-rs = { version = "0.22", optional = true }
+epics-pva-rs = { version = "0.24", optional = true }
 # NTNDArray codec decompression (feature `pva`, `pva_codec.rs`): raw-LZ4-block
 # and blosc/bitshuffle LZ4 sub-streams decode with lz4_flex — the same pure-Rust
 # block codec rust-hdf5's `lz4` feature uses (rust-hdf5's public filter API

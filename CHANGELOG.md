@@ -9,6 +9,24 @@ This is a workspace of three crates released together: **rsplot** (the plotting
 library), **rsdm** (a PyDM-style EPICS display layer built on rsplot), and
 **adl2rsdm** (a MEDM `.adl` → RsDM-Rust-source converter).
 
+## [Unreleased]
+
+### Changed
+
+- **Bumped the EPICS backends `epics-ca-rs` / `epics-base-rs` / `epics-pva-rs`
+  to 0.24.0** (from 0.22.x), affecting `rsdm`'s `ca`/`pva`/`calc` features
+  only. Three breaking API changes were adapted:
+  - `ConnectionEvent::Unresponsive` was removed — 0.24 folds the echo-timeout
+    into `Disconnected` (an unresponsive circuit disconnects every consumer; the
+    distinction now survives only inside the client's `ChannelState`). rsdm
+    already handled both identically.
+  - The pvAccess RPC reply became `RpcReply` (an enum) instead of a
+    `(descriptor, value)` tuple; its `Empty` variant is pvxs's no-value
+    `ExecOp::reply()`. `rsdm` reads the value through `RpcReply::into_value`,
+    treating `Empty` as the existing "connected, no scalar sample" case.
+  - `EnumInfo` became `#[non_exhaustive]` (it gained a `string_form`); a test
+    constructs it via `EnumInfo::new` instead of a struct literal.
+
 ## [0.5.4] - 2026-07-16
 
 A documentation-only patch release. No code, API, or behaviour changes.
