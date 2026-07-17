@@ -227,7 +227,11 @@ async fn run_channel(
                             .await;
                     }
                 }
-                Ok(ConnectionEvent::Disconnected | ConnectionEvent::Unresponsive) => {
+                // epics-ca-rs 0.24 folded the echo-timeout `Unresponsive` event
+                // into `Disconnected` (an unresponsive circuit disconnects every
+                // consumer; the distinction now survives only inside the client's
+                // ChannelState). Both arms already did the same thing here.
+                Ok(ConnectionEvent::Disconnected) => {
                     connected_now = false;
                     // Forget the value cache so the first value after a
                     // reconnect always emits (PyDM clear_cache parity).
@@ -808,9 +812,10 @@ mod tests {
     #[test]
     fn metadata_snapshot_caches_enum_strings_and_resolves_label() {
         let mut snap = Snapshot::new(EpicsValue::Enum(1), 0, 0, ts());
-        snap.enums = Some(EnumInfo {
-            strings: vec!["OFF".into(), "ON".into()],
-        });
+        // epics-base-rs 0.24 made `EnumInfo` non-exhaustive (it gained a
+        // `string_form`); `new` fills both slots from one label list, the
+        // labels-are-the-state-table case this two-state enum is.
+        snap.enums = Some(EnumInfo::new(vec!["OFF".into(), "ON".into()]));
 
         let strings: Option<Arc<[String]>> =
             snap.enums.as_ref().map(|e| latin1_strings(&e.strings));

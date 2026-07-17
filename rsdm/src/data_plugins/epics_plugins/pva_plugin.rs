@@ -556,13 +556,19 @@ async fn run_rpc(
             r = tokio::time::timeout(period, client.pvrpc(&fn_name, &desc, &value)) => r,
         };
         match result {
-            Ok(Ok((_, response))) => {
+            Ok(Ok(reply)) => {
                 // Result → connected + emit; only int/float/bool/str results
                 // are emitted (emit_for_type, p4p_plugin_component.py:80-89,
                 // called at :112-114). A result without a scalar `value`
                 // still marks the channel connected (PyDM would crash on
-                // `result.value` there; we stay connected without a sample).
-                match field(&response, "value").and_then(value_to_pv) {
+                // `result.value` there; we stay connected without a sample) —
+                // including epics-pva-rs 0.24's `RpcReply::Empty`, the pvxs
+                // `ExecOp::reply()` no-value reply, which `into_value` maps to
+                // `None`.
+                let scalar = reply
+                    .into_value()
+                    .and_then(|(_, response)| field(&response, "value").and_then(value_to_pv));
+                match scalar {
                     Some(
                         v @ (PvValue::Int(_)
                         | PvValue::Float(_)
