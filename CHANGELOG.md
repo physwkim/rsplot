@@ -11,6 +11,8 @@ library), **rsdm** (a PyDM-style EPICS display layer built on rsplot), and
 
 ## [Unreleased]
 
+## [0.5.6] - 2026-07-19
+
 ### Changed
 
 - **rsplot**: the toolbar Print action no longer depends on the `printers`
@@ -540,7 +542,8 @@ instead of Qt `.ui` XML.
 - rsplot is now the root of a three-crate workspace; `rsdm` reaches egui/wgpu
   through `rsplot::egui` to keep a single egui/wgpu in the tree.
 
-[Unreleased]: https://github.com/physwkim/rsplot/compare/v0.5.5...HEAD
+[Unreleased]: https://github.com/physwkim/rsplot/compare/v0.5.6...HEAD
+[0.5.6]: https://github.com/physwkim/rsplot/compare/v0.5.5...v0.5.6
 [0.5.5]: https://github.com/physwkim/rsplot/compare/v0.5.4...v0.5.5
 [0.5.4]: https://github.com/physwkim/rsplot/compare/v0.5.3...v0.5.4
 [0.5.3]: https://github.com/physwkim/rsplot/compare/v0.5.2...v0.5.3
