@@ -11,6 +11,22 @@ library), **rsdm** (a PyDM-style EPICS display layer built on rsplot), and
 
 ## [Unreleased]
 
+### Changed
+
+- **rsplot**: the toolbar Print action no longer depends on the `printers`
+  crate, so a default build links no CUPS library (`-lcups`) and needs no
+  `libcups2-dev` at build time. Printer enumeration and job submission now shell
+  out to the `lpstat` / `lp` command-line tools. Printing works wherever those
+  are on `PATH` (CUPS on Linux/macOS); on platforms without them (e.g. Windows)
+  the printer list is empty and the print action reports no destination
+  (`print_graph` returns `Ok(false)`). The public `print_graph` /
+  `print_graph_to` signatures are unchanged.
+
+### Removed
+
+- **rsplot**: the `printers` crate dependency (and its transitive CUPS /
+  `libcups` build requirement).
+
 ## [0.5.5] - 2026-07-18
 
 ### Changed

@@ -82,12 +82,12 @@ impl PrintDialog {
         self.open = true;
     }
 
-    /// Open the dialog over the live system printer list (native enumeration,
+    /// Open the dialog over the live system printer list (`lpstat` enumeration,
     /// untestable shim — the list/selection logic it feeds is [`Self::open_with`]).
     pub fn open_with_system_printers(&mut self) {
-        let printers = printers::get_printers();
-        let names = printers.iter().map(|p| p.system_name.clone()).collect();
-        let default = printers.iter().position(|p| p.is_default);
+        let names = crate::print_cli::system_printers();
+        let default =
+            crate::print_cli::default_printer().and_then(|d| names.iter().position(|n| *n == d));
         self.open_with(names, default);
     }
 
