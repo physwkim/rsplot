@@ -8405,10 +8405,10 @@ impl PlotWidget {
     /// (`_plotAsPNG`) and draws that bitmap onto the printer via
     /// `QPainter`/`QPrinter` — not vector graphics. Here the figure is rasterized
     /// to a temp PNG via [`Self::save_graph`] (the only public figure-encoding
-    /// entry point), then submitted to the default printer with the
-    /// [`printers`] crate. Returns `Ok(true)` when a print job was queued,
-    /// `Ok(false)` when no default printer is available (the silx
-    /// `getDefaultPrinter` analogue).
+    /// entry point), then spooled to the default printer via the `lp`
+    /// command-line tool (see [`crate::print_cli`]). Returns `Ok(true)` when a
+    /// print job was queued, `Ok(false)` when there is no default printer (the
+    /// silx `getDefaultPrinter` analogue — `lpstat -d` reports none).
     ///
     /// The GPU readback and the printer submission are untested native shims (a
     /// real printer / spooler is required); the rasterization step reuses the
@@ -8418,7 +8418,7 @@ impl PlotWidget {
     /// that routes to [`Self::print_graph_to`]; this method is the
     /// dialog-less direct path to the default printer.
     pub fn print_graph(&self, size: (u32, u32)) -> Result<bool, SaveError> {
-        let Some(printer) = printers::get_default_printer() else {
+        let Some(printer) = crate::print_cli::default_printer() else {
             return Ok(false);
         };
         self.print_to_printer(&printer, size)
@@ -8429,30 +8429,26 @@ impl PlotWidget {
     /// `Ok(false)` when no printer of that name exists (e.g. it disappeared
     /// between the dialog opening and the click).
     pub fn print_graph_to(&self, printer_name: &str, size: (u32, u32)) -> Result<bool, SaveError> {
-        let Some(printer) = printers::get_printer_by_name(printer_name) else {
+        if !crate::print_cli::system_printers()
+            .iter()
+            .any(|p| p == printer_name)
+        {
             return Ok(false);
-        };
-        self.print_to_printer(&printer, size)
+        }
+        self.print_to_printer(printer_name, size)
     }
 
     /// Single submit owner for both print entry points: rasterize to a temp
-    /// PNG, hand the file to `printer`, and always remove the temp file.
-    fn print_to_printer(
-        &self,
-        printer: &printers::common::base::printer::Printer,
-        size: (u32, u32),
-    ) -> Result<bool, SaveError> {
+    /// PNG, hand the file to `lp -d <printer>`, and always remove the temp file.
+    fn print_to_printer(&self, printer: &str, size: (u32, u32)) -> Result<bool, SaveError> {
         // Rasterize to a temp PNG, then hand the file to the printer. save_graph
         // is the only public figure-encoding entry point (it writes a PNG file),
         // and silx prints a PNG bitmap, so PNG is the faithful intermediate.
         let path = print_temp_png_path(&std::env::temp_dir(), std::process::id());
         self.save_graph(&path, size)?;
-        let submit = printer.print_file(
-            &path.to_string_lossy(),
-            printers::common::base::job::PrinterJobOptions::none(),
-        );
+        let submit = crate::print_cli::spool_file(&path, printer);
         let _ = std::fs::remove_file(&path);
-        submit.map_err(|e| SaveError::Readback(format!("print submit: {}", e.message)))?;
+        submit.map_err(|e| SaveError::Readback(format!("print submit: {e}")))?;
         Ok(true)
     }
 

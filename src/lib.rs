@@ -15,6 +15,10 @@ pub mod core;
 pub mod render;
 pub mod widget;
 
+/// System-printer enumeration and spooling via the `lp` / `lpstat` CLI tools,
+/// used by the toolbar Print action (no CUPS link dependency).
+pub(crate) mod print_cli;
+
 pub use crate::core::backend::{
     Backend, CurveColor, CurveSpec, ImagePixelsSpec, ImageSpec, ItemHandle, MarkerSpec, PickResult,
     ShapeSpec, TriangleSpec,

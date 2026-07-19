@@ -45,10 +45,6 @@ rfd = "0.17"
 # System clipboard for the toolbar Copy action (set_image with the wgpu readback RGBA).
 # Default features; the `image` crate it pulls is already in the tree via egui-winit.
 arboard = "3.6"
-# Submit the rasterized figure PNG to the default system printer for the
-# toolbar Print action (mirrors silx PrintAction printing a PNG bitmap via
-# QPrinter). Wraps CUPS on unix / winspool on windows.
-printers = "2.3.0"
 # Fast slice median for the median-filter analysis action (silx MedianFilterAction
 # / silx.math.medianfilter). The crate's `Medianf64::medf_unchecked` gives the silx
 # selection (sorted[n/2]) for the odd, NaN-free windows that dominate; the even /
