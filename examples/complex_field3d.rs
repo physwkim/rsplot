@@ -79,7 +79,7 @@ impl ComplexApp {
 
 impl eframe::App for ComplexApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        egui::Panel::top(ui.id().with("complex_toolbar")).show_inside(ui, |ui| {
+        egui::Panel::top(ui.id().with("complex_toolbar")).show(ui, |ui| {
             let current = MODES
                 .iter()
                 .find(|(m, _)| *m == self.mode)
@@ -97,7 +97,7 @@ impl eframe::App for ComplexApp {
                 self.apply_mode(chosen);
             }
         });
-        egui::CentralPanel::default().show_inside(ui, |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             self.scene.show(ui);
         });
     }

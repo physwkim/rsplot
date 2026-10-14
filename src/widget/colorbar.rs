@@ -653,6 +653,7 @@ pub(crate) fn format_end_label(v: f64) -> String {
 mod tests {
     use super::*;
     use crate::core::colormap::Colormap;
+    use crate::test_util::HeadlessRun;
 
     // --- tick_frac (silx _TickBar._getRelativePosition) -------------------
 
@@ -913,7 +914,7 @@ mod tests {
 
         let ctx = egui::Context::default();
         let mut galley = None;
-        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+        let _ = ctx.run_headless(egui::RawInput::default(), |ui| {
             galley = Some(ui.painter().layout_no_wrap(
                 "Intensity [counts]".to_owned(),
                 FontId::proportional(TICK_FONT_SIZE),

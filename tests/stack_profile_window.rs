@@ -14,6 +14,7 @@ use egui_kittest::Harness;
 use egui_kittest::wgpu::{WgpuTestRenderer, create_render_state, default_wgpu_setup};
 use rsplot::egui;
 use rsplot::egui::Color32;
+use rsplot::egui_wgpu::RendererOptions;
 use rsplot::{
     Colormap, ProfileLabels, ProfileMethod, ProfileMode, Roi, StackProfileDimension, StackView,
     YAxis,
@@ -39,7 +40,7 @@ fn sample_volume() -> (Vec<f32>, [usize; 3]) {
 /// Build a harness around a `StackView` holding [`sample_volume`], render two
 /// frames so the transform is cached, and return the shared widget + harness.
 fn harness() -> (Rc<RefCell<StackView>>, Harness<'static>) {
-    let rs = create_render_state(default_wgpu_setup());
+    let rs = create_render_state(default_wgpu_setup(), RendererOptions::default());
     rsplot::install(&rs);
 
     let mut view = StackView::new(&rs, 0);
@@ -347,7 +348,7 @@ fn two_d_profile_requires_a_volume_not_flat_frames() {
     // In flat-frames mode (`set_stack`, no 3D volume) the 2D stacked profile has
     // no source, so it produces nothing (silx ImageStack always carries the 3D
     // array; our flat-frames convenience does not).
-    let rs = create_render_state(default_wgpu_setup());
+    let rs = create_render_state(default_wgpu_setup(), RendererOptions::default());
     rsplot::install(&rs);
     let mut view = StackView::new(&rs, 0);
     let frames = vec![vec![1.0f32; 4 * 3], vec![2.0f32; 4 * 3]];

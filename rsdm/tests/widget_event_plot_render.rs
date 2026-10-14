@@ -19,6 +19,7 @@ use egui_kittest::wgpu::{WgpuTestRenderer, create_render_state, default_wgpu_set
 use rsdm::widgets::RsdmEventPlot;
 use rsdm::{Engine, PvValue};
 use rsplot::egui;
+use rsplot::egui_wgpu::RendererOptions;
 
 fn wait_for(mut cond: impl FnMut() -> bool, timeout: Duration) -> bool {
     let start = Instant::now();
@@ -41,7 +42,7 @@ fn count_red(raw: &[u8]) -> u32 {
 /// channel (selected by `x_idx=0`, `y_idx=1`), stepping the harness between
 /// updates so each is accumulated. Returns `(red_pixels, points_accumulated)`.
 fn render_events(samples: &[(f64, f64)]) -> (u32, usize) {
-    let rs = create_render_state(default_wgpu_setup());
+    let rs = create_render_state(default_wgpu_setup(), RendererOptions::default());
     rsplot::install(&rs);
     let engine = Engine::new();
     let mut plot = RsdmEventPlot::new(&rs, 0);

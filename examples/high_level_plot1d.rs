@@ -74,7 +74,7 @@ impl eframe::App for Plot1dApp {
         egui::Panel::right("plot1d_inspector")
             .resizable(true)
             .default_size(230.0)
-            .show_inside(ui, |ui| {
+            .show(ui, |ui| {
                 ui.heading("Legends");
                 self.plot.show_legend(ui);
                 ui.separator();
@@ -88,7 +88,7 @@ impl eframe::App for Plot1dApp {
                 }
             });
 
-        egui::CentralPanel::default().show_inside(ui, |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             let scatter_present = self.plot.scatter_by_legend("sample points").is_some();
             let mut phase = self.phase;
             let mut phase_changed = false;

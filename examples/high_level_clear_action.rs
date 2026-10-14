@@ -32,14 +32,14 @@ impl eframe::App for ClearActionApp {
         egui::Panel::right("clear_action_legend")
             .resizable(true)
             .default_size(220.0)
-            .show_inside(ui, |ui| {
+            .show(ui, |ui| {
                 ui.heading("Legends");
                 self.plot.show_legend(ui);
                 ui.separator();
                 self.plot.show_active_stats(ui);
             });
 
-        egui::CentralPanel::default().show_inside(ui, |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             self.plot.show_toolbar_with(ui, |ui, plot| {
                 if ui.button("Clear").clicked() {
                     plot.clear();

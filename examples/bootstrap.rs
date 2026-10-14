@@ -27,7 +27,7 @@ impl BootstrapApp {
 impl eframe::App for BootstrapApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         // The root `ui` has no margin/background; wrap it in a CentralPanel.
-        egui::CentralPanel::default().show_inside(ui, |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             PlotView::new().show(ui, &mut self.plot);
         });
     }

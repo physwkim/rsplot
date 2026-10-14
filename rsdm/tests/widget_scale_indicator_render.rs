@@ -17,6 +17,7 @@ use egui_kittest::wgpu::{WgpuTestRenderer, create_render_state, default_wgpu_set
 use rsdm::Engine;
 use rsdm::widgets::RsdmScaleIndicator;
 use rsplot::egui;
+use rsplot::egui_wgpu::RendererOptions;
 
 fn wait_for(mut cond: impl FnMut() -> bool, timeout: Duration) -> bool {
     let start = Instant::now();
@@ -37,7 +38,7 @@ fn count_red(raw: &[u8]) -> u32 {
 
 /// Render a bar-style scale over `[0, 100]` showing `init` and count red pixels.
 fn render_scale(init: f64) -> u32 {
-    let rs = create_render_state(default_wgpu_setup());
+    let rs = create_render_state(default_wgpu_setup(), RendererOptions::default());
     let engine = Engine::new();
     let address = format!("loc://scale_demo?type=float&init={init}");
     let scale = RsdmScaleIndicator::new(&engine, &address)

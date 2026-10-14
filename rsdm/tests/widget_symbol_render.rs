@@ -18,6 +18,7 @@ use egui_kittest::wgpu::{WgpuTestRenderer, create_render_state, default_wgpu_set
 use rsdm::Engine;
 use rsdm::widgets::{DrawingShape, RsdmSymbol};
 use rsplot::egui;
+use rsplot::egui_wgpu::RendererOptions;
 
 fn wait_for(mut cond: impl FnMut() -> bool, timeout: Duration) -> bool {
     let start = Instant::now();
@@ -38,7 +39,7 @@ fn count_red(raw: &[u8]) -> u32 {
 
 /// Render a symbol whose state `1` is a red circle, with the channel at `value`.
 fn render_symbol(value: i64) -> u32 {
-    let rs = create_render_state(default_wgpu_setup());
+    let rs = create_render_state(default_wgpu_setup(), RendererOptions::default());
     let engine = Engine::new();
     let address = format!("loc://symbol_demo?type=int&init={value}");
     let symbol = RsdmSymbol::new(&engine, &address)

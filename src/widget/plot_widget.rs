@@ -1646,6 +1646,7 @@ fn commit(plot: &mut Plot, next: interaction::Limits, next_y2: Option<(f64, f64)
 mod tests {
     use super::*;
     use crate::core::plot::Plot;
+    use crate::test_util::HeadlessRun;
 
     /// Drive a headless egui frame with the given raw input, run `show`, and
     /// return the resulting [`PlotResponse`] and its data area. The wgpu paint
@@ -1656,7 +1657,7 @@ mod tests {
         raw: egui::RawInput,
     ) -> (PlotResponse, Rect) {
         let mut captured: Option<(PlotResponse, Rect)> = None;
-        let _ = ctx.run_ui(raw, |ui| {
+        let _ = ctx.run_headless(raw, |ui| {
             let resp = PlotView::new().show(ui, plot);
             let area = resp.transform.area;
             captured = Some((resp, area));
@@ -1745,7 +1746,7 @@ mod tests {
                 events,
                 ..screen_input(screen)
             };
-            ctx.run_ui(raw, |ui| {
+            ctx.run_headless(raw, |ui| {
                 let mut ext = |ui: &mut Ui| {
                     let _ = ui.button("Custom entry");
                 };
@@ -1796,7 +1797,7 @@ mod tests {
         raw: egui::RawInput,
     ) -> (DrawResponse, Rect) {
         let mut captured: Option<(DrawResponse, Rect)> = None;
-        let _ = ctx.run_ui(raw, |ui| {
+        let _ = ctx.run_headless(raw, |ui| {
             let resp = PlotView::new().show_with_draw(
                 ui,
                 plot,
@@ -2530,7 +2531,7 @@ mod tests {
         raw: egui::RawInput,
     ) -> (PlotResponse, Rect) {
         let mut captured: Option<(PlotResponse, Rect)> = None;
-        let _ = ctx.run_ui(raw, |ui| {
+        let _ = ctx.run_headless(raw, |ui| {
             let resp = PlotView::new().show_with_interaction(ui, plot, mode);
             let area = resp.transform.area;
             captured = Some((resp, area));

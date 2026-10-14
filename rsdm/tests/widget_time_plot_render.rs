@@ -21,6 +21,7 @@ use egui_kittest::Harness;
 use egui_kittest::wgpu::{WgpuTestRenderer, create_render_state, default_wgpu_setup};
 use rsdm::Engine;
 use rsdm::widgets::{RsdmTimePlot, TimeAxisMode};
+use rsplot::egui_wgpu::RendererOptions;
 use rsplot::{DataMargins, TickMode, TimeZone, YAxis, egui};
 
 struct App {
@@ -50,7 +51,7 @@ fn count_green(raw: &[u8]) -> u32 {
 /// Render a time plot after running `setup` on it (e.g. injecting samples) and
 /// return the green pixel count.
 fn render_with(setup: impl FnOnce(&mut RsdmTimePlot, usize)) -> u32 {
-    let rs = create_render_state(default_wgpu_setup());
+    let rs = create_render_state(default_wgpu_setup(), RendererOptions::default());
     rsplot::install(&rs);
 
     let engine = Engine::new();
@@ -106,7 +107,7 @@ fn y_limits_after(
     margins: DataMargins,
     setup: impl FnOnce(&mut RsdmTimePlot, usize),
 ) -> (f64, f64) {
-    let rs = create_render_state(default_wgpu_setup());
+    let rs = create_render_state(default_wgpu_setup(), RendererOptions::default());
     rsplot::install(&rs);
 
     let engine = Engine::new();
@@ -213,7 +214,7 @@ fn empty_plot_renders_no_curve_color() {
 fn time_axis_mode_switches_between_relative_and_wall_clock() {
     // The X axis defaults to relative seconds and can switch to an absolute
     // wall-clock axis (the f32-safe path: relative vertices, offset tick labels).
-    let rs = create_render_state(default_wgpu_setup());
+    let rs = create_render_state(default_wgpu_setup(), RendererOptions::default());
     rsplot::install(&rs);
 
     // Default: numeric ticks + the "since start" unit label.
@@ -250,7 +251,7 @@ fn time_axis_mode_switches_between_relative_and_wall_clock() {
 fn crosshair_toggle_drives_the_plot_flag() {
     // The hover crosshair + (x, y) readout is off by default and the builder /
     // runtime setter flip the underlying rsplot crosshair flag.
-    let rs = create_render_state(default_wgpu_setup());
+    let rs = create_render_state(default_wgpu_setup(), RendererOptions::default());
     rsplot::install(&rs);
 
     let plot = RsdmTimePlot::new(&rs, 0);

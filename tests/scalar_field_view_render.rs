@@ -17,6 +17,7 @@ use rsplot::ScalarFieldView;
 use rsplot::egui;
 use rsplot::egui::Color32;
 use rsplot::egui_wgpu::RenderState;
+use rsplot::egui_wgpu::RendererOptions;
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -71,7 +72,7 @@ impl IsoApp {
 
 #[test]
 fn scalar_field_view_renders_isosurface_and_clear_removes_it() {
-    let rs = create_render_state(default_wgpu_setup());
+    let rs = create_render_state(default_wgpu_setup(), RendererOptions::default());
     let app = Rc::new(RefCell::new(IsoApp::new(&rs)));
     // Clone the render state so the test body can still rebuild geometry after
     // the renderer takes ownership (both handles share the same GPU + renderer).
@@ -107,7 +108,7 @@ fn scalar_field_view_renders_isosurface_and_clear_removes_it() {
 
 #[test]
 fn scalar_field_view_frames_camera_only_on_first_set_data() {
-    let rs = create_render_state(default_wgpu_setup());
+    let rs = create_render_state(default_wgpu_setup(), RendererOptions::default());
 
     let mut view = ScalarFieldView::new(&rs, 6);
     assert!(

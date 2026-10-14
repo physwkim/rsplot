@@ -7,10 +7,11 @@ use egui_kittest::wgpu::{create_render_state, default_wgpu_setup};
 use rsdm::widgets::{RsdmScatterPlot, RsdmTimePlot, RsdmWaveformPlot};
 use rsplot::YAxis;
 use rsplot::egui::Color32;
+use rsplot::egui_wgpu::RendererOptions;
 
 #[test]
 fn builders_style_the_underlying_plot() {
-    let rs = create_render_state(default_wgpu_setup());
+    let rs = create_render_state(default_wgpu_setup(), RendererOptions::default());
     rsplot::install(&rs);
 
     // Waveform: the full surface, including both pinned ranges (MEDM cartesian

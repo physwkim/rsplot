@@ -98,7 +98,7 @@ impl eframe::App for ItemsSelectorApp {
         egui::Panel::right("items_selector")
             .resizable(true)
             .default_size(260.0)
-            .show_inside(ui, |ui| {
+            .show(ui, |ui| {
                 ui.heading("Items");
                 for index in 0..self.rows.len() {
                     let handle = self.rows[index].handle;
@@ -124,7 +124,7 @@ impl eframe::App for ItemsSelectorApp {
                 self.plot.show_active_stats(ui);
             });
 
-        egui::CentralPanel::default().show_inside(ui, |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             let selected_count = self.selected.len();
             self.plot.show_toolbar_with(ui, |ui, _plot| {
                 ui.label(format!("selected: {selected_count}"));

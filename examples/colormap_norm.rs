@@ -119,7 +119,7 @@ impl eframe::App for NormApp {
             self.set_norm(render_state, norm);
         }
 
-        egui::CentralPanel::default().show_inside(ui, |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             PlotView::new().show(ui, &mut self.plot);
         });
     }

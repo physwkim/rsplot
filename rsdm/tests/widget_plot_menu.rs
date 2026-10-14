@@ -12,6 +12,7 @@ use rsdm::Engine;
 use rsdm::widgets::RsdmScatterPlot;
 use rsplot::YAxis;
 use rsplot::egui::Color32;
+use rsplot::egui_wgpu::RendererOptions;
 
 fn y_limits(plot: &RsdmScatterPlot) -> (f64, f64) {
     plot.plot()
@@ -21,7 +22,7 @@ fn y_limits(plot: &RsdmScatterPlot) -> (f64, f64) {
 
 #[test]
 fn set_y_range_pins_y_and_survives_updates_then_autoscale_refits() {
-    let rs = create_render_state(default_wgpu_setup());
+    let rs = create_render_state(default_wgpu_setup(), RendererOptions::default());
     rsplot::install(&rs);
 
     let engine = Engine::new();

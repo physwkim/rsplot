@@ -27,6 +27,7 @@ use egui_kittest::Harness;
 use egui_kittest::wgpu::{WgpuTestRenderer, create_render_state, default_wgpu_setup};
 use rsplot::VolumeRaycaster;
 use rsplot::egui;
+use rsplot::egui_wgpu::RendererOptions;
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Mutex;
@@ -63,7 +64,7 @@ fn centre_red(depth: usize, alpha: u8, steps: u32) -> u8 {
 /// The centre pixel's ray crosses the box through its middle, so its chord is
 /// the slab's Z extent — `depth / 16` of a unit, by `volume_bounds`.
 fn centre_rgb(depth: usize, voxel: [u8; 4], steps: u32) -> [u8; 3] {
-    let rs = create_render_state(default_wgpu_setup());
+    let rs = create_render_state(default_wgpu_setup(), RendererOptions::default());
     let mut view = VolumeRaycaster::new(&rs, 11);
     view.set_volume(&rs, &slab(depth, voxel), depth, 16, 16);
     view.set_steps(steps);

@@ -67,7 +67,7 @@ impl LargeImageApp {
 
 impl eframe::App for LargeImageApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        egui::CentralPanel::default().show_inside(ui, |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             ui.label(format!(
                 "image width {} px > max_texture_dimension_2d {} → tiled; gradient must stay continuous",
                 self.width, self.max_dim

@@ -14,6 +14,7 @@ use std::rc::Rc;
 use egui_kittest::Harness;
 use egui_kittest::wgpu::{WgpuTestRenderer, create_render_state, default_wgpu_setup};
 use rsplot::egui;
+use rsplot::egui_wgpu::RendererOptions;
 use rsplot::{Colormap, ScatterView, YAxis};
 
 /// A triangle of scattered points carrying the affine field `v = x + 2y`, plus a
@@ -28,7 +29,7 @@ fn affine_scatter() -> (Vec<f64>, Vec<f64>, Vec<f64>) {
 
 #[test]
 fn show_line_profile_opens_window_for_an_in_hull_segment() {
-    let rs = create_render_state(default_wgpu_setup());
+    let rs = create_render_state(default_wgpu_setup(), RendererOptions::default());
     rsplot::install(&rs);
 
     let mut view = ScatterView::new(&rs, 0);
@@ -53,7 +54,7 @@ fn show_line_profile_opens_window_for_an_in_hull_segment() {
 
 #[test]
 fn show_line_profile_is_a_noop_for_an_out_of_hull_segment() {
-    let rs = create_render_state(default_wgpu_setup());
+    let rs = create_render_state(default_wgpu_setup(), RendererOptions::default());
     rsplot::install(&rs);
 
     let mut view = ScatterView::new(&rs, 0);
@@ -76,7 +77,7 @@ fn show_line_profile_is_a_noop_for_an_out_of_hull_segment() {
 
 #[test]
 fn show_line_profile_without_data_is_a_noop() {
-    let rs = create_render_state(default_wgpu_setup());
+    let rs = create_render_state(default_wgpu_setup(), RendererOptions::default());
     rsplot::install(&rs);
 
     let mut view = ScatterView::new(&rs, 0);
@@ -87,7 +88,7 @@ fn show_line_profile_without_data_is_a_noop() {
 
 #[test]
 fn profile_mode_drag_samples_a_profile_and_opens_the_window() {
-    let rs = create_render_state(default_wgpu_setup());
+    let rs = create_render_state(default_wgpu_setup(), RendererOptions::default());
     rsplot::install(&rs);
 
     let mut view = ScatterView::new(&rs, 0);
@@ -153,7 +154,7 @@ fn scatter_view_stats_run_over_the_value_array() {
     // scatter's *value* array with (x, y) as position axes — not the marker
     // curve's y positions. Exercises the ScatterView Points-arm retained-data
     // wiring end-to-end through PlotWidget::feed_all_stats.
-    let rs = create_render_state(default_wgpu_setup());
+    let rs = create_render_state(default_wgpu_setup(), RendererOptions::default());
     rsplot::install(&rs);
 
     let mut view = ScatterView::new(&rs, 0);
@@ -177,7 +178,7 @@ fn scatter_view_stats_run_over_the_value_array() {
 
 #[test]
 fn disarming_profile_mode_closes_the_window() {
-    let rs = create_render_state(default_wgpu_setup());
+    let rs = create_render_state(default_wgpu_setup(), RendererOptions::default());
     rsplot::install(&rs);
 
     let mut view = ScatterView::new(&rs, 0);

@@ -18,6 +18,7 @@ use std::rc::Rc;
 use egui_kittest::Harness;
 use egui_kittest::wgpu::{WgpuTestRenderer, create_render_state, default_wgpu_setup};
 use rsplot::egui;
+use rsplot::egui_wgpu::RendererOptions;
 use rsplot::{PlotWidget, SnappingMode};
 
 /// A `PlotWidget` populated by `build`, rendered twice through the kittest+wgpu
@@ -36,7 +37,7 @@ fn plot_rendered_at(
     pixels_per_point: f32,
     build: impl FnOnce(&mut PlotWidget),
 ) -> (Rc<RefCell<PlotWidget>>, Harness<'static>) {
-    let rs = create_render_state(default_wgpu_setup());
+    let rs = create_render_state(default_wgpu_setup(), RendererOptions::default());
     rsplot::install(&rs);
     let mut plot = PlotWidget::new(&rs, 0);
     build(&mut plot);
@@ -327,7 +328,7 @@ fn snap_radius_scales_with_pixels_per_point() {
 fn uncached_transform_yields_no_snap() {
     // A widget that has never rendered has no cached transform, so data→pixel
     // projection fails and snapping returns None rather than panicking.
-    let rs = create_render_state(default_wgpu_setup());
+    let rs = create_render_state(default_wgpu_setup(), RendererOptions::default());
     rsplot::install(&rs);
     let mut plot = PlotWidget::new(&rs, 0);
     let xs: Vec<f64> = (0..=10).map(|i| i as f64).collect();

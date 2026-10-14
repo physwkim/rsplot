@@ -308,7 +308,9 @@ impl WgpuResources {
             .map_err(|e| crate::render::save::SaveError::Readback(format!("buffer map: {e}")))?;
 
         let rgba = {
-            let mapped = buffer.slice(..).get_mapped_range();
+            let mapped = buffer.slice(..).get_mapped_range().map_err(|e| {
+                crate::render::save::SaveError::Readback(format!("buffer map: {e}"))
+            })?;
             rows_to_rgba8(&mapped, w, h, bpr, target_format)
         };
         buffer.unmap();

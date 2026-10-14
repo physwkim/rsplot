@@ -18,6 +18,7 @@ use egui_kittest::wgpu::{WgpuTestRenderer, create_render_state, default_wgpu_set
 use rsdm::widgets::RsdmByteIndicator;
 use rsdm::{Engine, PvValue};
 use rsplot::egui;
+use rsplot::egui_wgpu::RendererOptions;
 
 struct App {
     indicator: RsdmByteIndicator,
@@ -49,7 +50,7 @@ struct Counts {
 /// Render a vertical byte indicator showing `value` over `num_bits` bits and
 /// count its on/off pixels.
 fn render(value: i64, num_bits: usize) -> Counts {
-    let rs = create_render_state(default_wgpu_setup());
+    let rs = create_render_state(default_wgpu_setup(), RendererOptions::default());
     let engine = Engine::new();
     // Config-bearing loc (type+init) so the connection is connected — a bare
     // `loc://` is disconnected until configured (R3-12), which would render the

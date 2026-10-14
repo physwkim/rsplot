@@ -767,11 +767,11 @@ impl Scene3dPipeline {
             immediate_size: 0,
         });
 
-        let vertex_buffers = [wgpu::VertexBufferLayout {
+        let vertex_buffers = [Some(wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<Scene3dVertex>() as u64,
             step_mode: wgpu::VertexStepMode::Vertex,
             attributes: &SCENE3D_VERTEX_ATTRS,
-        }];
+        })];
 
         // Lines and triangles differ only in primitive topology; everything else
         // (shader, vertex layout, depth state, target) is shared.
@@ -863,11 +863,11 @@ impl Scene3dPipeline {
                 entry_point: Some("vs_main"),
                 // No vertex buffer: corners come from vertex_index. One instance
                 // per point carries pos/color/size/marker.
-                buffers: &[wgpu::VertexBufferLayout {
+                buffers: &[Some(wgpu::VertexBufferLayout {
                     array_stride: std::mem::size_of::<Scene3dPoint>() as u64,
                     step_mode: wgpu::VertexStepMode::Instance,
                     attributes: &SCENE3D_POINT_ATTRS,
-                }],
+                })],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             },
             fragment: Some(wgpu::FragmentState {
@@ -930,11 +930,11 @@ impl Scene3dPipeline {
             vertex: wgpu::VertexState {
                 module: &mesh_shader,
                 entry_point: Some("vs_main"),
-                buffers: &[wgpu::VertexBufferLayout {
+                buffers: &[Some(wgpu::VertexBufferLayout {
                     array_stride: std::mem::size_of::<Scene3dMeshVertex>() as u64,
                     step_mode: wgpu::VertexStepMode::Vertex,
                     attributes: &SCENE3D_MESH_ATTRS,
-                }],
+                })],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             },
             fragment: Some(wgpu::FragmentState {
@@ -1011,11 +1011,11 @@ impl Scene3dPipeline {
             vertex: wgpu::VertexState {
                 module: &image_shader,
                 entry_point: Some("vs_main"),
-                buffers: &[wgpu::VertexBufferLayout {
+                buffers: &[Some(wgpu::VertexBufferLayout {
                     array_stride: std::mem::size_of::<Scene3dImageVertex>() as u64,
                     step_mode: wgpu::VertexStepMode::Vertex,
                     attributes: &SCENE3D_IMAGE_ATTRS,
-                }],
+                })],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             },
             fragment: Some(wgpu::FragmentState {
@@ -1932,7 +1932,7 @@ impl Scene3dResources {
         rx.recv().ok()?.ok()?;
 
         let rgba = {
-            let mapped = buffer.slice(..).get_mapped_range();
+            let mapped = buffer.slice(..).get_mapped_range().ok()?;
             rows_to_rgba8(&mapped, w, h, bpr, pipeline.target_format)
         };
         buffer.unmap();

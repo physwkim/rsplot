@@ -52,7 +52,7 @@ impl eframe::App for RoiStatsApp {
         egui::Panel::right("roi_stats")
             .resizable(true)
             .default_size(320.0)
-            .show_inside(ui, |ui| {
+            .show(ui, |ui| {
                 ui.heading("ROI stats");
                 // One row per ROI, reduced over the active image's pixels inside
                 // each ROI (silx ROIStatsWidget). The table follows the active
@@ -60,7 +60,7 @@ impl eframe::App for RoiStatsApp {
                 self.plot.show_roi_stats_widget(ui, &mut self.roi_stats);
             });
 
-        egui::CentralPanel::default().show_inside(ui, |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             self.plot.show_toolbar_with(ui, |ui, plot| {
                 if ui.button("Reset ROIs").clicked() {
                     reset_rois(plot);

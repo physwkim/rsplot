@@ -7,6 +7,7 @@
 
 use egui_kittest::wgpu::{create_render_state, default_wgpu_setup};
 use rsplot::egui::Color32;
+use rsplot::egui_wgpu::RendererOptions;
 use rsplot::{
     CameraFace, ImageInterpolation, PointMarker, Scatter2D, Scatter2DVisualization, Scatter3D,
     Scene3dGeometry, Scene3dImageLayer, Scene3dTexturedMesh, ScenePickKind, SceneWidget, Vec3,
@@ -44,7 +45,7 @@ fn cut_plane_quad(z: f32) -> Scene3dTexturedMesh {
 /// CPU geometry + camera, so the `RenderState` (only needed to install the scene
 /// resources at construction) need not outlive this helper.
 fn front_view_widget(id: u64, geometry: Scene3dGeometry) -> SceneWidget {
-    let rs = create_render_state(default_wgpu_setup());
+    let rs = create_render_state(default_wgpu_setup(), RendererOptions::default());
     let mut w = SceneWidget::new(&rs, id);
     w.set_geometry(&rs, geometry);
     w.set_viewpoint(CameraFace::Front); // look along -Z through the box centre

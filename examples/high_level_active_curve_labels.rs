@@ -161,7 +161,7 @@ impl eframe::App for ActiveLabelApp {
         egui::Panel::right("active_label_panel")
             .resizable(true)
             .default_size(260.0)
-            .show_inside(ui, |ui| {
+            .show(ui, |ui| {
                 ui.heading("Curve legend");
                 // The graph legend shows each curve's icon (color, line style,
                 // marker) and makes the clicked curve active (silx
@@ -210,7 +210,7 @@ impl eframe::App for ActiveLabelApp {
                 ui.label("Right-click the plot for Zoom Back / Reset Zoom.");
             });
 
-        egui::CentralPanel::default().show_inside(ui, |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             self.plot.show_toolbar(ui);
             self.plot.show(ui);
         });

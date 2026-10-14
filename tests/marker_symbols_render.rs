@@ -19,6 +19,7 @@ use std::rc::Rc;
 use egui_kittest::Harness;
 use egui_kittest::wgpu::{WgpuTestRenderer, create_render_state, default_wgpu_setup};
 use rsplot::egui::{self, Color32, Pos2};
+use rsplot::egui_wgpu::RendererOptions;
 use rsplot::{PlotWidget, Symbol, YAxis};
 
 const W: usize = 400;
@@ -36,7 +37,7 @@ fn is_red(px: [u8; 4]) -> bool {
 /// the `data_to_pixel` projection of each marker center (the cached display
 /// transform after rendering).
 fn render_markers(markers: &[(Symbol, f64, f64)]) -> (Vec<u8>, Vec<Pos2>) {
-    let rs = create_render_state(default_wgpu_setup());
+    let rs = create_render_state(default_wgpu_setup(), RendererOptions::default());
     rsplot::install(&rs);
 
     let mut plot = PlotWidget::new(&rs, 0);

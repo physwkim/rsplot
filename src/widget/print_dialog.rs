@@ -164,6 +164,7 @@ impl PrintDialog {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_util::HeadlessRun;
 
     #[test]
     fn preselected_index_uses_default_when_valid() {
@@ -197,7 +198,7 @@ mod tests {
     fn show_closed_returns_none_without_rendering() {
         let ctx = egui::Context::default();
         let mut dlg = PrintDialog::new();
-        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+        let _ = ctx.run_headless(egui::RawInput::default(), |ui| {
             assert!(dlg.show(ui.ctx()).is_none());
         });
     }
@@ -209,14 +210,14 @@ mod tests {
         let ctx = egui::Context::default();
         let mut dlg = PrintDialog::new();
         dlg.open_with(Vec::new(), None);
-        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+        let _ = ctx.run_headless(egui::RawInput::default(), |ui| {
             assert!(dlg.show(ui.ctx()).is_none());
         });
         assert!(dlg.is_open());
 
         let mut dlg = PrintDialog::new();
         dlg.open_with(vec!["Office".into(), "Lab".into()], Some(1));
-        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+        let _ = ctx.run_headless(egui::RawInput::default(), |ui| {
             assert!(dlg.show(ui.ctx()).is_none());
         });
         assert!(dlg.is_open());

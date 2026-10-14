@@ -133,7 +133,7 @@ impl eframe::App for LiveApp {
         update_image_region(&render_state, 0, 0, row, WIDTH, BAR_H, &bright);
         self.last_row = Some(row);
 
-        egui::CentralPanel::default().show_inside(ui, |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             PlotView::new().show(ui, &mut self.plot);
         });
 

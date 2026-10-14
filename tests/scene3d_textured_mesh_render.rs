@@ -23,6 +23,7 @@ use egui_kittest::Harness;
 use egui_kittest::wgpu::{WgpuTestRenderer, create_render_state, default_wgpu_setup};
 use rsplot::egui::{self, Color32};
 use rsplot::egui_wgpu::RenderState;
+use rsplot::egui_wgpu::RendererOptions;
 use rsplot::{
     Camera, ImageInterpolation, Scene3dGeometry, Scene3dTexturedMesh, Vec3, install_scene3d,
     paint_scene3d, set_scene3d,
@@ -96,7 +97,7 @@ impl App {
 
 #[test]
 fn scene3d_textured_mesh_interpolates_uvs_over_a_triangle() {
-    let rs = create_render_state(default_wgpu_setup());
+    let rs = create_render_state(default_wgpu_setup(), RendererOptions::default());
     let app = Rc::new(RefCell::new(App::new(&rs)));
     let renderer = WgpuTestRenderer::from_render_state(rs);
 

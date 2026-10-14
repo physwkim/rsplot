@@ -996,6 +996,7 @@ impl ImageStack {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_util::HeadlessRun;
 
     fn frame(label: &str) -> Option<Frame> {
         Some(Frame::new(
@@ -1461,7 +1462,7 @@ mod tests {
         let mut prev = egui::Rect::NOTHING;
         let mut next = egui::Rect::NOTHING;
         let mut last = egui::Rect::NOTHING;
-        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+        let _ = ctx.run_headless(egui::RawInput::default(), |ui| {
             ui.horizontal(|ui| {
                 first = ui.button("⏮").rect;
                 prev = ui.button("◀").rect;
@@ -1482,7 +1483,7 @@ mod tests {
         raw: egui::RawInput,
     ) -> Option<NavAction> {
         let mut action = None;
-        let _ = ctx.run_ui(raw, |ui| {
+        let _ = ctx.run_headless(raw, |ui| {
             action = navigation_toolbar_ui(ui, current, len);
         });
         action

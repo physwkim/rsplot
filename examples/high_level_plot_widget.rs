@@ -131,7 +131,7 @@ impl eframe::App for HighLevelWidgetApp {
         egui::Panel::right("high_level_plot_widget_inspector")
             .resizable(true)
             .default_size(230.0)
-            .show_inside(ui, |ui| {
+            .show(ui, |ui| {
                 ui.heading("Legends");
                 self.plot.show_legend(ui);
                 ui.separator();
@@ -145,7 +145,7 @@ impl eframe::App for HighLevelWidgetApp {
                 }
             });
 
-        egui::CentralPanel::default().show_inside(ui, |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             let current_demo = self.demo;
             let (_, requested_demo) = self.plot.show_toolbar_with(ui, |ui, _plot| {
                 let mut requested = None;

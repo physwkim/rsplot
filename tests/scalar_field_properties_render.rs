@@ -9,6 +9,7 @@ use egui_kittest::kittest::Queryable;
 use egui_kittest::wgpu::{WgpuTestRenderer, create_render_state, default_wgpu_setup};
 use rsplot::egui;
 use rsplot::egui_wgpu::RenderState;
+use rsplot::egui_wgpu::RendererOptions;
 use rsplot::{ScalarFieldProperties, ScalarFieldView};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -59,7 +60,7 @@ impl PanelApp {
 
 #[test]
 fn scalar_field_properties_panel_drives_the_view() {
-    let rs = create_render_state(default_wgpu_setup());
+    let rs = create_render_state(default_wgpu_setup(), RendererOptions::default());
     let app = Rc::new(RefCell::new(PanelApp::new(&rs)));
     let renderer = WgpuTestRenderer::from_render_state(rs.clone());
 

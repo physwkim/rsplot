@@ -1960,6 +1960,7 @@ pub fn draw_colorbar(painter: &Painter, rect: Rect, cmap: &Colormap, style: &Sty
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_util::HeadlessRun;
 
     #[test]
     fn roi_appearance_resolves_color_fallback_and_name() {
@@ -2660,7 +2661,7 @@ mod tests {
 
         let ctx = egui::Context::default();
         let mut galley = None;
-        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+        let _ = ctx.run_headless(egui::RawInput::default(), |ui| {
             galley = Some(ui.painter().layout_no_wrap(
                 "Temperature [\u{b0}C]".to_owned(),
                 FontId::proportional(12.0),

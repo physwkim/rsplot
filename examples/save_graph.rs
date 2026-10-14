@@ -53,7 +53,7 @@ impl SaveApp {
 
 impl eframe::App for SaveApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
-        egui::CentralPanel::default().show_inside(ui, |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             ui.horizontal(|ui| {
                 if ui.button("Save PNG").clicked()
                     && let Some(rs) = frame.wgpu_render_state()

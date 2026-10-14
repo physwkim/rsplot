@@ -12,6 +12,7 @@
 
 use egui_kittest::wgpu::{create_render_state, default_wgpu_setup};
 use rsplot::egui::Color32;
+use rsplot::egui_wgpu::RendererOptions;
 use rsplot::{Camera, Scene3dGeometry, Vec3, install_scene3d, set_scene3d, snapshot_scene3d};
 
 const SIZE: (u32, u32) = (100, 100);
@@ -41,7 +42,7 @@ fn centre_triangle_verts(z: f32) -> [[f32; 3]; 3] {
 
 #[test]
 fn translucent_triangle_composites_over_the_background() {
-    let rs = create_render_state(default_wgpu_setup());
+    let rs = create_render_state(default_wgpu_setup(), RendererOptions::default());
     install_scene3d(&rs);
 
     // A 50 %-alpha blue triangle over screen centre.
@@ -70,7 +71,7 @@ fn translucent_triangle_composites_over_the_background() {
 
 #[test]
 fn translucent_mesh_composites_over_the_background() {
-    let rs = create_render_state(default_wgpu_setup());
+    let rs = create_render_state(default_wgpu_setup(), RendererOptions::default());
     install_scene3d(&rs);
 
     // A 50 %-alpha blue lit mesh facing the camera over screen centre.

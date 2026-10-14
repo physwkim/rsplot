@@ -49,7 +49,7 @@ impl AspectApp {
 
 impl eframe::App for AspectApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        egui::CentralPanel::default().show_inside(ui, |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             ui.checkbox(
                 &mut self.plot.keep_aspect,
                 "Keep data aspect ratio (square pixels)",

@@ -17,6 +17,7 @@ use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
 use egui_kittest::wgpu::{WgpuTestRenderer, create_render_state, default_wgpu_setup};
 use rsplot::egui;
+use rsplot::egui_wgpu::RendererOptions;
 use rsplot::{ComplexImageView, ComplexMode};
 
 /// A `ComplexImageView` over a 2×2 complex field whose maximum modulus is
@@ -25,7 +26,7 @@ use rsplot::{ComplexImageView, ComplexMode};
 /// once before the first frame. Returns the shared view, the captured controls
 /// rect is not needed (widgets are queried by accesskit).
 fn view_harness() -> (Rc<RefCell<ComplexImageView>>, Harness<'static>) {
-    let rs = create_render_state(default_wgpu_setup());
+    let rs = create_render_state(default_wgpu_setup(), RendererOptions::default());
     rsplot::install(&rs);
     let mut view = ComplexImageView::new(&rs, 0);
     // max |z| = |(3,4)| = 5.0; the rest are smaller.

@@ -130,7 +130,7 @@ impl eframe::App for CurveLegendApp {
         egui::Panel::right("curve_legend_panel")
             .resizable(true)
             .default_size(220.0)
-            .show_inside(ui, |ui| {
+            .show(ui, |ui| {
                 ui.heading("Curve legends");
                 self.plot.show_legend(ui);
 
@@ -140,7 +140,7 @@ impl eframe::App for CurveLegendApp {
                 ui.label("Right-click a row for Set Active / Map to Y axis / Points / Lines.");
             });
 
-        egui::CentralPanel::default().show_inside(ui, |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             self.plot.show_toolbar(ui);
             self.plot.show(ui);
         });

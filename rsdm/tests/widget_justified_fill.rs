@@ -29,6 +29,7 @@ use rsdm::widgets::{
     RsdmScaleIndicator, RsdmSymbol,
 };
 use rsplot::egui;
+use rsplot::egui_wgpu::RendererOptions;
 
 fn wait_for(mut cond: impl FnMut() -> bool, timeout: Duration) -> bool {
     let start = Instant::now();
@@ -137,7 +138,7 @@ const PROBE_SIZE: u32 = 400;
 /// Render `show` in a [`PROBE_SIZE`]² harness, justified or plain, and return
 /// the raw RGBA bytes.
 fn pixel_probe_raw(justified: bool, show: impl FnMut(&mut egui::Ui) + 'static) -> Vec<u8> {
-    let rs = create_render_state(default_wgpu_setup());
+    let rs = create_render_state(default_wgpu_setup(), RendererOptions::default());
     let renderer = WgpuTestRenderer::from_render_state(rs);
     let show = RefCell::new(show);
     let mut harness = Harness::builder()
@@ -485,6 +486,7 @@ fn justified_enum_button_fits_a_narrow_medm_rect() {
         .with_pixels_per_point(1.0)
         .renderer(WgpuTestRenderer::from_render_state(create_render_state(
             default_wgpu_setup(),
+            RendererOptions::default(),
         )))
         .build_ui(move |ui| {
             // The adl2rsdm `place()` shape: an Area pinned at the MEDM rect,
@@ -542,6 +544,7 @@ fn justified_byte_fits_a_short_medm_rect() {
         .with_pixels_per_point(1.0)
         .renderer(WgpuTestRenderer::from_render_state(create_render_state(
             default_wgpu_setup(),
+            RendererOptions::default(),
         )))
         .build_ui(move |ui| {
             egui::Area::new(ui.id().with("short_byte"))
@@ -630,6 +633,7 @@ fn medm_cell_text_bbox(
         .with_pixels_per_point(1.0)
         .renderer(WgpuTestRenderer::from_render_state(create_render_state(
             default_wgpu_setup(),
+            RendererOptions::default(),
         )))
         .build_ui(move |ui| {
             egui::Area::new(ui.id().with("medm_cell"))

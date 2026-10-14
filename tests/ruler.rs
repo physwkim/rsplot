@@ -14,13 +14,14 @@ use std::rc::Rc;
 use egui_kittest::Harness;
 use egui_kittest::wgpu::{WgpuTestRenderer, create_render_state, default_wgpu_setup};
 use rsplot::egui;
+use rsplot::egui_wgpu::RendererOptions;
 use rsplot::{PlotInteractionMode, PlotWidget, Roi, RoiDrawKind, RulerToolButton, YAxis};
 
 /// Build a harness around a bare `PlotWidget` with a fixed data range
 /// (x,y ∈ [0,10]) so data↔pixel mapping is deterministic, render two frames so
 /// the transform is cached, and return the shared widget + harness.
 fn harness() -> (Rc<RefCell<PlotWidget>>, Harness<'static>) {
-    let rs = create_render_state(default_wgpu_setup());
+    let rs = create_render_state(default_wgpu_setup(), RendererOptions::default());
     rsplot::install(&rs);
 
     let mut plot = PlotWidget::new(&rs, 0);

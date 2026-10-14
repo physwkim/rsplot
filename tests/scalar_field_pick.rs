@@ -7,6 +7,7 @@
 
 use egui_kittest::wgpu::{create_render_state, default_wgpu_setup};
 use rsplot::egui::Color32;
+use rsplot::egui_wgpu::RendererOptions;
 use rsplot::{CameraFace, FieldPickItem, ScalarFieldView, Vec3};
 
 const N: usize = 5;
@@ -33,7 +34,7 @@ fn ramp_z() -> Vec<f32> {
 /// `RenderState` — needed only to build/upload the geometry here — need not
 /// outlive this helper.
 fn front_field_view(id: u64, cut_z: f32, visible: bool) -> ScalarFieldView {
-    let rs = create_render_state(default_wgpu_setup());
+    let rs = create_render_state(default_wgpu_setup(), RendererOptions::default());
     let mut view = ScalarFieldView::new(&rs, id);
     assert!(
         view.set_data(&rs, &ramp_z(), N, N, N),
@@ -90,7 +91,7 @@ fn pick_on_an_isosurface_reports_the_isosurface_item() {
     // R3-11: with the cut plane hidden and a single iso-surface at level 2 over
     // the z-ramp, the front-view centre ray crosses the surface, so the pick
     // names the Isosurface item — the other silx Item-field label.
-    let rs = create_render_state(default_wgpu_setup());
+    let rs = create_render_state(default_wgpu_setup(), RendererOptions::default());
     let mut view = ScalarFieldView::new(&rs, 40);
     assert!(
         view.set_data(&rs, &ramp_z(), N, N, N),

@@ -2,7 +2,7 @@
 name = "rsplot"
 version = "0.5.6"
 edition = "2024"
-rust-version = "1.92"
+rust-version = "1.95"
 license = "MIT OR Apache-2.0"
 description = "silx-style scientific plotting for egui, rendered with wgpu"
 repository = "https://github.com/physwkim/rsplot"
@@ -21,8 +21,8 @@ resolver = "3"
 # an egui widget + egui-wgpu paint callback. wgpu types are reached through the
 # egui-wgpu re-export to avoid version skew (a duplicate wgpu).
 [dependencies]
-egui = "0.34"
-egui-wgpu = "0.34"
+egui = "0.36"
+egui-wgpu = "0.36"
 bytemuck = { version = "1", features = ["derive"] }
 # f16 encoding for the volume ray-caster's premultiplied 3D texture. Already in
 # the tree transitively (via wgpu), so this pins no new major version.
@@ -72,8 +72,8 @@ tzdb = "0.7.3"
 
 # Only the example (an eframe app) needs a window + RenderState.
 [dev-dependencies]
-eframe = "0.34"
-egui_kittest = { version = "0.34.3", features = ["wgpu", "snapshot"] }
+eframe = "0.36"
+egui_kittest = { version = "0.36", features = ["wgpu", "snapshot"] }
 
 [[example]]
 name = "bootstrap"

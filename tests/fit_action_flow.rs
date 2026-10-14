@@ -8,6 +8,7 @@
 
 use egui_kittest::wgpu::{create_render_state, default_wgpu_setup};
 use rsplot::egui::Color32;
+use rsplot::egui_wgpu::RendererOptions;
 use rsplot::{FitWidget, Plot1D};
 
 /// A plot showing a straight line over x = 0..100, zoomed to [20, 40].
@@ -22,7 +23,7 @@ fn zoomed_line_plot(rs: &egui_wgpu::RenderState) -> (Plot1D, rsplot::ItemHandle)
 
 #[test]
 fn fit_target_seeds_range_from_visible_x_window() {
-    let rs = create_render_state(default_wgpu_setup());
+    let rs = create_render_state(default_wgpu_setup(), RendererOptions::default());
     rsplot::install(&rs);
     let (plot, handle) = zoomed_line_plot(&rs);
     let mut fit = FitWidget::new(&rs, 1);
@@ -45,7 +46,7 @@ fn fit_target_seeds_range_from_visible_x_window() {
 
 #[test]
 fn fit_overlay_appears_updates_in_place_and_hides_without_result() {
-    let rs = create_render_state(default_wgpu_setup());
+    let rs = create_render_state(default_wgpu_setup(), RendererOptions::default());
     rsplot::install(&rs);
     let (mut plot, handle) = zoomed_line_plot(&rs);
     let mut fit = FitWidget::new(&rs, 1);

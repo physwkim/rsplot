@@ -9,6 +9,7 @@ use egui_kittest::wgpu::{WgpuTestRenderer, create_render_state, default_wgpu_set
 use rsplot::VolumeRaycaster;
 use rsplot::egui;
 use rsplot::egui_wgpu::RenderState;
+use rsplot::egui_wgpu::RendererOptions;
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Mutex;
@@ -61,7 +62,7 @@ impl App {
 }
 
 fn red_pixels_for(rgba: [u8; 4]) -> usize {
-    let rs = create_render_state(default_wgpu_setup());
+    let rs = create_render_state(default_wgpu_setup(), RendererOptions::default());
     let app = Rc::new(RefCell::new(App::new(&rs, rgba)));
     let renderer = WgpuTestRenderer::from_render_state(rs);
     let app_ui = app.clone();
@@ -100,7 +101,7 @@ fn red_pixels_of(rs: &RenderState, view: VolumeRaycaster) -> usize {
 #[test]
 fn remove_keeps_the_texture_while_another_same_id_view_lives() {
     let _gpu = GPU.lock().unwrap_or_else(|e| e.into_inner());
-    let rs = create_render_state(default_wgpu_setup());
+    let rs = create_render_state(default_wgpu_setup(), RendererOptions::default());
 
     let mut uploader = VolumeRaycaster::new(&rs, 21);
     uploader.set_volume(&rs, &solid(16, [255, 0, 0, 255]), 16, 16, 16);
@@ -122,7 +123,7 @@ fn remove_keeps_the_texture_while_another_same_id_view_lives() {
 #[test]
 fn dropping_the_last_view_frees_the_texture() {
     let _gpu = GPU.lock().unwrap_or_else(|e| e.into_inner());
-    let rs = create_render_state(default_wgpu_setup());
+    let rs = create_render_state(default_wgpu_setup(), RendererOptions::default());
 
     let mut uploader = VolumeRaycaster::new(&rs, 22);
     uploader.set_volume(&rs, &solid(16, [255, 0, 0, 255]), 16, 16, 16);

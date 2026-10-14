@@ -2,7 +2,7 @@
 name = "rsdm"
 version = "0.5.6"
 edition = "2024"
-rust-version = "1.92"
+rust-version = "1.95"
 license = "MIT OR Apache-2.0"
 description = "PyDM-style EPICS display widgets and data engine, built on rsplot"
 repository = "https://github.com/physwkim/rsplot"
@@ -134,15 +134,15 @@ arboard = { version = "3.6", default-features = false }
 
 [dev-dependencies]
 # Headless egui renderer for the widget render tests (alarm-border readback),
-# pinned to the same 0.34.3 the rsplot crate's tests use so there is one egui in
+# pinned to the same 0.36 the rsplot crate's tests use so there is one egui in
 # the tree. The `wgpu` feature provides the GPU readback (`Harness::render`); the
 # tests read pixels back and assert colours, the same empirical-verification
 # pattern as rsplot's `tests/mask_pointer_offset.rs` (no golden images).
-egui_kittest = { version = "0.34.3", features = ["wgpu"] }
+egui_kittest = { version = "0.36", features = ["wgpu"] }
 # Windowing for the runnable example panels (a wgpu `RenderState` + an event
-# loop), pinned to the same 0.34 the rsplot examples use. The library never
+# loop), pinned to the same 0.36 the rsplot examples use. The library never
 # depends on eframe — only the examples need a window.
-eframe = "0.34"
+eframe = "0.36"
 
 # A panel of PyDM-style widgets driven entirely by `loc://`/`fake://` channels,
 # so it runs with no IOC.

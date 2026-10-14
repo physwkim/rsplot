@@ -24,6 +24,7 @@ use egui_kittest::Harness;
 use egui_kittest::wgpu::{WgpuTestRenderer, create_render_state, default_wgpu_setup};
 use rsplot::egui::{self, Color32};
 use rsplot::egui_wgpu::RenderState;
+use rsplot::egui_wgpu::RendererOptions;
 use rsplot::{Camera, Scene3dGeometry, Vec3, install_scene3d, paint_scene3d, set_scene3d};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -99,7 +100,7 @@ impl App {
 
 #[test]
 fn scene3d_renders_depth_tested_geometry_and_lines() {
-    let rs = create_render_state(default_wgpu_setup());
+    let rs = create_render_state(default_wgpu_setup(), RendererOptions::default());
     let app = Rc::new(RefCell::new(App::new(&rs)));
     let renderer = WgpuTestRenderer::from_render_state(rs);
 

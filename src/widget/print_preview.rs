@@ -562,6 +562,7 @@ impl PrintPreview {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_util::HeadlessRun;
 
     fn approx(a: f32, b: f32) {
         assert!((a - b).abs() < 1e-3, "expected {b}, got {a}");
@@ -731,7 +732,7 @@ mod tests {
             "comment",
             CommentPosition::Center,
         );
-        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+        let _ = ctx.run_headless(egui::RawInput::default(), |ui| {
             pv.show(ui.ctx());
         });
         assert!(pv.is_open());
@@ -742,7 +743,7 @@ mod tests {
     fn show_closed_is_a_noop() {
         let ctx = egui::Context::default();
         let mut pv = PrintPreview::new();
-        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+        let _ = ctx.run_headless(egui::RawInput::default(), |ui| {
             pv.show(ui.ctx());
         });
         assert!(!pv.is_open());

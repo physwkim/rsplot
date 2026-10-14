@@ -59,7 +59,7 @@ impl ContextMenuApp {
 
 impl eframe::App for ContextMenuApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        egui::CentralPanel::default().show_inside(ui, |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             let status = self.status.clone();
             self.plot.show_toolbar_with(ui, |ui, _plot| {
                 ui.label(status);

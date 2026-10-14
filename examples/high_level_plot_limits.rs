@@ -85,7 +85,7 @@ impl eframe::App for PlotLimitsApp {
         egui::Panel::left("controls")
             .resizable(true)
             .default_size(200.0)
-            .show_inside(ui, |ui| {
+            .show(ui, |ui| {
                 ui.heading("Range constraints");
                 ui.checkbox(&mut self.constrain_range, "Enable range limits");
                 ui.add_enabled(
@@ -136,7 +136,7 @@ impl eframe::App for PlotLimitsApp {
 
         self.apply_constraints();
 
-        egui::CentralPanel::default().show_inside(ui, |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             self.plot.show_toolbar(ui);
             self.plot.show(ui);
         });

@@ -22,6 +22,7 @@ use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
 use egui_kittest::wgpu::{WgpuTestRenderer, create_render_state, default_wgpu_setup};
 use rsplot::egui;
+use rsplot::egui_wgpu::RendererOptions;
 use rsplot::{PlotWidget, Roi};
 
 const W: f32 = 360.0;
@@ -39,7 +40,7 @@ fn rect_desc(x: (f64, f64), y: (f64, f64)) -> String {
 
 #[test]
 fn roi_manager_table_renders_rows_and_click_makes_current() {
-    let rs = create_render_state(default_wgpu_setup());
+    let rs = create_render_state(default_wgpu_setup(), RendererOptions::default());
     rsplot::install(&rs);
 
     // Two ROIs at distinct positions → distinct geometry labels, so each row's
