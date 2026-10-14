@@ -5982,7 +5982,10 @@ impl PlotWidget {
             egui::vec2(260.0, 110.0),
             None,
             |ui| {
-                let edit = ui.add(egui::TextEdit::singleline(&mut buffer).desired_width(200.0));
+                // span the dialog width (a fixed width leaves a ragged gap)
+                let edit = ui.add(
+                    egui::TextEdit::singleline(&mut buffer).desired_width(ui.available_width()),
+                );
                 // Enter in the field applies, matching a dialog's default button.
                 if edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                     apply = true;

@@ -14,6 +14,7 @@ pub mod complex_image_view;
 pub mod curves_roi_widget;
 pub mod detached;
 pub mod fit_widget;
+pub mod form;
 pub mod high_level;
 pub mod histogram_colorbar;
 pub mod image_stack;

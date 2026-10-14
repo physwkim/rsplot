@@ -105,7 +105,7 @@ impl PrintDialog {
 
         let signals = crate::widget::detached::show_detached(ctx, id, "Print", size, pos, |ui| {
             ui.horizontal(|ui| {
-                ui.label("Printer:");
+                crate::widget::form::label(ui, 60.0, "Printer:");
                 if self.printer_names.is_empty() {
                     ui.label("No printers found");
                 } else {
@@ -116,6 +116,7 @@ impl PrintDialog {
                         .unwrap_or_default();
                     egui::ComboBox::from_id_salt("print_dialog_printer")
                         .selected_text(current)
+                        .width(ui.available_width())
                         .show_ui(ui, |ui| {
                             for (i, name) in self.printer_names.iter().enumerate() {
                                 ui.selectable_value(&mut self.selected, i, name);

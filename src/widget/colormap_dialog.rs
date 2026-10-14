@@ -182,11 +182,15 @@ impl ColormapDialog {
 
         let signals =
             crate::widget::detached::show_detached(ctx, id, "Colormap", size, pos, |ui| {
+                // Form rows (silx ColormapDialog is a QFormLayout): fixed
+                // label column, combos stretching to the dialog width.
+                const LABEL_W: f32 = 100.0;
                 ui.horizontal(|ui| {
-                    ui.label("Name:");
+                    crate::widget::form::label(ui, LABEL_W, "Name:");
                     let prev_name = self.name;
                     egui::ComboBox::from_id_salt("cmap_name")
                         .selected_text(self.name.label())
+                        .width(ui.available_width())
                         .show_ui(ui, |ui| {
                             for &name in &ColormapName::ALL {
                                 ui.selectable_value(&mut self.name, name, name.label());
@@ -198,10 +202,11 @@ impl ColormapDialog {
                 });
 
                 ui.horizontal(|ui| {
-                    ui.label("Normalization:");
+                    crate::widget::form::label(ui, LABEL_W, "Normalization:");
                     let prev_norm = self.normalization;
                     egui::ComboBox::from_id_salt("cmap_norm")
                         .selected_text(format!("{:?}", self.normalization))
+                        .width(ui.available_width())
                         .show_ui(ui, |ui| {
                             ui.selectable_value(
                                 &mut self.normalization,
@@ -232,7 +237,7 @@ impl ColormapDialog {
 
                 if self.normalization == Normalization::Gamma {
                     ui.horizontal(|ui| {
-                        ui.label("Gamma:");
+                        crate::widget::form::label(ui, LABEL_W, "Gamma:");
                         let prev = self.gamma;
                         ui.add(
                             egui::DragValue::new(&mut self.gamma)
@@ -252,7 +257,7 @@ impl ColormapDialog {
                 // egui Color32 (unmultiplied sRGBA) so the stored bytes match the
                 // colormap's `nan_color` exactly.
                 ui.horizontal(|ui| {
-                    ui.label("NaN color:");
+                    crate::widget::form::label(ui, LABEL_W, "NaN color:");
                     let [r, g, b, a] = self.nan_color;
                     let mut color = egui::Color32::from_rgba_unmultiplied(r, g, b, a);
                     if ui.color_edit_button_srgba(&mut color).changed() {
@@ -306,10 +311,11 @@ impl ColormapDialog {
                 // autoscale (silx `Colormap.setAutoscaleMode`).
                 if self.vmin_auto || self.vmax_auto {
                     ui.horizontal(|ui| {
-                        ui.label("Mode:");
+                        crate::widget::form::label(ui, LABEL_W, "Mode:");
                         let prev_mode = self.autoscale_mode;
                         egui::ComboBox::from_id_salt("cmap_autoscale_mode")
                             .selected_text(self.autoscale_mode.label())
+                            .width(ui.available_width())
                             .show_ui(ui, |ui| {
                                 for mode in AutoscaleMode::ALL {
                                     ui.selectable_value(
@@ -326,7 +332,7 @@ impl ColormapDialog {
 
                     if self.autoscale_mode == AutoscaleMode::Percentile {
                         ui.horizontal(|ui| {
-                            ui.label("Percentiles:");
+                            crate::widget::form::label(ui, LABEL_W, "Percentiles:");
                             let (prev_lo, prev_hi) = self.percentiles;
                             ui.add(
                                 egui::DragValue::new(&mut self.percentiles.0)
