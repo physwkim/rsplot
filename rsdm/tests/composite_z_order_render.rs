@@ -23,7 +23,7 @@ use rsplot::egui_wgpu::RendererOptions;
 fn black_over_red(raw: &[u8], width: usize, chip: egui::Rect) -> u32 {
     let mut black = 0u32;
     let mut red = 0u32;
-    for (i, px) in raw.chunks_exact(4).enumerate() {
+    for (i, px) in raw.as_chunks::<4>().0.iter().enumerate() {
         let (x, y) = ((i % width) as f32, (i / width) as f32);
         if !chip.contains(egui::pos2(x, y)) {
             continue;

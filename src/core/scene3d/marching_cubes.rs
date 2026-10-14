@@ -165,7 +165,9 @@ impl MarchingCubes {
     /// Vertices as `(z, y, x)` triples.
     pub fn vertices_zyx(&self) -> Vec<[f32; 3]> {
         self.vertices
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .map(|c| [c[0], c[1], c[2]])
             .collect()
     }
@@ -173,7 +175,9 @@ impl MarchingCubes {
     /// Normals as `(nz, ny, nx)` triples.
     pub fn normals_zyx(&self) -> Vec<[f32; 3]> {
         self.normals
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .map(|c| [c[0], c[1], c[2]])
             .collect()
     }

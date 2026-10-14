@@ -43,7 +43,9 @@ fn now_epoch_secs() -> f64 {
 
 /// Pure-green (curve colour) pixel count in an RGBA frame.
 fn count_green(raw: &[u8]) -> u32 {
-    raw.chunks_exact(4)
+    raw.as_chunks::<4>()
+        .0
+        .iter()
         .filter(|px| px[0] < 80 && px[1] > 200 && px[2] < 80)
         .count() as u32
 }

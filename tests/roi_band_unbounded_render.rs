@@ -40,7 +40,7 @@ fn is_red(px: &[u8]) -> bool {
 /// frame, indexed by image column `0..W`.
 fn red_columns(raw: &[u8]) -> Vec<u32> {
     let mut cols = vec![0u32; W];
-    for (i, px) in raw.chunks_exact(4).enumerate() {
+    for (i, px) in raw.as_chunks::<4>().0.iter().enumerate() {
         if is_red(px) {
             cols[i % W] += 1;
         }

@@ -28,7 +28,9 @@ fn now_epoch_secs() -> f64 {
 }
 
 fn count_color(raw: &[u8], want: [u8; 3]) -> u32 {
-    raw.chunks_exact(4)
+    raw.as_chunks::<4>()
+        .0
+        .iter()
         .filter(|px| {
             let dominant = |c: usize| {
                 if want[c] > 200 {

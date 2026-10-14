@@ -399,14 +399,14 @@ impl Scene3dGeometry {
     /// Used by [`crate::SceneWidget::pick`].
     pub fn pick_triangles(&self) -> Vec<[Vec3; 3]> {
         let mut out = Vec::with_capacity(self.triangles.len() / 3 + self.meshes.len() / 3);
-        for tri in self.triangles.chunks_exact(3) {
+        for tri in self.triangles.as_chunks::<3>().0 {
             out.push([
                 Vec3::from_array(tri[0].pos),
                 Vec3::from_array(tri[1].pos),
                 Vec3::from_array(tri[2].pos),
             ]);
         }
-        for tri in self.meshes.chunks_exact(3) {
+        for tri in self.meshes.as_chunks::<3>().0 {
             out.push([
                 Vec3::from_array(tri[0].pos),
                 Vec3::from_array(tri[1].pos),

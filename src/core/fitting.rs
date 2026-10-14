@@ -2585,7 +2585,7 @@ pub fn fit_in_range(
 pub fn multi_gaussian_model(x: &[f64], params: &[f64]) -> Vec<f64> {
     let inv = 1.0 / fwhm_to_sigma_factor();
     let mut y = vec![0.0_f64; x.len()];
-    for triple in params.chunks_exact(3) {
+    for triple in params.as_chunks::<3>().0 {
         let (height, centroid, fwhm) = (triple[0], triple[1], triple[2]);
         let sigma = fwhm * inv;
         if sigma == 0.0 {
@@ -4133,7 +4133,9 @@ mod tests {
     /// Find the fitted triple whose centre is nearest `target`.
     fn nearest_peak(params: &[f64], target: f64) -> [f64; 3] {
         params
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .min_by(|a, b| {
                 (a[1] - target)
                     .abs()

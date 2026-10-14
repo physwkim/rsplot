@@ -40,7 +40,9 @@ fn wait_for(mut cond: impl FnMut() -> bool, timeout: Duration) -> bool {
 /// Count pixels whose channels are clearly separated — i.e. colour-mapped image
 /// pixels (viridis purple/green/yellow), not the grey plot chrome or background.
 fn count_colorful(raw: &[u8]) -> u32 {
-    raw.chunks_exact(4)
+    raw.as_chunks::<4>()
+        .0
+        .iter()
         .filter(|px| {
             let mx = i32::from(px[0].max(px[1]).max(px[2]));
             let mn = i32::from(px[0].min(px[1]).min(px[2]));

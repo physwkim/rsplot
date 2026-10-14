@@ -909,7 +909,7 @@ mod tests {
             .expect("encode rgb jpeg");
         let out = decompress("jpeg", &stream, rgb.len(), 1).unwrap();
         assert!(
-            out.chunks_exact(3).all(|p| p[0].abs_diff(10) <= 8
+            out.as_chunks::<3>().0.iter().all(|p| p[0].abs_diff(10) <= 8
                 && p[1].abs_diff(200) <= 8
                 && p[2].abs_diff(60) <= 8),
             "rgb pixels off by more than 8"

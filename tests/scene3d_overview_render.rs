@@ -16,8 +16,10 @@ const H: u32 = 240;
 /// (`width`-wide tightly packed RGBA8, top row first).
 fn diff_pixels(a: &[u8], b: &[u8], width: u32) -> Vec<(u32, u32)> {
     assert_eq!(a.len(), b.len());
-    a.chunks_exact(4)
-        .zip(b.chunks_exact(4))
+    a.as_chunks::<4>()
+        .0
+        .iter()
+        .zip(b.as_chunks::<4>().0.iter())
         .enumerate()
         .filter(|(_, (pa, pb))| pa != pb)
         .map(|(i, _)| (i as u32 % width, i as u32 / width))

@@ -46,7 +46,7 @@ fn is_teal(px: &[u8]) -> bool {
 /// `(teal pixels in the left third of the frame, teal pixels in the right third)`.
 fn teal_left_right(raw: &[u8]) -> (u32, u32) {
     let (mut left, mut right) = (0u32, 0u32);
-    for (i, px) in raw.chunks_exact(4).enumerate() {
+    for (i, px) in raw.as_chunks::<4>().0.iter().enumerate() {
         if is_teal(px) {
             let col = i % W;
             if col < W / 3 {

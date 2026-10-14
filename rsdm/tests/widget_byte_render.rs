@@ -86,7 +86,7 @@ fn render(value: i64, num_bits: usize) -> Counts {
     let raw = image.as_raw();
 
     let (mut green, mut grey) = (0u32, 0u32);
-    for px in raw.chunks_exact(4) {
+    for px in raw.as_chunks::<4>().0 {
         let (r, g, b) = (px[0], px[1], px[2]);
         if r < 80 && g > 200 && b < 80 {
             green += 1;

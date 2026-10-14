@@ -113,7 +113,12 @@ pub(crate) fn rows_to_rgba8(
         let src = &mapped[row * bpr..row * bpr + row_bytes];
         let dst = &mut out[row * row_bytes..(row + 1) * row_bytes];
         if swap {
-            for (s, d) in src.chunks_exact(4).zip(dst.chunks_exact_mut(4)) {
+            for (s, d) in src
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .zip(dst.as_chunks_mut::<4>().0.iter_mut())
+            {
                 d[0] = s[2];
                 d[1] = s[1];
                 d[2] = s[0];
@@ -148,7 +153,7 @@ pub fn encode_png(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>, png::
 pub fn rgba_to_rgb(rgba: &[u8], width: u32, height: u32) -> Vec<u8> {
     let n = (width as usize) * (height as usize);
     let mut out = Vec::with_capacity(n * 3);
-    for px in rgba.chunks_exact(4).take(n) {
+    for px in rgba.as_chunks::<4>().0.iter().take(n) {
         out.push(px[0]);
         out.push(px[1]);
         out.push(px[2]);
@@ -1500,7 +1505,9 @@ mod tests {
         let hex: String = body.chars().filter(|c| c.is_ascii_hexdigit()).collect();
         let decoded: Vec<u8> = hex
             .as_bytes()
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
             .collect();
         assert_eq!(decoded, rgba_to_rgb(&rgba, 2, 2));
@@ -1548,7 +1555,9 @@ mod tests {
         let hex: String = hex.chars().filter(|c| c.is_ascii_hexdigit()).collect();
         let decoded: Vec<u8> = hex
             .as_bytes()
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
             .collect();
         assert_eq!(decoded, rgba_to_rgb(&rgba, 2, 2));

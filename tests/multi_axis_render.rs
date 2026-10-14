@@ -20,7 +20,9 @@ use rsplot::egui_wgpu::RendererOptions;
 use rsplot::{AxisSide, Plot1D, YAxis};
 
 fn count_red(raw: &[u8]) -> u32 {
-    raw.chunks_exact(4)
+    raw.as_chunks::<4>()
+        .0
+        .iter()
         .filter(|px| px[0] > 200 && px[1] < 80 && px[2] < 80)
         .count() as u32
 }

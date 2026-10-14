@@ -43,13 +43,17 @@ fn wait_for(mut cond: impl FnMut() -> bool, timeout: Duration) -> bool {
 }
 
 fn count_red(raw: &[u8]) -> u32 {
-    raw.chunks_exact(4)
+    raw.as_chunks::<4>()
+        .0
+        .iter()
         .filter(|px| px[0] > 200 && px[1] < 80 && px[2] < 80)
         .count() as u32
 }
 
 fn count_green(raw: &[u8]) -> u32 {
-    raw.chunks_exact(4)
+    raw.as_chunks::<4>()
+        .0
+        .iter()
         .filter(|px| px[0] < 80 && px[1] > 200 && px[2] < 80)
         .count() as u32
 }
@@ -176,7 +180,7 @@ fn pixel_probe(
 /// threshold) in a [`PROBE_SIZE`]-wide probe image. `(0, 0)` when none.
 fn white_bbox(raw: &[u8]) -> (u32, u32) {
     let (mut x0, mut y0, mut x1, mut y1) = (u32::MAX, u32::MAX, 0u32, 0u32);
-    for (i, px) in raw.chunks_exact(4).enumerate() {
+    for (i, px) in raw.as_chunks::<4>().0.iter().enumerate() {
         if px[0] > 230 && px[1] > 230 && px[2] > 230 {
             let (x, y) = (i as u32 % PROBE_SIZE, i as u32 / PROBE_SIZE);
             x0 = x0.min(x);
@@ -439,7 +443,7 @@ fn match_bbox(
     is_match: impl Fn(&[u8]) -> bool,
 ) -> Option<(usize, usize, usize, usize)> {
     let mut bbox: Option<(usize, usize, usize, usize)> = None;
-    for (i, px) in raw.chunks_exact(4).enumerate() {
+    for (i, px) in raw.as_chunks::<4>().0.iter().enumerate() {
         if is_match(px) {
             let (x, y) = (i % width, i / width);
             bbox = Some(match bbox {
@@ -664,7 +668,7 @@ fn medm_cell_text_bbox(
     // Confine the scan to the cell interior: outside it lies the dark harness
     // panel, which would swallow the band into rows 0..39.
     let (mut top, mut bottom, mut left, mut right) = (usize::MAX, 0usize, usize::MAX, 0usize);
-    for (i, px) in raw.chunks_exact(4).enumerate() {
+    for (i, px) in raw.as_chunks::<4>().0.iter().enumerate() {
         let (x, y) = (i % 110, i / 110);
         if x_scan.contains(&x) && (10..30).contains(&y) && px[0] < 70 && px[1] < 70 && px[2] < 70 {
             top = top.min(y);
