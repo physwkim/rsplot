@@ -122,6 +122,11 @@ const CBAR_INTERACTIVE_WIDTH: f32 = 175.0;
 // Extra gutter claimed by an axis title / label when present.
 const TITLE_H: f32 = 18.0;
 const LABEL_H: f32 = 16.0;
+// Least distance from the data area's top edge at which a Rect/HRange/VRange
+// ROI's name label is anchored: the 11 pt label row plus its 3 px padding, so
+// the label (drawn above its anchor) stays inside the area instead of over the
+// title gutter. See [`draw_roi`].
+const ROI_LABEL_INSET: f32 = 16.0;
 
 /// What chrome the plot needs space reserved for. Drives [`layout`]'s gutter
 /// sizes so titles/labels, a colorbar, and a y2 axis all get room.
@@ -1374,7 +1379,12 @@ pub fn draw_roi(
                 r.right_bottom(),
                 r.left_bottom(),
             ]);
-            Some(egui::pos2(r.center().x, r.top()))
+            // The label sits above the top edge, so a rect whose top is at the
+            // data area's top — every VRange, which spans the full height —
+            // would put it in the title gutter, over the title. Keep the anchor
+            // at least one label height inside the area.
+            let y = r.top().max(t.area.top() + ROI_LABEL_INSET);
+            Some(egui::pos2(r.center().x, y))
         }
     };
 
