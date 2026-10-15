@@ -397,6 +397,14 @@ impl<'a> PlotView<'a> {
             .with_overrides(plot.foreground, plot.grid_color);
 
         let painter = ui.painter();
+        // Chrome background (silx `setBackgroundColors`' first colour): the
+        // surround behind the gutters, painted under everything else. With
+        // `None` the host panel's fill shows through, as before the colour
+        // was honoured — a light data area over a dark panel left the tick
+        // labels (dark, per the foreground override) unreadable.
+        if let Some(bg) = plot.background {
+            painter.rect_filled(rect, egui::CornerRadius::ZERO, bg);
+        }
         // Data layer (wgpu), clipped to the data area: clear, image, then curve.
         painter.add(egui_wgpu::Callback::new_paint_callback(
             area,

@@ -319,6 +319,10 @@ pub struct Plot {
     pub id: PlotId,
     /// Data-area background color (maps to silx `setBackgroundColors`' data background).
     pub data_background: Color32,
+    /// Chrome background color — the surround behind the gutters, axes and
+    /// labels (silx `setBackgroundColors`' first colour). `None` (the default)
+    /// paints nothing there, so the host panel's fill shows through.
+    pub background: Option<Color32>,
     /// Data-space limits `(x_min, x_max, y_min, y_max)`.
     pub limits: (f64, f64, f64, f64),
     /// Margins reserving extra space inside the chrome gutters. Zero by default.
@@ -568,6 +572,7 @@ impl Plot {
         Self {
             id,
             data_background: Color32::from_rgb(16, 16, 24),
+            background: None,
             limits: (0.0, 1.0, 0.0, 1.0),
             margins: Margins::ZERO,
             colormap: None,

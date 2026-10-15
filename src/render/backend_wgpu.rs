@@ -797,7 +797,8 @@ impl Backend for WgpuBackend {
         self.plot.grid_color = Some(grid);
     }
 
-    fn set_background_colors(&mut self, _background: Color32, data_background: Color32) {
+    fn set_background_colors(&mut self, background: Color32, data_background: Color32) {
+        self.plot.background = Some(background);
         self.plot.data_background = data_background;
     }
 
