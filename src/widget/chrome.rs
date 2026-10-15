@@ -564,6 +564,35 @@ pub fn draw_axes(
     );
 }
 
+/// Greedy tick-label culling along one axis: [`admit`](Self::admit) keeps a
+/// label whose pixel span clears the last kept label by [`GAP`](Self::GAP) and
+/// drops it otherwise. Tick positions arrive monotonically (ascending or
+/// descending pixels), so checking only the last kept span suffices. Tick
+/// *marks* are never culled — only their text — so a plot too small for every
+/// label sheds labels instead of overlapping them (the adaptive density counts
+/// labels per inch but never measures label extent, so at small sizes its
+/// minimum of 2 ticks can still collide).
+#[derive(Default)]
+struct LabelCull {
+    last: Option<(f32, f32)>,
+}
+
+impl LabelCull {
+    /// Minimum clear pixels between adjacent labels.
+    const GAP: f32 = 3.0;
+
+    fn admit(&mut self, lo: f32, hi: f32) -> bool {
+        let fits = match self.last {
+            None => true,
+            Some((kept_lo, kept_hi)) => lo > kept_hi + Self::GAP || hi < kept_lo - Self::GAP,
+        };
+        if fits {
+            self.last = Some((lo, hi));
+        }
+        fits
+    }
+}
+
 /// As [`draw_axes`] but honoring the X-axis [`TickMode`]: with
 /// [`TickMode::TimeSeries`] the X tick positions and labels are produced by
 /// [`dtime_ticks`] (epoch-seconds data values) laid out in `x_time_zone`'s
@@ -653,34 +682,40 @@ pub fn draw_axes_with_x_tick_mode(
     );
 
     // X ticks + labels below the bottom edge.
+    let mut x_cull = LabelCull::default();
     for (xv, label) in &xticks {
         let px = t.data_to_pixel(*xv, t.y.min).x;
         painter.line_segment(
             [pos2(px, area.bottom()), pos2(px, area.bottom() + tick_len)],
             axis,
         );
-        painter.text(
-            pos2(px, area.bottom() + tick_len + 2.0),
-            Align2::CENTER_TOP,
-            label,
-            font.clone(),
-            style.text,
-        );
+        let galley = painter.layout_no_wrap(label.clone(), font.clone(), style.text);
+        let half_w = galley.size().x * 0.5;
+        if x_cull.admit(px - half_w, px + half_w) {
+            painter.galley(
+                pos2(px - half_w, area.bottom() + tick_len + 2.0),
+                galley,
+                style.text,
+            );
+        }
     }
     // Y ticks + labels left of the left edge.
+    let mut y_cull = LabelCull::default();
     for (yv, label) in &yticks {
         let py = t.data_to_pixel(t.x.min, *yv).y;
         painter.line_segment(
             [pos2(area.left() - tick_len, py), pos2(area.left(), py)],
             axis,
         );
-        painter.text(
-            pos2(area.left() - tick_len - 3.0, py),
-            Align2::RIGHT_CENTER,
-            label,
-            font.clone(),
-            style.text,
-        );
+        let galley = painter.layout_no_wrap(label.clone(), font.clone(), style.text);
+        let size = galley.size();
+        if y_cull.admit(py - size.y * 0.5, py + size.y * 0.5) {
+            painter.galley(
+                pos2(area.left() - tick_len - 3.0 - size.x, py - size.y * 0.5),
+                galley,
+                style.text,
+            );
+        }
     }
 }
 
@@ -694,19 +729,22 @@ pub fn draw_y2_ticks(painter: &Painter, t: &Transform, style: &Style) {
     let font = FontId::proportional(11.0);
     let tick_len = 4.0;
 
+    let mut cull = LabelCull::default();
     for (yv, label) in axis_ticks(&t.y, 6) {
         let py = t.data_to_pixel(t.x.min, yv).y;
         painter.line_segment(
             [pos2(area.right(), py), pos2(area.right() + tick_len, py)],
             axis,
         );
-        painter.text(
-            pos2(area.right() + tick_len + 3.0, py),
-            Align2::LEFT_CENTER,
-            label,
-            font.clone(),
-            style.text,
-        );
+        let galley = painter.layout_no_wrap(label, font.clone(), style.text);
+        let half_h = galley.size().y * 0.5;
+        if cull.admit(py - half_h, py + half_h) {
+            painter.galley(
+                pos2(area.right() + tick_len + 3.0, py - half_h),
+                galley,
+                style.text,
+            );
+        }
     }
 }
 
@@ -735,34 +773,38 @@ pub fn draw_extra_y_ticks(
     // y2, whose spine is the data-area frame), so draw one.
     painter.vline(baseline_x, area.y_range(), axis);
 
+    let mut cull = LabelCull::default();
     for (yv, label) in axis_ticks(&t.y, 6) {
         let py = t.data_to_pixel(t.x.min, yv).y;
+        let galley = painter.layout_no_wrap(label, font.clone(), style.text);
+        let size = galley.size();
+        let keep = cull.admit(py - size.y * 0.5, py + size.y * 0.5);
         match side {
             AxisSide::Right => {
                 painter.line_segment(
                     [pos2(baseline_x, py), pos2(baseline_x + tick_len, py)],
                     axis,
                 );
-                painter.text(
-                    pos2(baseline_x + tick_len + 3.0, py),
-                    Align2::LEFT_CENTER,
-                    label,
-                    font.clone(),
-                    style.text,
-                );
+                if keep {
+                    painter.galley(
+                        pos2(baseline_x + tick_len + 3.0, py - size.y * 0.5),
+                        galley,
+                        style.text,
+                    );
+                }
             }
             AxisSide::Left => {
                 painter.line_segment(
                     [pos2(baseline_x - tick_len, py), pos2(baseline_x, py)],
                     axis,
                 );
-                painter.text(
-                    pos2(baseline_x - tick_len - 3.0, py),
-                    Align2::RIGHT_CENTER,
-                    label,
-                    font.clone(),
-                    style.text,
-                );
+                if keep {
+                    painter.galley(
+                        pos2(baseline_x - tick_len - 3.0 - size.x, py - size.y * 0.5),
+                        galley,
+                        style.text,
+                    );
+                }
             }
         }
     }
@@ -1985,6 +2027,26 @@ pub fn draw_colorbar(painter: &Painter, rect: Rect, cmap: &Colormap, style: &Sty
 mod tests {
     use super::*;
     use crate::test_util::HeadlessRun;
+
+    #[test]
+    fn label_cull_drops_overlapping_and_keeps_spaced() {
+        let mut c = LabelCull::default();
+        assert!(c.admit(0.0, 10.0));
+        assert!(!c.admit(8.0, 18.0)); // overlaps the kept span
+        assert!(!c.admit(11.0, 21.0)); // clears it but not by GAP
+        assert!(c.admit(14.0, 24.0)); // clears GAP
+        assert!(!c.admit(20.0, 30.0)); // compares against the last KEPT span
+    }
+
+    #[test]
+    fn label_cull_handles_descending_runs() {
+        // Y labels walk down in data order but up in pixels (or vice versa);
+        // admit must work for a monotone run in either direction.
+        let mut c = LabelCull::default();
+        assert!(c.admit(90.0, 100.0));
+        assert!(!c.admit(85.0, 95.0));
+        assert!(c.admit(70.0, 80.0));
+    }
 
     #[test]
     fn roi_appearance_resolves_color_fallback_and_name() {
