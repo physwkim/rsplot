@@ -781,6 +781,7 @@ pub fn draw_extra_y_ticks(
             text,
             FontId::proportional(12.0),
             style.text,
+            area.height(),
         );
     }
 }
@@ -813,26 +814,32 @@ pub fn draw_labels(
     let title_font = FontId::proportional(14.0);
     let label_font = FontId::proportional(12.0);
 
+    // A label longer than its gutter run is elided with '…' rather than drawn
+    // full length: centered on the data area, an overlong title or axis label
+    // would otherwise hit the widget clip rect mid-glyph on a narrow plot (and
+    // run under the colorbar / y2 gutters before that).
+    let h_max = 2.0 * (area.center().x - full.left()).min(full.right() - area.center().x);
     if let Some(t) = labels.title {
-        painter.text(
-            pos2(area.center().x, full.top() + 2.0),
-            Align2::CENTER_TOP,
-            t,
-            title_font,
+        let galley = elided_singleline(painter, t, title_font, style.text, h_max);
+        let size = galley.size();
+        painter.galley(
+            pos2(area.center().x - size.x * 0.5, full.top() + 2.0),
+            galley,
             style.text,
         );
     }
     if let Some(t) = labels.x {
-        painter.text(
-            pos2(area.center().x, full.bottom() - 2.0),
-            Align2::CENTER_BOTTOM,
-            t,
-            label_font.clone(),
+        let galley = elided_singleline(painter, t, label_font.clone(), style.text, h_max);
+        let size = galley.size();
+        painter.galley(
+            pos2(area.center().x - size.x * 0.5, full.bottom() - 2.0 - size.y),
+            galley,
             style.text,
         );
     }
     // Left Y label: rotate a quarter turn counter-clockwise (reads bottom→top),
     // centered in the left gutter strip.
+    let v_max = 2.0 * (area.center().y - full.top()).min(full.bottom() - area.center().y);
     if let Some(t) = labels.y {
         draw_rotated_label(
             painter,
@@ -841,6 +848,7 @@ pub fn draw_labels(
             t,
             label_font.clone(),
             style.text,
+            v_max,
         );
     }
     // Right y2 label: rotate a quarter turn clockwise (reads top→bottom),
@@ -853,6 +861,7 @@ pub fn draw_labels(
             t,
             label_font,
             style.text,
+            v_max,
         );
     }
 }
@@ -874,12 +883,27 @@ fn draw_rotated_label(
     text: &str,
     font: FontId,
     color: Color32,
+    max_len: f32,
 ) {
-    let galley = painter.layout_no_wrap(text.to_owned(), font, color);
+    let galley = elided_singleline(painter, text, font, color, max_len);
     let pos = center - galley.rect.center().to_vec2();
     painter.add(egui::Shape::Text(
         TextShape::new(pos, galley, color).with_angle_and_anchor(angle, Align2::CENTER_CENTER),
     ));
+}
+
+/// Lay out `text` on one line, elided with '…' so it never exceeds `max_w` —
+/// the bound a gutter label gets from its run along the widget edge.
+fn elided_singleline(
+    painter: &Painter,
+    text: &str,
+    font: FontId,
+    color: Color32,
+    max_w: f32,
+) -> std::sync::Arc<egui::Galley> {
+    let mut job = egui::text::LayoutJob::simple_singleline(text.to_owned(), font, color);
+    job.wrap = egui::text::TextWrapping::truncate_at_width(max_w.max(0.0));
+    painter.layout_job(job)
 }
 
 /// Format a coordinate with decimals scaled to the visible span.
