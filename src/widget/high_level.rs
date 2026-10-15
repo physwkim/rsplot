@@ -3833,6 +3833,9 @@ impl PlotWidget {
         // silx devicePixelRatio analog for the snap radius (PositionInfo.py:229-237).
         self.last_pixels_per_point = ui.ctx().pixels_per_point();
         self.sync_active_axis_labels();
+        // Land any pending item mutations in the GPU scene exactly once per
+        // frame (see `WgpuBackend::flush_scene`).
+        self.backend.flush_scene();
         let mut view = PlotView::new();
         if let Some(ext) = menu_ext {
             view = view.with_context_menu(ext);
