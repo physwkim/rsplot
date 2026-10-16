@@ -109,7 +109,7 @@ flate2 = { version = "1", optional = true }
 # The blosc ZSTD sub-codec — the same pure-Rust zstd implementation rust-hdf5's
 # `zstd` feature uses (its `default-features = false` drops the rayon
 # parallelism, matching rust-hdf5's own declaration).
-rust-zstd = { version = "0.1", optional = true, default-features = false }
+rust-zstd = { version = "0.4", optional = true, default-features = false }
 # The blosc SNAPPY sub-codec (raw snappy per split, `snappy_uncompress` in
 # c-blosc's snappy_wrap_decompress) — the crate rust-hdf5's blosc feature uses.
 snap = { version = "1", optional = true }

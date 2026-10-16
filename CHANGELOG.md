@@ -32,6 +32,8 @@ library), **rsdm** (a PyDM-style EPICS display layer built on rsplot), and
   gutter (tick marks never).
 - **rsplot**: the compact-toolbar overflow button uses U+2026, which egui's
   bundled font covers (U+22EF rendered as the tofu box).
+- **rsdm**: the `pva` feature's blosc ZSTD sub-codec uses `rust-zstd` 0.4;
+  0.1.0, the only 0.1 release, was yanked, so a fresh resolve of rsdm failed.
 
 ### Added
 
