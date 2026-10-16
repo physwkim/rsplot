@@ -94,12 +94,12 @@ impl eframe::App for ShiftActionApp {
         egui::Panel::right("shift_action_legend")
             .resizable(true)
             .default_size(220.0)
-            .show_inside(ui, |ui| {
+            .show(ui, |ui| {
                 ui.heading("Legends");
                 self.plot.show_legend(ui);
             });
 
-        egui::CentralPanel::default().show_inside(ui, |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             let status = self.status.clone();
             let (_, shift_clicked) = self.plot.show_toolbar_with(ui, |ui, _plot| {
                 let shift_clicked = ui.button("Shift active curve up").clicked();

@@ -540,6 +540,7 @@ struct HandleColumns {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_util::HeadlessRun;
 
     // ── axis_range ──────────────────────────────────────────────────────
 
@@ -722,7 +723,7 @@ mod tests {
         // Exercises the full ui() render path (gradient loop, histogram bars,
         // handles, labels, per-handle interact) headlessly; no input, so no drag.
         let ctx = egui::Context::default();
-        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+        let _ = ctx.run_headless(egui::RawInput::default(), |ui| {
             let bar = HistogramColorBar::new(Colormap::viridis(0.0, 1.0))
                 .with_data_range((0.0, 1.0))
                 .with_histogram(Some((vec![3, 7, 2], vec![0.0, 0.33, 0.66, 1.0])))
@@ -737,7 +738,7 @@ mod tests {
         // Pinned bounds inset well inside the allocated box: the strip aligns to
         // the bounds (image data-area guides) and nothing panics / clips.
         let ctx = egui::Context::default();
-        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+        let _ = ctx.run_headless(egui::RawInput::default(), |ui| {
             let origin = ui.max_rect().top();
             let bar = HistogramColorBar::new(Colormap::viridis(0.0, 1.0))
                 .with_data_range((0.0, 1.0))
@@ -753,7 +754,7 @@ mod tests {
         // Embedded form: render into a fixed gutter rect (as PlotView does for a
         // chrome colorbar) rather than allocating from the layout cursor.
         let ctx = egui::Context::default();
-        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+        let _ = ctx.run_headless(egui::RawInput::default(), |ui| {
             let origin = ui.max_rect().left_top();
             let gutter = Rect::from_min_max(
                 pos2(origin.x + 300.0, origin.y + 20.0),
@@ -774,7 +775,7 @@ mod tests {
         // %.2e). The label gutter is measured from the drawn value, so the wide
         // scientific label must lay out inside the column without panicking.
         let ctx = egui::Context::default();
-        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+        let _ = ctx.run_headless(egui::RawInput::default(), |ui| {
             let bar = HistogramColorBar::new(Colormap::viridis(0.062, 1.0))
                 .with_data_range((0.0, 1.0))
                 .with_histogram(Some((vec![9, 4, 1], vec![0.0, 0.33, 0.66, 1.0])))
@@ -802,7 +803,7 @@ mod tests {
 
         let ctx = egui::Context::default();
         let mut gutter = Rect::NOTHING;
-        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+        let output = ctx.run_headless(egui::RawInput::default(), |ui| {
             let origin = ui.max_rect().left_top();
             gutter = Rect::from_min_max(
                 pos2(origin.x + 10.0, origin.y + 10.0),
@@ -838,7 +839,7 @@ mod tests {
         // All-equal data + vmin==vmax + no histogram + tiny rect: the degenerate
         // axis and clamp paths must not panic.
         let ctx = egui::Context::default();
-        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+        let _ = ctx.run_headless(egui::RawInput::default(), |ui| {
             let bar = HistogramColorBar::new(Colormap::viridis(5.0, 5.0))
                 .with_data_range((5.0, 5.0))
                 .with_histogram(None)
@@ -852,7 +853,7 @@ mod tests {
         // Log colormap with a non-positive-inclusive data range exercises the
         // log positivity guards in axis_range / value_to_frac during paint.
         let ctx = egui::Context::default();
-        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+        let _ = ctx.run_headless(egui::RawInput::default(), |ui| {
             let cmap = Colormap::viridis(1.0, 1000.0).with_normalization(Normalization::Log);
             let bar = HistogramColorBar::new(cmap)
                 .with_data_range((-2.0, 1000.0))

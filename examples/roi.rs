@@ -56,7 +56,7 @@ impl RoiApp {
 
 impl eframe::App for RoiApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        egui::CentralPanel::default().show_inside(ui, |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             let out = PlotView::new().show(ui, &mut self.plot);
             // Report the bounds of whichever region's edge is being dragged.
             if let Some(i) = out.roi_changed {

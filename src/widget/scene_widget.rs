@@ -770,7 +770,9 @@ impl SceneWidget {
         for (mesh, tm) in self.content.textured_meshes.iter().enumerate() {
             let tris: Vec<[Vec3; 3]> = tm
                 .vertices
-                .chunks_exact(3)
+                .as_chunks::<3>()
+                .0
+                .iter()
                 .map(|t| {
                     [
                         Vec3::from_array(t[0]),

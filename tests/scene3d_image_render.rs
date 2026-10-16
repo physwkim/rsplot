@@ -19,6 +19,7 @@ use egui_kittest::Harness;
 use egui_kittest::wgpu::{WgpuTestRenderer, create_render_state, default_wgpu_setup};
 use rsplot::egui::{self, Color32};
 use rsplot::egui_wgpu::RenderState;
+use rsplot::egui_wgpu::RendererOptions;
 use rsplot::{
     Camera, ImageInterpolation, Scene3dGeometry, Scene3dImageLayer, Vec3, install_scene3d,
     paint_scene3d, set_scene3d,
@@ -90,7 +91,7 @@ impl App {
 
 #[test]
 fn scene3d_image_quad_projects_its_texels() {
-    let rs = create_render_state(default_wgpu_setup());
+    let rs = create_render_state(default_wgpu_setup(), RendererOptions::default());
     let app = Rc::new(RefCell::new(App::new(&rs)));
     let renderer = WgpuTestRenderer::from_render_state(rs);
 
@@ -214,7 +215,7 @@ impl DepthHoleApp {
 
 #[test]
 fn transparent_front_texel_does_not_occlude_geometry_behind() {
-    let rs = create_render_state(default_wgpu_setup());
+    let rs = create_render_state(default_wgpu_setup(), RendererOptions::default());
     let app = Rc::new(RefCell::new(DepthHoleApp::new(&rs)));
     let renderer = WgpuTestRenderer::from_render_state(rs);
 

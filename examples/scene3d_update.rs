@@ -69,7 +69,7 @@ impl eframe::App for UpdateApp {
         // egui's monotonic clock drives the animation (no wall-clock needed).
         let angle = ui.input(|i| i.time) as f32 * 0.6;
         self.rebuild(angle);
-        egui::CentralPanel::default().show_inside(ui, |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             self.scene.show(ui);
         });
         ui.ctx().request_repaint(); // keep the animation running

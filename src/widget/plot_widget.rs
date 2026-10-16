@@ -397,6 +397,14 @@ impl<'a> PlotView<'a> {
             .with_overrides(plot.foreground, plot.grid_color);
 
         let painter = ui.painter();
+        // Chrome background (silx `setBackgroundColors`' first colour): the
+        // surround behind the gutters, painted under everything else. With
+        // `None` the host panel's fill shows through, as before the colour
+        // was honoured — a light data area over a dark panel left the tick
+        // labels (dark, per the foreground override) unreadable.
+        if let Some(bg) = plot.background {
+            painter.rect_filled(rect, egui::CornerRadius::ZERO, bg);
+        }
         // Data layer (wgpu), clipped to the data area: clear, image, then curve.
         painter.add(egui_wgpu::Callback::new_paint_callback(
             area,
@@ -1646,6 +1654,7 @@ fn commit(plot: &mut Plot, next: interaction::Limits, next_y2: Option<(f64, f64)
 mod tests {
     use super::*;
     use crate::core::plot::Plot;
+    use crate::test_util::HeadlessRun;
 
     /// Drive a headless egui frame with the given raw input, run `show`, and
     /// return the resulting [`PlotResponse`] and its data area. The wgpu paint
@@ -1656,7 +1665,7 @@ mod tests {
         raw: egui::RawInput,
     ) -> (PlotResponse, Rect) {
         let mut captured: Option<(PlotResponse, Rect)> = None;
-        let _ = ctx.run_ui(raw, |ui| {
+        let _ = ctx.run_headless(raw, |ui| {
             let resp = PlotView::new().show(ui, plot);
             let area = resp.transform.area;
             captured = Some((resp, area));
@@ -1745,7 +1754,7 @@ mod tests {
                 events,
                 ..screen_input(screen)
             };
-            ctx.run_ui(raw, |ui| {
+            ctx.run_headless(raw, |ui| {
                 let mut ext = |ui: &mut Ui| {
                     let _ = ui.button("Custom entry");
                 };
@@ -1796,7 +1805,7 @@ mod tests {
         raw: egui::RawInput,
     ) -> (DrawResponse, Rect) {
         let mut captured: Option<(DrawResponse, Rect)> = None;
-        let _ = ctx.run_ui(raw, |ui| {
+        let _ = ctx.run_headless(raw, |ui| {
             let resp = PlotView::new().show_with_draw(
                 ui,
                 plot,
@@ -2530,7 +2539,7 @@ mod tests {
         raw: egui::RawInput,
     ) -> (PlotResponse, Rect) {
         let mut captured: Option<(PlotResponse, Rect)> = None;
-        let _ = ctx.run_ui(raw, |ui| {
+        let _ = ctx.run_headless(raw, |ui| {
             let resp = PlotView::new().show_with_interaction(ui, plot, mode);
             let area = resp.transform.area;
             captured = Some((resp, area));

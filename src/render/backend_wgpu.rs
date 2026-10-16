@@ -308,7 +308,9 @@ impl WgpuResources {
             .map_err(|e| crate::render::save::SaveError::Readback(format!("buffer map: {e}")))?;
 
         let rgba = {
-            let mapped = buffer.slice(..).get_mapped_range();
+            let mapped = buffer.slice(..).get_mapped_range().map_err(|e| {
+                crate::render::save::SaveError::Readback(format!("buffer map: {e}"))
+            })?;
             rows_to_rgba8(&mapped, w, h, bpr, target_format)
         };
         buffer.unmap();
@@ -355,6 +357,13 @@ pub struct WgpuBackend {
     /// Draw-order z-value per item. Default `0.0`. Within each GPU item type
     /// (images, curves), items are sorted ascending by z before drawing.
     item_z: HashMap<ItemHandle, f32>,
+    /// Set when an item mutation invalidated the GPU curve/image set;
+    /// [`flush_scene`](Self::flush_scene) rebuilds once per frame. Deferring
+    /// the rebuild is what makes a batch of mutations (clearing and re-adding
+    /// N curves, re-ordering every z) cost one scene sync instead of one *per
+    /// mutation* — the per-mutation sync made every rebuild O(N²) in GPU
+    /// buffer creation. `Cell` so the `&self` save path can flush too.
+    scene_dirty: std::cell::Cell<bool>,
 }
 
 impl WgpuBackend {
@@ -374,6 +383,16 @@ impl WgpuBackend {
             last_data_area: None,
             item_visible: HashMap::new(),
             item_z: HashMap::new(),
+            scene_dirty: std::cell::Cell::new(false),
+        }
+    }
+
+    /// Rebuild the GPU curve/image set if any mutation invalidated it since the
+    /// last flush. Called once per frame by the widget before drawing, and by
+    /// the save paths before reading pixels back; a no-op when nothing changed.
+    pub fn flush_scene(&self) {
+        if self.scene_dirty.replace(false) {
+            self.sync_gpu_items();
         }
     }
 
@@ -411,9 +430,12 @@ impl WgpuBackend {
         let Some(v) = self.item_visible.get_mut(&handle) else {
             return false;
         };
+        if *v == visible {
+            return true;
+        }
         *v = visible;
         self.sync_plot_items();
-        self.sync_gpu_items();
+        self.scene_dirty.set(true);
         true
     }
 
@@ -430,8 +452,11 @@ impl WgpuBackend {
         let Some(v) = self.item_z.get_mut(&handle) else {
             return false;
         };
+        if *v == z {
+            return true;
+        }
         *v = z;
-        self.sync_gpu_items();
+        self.scene_dirty.set(true);
         true
     }
 
@@ -559,7 +584,7 @@ impl WgpuBackend {
             handle,
             data: curve_data_from_spec(curve),
         };
-        self.sync_gpu_items();
+        self.scene_dirty.set(true);
         true
     }
 
@@ -577,7 +602,7 @@ impl WgpuBackend {
             data: image_data_from_spec(image),
         };
         self.sync_plot_items();
-        self.sync_gpu_items();
+        self.scene_dirty.set(true);
         true
     }
 
@@ -623,7 +648,7 @@ impl WgpuBackend {
         self.item_visible.clear();
         self.item_z.clear();
         self.sync_plot_items();
-        self.sync_gpu_items();
+        self.scene_dirty.set(true);
     }
 }
 
@@ -636,7 +661,7 @@ impl Backend for WgpuBackend {
             handle,
             data: curve_data_from_spec(curve),
         });
-        self.sync_gpu_items();
+        self.scene_dirty.set(true);
         handle
     }
 
@@ -647,7 +672,7 @@ impl Backend for WgpuBackend {
             data: image_data_from_spec(image),
         });
         self.sync_plot_items();
-        self.sync_gpu_items();
+        self.scene_dirty.set(true);
         handle
     }
 
@@ -689,7 +714,7 @@ impl Backend for WgpuBackend {
             self.item_visible.remove(&item);
             self.item_z.remove(&item);
             self.sync_plot_items();
-            self.sync_gpu_items();
+            self.scene_dirty.set(true);
         }
         removed
     }
@@ -772,7 +797,8 @@ impl Backend for WgpuBackend {
         self.plot.grid_color = Some(grid);
     }
 
-    fn set_background_colors(&mut self, _background: Color32, data_background: Color32) {
+    fn set_background_colors(&mut self, background: Color32, data_background: Color32) {
+        self.plot.background = Some(background);
         self.plot.data_background = data_background;
     }
 
@@ -812,10 +838,13 @@ impl Backend for WgpuBackend {
 
     fn replot(&mut self) {
         self.sync_plot_items();
-        self.sync_gpu_items();
+        self.scene_dirty.set(true);
     }
 
     fn save_graph(&self, path: &std::path::Path, size: (u32, u32)) -> Result<(), Self::SaveError> {
+        // The readback renders from the installed GPU state, so pending item
+        // mutations must land first (a save can run with no frame in between).
+        self.flush_scene();
         crate::render::save::save_graph(&self.render_state, &self.plot, size, path)
     }
 
@@ -826,6 +855,7 @@ impl Backend for WgpuBackend {
         format: crate::render::save::SaveFormat,
         dpi: u32,
     ) -> Result<(), Self::SaveError> {
+        self.flush_scene();
         crate::render::save::save_graph_with_format(
             &self.render_state,
             &self.plot,

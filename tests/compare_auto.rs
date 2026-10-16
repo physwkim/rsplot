@@ -15,6 +15,7 @@ use std::rc::Rc;
 use egui_kittest::Harness;
 use egui_kittest::wgpu::{WgpuTestRenderer, create_render_state, default_wgpu_setup};
 use rsplot::egui;
+use rsplot::egui_wgpu::RendererOptions;
 use rsplot::{Colormap, CompareAlignment, CompareImages};
 
 /// A sum of Gaussian blobs at distinct positions/scales — a SIFT-friendly
@@ -66,7 +67,7 @@ fn harness_auto(
     a: Vec<f32>,
     b: Vec<f32>,
 ) -> (Rc<RefCell<CompareImages>>, Harness<'static>) {
-    let rs = create_render_state(default_wgpu_setup());
+    let rs = create_render_state(default_wgpu_setup(), RendererOptions::default());
     rsplot::install(&rs);
 
     let mut view = CompareImages::new(&rs, 0);

@@ -20,6 +20,7 @@ use egui_kittest::wgpu::{WgpuTestRenderer, create_render_state, default_wgpu_set
 use rsdm::Engine;
 use rsdm::widgets::RsdmMultiStateIndicator;
 use rsplot::egui;
+use rsplot::egui_wgpu::RendererOptions;
 
 fn wait_for(mut cond: impl FnMut() -> bool, timeout: Duration) -> bool {
     let start = Instant::now();
@@ -33,7 +34,9 @@ fn wait_for(mut cond: impl FnMut() -> bool, timeout: Duration) -> bool {
 }
 
 fn count_green(raw: &[u8]) -> u32 {
-    raw.chunks_exact(4)
+    raw.as_chunks::<4>()
+        .0
+        .iter()
         .filter(|px| px[1] > 200 && px[0] < 80 && px[2] < 80)
         .count() as u32
 }
@@ -41,7 +44,7 @@ fn count_green(raw: &[u8]) -> u32 {
 /// Render a multi-state indicator whose state `2` is green, with the channel at
 /// `value`, and return the count of green pixels.
 fn render_multi_state(value: i64) -> u32 {
-    let rs = create_render_state(default_wgpu_setup());
+    let rs = create_render_state(default_wgpu_setup(), RendererOptions::default());
     let engine = Engine::new();
     let address = format!("loc://multi_state_demo?type=int&init={value}");
     let indicator = RsdmMultiStateIndicator::new(&engine, &address)

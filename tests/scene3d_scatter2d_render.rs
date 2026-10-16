@@ -15,6 +15,7 @@ use egui_kittest::Harness;
 use egui_kittest::wgpu::{WgpuTestRenderer, create_render_state, default_wgpu_setup};
 use rsplot::egui::{self, Color32};
 use rsplot::egui_wgpu::RenderState;
+use rsplot::egui_wgpu::RendererOptions;
 use rsplot::{
     Camera, Colormap, ColormapName, Scatter2D, Scatter2DVisualization, Scene3dGeometry, Vec3,
     install_scene3d, paint_scene3d, set_scene3d,
@@ -74,7 +75,7 @@ impl App {
 /// Render one Scatter2D visualization mode and return the count of non-black
 /// (rendered-content) pixels inside the scene rect.
 fn coloured_pixels(mode: Scatter2DVisualization) -> usize {
-    let rs = create_render_state(default_wgpu_setup());
+    let rs = create_render_state(default_wgpu_setup(), RendererOptions::default());
     let app = Rc::new(RefCell::new(App::new(&rs, mode)));
     let renderer = WgpuTestRenderer::from_render_state(rs);
 

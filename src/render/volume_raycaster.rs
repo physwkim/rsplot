@@ -74,7 +74,9 @@ pub fn volume_bounds(depth: usize, height: usize, width: usize) -> ([f32; 3], [f
 /// ~0.05% relative, so the recovered RGB is exact to well under one 8-bit step
 /// at every coverage down to 1/255.
 fn premultiply_rgba(rgba: &[u8]) -> Vec<u8> {
-    rgba.chunks_exact(4)
+    rgba.as_chunks::<4>()
+        .0
+        .iter()
         .flat_map(|px| {
             let a = f32::from(px[3]) / 255.0;
             let texel = [

@@ -106,7 +106,7 @@ impl eframe::App for Plot2dApp {
         egui::Panel::right("plot2d_inspector")
             .resizable(true)
             .default_size(230.0)
-            .show_inside(ui, |ui| {
+            .show(ui, |ui| {
                 ui.heading("Legends");
                 self.plot.show_legend(ui);
                 ui.separator();
@@ -120,7 +120,7 @@ impl eframe::App for Plot2dApp {
                 show_value_stats(ui, self.column_stats());
             });
 
-        egui::CentralPanel::default().show_inside(ui, |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             let mut mask_visible = self.mask_visible;
             let mut row = self.row;
             let mut column = self.column;

@@ -20,6 +20,7 @@ use egui_kittest::wgpu::{WgpuTestRenderer, create_render_state, default_wgpu_set
 use rsdm::widgets::{RsdmScatterPlot, RsdmWaveformPlot};
 use rsdm::{Engine, PvValue};
 use rsplot::egui;
+use rsplot::egui_wgpu::RendererOptions;
 
 fn wait_for(mut cond: impl FnMut() -> bool, timeout: Duration) -> bool {
     let start = Instant::now();
@@ -33,14 +34,16 @@ fn wait_for(mut cond: impl FnMut() -> bool, timeout: Duration) -> bool {
 }
 
 fn count_green(raw: &[u8]) -> u32 {
-    raw.chunks_exact(4)
+    raw.as_chunks::<4>()
+        .0
+        .iter()
         .filter(|px| px[0] < 80 && px[1] > 200 && px[2] < 80)
         .count() as u32
 }
 
 #[test]
 fn waveform_curve_renders_from_a_y_array() {
-    let rs = create_render_state(default_wgpu_setup());
+    let rs = create_render_state(default_wgpu_setup(), RendererOptions::default());
     rsplot::install(&rs);
     let engine = Engine::new();
     let mut plot = RsdmWaveformPlot::new(&rs, 0);
@@ -91,7 +94,7 @@ fn waveform_curve_renders_from_a_y_array() {
 
 #[test]
 fn scatter_markers_render_from_injected_pairs() {
-    let rs = create_render_state(default_wgpu_setup());
+    let rs = create_render_state(default_wgpu_setup(), RendererOptions::default());
     rsplot::install(&rs);
     let engine = Engine::new();
     let mut plot = RsdmScatterPlot::new(&rs, 0);
@@ -133,7 +136,7 @@ fn scatter_markers_render_from_injected_pairs() {
 
 #[test]
 fn empty_array_plot_renders_no_curve_color() {
-    let rs = create_render_state(default_wgpu_setup());
+    let rs = create_render_state(default_wgpu_setup(), RendererOptions::default());
     rsplot::install(&rs);
     let engine = Engine::new();
     let mut plot = RsdmWaveformPlot::new(&rs, 0);

@@ -13,6 +13,8 @@
 
 pub mod core;
 pub mod render;
+#[cfg(test)]
+mod test_util;
 pub mod widget;
 
 /// System-printer enumeration and spooling via the `lp` / `lpstat` CLI tools,

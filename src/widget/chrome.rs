@@ -122,6 +122,11 @@ const CBAR_INTERACTIVE_WIDTH: f32 = 175.0;
 // Extra gutter claimed by an axis title / label when present.
 const TITLE_H: f32 = 18.0;
 const LABEL_H: f32 = 16.0;
+// Least distance from the data area's top edge at which a Rect/HRange/VRange
+// ROI's name label is anchored: the 11 pt label row plus its 3 px padding, so
+// the label (drawn above its anchor) stays inside the area instead of over the
+// title gutter. See [`draw_roi`].
+const ROI_LABEL_INSET: f32 = 16.0;
 
 /// What chrome the plot needs space reserved for. Drives [`layout`]'s gutter
 /// sizes so titles/labels, a colorbar, and a y2 axis all get room.
@@ -564,6 +569,35 @@ pub fn draw_axes(
     );
 }
 
+/// Greedy tick-label culling along one axis: [`admit`](Self::admit) keeps a
+/// label whose pixel span clears the last kept label by [`GAP`](Self::GAP) and
+/// drops it otherwise. Tick positions arrive monotonically (ascending or
+/// descending pixels), so checking only the last kept span suffices. Tick
+/// *marks* are never culled — only their text — so a plot too small for every
+/// label sheds labels instead of overlapping them (the adaptive density counts
+/// labels per inch but never measures label extent, so at small sizes its
+/// minimum of 2 ticks can still collide).
+#[derive(Default)]
+struct LabelCull {
+    last: Option<(f32, f32)>,
+}
+
+impl LabelCull {
+    /// Minimum clear pixels between adjacent labels.
+    const GAP: f32 = 3.0;
+
+    fn admit(&mut self, lo: f32, hi: f32) -> bool {
+        let fits = match self.last {
+            None => true,
+            Some((kept_lo, kept_hi)) => lo > kept_hi + Self::GAP || hi < kept_lo - Self::GAP,
+        };
+        if fits {
+            self.last = Some((lo, hi));
+        }
+        fits
+    }
+}
+
 /// As [`draw_axes`] but honoring the X-axis [`TickMode`]: with
 /// [`TickMode::TimeSeries`] the X tick positions and labels are produced by
 /// [`dtime_ticks`] (epoch-seconds data values) laid out in `x_time_zone`'s
@@ -653,34 +687,40 @@ pub fn draw_axes_with_x_tick_mode(
     );
 
     // X ticks + labels below the bottom edge.
+    let mut x_cull = LabelCull::default();
     for (xv, label) in &xticks {
         let px = t.data_to_pixel(*xv, t.y.min).x;
         painter.line_segment(
             [pos2(px, area.bottom()), pos2(px, area.bottom() + tick_len)],
             axis,
         );
-        painter.text(
-            pos2(px, area.bottom() + tick_len + 2.0),
-            Align2::CENTER_TOP,
-            label,
-            font.clone(),
-            style.text,
-        );
+        let galley = painter.layout_no_wrap(label.clone(), font.clone(), style.text);
+        let half_w = galley.size().x * 0.5;
+        if x_cull.admit(px - half_w, px + half_w) {
+            painter.galley(
+                pos2(px - half_w, area.bottom() + tick_len + 2.0),
+                galley,
+                style.text,
+            );
+        }
     }
     // Y ticks + labels left of the left edge.
+    let mut y_cull = LabelCull::default();
     for (yv, label) in &yticks {
         let py = t.data_to_pixel(t.x.min, *yv).y;
         painter.line_segment(
             [pos2(area.left() - tick_len, py), pos2(area.left(), py)],
             axis,
         );
-        painter.text(
-            pos2(area.left() - tick_len - 3.0, py),
-            Align2::RIGHT_CENTER,
-            label,
-            font.clone(),
-            style.text,
-        );
+        let galley = painter.layout_no_wrap(label.clone(), font.clone(), style.text);
+        let size = galley.size();
+        if y_cull.admit(py - size.y * 0.5, py + size.y * 0.5) {
+            painter.galley(
+                pos2(area.left() - tick_len - 3.0 - size.x, py - size.y * 0.5),
+                galley,
+                style.text,
+            );
+        }
     }
 }
 
@@ -694,19 +734,22 @@ pub fn draw_y2_ticks(painter: &Painter, t: &Transform, style: &Style) {
     let font = FontId::proportional(11.0);
     let tick_len = 4.0;
 
+    let mut cull = LabelCull::default();
     for (yv, label) in axis_ticks(&t.y, 6) {
         let py = t.data_to_pixel(t.x.min, yv).y;
         painter.line_segment(
             [pos2(area.right(), py), pos2(area.right() + tick_len, py)],
             axis,
         );
-        painter.text(
-            pos2(area.right() + tick_len + 3.0, py),
-            Align2::LEFT_CENTER,
-            label,
-            font.clone(),
-            style.text,
-        );
+        let galley = painter.layout_no_wrap(label, font.clone(), style.text);
+        let half_h = galley.size().y * 0.5;
+        if cull.admit(py - half_h, py + half_h) {
+            painter.galley(
+                pos2(area.right() + tick_len + 3.0, py - half_h),
+                galley,
+                style.text,
+            );
+        }
     }
 }
 
@@ -735,34 +778,38 @@ pub fn draw_extra_y_ticks(
     // y2, whose spine is the data-area frame), so draw one.
     painter.vline(baseline_x, area.y_range(), axis);
 
+    let mut cull = LabelCull::default();
     for (yv, label) in axis_ticks(&t.y, 6) {
         let py = t.data_to_pixel(t.x.min, yv).y;
+        let galley = painter.layout_no_wrap(label, font.clone(), style.text);
+        let size = galley.size();
+        let keep = cull.admit(py - size.y * 0.5, py + size.y * 0.5);
         match side {
             AxisSide::Right => {
                 painter.line_segment(
                     [pos2(baseline_x, py), pos2(baseline_x + tick_len, py)],
                     axis,
                 );
-                painter.text(
-                    pos2(baseline_x + tick_len + 3.0, py),
-                    Align2::LEFT_CENTER,
-                    label,
-                    font.clone(),
-                    style.text,
-                );
+                if keep {
+                    painter.galley(
+                        pos2(baseline_x + tick_len + 3.0, py - size.y * 0.5),
+                        galley,
+                        style.text,
+                    );
+                }
             }
             AxisSide::Left => {
                 painter.line_segment(
                     [pos2(baseline_x - tick_len, py), pos2(baseline_x, py)],
                     axis,
                 );
-                painter.text(
-                    pos2(baseline_x - tick_len - 3.0, py),
-                    Align2::RIGHT_CENTER,
-                    label,
-                    font.clone(),
-                    style.text,
-                );
+                if keep {
+                    painter.galley(
+                        pos2(baseline_x - tick_len - 3.0 - size.x, py - size.y * 0.5),
+                        galley,
+                        style.text,
+                    );
+                }
             }
         }
     }
@@ -781,6 +828,7 @@ pub fn draw_extra_y_ticks(
             text,
             FontId::proportional(12.0),
             style.text,
+            area.height(),
         );
     }
 }
@@ -813,26 +861,32 @@ pub fn draw_labels(
     let title_font = FontId::proportional(14.0);
     let label_font = FontId::proportional(12.0);
 
+    // A label longer than its gutter run is elided with '…' rather than drawn
+    // full length: centered on the data area, an overlong title or axis label
+    // would otherwise hit the widget clip rect mid-glyph on a narrow plot (and
+    // run under the colorbar / y2 gutters before that).
+    let h_max = 2.0 * (area.center().x - full.left()).min(full.right() - area.center().x);
     if let Some(t) = labels.title {
-        painter.text(
-            pos2(area.center().x, full.top() + 2.0),
-            Align2::CENTER_TOP,
-            t,
-            title_font,
+        let galley = elided_singleline(painter, t, title_font, style.text, h_max);
+        let size = galley.size();
+        painter.galley(
+            pos2(area.center().x - size.x * 0.5, full.top() + 2.0),
+            galley,
             style.text,
         );
     }
     if let Some(t) = labels.x {
-        painter.text(
-            pos2(area.center().x, full.bottom() - 2.0),
-            Align2::CENTER_BOTTOM,
-            t,
-            label_font.clone(),
+        let galley = elided_singleline(painter, t, label_font.clone(), style.text, h_max);
+        let size = galley.size();
+        painter.galley(
+            pos2(area.center().x - size.x * 0.5, full.bottom() - 2.0 - size.y),
+            galley,
             style.text,
         );
     }
     // Left Y label: rotate a quarter turn counter-clockwise (reads bottom→top),
     // centered in the left gutter strip.
+    let v_max = 2.0 * (area.center().y - full.top()).min(full.bottom() - area.center().y);
     if let Some(t) = labels.y {
         draw_rotated_label(
             painter,
@@ -841,6 +895,7 @@ pub fn draw_labels(
             t,
             label_font.clone(),
             style.text,
+            v_max,
         );
     }
     // Right y2 label: rotate a quarter turn clockwise (reads top→bottom),
@@ -853,6 +908,7 @@ pub fn draw_labels(
             t,
             label_font,
             style.text,
+            v_max,
         );
     }
 }
@@ -874,12 +930,27 @@ fn draw_rotated_label(
     text: &str,
     font: FontId,
     color: Color32,
+    max_len: f32,
 ) {
-    let galley = painter.layout_no_wrap(text.to_owned(), font, color);
+    let galley = elided_singleline(painter, text, font, color, max_len);
     let pos = center - galley.rect.center().to_vec2();
     painter.add(egui::Shape::Text(
         TextShape::new(pos, galley, color).with_angle_and_anchor(angle, Align2::CENTER_CENTER),
     ));
+}
+
+/// Lay out `text` on one line, elided with '…' so it never exceeds `max_w` —
+/// the bound a gutter label gets from its run along the widget edge.
+fn elided_singleline(
+    painter: &Painter,
+    text: &str,
+    font: FontId,
+    color: Color32,
+    max_w: f32,
+) -> std::sync::Arc<egui::Galley> {
+    let mut job = egui::text::LayoutJob::simple_singleline(text.to_owned(), font, color);
+    job.wrap = egui::text::TextWrapping::truncate_at_width(max_w.max(0.0));
+    painter.layout_job(job)
 }
 
 /// Format a coordinate with decimals scaled to the visible span.
@@ -1308,7 +1379,12 @@ pub fn draw_roi(
                 r.right_bottom(),
                 r.left_bottom(),
             ]);
-            Some(egui::pos2(r.center().x, r.top()))
+            // The label sits above the top edge, so a rect whose top is at the
+            // data area's top — every VRange, which spans the full height —
+            // would put it in the title gutter, over the title. Keep the anchor
+            // at least one label height inside the area.
+            let y = r.top().max(t.area.top() + ROI_LABEL_INSET);
+            Some(egui::pos2(r.center().x, y))
         }
     };
 
@@ -1960,6 +2036,27 @@ pub fn draw_colorbar(painter: &Painter, rect: Rect, cmap: &Colormap, style: &Sty
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_util::HeadlessRun;
+
+    #[test]
+    fn label_cull_drops_overlapping_and_keeps_spaced() {
+        let mut c = LabelCull::default();
+        assert!(c.admit(0.0, 10.0));
+        assert!(!c.admit(8.0, 18.0)); // overlaps the kept span
+        assert!(!c.admit(11.0, 21.0)); // clears it but not by GAP
+        assert!(c.admit(14.0, 24.0)); // clears GAP
+        assert!(!c.admit(20.0, 30.0)); // compares against the last KEPT span
+    }
+
+    #[test]
+    fn label_cull_handles_descending_runs() {
+        // Y labels walk down in data order but up in pixels (or vice versa);
+        // admit must work for a monotone run in either direction.
+        let mut c = LabelCull::default();
+        assert!(c.admit(90.0, 100.0));
+        assert!(!c.admit(85.0, 95.0));
+        assert!(c.admit(70.0, 80.0));
+    }
 
     #[test]
     fn roi_appearance_resolves_color_fallback_and_name() {
@@ -2660,7 +2757,7 @@ mod tests {
 
         let ctx = egui::Context::default();
         let mut galley = None;
-        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+        let _ = ctx.run_headless(egui::RawInput::default(), |ui| {
             galley = Some(ui.painter().layout_no_wrap(
                 "Temperature [\u{b0}C]".to_owned(),
                 FontId::proportional(12.0),

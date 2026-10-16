@@ -5,6 +5,7 @@
 //! API and the events it pushes are asserted.
 
 use egui_kittest::wgpu::{create_render_state, default_wgpu_setup};
+use rsplot::egui_wgpu::RendererOptions;
 use rsplot::{PlotEvent, PlotWidget, Roi, RoiInteractionMode};
 
 fn rect(x: f64) -> Roi {
@@ -26,7 +27,7 @@ fn arc() -> Roi {
 
 #[test]
 fn remove_roi_emits_about_to_be_removed_before_removal() {
-    let rs = create_render_state(default_wgpu_setup());
+    let rs = create_render_state(default_wgpu_setup(), RendererOptions::default());
     let mut plot = PlotWidget::new(&rs, 0);
 
     assert_eq!(plot.add_roi(rect(0.0)), 0);
@@ -53,7 +54,7 @@ fn remove_roi_emits_about_to_be_removed_before_removal() {
 
 #[test]
 fn clear_rois_emits_rois_cleared() {
-    let rs = create_render_state(default_wgpu_setup());
+    let rs = create_render_state(default_wgpu_setup(), RendererOptions::default());
     let mut plot = PlotWidget::new(&rs, 0);
     plot.add_roi(rect(0.0));
     plot.add_roi(rect(2.0));
@@ -70,7 +71,7 @@ fn clear_rois_emits_rois_cleared() {
 
 #[test]
 fn save_then_load_round_trips_rois_through_the_widget() {
-    let rs = create_render_state(default_wgpu_setup());
+    let rs = create_render_state(default_wgpu_setup(), RendererOptions::default());
     let mut plot = PlotWidget::new(&rs, 0);
     plot.add_roi(rect(0.0));
     plot.add_roi(rect(2.0));
@@ -114,7 +115,7 @@ fn save_then_load_round_trips_rois_through_the_widget() {
 
 #[test]
 fn set_roi_interaction_mode_switches_mode_and_emits_event() {
-    let rs = create_render_state(default_wgpu_setup());
+    let rs = create_render_state(default_wgpu_setup(), RendererOptions::default());
     let mut plot = PlotWidget::new(&rs, 0);
     plot.add_roi(arc());
     plot.drain_events();
@@ -160,7 +161,7 @@ fn set_roi_interaction_mode_switches_mode_and_emits_event() {
 
 #[test]
 fn remove_roi_out_of_range_emits_nothing() {
-    let rs = create_render_state(default_wgpu_setup());
+    let rs = create_render_state(default_wgpu_setup(), RendererOptions::default());
     let mut plot = PlotWidget::new(&rs, 0);
     plot.add_roi(rect(0.0));
     plot.drain_events();

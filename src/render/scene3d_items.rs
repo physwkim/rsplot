@@ -633,7 +633,7 @@ fn expand_triangles(
     let mut tris = Vec::new();
     match mode {
         MeshDrawMode::Triangles => {
-            for c in stream.chunks_exact(3) {
+            for c in stream.as_chunks::<3>().0 {
                 tris.push([c[0], c[1], c[2]]);
             }
         }
@@ -2950,7 +2950,7 @@ fn append_solid_isosurfaces(
         else {
             continue;
         };
-        for tri in indices.chunks_exact(3) {
+        for tri in indices.as_chunks::<3>().0 {
             let p = iso_triangle_positions(&vertices, tri);
             let n = iso_triangle_normals(&normals, tri);
             geometry.add_mesh_triangle(p, iso.color, n);
@@ -2982,7 +2982,7 @@ fn append_colormapped_isosurface(
         return;
     };
     let (colormap, alpha) = (iso.colormap(), iso.alpha());
-    for tri in indices.chunks_exact(3) {
+    for tri in indices.as_chunks::<3>().0 {
         let p = iso_triangle_positions(&vertices, tri);
         let n = iso_triangle_normals(&normals, tri);
         let rgba = [0usize, 1, 2].map(|k| {
@@ -4716,7 +4716,9 @@ mod tests {
             sf.append_to(&mut g);
             g.textured_meshes[0]
                 .pixels
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .filter(|c| c[3] == 0)
                 .count()
         };
@@ -4730,7 +4732,9 @@ mod tests {
         sf.append_to(&mut g);
         let opaque = g.textured_meshes[0]
             .pixels
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .filter(|c| c[3] == 255)
             .count();
         assert!(opaque > 0, "above-min block texels stay opaque");

@@ -20,6 +20,7 @@ use egui_kittest::wgpu::{WgpuTestRenderer, create_render_state, default_wgpu_set
 use rsdm::widgets::RsdmWaveformTable;
 use rsdm::{Engine, PvValue};
 use rsplot::egui;
+use rsplot::egui_wgpu::RendererOptions;
 
 fn wait_for(mut cond: impl FnMut() -> bool, timeout: Duration) -> bool {
     let start = Instant::now();
@@ -34,7 +35,9 @@ fn wait_for(mut cond: impl FnMut() -> bool, timeout: Duration) -> bool {
 
 /// Light pixels — the rendered glyphs/widget chrome on egui's dark default theme.
 fn count_light(raw: &[u8]) -> u32 {
-    raw.chunks_exact(4)
+    raw.as_chunks::<4>()
+        .0
+        .iter()
         .filter(|px| px[0] > 150 && px[1] > 150 && px[2] > 150)
         .count() as u32
 }
@@ -42,7 +45,7 @@ fn count_light(raw: &[u8]) -> u32 {
 /// Render a 2-column waveform table over a `loc://` int-array channel, optionally
 /// seeded with `values`, and return the count of light (text) pixels.
 fn render_table(address: &str, values: Option<&[i64]>) -> u32 {
-    let rs = create_render_state(default_wgpu_setup());
+    let rs = create_render_state(default_wgpu_setup(), RendererOptions::default());
     let engine = Engine::new();
     let table = RsdmWaveformTable::new(&engine, address)
         .expect("connect")

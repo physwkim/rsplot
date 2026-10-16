@@ -16,6 +16,7 @@
 use egui_kittest::Harness;
 use egui_kittest::wgpu::{WgpuTestRenderer, create_render_state, default_wgpu_setup};
 use rsplot::egui_wgpu::RenderState;
+use rsplot::egui_wgpu::RendererOptions;
 use rsplot::{
     Box3D, Colormap, ColormapMesh3D, ColormapName, CompareImages, Cylinder3D, FitModelChoice,
     FitWidget, GraphGrid, Hexagon3D, ImageGeometry, ImageView, MeshDrawMode, Plot2D,
@@ -36,7 +37,7 @@ fn capture(
 ) {
     // A fresh device + installed WgpuResources per scene keeps plot ids and GPU
     // state independent across captures.
-    let render_state = create_render_state(default_wgpu_setup());
+    let render_state = create_render_state(default_wgpu_setup(), RendererOptions::default());
     rsplot::install(&render_state);
 
     let mut scene = build(&render_state);
@@ -103,14 +104,14 @@ fn main() {
         Box::new(move |ui: &mut egui::Ui| {
             egui::Panel::right("gallery_plot_widget_panel")
                 .default_size(220.0)
-                .show_inside(ui, |ui| {
+                .show(ui, |ui| {
                     ui.heading("Legends");
                     plot.show_legend(ui);
                     ui.separator();
                     ui.heading("Active stats");
                     plot.show_active_stats(ui);
                 });
-            egui::CentralPanel::default().show_inside(ui, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
                 plot.show_toolbar(ui);
                 plot.show(ui);
             });
@@ -147,14 +148,14 @@ fn main() {
         Box::new(move |ui: &mut egui::Ui| {
             egui::Panel::right("gallery_plot2d_panel")
                 .default_size(220.0)
-                .show_inside(ui, |ui| {
+                .show(ui, |ui| {
                     ui.heading("Legends");
                     plot.show_legend(ui);
                     ui.separator();
                     ui.heading("Active stats");
                     plot.show_active_stats(ui);
                 });
-            egui::CentralPanel::default().show_inside(ui, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
                 plot.show_toolbar(ui);
                 plot.show(ui);
             });
@@ -170,7 +171,7 @@ fn main() {
             .expect("image dimensions match");
         view.image_plot_mut().set_graph_title("ImageView");
         Box::new(move |ui: &mut egui::Ui| {
-            egui::CentralPanel::default().show_inside(ui, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
                 // ImageView lays its three columns (image | profile+radar |
                 // colorbar) out from `available_size`; reserve the two
                 // horizontal item-spacing gaps so the right profile is not
@@ -189,7 +190,7 @@ fn main() {
         sv.set_data(&x, &y, &values, Colormap::viridis(0.0, 1.0))
             .expect("x / y / values are the same length");
         Box::new(move |ui: &mut egui::Ui| {
-            egui::CentralPanel::default().show_inside(ui, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
                 sv.show_toolbar(ui);
                 sv.show(ui);
             });
@@ -208,7 +209,7 @@ fn main() {
         // The central depth slice is the brightest part of the sinc volume.
         sv.set_frame(sv.frame_count() / 2);
         Box::new(move |ui: &mut egui::Ui| {
-            egui::CentralPanel::default().show_inside(ui, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
                 sv.perspective_ui(ui);
                 sv.show_frame_controls(ui);
                 sv.show(ui);
@@ -225,7 +226,7 @@ fn main() {
             .expect("data matches dimensions");
         cmp.set_graph_title("CompareImages — A vs B");
         Box::new(move |ui: &mut egui::Ui| {
-            egui::CentralPanel::default().show_inside(ui, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
                 cmp.show_toolbar(ui);
                 cmp.show(ui);
             });
@@ -277,7 +278,7 @@ fn main() {
         plot.drain_events();
 
         Box::new(move |ui: &mut egui::Ui| {
-            egui::CentralPanel::default().show_inside(ui, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
                 plot.show_with_toolbar(ui);
             });
         })
@@ -292,7 +293,7 @@ fn main() {
         assert!(view.set_data(rs, &data, n, n, n), "cubic volume is valid");
         view.add_auto_isosurface(rs, mean_plus_std, egui::Color32::from_rgb(255, 70, 90));
         Box::new(move |ui: &mut egui::Ui| {
-            egui::CentralPanel::default().show_inside(ui, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
                 view.show(ui);
             });
         })
@@ -308,7 +309,7 @@ fn main() {
         scene.set_bounds(rs, (Vec3::new(-4.0, -4.0, -1.5), Vec3::new(4.0, 4.0, 3.0)));
         scene.set_geometry(rs, geometry);
         Box::new(move |ui: &mut egui::Ui| {
-            egui::CentralPanel::default().show_inside(ui, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
                 scene.show(ui);
             });
         })
@@ -323,7 +324,7 @@ fn main() {
         scene.set_bounds(rs, (Vec3::ZERO, Vec3::new(1.0, 1.0, 1.0)));
         scene.set_geometry(rs, geometry);
         Box::new(move |ui: &mut egui::Ui| {
-            egui::CentralPanel::default().show_inside(ui, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
                 scene.show(ui);
             });
         })

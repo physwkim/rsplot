@@ -54,7 +54,7 @@ impl PickingApp {
 
 impl eframe::App for PickingApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        egui::CentralPanel::default().show_inside(ui, |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             let out = PlotView::new().show(ui, &mut self.plot);
             // Highlight the nearest vertex within 14 px of the pointer.
             if let Some(cursor) = out.response.hover_pos()

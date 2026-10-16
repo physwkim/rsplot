@@ -23,6 +23,7 @@ use std::rc::Rc;
 use egui_kittest::Harness;
 use egui_kittest::wgpu::{WgpuTestRenderer, create_render_state, default_wgpu_setup};
 use rsplot::egui;
+use rsplot::egui_wgpu::RendererOptions;
 use rsplot::{Colormap, ImageSpec, PlotWidget, YAxis};
 
 const W: usize = 400;
@@ -45,7 +46,7 @@ fn is_teal(px: &[u8]) -> bool {
 /// `(teal pixels in the left third of the frame, teal pixels in the right third)`.
 fn teal_left_right(raw: &[u8]) -> (u32, u32) {
     let (mut left, mut right) = (0u32, 0u32);
-    for (i, px) in raw.chunks_exact(4).enumerate() {
+    for (i, px) in raw.as_chunks::<4>().0.iter().enumerate() {
         if is_teal(px) {
             let col = i % W;
             if col < W / 3 {
@@ -70,7 +71,7 @@ fn render(alpha_map: Option<Vec<f32>>) -> (u32, u32) {
 /// (the `(-1, 2)` levels keep the uniform `0.5` texel at the mid teal, so the
 /// detector is unchanged and only the alpha map's survival is under test).
 fn render_after(alpha_map: Option<Vec<f32>>, relevel: Option<(f64, f64)>) -> (u32, u32) {
-    let rs = create_render_state(default_wgpu_setup());
+    let rs = create_render_state(default_wgpu_setup(), RendererOptions::default());
     rsplot::install(&rs);
 
     let mut plot = PlotWidget::new(&rs, 0);

@@ -9,6 +9,7 @@
 
 use egui_kittest::wgpu::{create_render_state, default_wgpu_setup};
 use rsplot::actions::analysis::median_filter_2d;
+use rsplot::egui_wgpu::RendererOptions;
 use rsplot::{AutoscaleMode, Colormap, ImageSpec, ItemHandle, PlotWidget};
 
 const W: usize = 5;
@@ -25,7 +26,7 @@ fn hot_pixel_data() -> Vec<f64> {
 }
 
 fn plot_with_image(data: &[f64]) -> (PlotWidget, ItemHandle) {
-    let rs = create_render_state(default_wgpu_setup());
+    let rs = create_render_state(default_wgpu_setup(), RendererOptions::default());
     rsplot::install(&rs);
     let mut plot = PlotWidget::new(&rs, 0);
     let pixels: Vec<f32> = data.iter().map(|&v| v as f32).collect();

@@ -17,6 +17,7 @@ use egui_kittest::Harness;
 use egui_kittest::wgpu::{WgpuTestRenderer, create_render_state, default_wgpu_setup};
 use rsdm::Engine;
 use rsdm::widgets::{CurveStyle, RsdmScatterPlot, RsdmTimePlot};
+use rsplot::egui_wgpu::RendererOptions;
 use rsplot::{AxisSide, YAxis, egui};
 
 fn now_epoch_secs() -> f64 {
@@ -27,7 +28,9 @@ fn now_epoch_secs() -> f64 {
 }
 
 fn count_color(raw: &[u8], want: [u8; 3]) -> u32 {
-    raw.chunks_exact(4)
+    raw.as_chunks::<4>()
+        .0
+        .iter()
         .filter(|px| {
             let dominant = |c: usize| {
                 if want[c] > 200 {
@@ -43,7 +46,7 @@ fn count_color(raw: &[u8], want: [u8; 3]) -> u32 {
 
 #[test]
 fn set_curve_style_recolors_the_curve_on_screen() {
-    let rs = create_render_state(default_wgpu_setup());
+    let rs = create_render_state(default_wgpu_setup(), RendererOptions::default());
     rsplot::install(&rs);
 
     let engine = Engine::new();
@@ -110,7 +113,7 @@ fn set_curve_style_binds_curve_to_extra_axis_and_autoscales_it() {
     // observed directly. `RsdmTimePlot` now also keeps `auto_reset_zoom` on (its
     // Y / y2 / extra axes refit live), but its per-frame X scroll would only add
     // noise to this end-to-end axis-binding check.
-    let rs = create_render_state(default_wgpu_setup());
+    let rs = create_render_state(default_wgpu_setup(), RendererOptions::default());
     rsplot::install(&rs);
 
     let engine = Engine::new();
@@ -176,7 +179,7 @@ fn set_curve_style_binds_curve_to_extra_axis_and_autoscales_it() {
 
 #[test]
 fn set_curve_style_rejects_out_of_range_index() {
-    let rs = create_render_state(default_wgpu_setup());
+    let rs = create_render_state(default_wgpu_setup(), RendererOptions::default());
     rsplot::install(&rs);
     let engine = Engine::new();
     let mut plot = RsdmTimePlot::new(&rs, 0);

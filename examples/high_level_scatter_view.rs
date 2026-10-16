@@ -34,7 +34,7 @@ impl ScatterViewApp {
 
 impl eframe::App for ScatterViewApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        egui::CentralPanel::default().show_inside(ui, |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             self.sv.show_toolbar(ui);
             // `ScatterView::show` fills all remaining height, so reserve one row
             // at the bottom for the position-info readout before showing the

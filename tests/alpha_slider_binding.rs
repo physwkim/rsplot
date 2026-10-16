@@ -23,6 +23,7 @@ use std::rc::Rc;
 use egui_kittest::Harness;
 use egui_kittest::wgpu::{WgpuTestRenderer, create_render_state, default_wgpu_setup};
 use rsplot::egui;
+use rsplot::egui_wgpu::RendererOptions;
 use rsplot::{
     ActiveImageAlphaSlider, AutoscaleMode, Colormap, ImageSpec, ItemHandle, NamedItemAlphaSlider,
     PlotWidget,
@@ -33,7 +34,7 @@ use rsplot::{
 /// and the image handle. No frame is rendered — the image-alpha API needs only
 /// the GPU upload, not the transform.
 fn plot_with_image(alpha0: f32, legend: Option<&str>) -> (PlotWidget, ItemHandle) {
-    let rs = create_render_state(default_wgpu_setup());
+    let rs = create_render_state(default_wgpu_setup(), RendererOptions::default());
     rsplot::install(&rs);
     let mut plot = PlotWidget::new(&rs, 0);
     let pixels = [1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0];
@@ -134,7 +135,7 @@ type ActiveSliderBundle = (
 /// slider's response rect each frame so a drag can target the track. Renders two
 /// frames so the plot transform is cached.
 fn active_slider_harness(alpha0: f32, with_image: bool) -> ActiveSliderBundle {
-    let rs = create_render_state(default_wgpu_setup());
+    let rs = create_render_state(default_wgpu_setup(), RendererOptions::default());
     rsplot::install(&rs);
     let mut plot = PlotWidget::new(&rs, 0);
     if with_image {
@@ -233,7 +234,7 @@ fn dragging_the_active_image_slider_writes_alpha_back_to_the_image() {
 
 #[test]
 fn named_item_slider_binds_by_legend_and_disables_for_unknown() {
-    let rs = create_render_state(default_wgpu_setup());
+    let rs = create_render_state(default_wgpu_setup(), RendererOptions::default());
     rsplot::install(&rs);
     let mut plot = PlotWidget::new(&rs, 0);
     let pixels = [1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0];

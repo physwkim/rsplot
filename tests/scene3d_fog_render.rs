@@ -8,6 +8,7 @@
 
 use egui_kittest::wgpu::{create_render_state, default_wgpu_setup};
 use rsplot::egui::Color32;
+use rsplot::egui_wgpu::RendererOptions;
 use rsplot::{
     Camera, Scene3dFog, Scene3dGeometry, Scene3dShading, Vec3, install_scene3d, set_scene3d,
     snapshot_scene3d, snapshot_scene3d_with,
@@ -36,7 +37,7 @@ fn centre_pixel(rgba: &[u8]) -> (u8, u8, u8) {
 
 #[test]
 fn linear_fog_fades_far_geometry_toward_background() {
-    let rs = create_render_state(default_wgpu_setup());
+    let rs = create_render_state(default_wgpu_setup(), RendererOptions::default());
     install_scene3d(&rs);
 
     // A red triangle at the FAR side of the unit-cube bounds (z = -1; camera z
@@ -84,7 +85,7 @@ fn linear_fog_fades_far_geometry_toward_background() {
 
 #[test]
 fn specular_term_activates_with_shininess() {
-    let rs = create_render_state(default_wgpu_setup());
+    let rs = create_render_state(default_wgpu_setup(), RendererOptions::default());
     install_scene3d(&rs);
 
     // A dark lit mesh facing the camera: normal (0,0,1) reflects the headlight

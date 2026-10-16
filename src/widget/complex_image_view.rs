@@ -538,6 +538,7 @@ impl ComplexImageView {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_util::HeadlessRun;
 
     const PI: f32 = std::f32::consts::PI;
 
@@ -552,7 +553,7 @@ mod tests {
         current: ComplexMode,
     ) -> Vec<(ComplexMode, egui::Rect)> {
         let mut rects = Vec::new();
-        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+        let _ = ctx.run_headless(egui::RawInput::default(), |ui| {
             ui.horizontal(|ui| {
                 for mode in ComplexMode::ALL {
                     let r = ui.selectable_label(current == mode, mode.label());
@@ -571,7 +572,7 @@ mod tests {
         raw: egui::RawInput,
     ) -> Option<ComplexMode> {
         let mut picked = None;
-        let _ = ctx.run_ui(raw, |ui| {
+        let _ = ctx.run_headless(raw, |ui| {
             picked = mode_toolbar_ui(ui, current);
         });
         picked

@@ -311,7 +311,7 @@ fn roi_from_type_and_geom(type_name: &str, g: &[f64]) -> Result<Roi, RoiIoError>
                 return Err(RoiIoError::BadGeometry);
             }
             Roi::Polygon {
-                vertices: g.chunks_exact(2).map(|c| (c[0], c[1])).collect(),
+                vertices: g.as_chunks::<2>().0.iter().map(|c| (c[0], c[1])).collect(),
             }
         }
         "cross" => {

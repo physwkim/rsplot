@@ -16,10 +16,13 @@ use std::rc::Rc;
 use egui_kittest::Harness;
 use egui_kittest::wgpu::{WgpuTestRenderer, create_render_state, default_wgpu_setup};
 use rsplot::egui::{self, Color32};
+use rsplot::egui_wgpu::RendererOptions;
 use rsplot::{AxisSide, Plot1D, YAxis};
 
 fn count_red(raw: &[u8]) -> u32 {
-    raw.chunks_exact(4)
+    raw.as_chunks::<4>()
+        .0
+        .iter()
         .filter(|px| px[0] > 200 && px[1] < 80 && px[2] < 80)
         .count() as u32
 }
@@ -29,7 +32,7 @@ fn count_red(raw: &[u8]) -> u32 {
 /// range `[100, 200]`; otherwise it stays on the left axis pinned to `[0, 1]`.
 /// Returns the red pixel count.
 fn render(bind_extra: bool) -> u32 {
-    let rs = create_render_state(default_wgpu_setup());
+    let rs = create_render_state(default_wgpu_setup(), RendererOptions::default());
     rsplot::install(&rs);
 
     let mut plot = Plot1D::new(&rs, 0);
@@ -69,7 +72,7 @@ fn render(bind_extra: bool) -> u32 {
 
 #[test]
 fn extra_axis_api_autoscales_and_toggles() {
-    let rs = create_render_state(default_wgpu_setup());
+    let rs = create_render_state(default_wgpu_setup(), RendererOptions::default());
     rsplot::install(&rs);
     let mut plot = Plot1D::new(&rs, 0);
 

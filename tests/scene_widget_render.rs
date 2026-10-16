@@ -13,6 +13,7 @@ use egui_kittest::wgpu::{WgpuTestRenderer, create_render_state, default_wgpu_set
 use rsplot::egui;
 use rsplot::egui::Color32;
 use rsplot::egui_wgpu::RenderState;
+use rsplot::egui_wgpu::RendererOptions;
 use rsplot::{Box3D, Scene3dGeometry, SceneWidget, Vec3};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -65,7 +66,7 @@ fn classify(raw: &[u8], iw: usize, ih: usize) -> (usize, usize, usize, usize) {
 
 #[test]
 fn scene_widget_renders_axes_and_orbits_on_drag() {
-    let rs = create_render_state(default_wgpu_setup());
+    let rs = create_render_state(default_wgpu_setup(), RendererOptions::default());
     let app = Rc::new(RefCell::new(App::new(&rs)));
     let renderer = WgpuTestRenderer::from_render_state(rs);
 
@@ -162,7 +163,7 @@ impl ContentApp {
 
 #[test]
 fn scene_widget_forwards_and_renders_content_mesh() {
-    let rs = create_render_state(default_wgpu_setup());
+    let rs = create_render_state(default_wgpu_setup(), RendererOptions::default());
     let app = Rc::new(RefCell::new(ContentApp::new(&rs)));
     let renderer = WgpuTestRenderer::from_render_state(rs);
 

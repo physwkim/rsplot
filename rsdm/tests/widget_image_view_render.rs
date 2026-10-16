@@ -24,6 +24,7 @@ use egui_kittest::wgpu::{WgpuTestRenderer, create_render_state, default_wgpu_set
 use rsdm::widgets::RsdmImageView;
 use rsdm::{Engine, PvValue};
 use rsplot::egui;
+use rsplot::egui_wgpu::RendererOptions;
 
 fn wait_for(mut cond: impl FnMut() -> bool, timeout: Duration) -> bool {
     let start = Instant::now();
@@ -39,7 +40,9 @@ fn wait_for(mut cond: impl FnMut() -> bool, timeout: Duration) -> bool {
 /// Count pixels whose channels are clearly separated — i.e. colour-mapped image
 /// pixels (viridis purple/green/yellow), not the grey plot chrome or background.
 fn count_colorful(raw: &[u8]) -> u32 {
-    raw.chunks_exact(4)
+    raw.as_chunks::<4>()
+        .0
+        .iter()
         .filter(|px| {
             let mx = i32::from(px[0].max(px[1]).max(px[2]));
             let mn = i32::from(px[0].min(px[1]).min(px[2]));
@@ -57,7 +60,7 @@ fn bare(view: &mut RsdmImageView) {
 
 #[test]
 fn gradient_array_renders_a_color_mapped_image() {
-    let rs = create_render_state(default_wgpu_setup());
+    let rs = create_render_state(default_wgpu_setup(), RendererOptions::default());
     rsplot::install(&rs);
     let engine = Engine::new();
     // Config-bearing loc (type+init) so the connection connects — a bare
@@ -108,7 +111,7 @@ fn gradient_array_renders_a_color_mapped_image() {
 
 #[test]
 fn middle_click_copies_image_and_width_channels() {
-    let rs = create_render_state(default_wgpu_setup());
+    let rs = create_render_state(default_wgpu_setup(), RendererOptions::default());
     rsplot::install(&rs);
     let engine = Engine::new();
     let mut view = RsdmImageView::new(
@@ -167,7 +170,7 @@ fn middle_click_copies_image_and_width_channels() {
 
 #[test]
 fn view_without_data_renders_no_color_mapped_image() {
-    let rs = create_render_state(default_wgpu_setup());
+    let rs = create_render_state(default_wgpu_setup(), RendererOptions::default());
     rsplot::install(&rs);
     let engine = Engine::new();
     let mut view = RsdmImageView::new(&engine, &rs, 0, "loc://cam_empty", None)

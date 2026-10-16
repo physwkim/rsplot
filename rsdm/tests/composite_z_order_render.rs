@@ -17,12 +17,13 @@
 use egui_kittest::Harness;
 use egui_kittest::wgpu::{WgpuTestRenderer, create_render_state, default_wgpu_setup};
 use rsplot::egui;
+use rsplot::egui_wgpu::RendererOptions;
 
 /// Count near-black pixels (the title glyphs) inside the chip's red rectangle.
 fn black_over_red(raw: &[u8], width: usize, chip: egui::Rect) -> u32 {
     let mut black = 0u32;
     let mut red = 0u32;
-    for (i, px) in raw.chunks_exact(4).enumerate() {
+    for (i, px) in raw.as_chunks::<4>().0.iter().enumerate() {
         let (x, y) = ((i % width) as f32, (i / width) as f32);
         if !chip.contains(egui::pos2(x, y)) {
             continue;
@@ -53,7 +54,10 @@ fn later_same_order_area_renders_on_top() {
     let chip = egui::Rect::from_min_size(egui::pos2(20.0, 8.0), egui::vec2(220.0, 40.0));
     let text_pos = egui::pos2(28.0, 18.0);
 
-    let renderer = WgpuTestRenderer::from_render_state(create_render_state(default_wgpu_setup()));
+    let renderer = WgpuTestRenderer::from_render_state(create_render_state(
+        default_wgpu_setup(),
+        RendererOptions::default(),
+    ));
     let mut harness = Harness::builder()
         .with_size(egui::vec2(W as f32, H as f32))
         .with_pixels_per_point(1.0)

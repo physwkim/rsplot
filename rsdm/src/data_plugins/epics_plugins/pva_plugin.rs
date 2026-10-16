@@ -839,15 +839,19 @@ fn decoded_bytes_to_pv(
         NdElemKind::U64 => ints(|c| u64::from_le_bytes(c.try_into().expect("8B")) as i64),
         NdElemKind::F32 => PvValue::FloatArray(
             bytes
-                .chunks_exact(4)
-                .map(|c| f64::from(f32::from_le_bytes(c.try_into().expect("4B"))))
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|c| f64::from(f32::from_le_bytes(*c)))
                 .collect::<Vec<_>>()
                 .into(),
         ),
         NdElemKind::F64 => PvValue::FloatArray(
             bytes
-                .chunks_exact(8)
-                .map(|c| f64::from_le_bytes(c.try_into().expect("8B")))
+                .as_chunks::<8>()
+                .0
+                .iter()
+                .map(|c| f64::from_le_bytes(*c))
                 .collect::<Vec<_>>()
                 .into(),
         ),

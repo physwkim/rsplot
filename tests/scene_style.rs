@@ -8,10 +8,11 @@
 use egui_kittest::wgpu::{create_render_state, default_wgpu_setup};
 use rsplot::SceneWidget;
 use rsplot::egui::Color32;
+use rsplot::egui_wgpu::RendererOptions;
 
 #[test]
 fn default_style_matches_silx() {
-    let rs = create_render_state(default_wgpu_setup());
+    let rs = create_render_state(default_wgpu_setup(), RendererOptions::default());
     let w = SceneWidget::new(&rs, 41);
     // silx background (0.2, 0.2, 0.2, 1.0) → grey 51, not the previous grey 30.
     assert_eq!(w.background(), Color32::from_gray(51));
@@ -22,7 +23,7 @@ fn default_style_matches_silx() {
 
 #[test]
 fn foreground_and_text_color_setters_round_trip() {
-    let rs = create_render_state(default_wgpu_setup());
+    let rs = create_render_state(default_wgpu_setup(), RendererOptions::default());
     let mut w = SceneWidget::new(&rs, 42);
     w.set_foreground_color(&rs, Color32::from_rgb(10, 20, 30));
     assert_eq!(w.foreground_color(), Color32::from_rgb(10, 20, 30));
@@ -37,7 +38,7 @@ fn foreground_and_text_color_setters_round_trip() {
 fn axes_labels_default_empty_and_update_selectively() {
     // silx `setAxesLabels(xlabel=None, ...)` leaves unset axes unchanged
     // (items/core.py:702-717); Text2D labels default to empty strings.
-    let rs = create_render_state(default_wgpu_setup());
+    let rs = create_render_state(default_wgpu_setup(), RendererOptions::default());
     let mut w = SceneWidget::new(&rs, 43);
     assert_eq!(w.axes_labels(), ("", "", ""));
     w.set_axes_labels(Some("X (mm)"), None, Some("Z"));

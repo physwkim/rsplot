@@ -15,6 +15,7 @@ use std::rc::Rc;
 use egui_kittest::Harness;
 use egui_kittest::wgpu::{WgpuTestRenderer, create_render_state, default_wgpu_setup};
 use rsplot::egui;
+use rsplot::egui_wgpu::RendererOptions;
 use rsplot::{Colormap, CompareImages, CompareMode, YAxis};
 
 /// Build a harness around a `CompareImages` in the given mode, render two frames
@@ -24,7 +25,7 @@ use rsplot::{Colormap, CompareImages, CompareMode, YAxis};
 /// position is valid and the composite is well-defined; the exact pixel values
 /// do not matter — only that the separator maps to `split`.
 fn harness_for(mode: CompareMode) -> (Rc<RefCell<CompareImages>>, Harness<'static>) {
-    let rs = create_render_state(default_wgpu_setup());
+    let rs = create_render_state(default_wgpu_setup(), RendererOptions::default());
     rsplot::install(&rs);
 
     let mut view = CompareImages::new(&rs, 0);

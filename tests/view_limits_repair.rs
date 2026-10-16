@@ -11,13 +11,14 @@
 //! Needs a GPU (real or software); mirrors `tests/limits_history_lifecycle.rs`.
 
 use egui_kittest::wgpu::{create_render_state, default_wgpu_setup};
+use rsplot::egui_wgpu::RendererOptions;
 use rsplot::{AxisSide, Plot1D, YAxis};
 
 const F32_SAFE_MAX: f64 = 1e37;
 const F32_SAFE_MIN: f64 = -1e37;
 
 fn widget() -> Plot1D {
-    let rs = create_render_state(default_wgpu_setup());
+    let rs = create_render_state(default_wgpu_setup(), RendererOptions::default());
     rsplot::install(&rs);
     Plot1D::new(&rs, 0)
 }

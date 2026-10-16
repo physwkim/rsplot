@@ -92,12 +92,17 @@ There are two API layers:
 
 ## Requirements
 
-- A recent Rust toolchain (edition 2024; `rust-version = 1.92`).
+- A recent Rust toolchain (edition 2024; `rust-version = 1.95`).
 - An egui application running on the **wgpu** renderer — `rsplot` renders
   through an `egui_wgpu` paint callback and needs the wgpu `RenderState`.
-- egui / egui-wgpu **0.34**. `rsplot` re-exports `egui` and `egui_wgpu`
+- egui / egui-wgpu **0.36**. `rsplot` re-exports `egui` and `egui_wgpu`
   (`rsplot::egui`, `rsplot::egui_wgpu`) so downstreams can stay on the same
   versions without skew.
+- Some widget labels use glyphs beyond egui's default fonts — `→` in the ROI
+  manager descriptions, `─ ╌ ┈` in the ROI line-style selector, `═` in the
+  image-compare toolbar — which render as the missing-glyph box (□) without a
+  fallback. Append a broad-coverage font (e.g. DejaVu Sans) to each egui font
+  family (`FontDefinitions`), as a *last* entry so it only fills the gaps.
 
 ## Quick start
 

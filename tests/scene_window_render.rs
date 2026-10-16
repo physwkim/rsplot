@@ -12,6 +12,7 @@ use rsplot::SceneWindow;
 use rsplot::egui;
 use rsplot::egui::Color32;
 use rsplot::egui_wgpu::RenderState;
+use rsplot::egui_wgpu::RendererOptions;
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -66,7 +67,7 @@ impl WindowApp {
 
 #[test]
 fn scene_window_composes_toolbar_scene_and_properties() {
-    let rs = create_render_state(default_wgpu_setup());
+    let rs = create_render_state(default_wgpu_setup(), RendererOptions::default());
     let app = Rc::new(RefCell::new(WindowApp::new(&rs)));
     let renderer = WgpuTestRenderer::from_render_state(rs.clone());
 

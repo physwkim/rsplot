@@ -6,11 +6,12 @@
 //! (real or software).
 
 use egui_kittest::wgpu::{create_render_state, default_wgpu_setup};
+use rsplot::egui_wgpu::RendererOptions;
 use rsplot::{Colormap, ColormapName, Normalization, Plot2D, PlotWidget};
 
 #[test]
 fn plot_default_image_colormap_is_gray_linear() {
-    let rs = create_render_state(default_wgpu_setup());
+    let rs = create_render_state(default_wgpu_setup(), RendererOptions::default());
     rsplot::install(&rs);
 
     let plot = PlotWidget::new(&rs, 0);

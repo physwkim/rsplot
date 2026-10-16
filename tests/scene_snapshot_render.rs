@@ -9,6 +9,7 @@
 use egui_kittest::wgpu::{create_render_state, default_wgpu_setup};
 use rsplot::ScalarFieldView;
 use rsplot::egui::Color32;
+use rsplot::egui_wgpu::RendererOptions;
 use rsplot::encode_png;
 
 fn blob() -> Vec<f32> {
@@ -34,7 +35,7 @@ fn count_magenta(raw: &[u8], iw: usize, ih: usize) -> usize {
 
 #[test]
 fn snapshot_captures_isosurface_and_encodes_png() {
-    let rs = create_render_state(default_wgpu_setup());
+    let rs = create_render_state(default_wgpu_setup(), RendererOptions::default());
     let mut view = ScalarFieldView::new(&rs, 7);
     assert!(
         view.set_data(&rs, &blob(), 5, 5, 5),
@@ -68,7 +69,7 @@ fn snapshot_captures_isosurface_and_encodes_png() {
 
 #[test]
 fn snapshot_size_tracks_requested_pixels() {
-    let rs = create_render_state(default_wgpu_setup());
+    let rs = create_render_state(default_wgpu_setup(), RendererOptions::default());
     let mut view = ScalarFieldView::new(&rs, 8);
     assert!(view.set_data(&rs, &blob(), 5, 5, 5), "valid data");
     view.add_isosurface(&rs, 0.5, Color32::from_rgb(255, 0, 255));

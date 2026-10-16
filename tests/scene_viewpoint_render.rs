@@ -14,6 +14,7 @@ use egui_kittest::kittest::Queryable;
 use egui_kittest::wgpu::{WgpuTestRenderer, create_render_state, default_wgpu_setup};
 use rsplot::egui;
 use rsplot::egui_wgpu::RenderState;
+use rsplot::egui_wgpu::RendererOptions;
 use rsplot::{CameraFace, SceneWidget, Vec3, viewpoint_menu};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -39,7 +40,7 @@ fn expected_offset(face: CameraFace) -> Vec3 {
 
 #[test]
 fn viewpoint_presets_orient_camera_along_expected_axis() {
-    let rs = create_render_state(default_wgpu_setup());
+    let rs = create_render_state(default_wgpu_setup(), RendererOptions::default());
     let mut scene = SceneWidget::new(&rs, 0);
     scene.set_bounds(&rs, UNIT);
     let center = scene.center();
@@ -68,7 +69,7 @@ fn viewpoint_presets_orient_camera_along_expected_axis() {
 fn fresh_scene_opens_on_the_front_view_like_silx() {
     // silx's viewport camera opens face-on down -Z (viewport.py:221-223,
     // camera.py:50): eye on the +Z side, not the (1,1,1) 'side' three-quarter.
-    let rs = create_render_state(default_wgpu_setup());
+    let rs = create_render_state(default_wgpu_setup(), RendererOptions::default());
     let mut scene = SceneWidget::new(&rs, 7);
     scene.set_bounds(&rs, UNIT);
     let center = scene.center();
@@ -83,7 +84,7 @@ fn fresh_scene_opens_on_the_front_view_like_silx() {
 
 #[test]
 fn rotate_scene_orbits_around_the_center_preserving_radius() {
-    let rs = create_render_state(default_wgpu_setup());
+    let rs = create_render_state(default_wgpu_setup(), RendererOptions::default());
     let mut scene = SceneWidget::new(&rs, 1);
     scene.set_bounds(&rs, UNIT);
     let center = scene.center();
@@ -126,7 +127,7 @@ impl MenuApp {
 
 #[test]
 fn viewpoint_menu_click_reorients_the_camera() {
-    let rs = create_render_state(default_wgpu_setup());
+    let rs = create_render_state(default_wgpu_setup(), RendererOptions::default());
     let app = Rc::new(RefCell::new(MenuApp::new(&rs)));
     let renderer = WgpuTestRenderer::from_render_state(rs.clone());
 

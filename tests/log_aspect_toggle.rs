@@ -12,10 +12,11 @@
 use egui_kittest::wgpu::{create_render_state, default_wgpu_setup};
 use rsplot::Plot1D;
 use rsplot::egui::Color32;
+use rsplot::egui_wgpu::RendererOptions;
 
 #[test]
 fn y_log_toggle_snaps_to_positive_data_range() {
-    let rs = create_render_state(default_wgpu_setup());
+    let rs = create_render_state(default_wgpu_setup(), RendererOptions::default());
     rsplot::install(&rs);
     let mut plot = Plot1D::new(&rs, 0);
 
@@ -36,7 +37,7 @@ fn y_log_toggle_snaps_to_positive_data_range() {
 
 #[test]
 fn x_log_toggle_with_no_positive_data_lands_on_1_100() {
-    let rs = create_render_state(default_wgpu_setup());
+    let rs = create_render_state(default_wgpu_setup(), RendererOptions::default());
     rsplot::install(&rs);
     let mut plot = Plot1D::new(&rs, 0);
 
@@ -53,7 +54,7 @@ fn x_log_toggle_with_no_positive_data_lands_on_1_100() {
 
 #[test]
 fn keep_aspect_toggle_forces_reset_zoom_once() {
-    let rs = create_render_state(default_wgpu_setup());
+    let rs = create_render_state(default_wgpu_setup(), RendererOptions::default());
     rsplot::install(&rs);
     let mut plot = Plot1D::new(&rs, 0);
 

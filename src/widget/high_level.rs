@@ -3753,7 +3753,7 @@ pub struct PlotWidget {
     /// returns `None` for lack of a cached transform).
     last_pixels_per_point: f32,
     /// Whether the control toolbar renders compact — the essential buttons
-    /// plus a "⋯" overflow menu holding the rest — or the full flat row.
+    /// plus a "…" overflow menu holding the rest — or the full flat row.
     /// Compact by default so the toolbar stays a single line and the plot
     /// keeps its height.
     toolbar_compact: bool,
@@ -3833,6 +3833,9 @@ impl PlotWidget {
         // silx devicePixelRatio analog for the snap radius (PositionInfo.py:229-237).
         self.last_pixels_per_point = ui.ctx().pixels_per_point();
         self.sync_active_axis_labels();
+        // Land any pending item mutations in the GPU scene exactly once per
+        // frame (see `WgpuBackend::flush_scene`).
+        self.backend.flush_scene();
         let mut view = PlotView::new();
         if let Some(ext) = menu_ext {
             view = view.with_context_menu(ext);
@@ -5982,7 +5985,10 @@ impl PlotWidget {
             egui::vec2(260.0, 110.0),
             None,
             |ui| {
-                let edit = ui.add(egui::TextEdit::singleline(&mut buffer).desired_width(200.0));
+                // span the dialog width (a fixed width leaves a ragged gap)
+                let edit = ui.add(
+                    egui::TextEdit::singleline(&mut buffer).desired_width(ui.available_width()),
+                );
                 // Enter in the field applies, matching a dialog's default button.
                 if edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                     apply = true;
@@ -6564,7 +6570,7 @@ impl PlotWidget {
         if self.toolbar_compact {
             // Everything else folds into one overflow menu so the toolbar
             // stays a single row and the plot keeps its height.
-            ui.menu_button("⋯", |ui| {
+            ui.menu_button("…", |ui| {
                 ui.set_max_width(240.0);
                 ui.horizontal_wrapped(|ui| {
                     self.show_toolbar_extended(ui, out);
@@ -6594,7 +6600,7 @@ impl PlotWidget {
     }
 
     /// The non-essential control-toolbar buttons: rendered flat in the row
-    /// when the toolbar is full, or inside the "⋯" overflow menu when compact
+    /// when the toolbar is full, or inside the "…" overflow menu when compact
     /// ([`Self::set_toolbar_compact`]).
     fn show_toolbar_extended(&mut self, ui: &mut egui::Ui, out: &mut ToolbarResponse) {
         if toolbar_icon_button(ui, ToolbarIcon::ZoomIn, false, "Zoom in").clicked() {
@@ -6784,12 +6790,12 @@ impl PlotWidget {
     }
 
     /// Whether the control toolbar is compact — the essential buttons plus a
-    /// "⋯" overflow menu (the default) — or the full flat row.
+    /// "…" overflow menu (the default) — or the full flat row.
     pub fn toolbar_compact(&self) -> bool {
         self.toolbar_compact
     }
 
-    /// Choose between the compact control toolbar (essential buttons + "⋯"
+    /// Choose between the compact control toolbar (essential buttons + "…"
     /// overflow menu, the default) and the full flat row.
     pub fn set_toolbar_compact(&mut self, compact: bool) {
         self.toolbar_compact = compact;

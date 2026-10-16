@@ -51,7 +51,7 @@ impl LogAxisApp {
 
 impl eframe::App for LogAxisApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        egui::CentralPanel::default().show_inside(ui, |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             PlotView::new().show(ui, &mut self.plot);
         });
     }

@@ -105,7 +105,7 @@ impl PrintDialog {
 
         let signals = crate::widget::detached::show_detached(ctx, id, "Print", size, pos, |ui| {
             ui.horizontal(|ui| {
-                ui.label("Printer:");
+                crate::widget::form::label(ui, 60.0, "Printer:");
                 if self.printer_names.is_empty() {
                     ui.label("No printers found");
                 } else {
@@ -116,6 +116,7 @@ impl PrintDialog {
                         .unwrap_or_default();
                     egui::ComboBox::from_id_salt("print_dialog_printer")
                         .selected_text(current)
+                        .width(ui.available_width())
                         .show_ui(ui, |ui| {
                             for (i, name) in self.printer_names.iter().enumerate() {
                                 ui.selectable_value(&mut self.selected, i, name);
@@ -164,6 +165,7 @@ impl PrintDialog {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_util::HeadlessRun;
 
     #[test]
     fn preselected_index_uses_default_when_valid() {
@@ -197,7 +199,7 @@ mod tests {
     fn show_closed_returns_none_without_rendering() {
         let ctx = egui::Context::default();
         let mut dlg = PrintDialog::new();
-        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+        let _ = ctx.run_headless(egui::RawInput::default(), |ui| {
             assert!(dlg.show(ui.ctx()).is_none());
         });
     }
@@ -209,14 +211,14 @@ mod tests {
         let ctx = egui::Context::default();
         let mut dlg = PrintDialog::new();
         dlg.open_with(Vec::new(), None);
-        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+        let _ = ctx.run_headless(egui::RawInput::default(), |ui| {
             assert!(dlg.show(ui.ctx()).is_none());
         });
         assert!(dlg.is_open());
 
         let mut dlg = PrintDialog::new();
         dlg.open_with(vec!["Office".into(), "Lab".into()], Some(1));
-        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+        let _ = ctx.run_headless(egui::RawInput::default(), |ui| {
             assert!(dlg.show(ui.ctx()).is_none());
         });
         assert!(dlg.is_open());

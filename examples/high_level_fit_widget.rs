@@ -145,14 +145,14 @@ impl eframe::App for FitApp {
         egui::Panel::left("fit_curve_picker")
             .resizable(true)
             .default_size(220.0)
-            .show_inside(ui, |ui| {
+            .show(ui, |ui| {
                 ui.heading("Curve to fit");
                 self.picker.ui(ui);
             });
         // Apply any selection change to the fit widget's data.
         self.sync_fitted_item();
 
-        egui::CentralPanel::default().show_inside(ui, |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             if !self.fit_widget.is_open() && ui.button("Open Fit Widget").clicked() {
                 self.fit_widget.set_open(true);
             }

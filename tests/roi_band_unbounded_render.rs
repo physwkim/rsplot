@@ -26,6 +26,7 @@ use std::rc::Rc;
 use egui_kittest::Harness;
 use egui_kittest::wgpu::{WgpuTestRenderer, create_render_state, default_wgpu_setup};
 use rsplot::egui::{self, Color32};
+use rsplot::egui_wgpu::RendererOptions;
 use rsplot::{ManagedRoi, PlotWidget, Roi, RoiInteractionMode, YAxis};
 
 const W: usize = 400;
@@ -39,7 +40,7 @@ fn is_red(px: &[u8]) -> bool {
 /// frame, indexed by image column `0..W`.
 fn red_columns(raw: &[u8]) -> Vec<u32> {
     let mut cols = vec![0u32; W];
-    for (i, px) in raw.chunks_exact(4).enumerate() {
+    for (i, px) in raw.as_chunks::<4>().0.iter().enumerate() {
         if is_red(px) {
             cols[i % W] += 1;
         }
@@ -51,7 +52,7 @@ fn red_columns(raw: &[u8]) -> Vec<u32> {
 /// rejects stray anti-aliased specks so the column reflects a real thick line or
 /// edge. Leftmost is `W` (sentinel, past the right edge) when nothing qualifies.
 fn render(mode: RoiInteractionMode) -> (usize, u32) {
-    let rs = create_render_state(default_wgpu_setup());
+    let rs = create_render_state(default_wgpu_setup(), RendererOptions::default());
     rsplot::install(&rs);
 
     let mut plot = PlotWidget::new(&rs, 0);

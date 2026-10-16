@@ -134,7 +134,7 @@ impl eframe::App for ScatterMaskApp {
         egui::Panel::left("scatter_mask_controls")
             .resizable(false)
             .default_size(180.0)
-            .show_inside(ui, |ui| {
+            .show(ui, |ui| {
                 ui.label("Point opacity (alpha)");
                 let mut alpha_f = self.alpha as f32 / 255.0;
                 if ui
@@ -178,7 +178,7 @@ impl eframe::App for ScatterMaskApp {
             });
 
         // Plot fills the remaining central area.
-        egui::CentralPanel::default().show_inside(ui, |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             self.plot.show_toolbar(ui);
             self.plot.show(ui);
         });

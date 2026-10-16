@@ -19,6 +19,7 @@ use egui_kittest::wgpu::{WgpuTestRenderer, create_render_state, default_wgpu_set
 use rsdm::widgets::ChannelBase;
 use rsdm::{AlarmSeverity, ChannelState, Engine};
 use rsplot::egui;
+use rsplot::egui_wgpu::RendererOptions;
 
 const PPP: f32 = 1.0;
 const CONTENT: egui::Vec2 = egui::vec2(220.0, 80.0);
@@ -54,7 +55,7 @@ struct Frame {
 
 /// Render one frame for `severity`/`connected`.
 fn render(severity: AlarmSeverity, connected: bool) -> Frame {
-    let rs = create_render_state(default_wgpu_setup());
+    let rs = create_render_state(default_wgpu_setup(), RendererOptions::default());
     let engine = Engine::new();
     let channel = engine
         .connect("loc://border_render_demo")

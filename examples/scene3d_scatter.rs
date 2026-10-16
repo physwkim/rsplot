@@ -56,7 +56,7 @@ impl ScatterApp {
 
 impl eframe::App for ScatterApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        egui::CentralPanel::default().show_inside(ui, |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             self.scene.show(ui);
         });
     }

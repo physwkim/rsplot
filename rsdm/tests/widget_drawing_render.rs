@@ -16,15 +16,18 @@ use egui_kittest::wgpu::{WgpuTestRenderer, create_render_state, default_wgpu_set
 use rsdm::Engine;
 use rsdm::widgets::{DrawingShape, RsdmDrawing};
 use rsplot::egui;
+use rsplot::egui_wgpu::RendererOptions;
 
 fn count_red(raw: &[u8]) -> u32 {
-    raw.chunks_exact(4)
+    raw.as_chunks::<4>()
+        .0
+        .iter()
         .filter(|px| px[0] > 200 && px[1] < 80 && px[2] < 80)
         .count() as u32
 }
 
 fn render_drawing(fill: egui::Color32) -> u32 {
-    let rs = create_render_state(default_wgpu_setup());
+    let rs = create_render_state(default_wgpu_setup(), RendererOptions::default());
     let engine = Engine::new();
     let drawing = RsdmDrawing::new(&engine, "loc://drawing_demo", DrawingShape::Rectangle)
         .expect("connect")

@@ -6,6 +6,7 @@
 //! `setOrientationIndicatorVisible` (`:320-336`).
 
 use egui_kittest::wgpu::{create_render_state, default_wgpu_setup};
+use rsplot::egui_wgpu::RendererOptions;
 use rsplot::{OVERVIEW_SIZE_PX, SceneWidget};
 
 const W: u32 = 300;
@@ -15,8 +16,10 @@ const H: u32 = 240;
 /// (`width`-wide tightly packed RGBA8, top row first).
 fn diff_pixels(a: &[u8], b: &[u8], width: u32) -> Vec<(u32, u32)> {
     assert_eq!(a.len(), b.len());
-    a.chunks_exact(4)
-        .zip(b.chunks_exact(4))
+    a.as_chunks::<4>()
+        .0
+        .iter()
+        .zip(b.as_chunks::<4>().0.iter())
         .enumerate()
         .filter(|(_, (pa, pb))| pa != pb)
         .map(|(i, _)| (i as u32 % width, i as u32 / width))
@@ -25,7 +28,7 @@ fn diff_pixels(a: &[u8], b: &[u8], width: u32) -> Vec<(u32, u32)> {
 
 #[test]
 fn indicator_is_on_by_default_and_toggles() {
-    let rs = create_render_state(default_wgpu_setup());
+    let rs = create_render_state(default_wgpu_setup(), RendererOptions::default());
     let mut w = SceneWidget::new(&rs, 61);
     // silx viewports = [viewport, overview] by default (Plot3DWidget.py:165).
     assert!(w.is_orientation_indicator_visible());
@@ -37,7 +40,7 @@ fn indicator_is_on_by_default_and_toggles() {
 
 #[test]
 fn indicator_draws_only_in_the_top_right_corner() {
-    let rs = create_render_state(default_wgpu_setup());
+    let rs = create_render_state(default_wgpu_setup(), RendererOptions::default());
     let mut w = SceneWidget::new(&rs, 62);
     let on = w.snapshot(&rs, (W, H)).expect("snapshot");
     w.set_orientation_indicator_visible(false);
@@ -73,7 +76,7 @@ fn indicator_draws_only_in_the_top_right_corner() {
 
 #[test]
 fn indicator_skipped_when_target_smaller_than_its_viewport() {
-    let rs = create_render_state(default_wgpu_setup());
+    let rs = create_render_state(default_wgpu_setup(), RendererOptions::default());
     let mut w = SceneWidget::new(&rs, 63);
     let small = (OVERVIEW_SIZE_PX - 20, OVERVIEW_SIZE_PX - 20);
     let on = w.snapshot(&rs, small).expect("snapshot");

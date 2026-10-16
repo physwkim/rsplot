@@ -90,7 +90,7 @@ impl eframe::App for ColormapApp {
         egui::Panel::left("colormap_controls")
             .resizable(false)
             .default_size(160.0)
-            .show_inside(ui, |ui| {
+            .show(ui, |ui| {
                 ui.label("Colormap");
                 for (i, &(_, name)) in COLORMAPS.iter().enumerate() {
                     if ui.radio_value(&mut self.selected_cm, i, name).changed() {
@@ -135,7 +135,7 @@ impl eframe::App for ColormapApp {
             });
 
         // Right: image fills the remaining central area.
-        egui::CentralPanel::default().show_inside(ui, |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             self.plot.show(ui);
         });
     }

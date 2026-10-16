@@ -59,12 +59,12 @@ impl eframe::App for LiveUpdateApp {
         egui::Panel::right("live_update_stats")
             .resizable(true)
             .default_size(180.0)
-            .show_inside(ui, |ui| {
+            .show(ui, |ui| {
                 ui.heading("Stats");
                 self.plot.show_active_stats(ui);
             });
 
-        egui::CentralPanel::default().show_inside(ui, |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             let mut paused = self.paused;
             let mut amplitude = self.amplitude;
             self.plot.show_toolbar_with(ui, |ui, _plot| {

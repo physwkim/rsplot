@@ -46,14 +46,14 @@ impl eframe::App for CurvesRoiApp {
         egui::Panel::right("curves_roi_stats")
             .resizable(true)
             .default_size(420.0)
-            .show_inside(ui, |ui| {
+            .show(ui, |ui| {
                 ui.heading("Curve ROI stats");
                 // One row per x-range ROI, reduced over the active curve (silx
                 // CurvesROIWidget). Drag a ROI edge on the plot to update a row.
                 self.plot.show_curves_roi_widget(ui, &mut self.roi_stats);
             });
 
-        egui::CentralPanel::default().show_inside(ui, |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             self.plot.show_toolbar_with(ui, |ui, plot| {
                 if ui.button("Reset ROIs").clicked() {
                     reset_rois(plot);

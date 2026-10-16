@@ -85,7 +85,7 @@ impl LimitsWidget {
             size,
             pos,
             |ui| {
-                ui.group(|ui| {
+                crate::widget::form::group(ui, |ui| {
                     ui.heading("X Axis");
                     ui.horizontal(|ui| {
                         ui.label("Min:");
@@ -108,7 +108,7 @@ impl LimitsWidget {
                     }
                 });
 
-                ui.group(|ui| {
+                crate::widget::form::group(ui, |ui| {
                     ui.heading("Y Axis");
                     ui.horizontal(|ui| {
                         ui.label("Min:");

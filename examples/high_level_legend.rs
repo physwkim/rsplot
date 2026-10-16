@@ -168,7 +168,7 @@ impl eframe::App for LegendDemoApp {
         egui::Panel::right("legend_demo_panel")
             .resizable(true)
             .default_size(230.0)
-            .show_inside(ui, |ui| {
+            .show(ui, |ui| {
                 ui.heading("Legends");
                 let response = self.plot.show_legend(ui);
                 if let Some(handle) = response.selected {
@@ -201,7 +201,7 @@ impl eframe::App for LegendDemoApp {
                 }
             });
 
-        egui::CentralPanel::default().show_inside(ui, |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             self.plot.show_toolbar(ui);
             self.plot.show(ui);
         });

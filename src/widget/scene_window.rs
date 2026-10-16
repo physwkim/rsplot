@@ -95,7 +95,7 @@ impl SceneWindow {
     /// interaction and painting. Returns the egui [`Response`] of the scene rect.
     pub fn show(&mut self, ui: &mut Ui, render_state: &RenderState) -> Response {
         // Toolbar (top): viewpoint presets + a properties-panel toggle.
-        egui::Panel::top(ui.id().with("scene_window_toolbar")).show_inside(ui, |ui| {
+        egui::Panel::top(ui.id().with("scene_window_toolbar")).show(ui, |ui| {
             ui.horizontal(|ui| {
                 viewpoint_menu(ui, self.view.scene_mut());
                 ui.checkbox(&mut self.show_properties, "Properties");
@@ -106,7 +106,7 @@ impl SceneWindow {
         if self.show_properties {
             egui::Panel::left(ui.id().with("scene_window_properties"))
                 .default_size(PROPERTIES_WIDTH)
-                .show_inside(ui, |ui| {
+                .show(ui, |ui| {
                     self.properties.ui(ui, &mut self.view, render_state);
                 });
         }
@@ -115,13 +115,13 @@ impl SceneWindow {
         // scene rect it picks against is only known after the central panel lays
         // out, so the update below feeds the next frame (one-frame lag, the
         // idiomatic egui immediate-mode trade-off).
-        egui::Panel::bottom(ui.id().with("scene_window_position_info")).show_inside(ui, |ui| {
+        egui::Panel::bottom(ui.id().with("scene_window_position_info")).show(ui, |ui| {
             self.position_info.ui(ui);
         });
 
         // Scene fills the rest.
         let response = egui::CentralPanel::default()
-            .show_inside(ui, |ui| self.view.show(ui))
+            .show(ui, |ui| self.view.show(ui))
             .inner;
 
         // Update the readout from the cursor over the scene (silx

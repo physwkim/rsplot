@@ -95,7 +95,7 @@ impl LocalPanel {
 
 impl eframe::App for LocalPanel {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        egui::CentralPanel::default().show_inside(ui, |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             ui.heading("RsDM local panel (no IOC)");
             ui.label(
                 "loc:// + fake:// channels. Edit the setpoint and flags; \
