@@ -11,6 +11,46 @@ library), **rsdm** (a PyDM-style EPICS display layer built on rsplot), and
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-16
+
+### Changed
+
+- **egui / egui-wgpu 0.36 (wgpu 30)**, MSRV **1.95**. `rsplot` re-exports
+  `egui`, so downstreams move to 0.36 with it — hence the minor bump. Adapted:
+  wgpu 30's `Option` vertex buffers and fallible `get_mapped_range`, egui's
+  `Panel::show_inside` → `show`, `egui_kittest::create_render_state` taking
+  `RendererOptions`; the headless widget tests run through
+  `test_util::HeadlessRun`, since epaint 0.36 panics when an unapplied
+  `TexturesDelta` is dropped.
+- **rsplot**: `WgpuBackend` defers `sync_gpu_items` to one `flush_scene` per
+  frame, so N item mutations (add / remove / update, z, visibility, clear)
+  rebuild the GPU scene once instead of N times; unchanged z / visibility
+  writes no longer dirty the scene.
+- **rsplot**: the title and the x, y, y2 and extra-axis labels lay out
+  single-line and elide with `…` to their gutter run instead of being clipped
+  mid-glyph on a narrow plot; overlapping tick labels are culled on every
+  gutter (tick marks never).
+- **rsplot**: the compact-toolbar overflow button uses U+2026, which egui's
+  bundled font covers (U+22EF rendered as the tofu box).
+
+### Added
+
+- **rsplot**: `widget::form` — label / fill / group helpers for Qt-style
+  (`QFormLayout`) dialog rows in one egui pass; the colormap, print and
+  limits dialogs use them.
+- **rsplot**: a whole-widget plot background: `set_background_colors`' first
+  argument was dropped, so a light canvas over a dark host panel got dark
+  tick labels on still-dark gutters. When set, `PlotView` paints the widget
+  rect with it under the data layer.
+- Documented that hosts must append a broad-coverage fallback font for the
+  arrow and box-drawing glyphs the ROI descriptions, the style selector and
+  the image-compare toolbar use.
+
+### Fixed
+
+- **rsplot**: a range ROI's name label stays inside the data area instead of
+  landing in the title gutter over the plot title.
+
 ## [0.5.6] - 2026-07-19
 
 ### Changed
@@ -542,7 +582,8 @@ instead of Qt `.ui` XML.
 - rsplot is now the root of a three-crate workspace; `rsdm` reaches egui/wgpu
   through `rsplot::egui` to keep a single egui/wgpu in the tree.
 
-[Unreleased]: https://github.com/physwkim/rsplot/compare/v0.5.6...HEAD
+[Unreleased]: https://github.com/physwkim/rsplot/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/physwkim/rsplot/compare/v0.5.6...v0.6.0
 [0.5.6]: https://github.com/physwkim/rsplot/compare/v0.5.5...v0.5.6
 [0.5.5]: https://github.com/physwkim/rsplot/compare/v0.5.4...v0.5.5
 [0.5.4]: https://github.com/physwkim/rsplot/compare/v0.5.3...v0.5.4
