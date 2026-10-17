@@ -16,7 +16,7 @@ struct Params {
     half_width_px: f32,      // half the error-bar line width, in physical pixels
 };
 
-@group(0) @binding(0) var<uniform> params: Params;
+@group(0) @binding(0) var<storage, read> params: Params;
 @group(0) @binding(1) var<storage, read> segs: array<vec4<f32>>;
 
 // 1 / ln(10), to turn the natural log into log10.

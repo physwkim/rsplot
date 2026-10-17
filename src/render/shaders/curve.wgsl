@@ -36,7 +36,7 @@ struct Params {
     use_gap_color: f32,         // >0.5 to fill gaps with gap_color, else discard
 };
 
-@group(0) @binding(0) var<uniform> params: Params;
+@group(0) @binding(0) var<storage, read> params: Params;
 @group(0) @binding(1) var<storage, read> points: array<vec2<f32>>;
 // Per-vertex linear premultiplied RGBA, one per point. A 1-element placeholder
 // when `use_vertex_color` is 0 (never sampled, but the binding must be present).

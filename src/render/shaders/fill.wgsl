@@ -13,7 +13,7 @@ struct Params {
     axis_log: vec2<f32>,     // 1.0 if that axis is log10, else 0.0
 };
 
-@group(0) @binding(0) var<uniform> params: Params;
+@group(0) @binding(0) var<storage, read> params: Params;
 @group(0) @binding(1) var<storage, read> points: array<vec2<f32>>;
 @group(0) @binding(2) var<storage, read> baseline: array<f32>;
 

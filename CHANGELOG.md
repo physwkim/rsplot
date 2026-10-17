@@ -11,6 +11,15 @@ library), **rsdm** (a PyDM-style EPICS display layer built on rsplot), and
 
 ## [Unreleased]
 
+### Fixed
+
+- **rsplot**: the per-curve params blocks (line, markers, caps, fill, error
+  bars) are bound as read-only storage buffers instead of uniforms. On
+  Windows' DX12 backend with the WARP software adapter (a GPU-less VM) every
+  curve in a pass read the last curve's uniform, so all curves took the last
+  curve's colour; storage reads were per-curve correct. The block layouts are
+  unchanged.
+
 ## [0.6.0] - 2026-10-16
 
 ### Changed
