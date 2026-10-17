@@ -6,7 +6,9 @@
 // texture (nearest or bilinear-on-data, mirroring silx interpolation),
 // maps it to a [0, 1] LUT coordinate under the colormap normalization
 // (linear / log10 / sqrt / gamma / arcsinh — mirrors silx GLPlotImage),
-// and looks up the color in a 256x1 sRGB LUT texture (linear).
+// and looks up the color in a 256x1 LUT texture. The LUT's format puts the
+// sampled texel in the render target's encoding (gpu_image.rs
+// `color_texel_format`), so the color is written out unconverted.
 
 struct Params {
     ortho: mat4x4<f32>,
@@ -21,7 +23,8 @@ struct Params {
     has_alpha_map: u32,        // 1 if a per-pixel alpha map is bound at binding 5
     // WGSL pads the vec4 below to the 16-aligned offset 128 (the three trailing
     // u32s above end at 116); the Rust ImageParams adds explicit padding to match.
-    nan_color: vec4<f32>,      // linear RGBA for non-finite samples (silx nan_color)
+    nan_color: vec4<f32>,      // RGBA for non-finite samples (silx nan_color),
+                               // in the target's encoding like the LUT texels
 };
 
 // 1 / ln(10), to turn the natural log into log10.
@@ -42,7 +45,7 @@ fn apply_scale(p: vec2<f32>) -> vec2<f32> {
 @group(0) @binding(2) var data_samp: sampler;          // unused: data is fetched
                                                        // via textureLoad below,
                                                        // kept for layout parity
-@group(0) @binding(3) var lut_tex: texture_2d<f32>;    // 256x1 sRGB
+@group(0) @binding(3) var lut_tex: texture_2d<f32>;    // 256x1, target encoding
 @group(0) @binding(4) var lut_samp: sampler;           // filtering (linear)
 @group(0) @binding(5) var alpha_tex: texture_2d<f32>;  // R32Float per-pixel alpha,
                                                        // unfilterable; 1x1 dummy
@@ -185,9 +188,9 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // Only NaN gets the colormap's nan_color (silx GLPlotImage.py:202-206 /
     // _colormap.pyx:362-376: nancolor solely for isnan). +/-inf survive the
     // normalization clamp and land on the LUT ends (+inf -> top, -inf -> bottom).
-    // NaN is the only value that fails self-equality. The nan_color is
-    // pre-converted to linear RGBA on the CPU so it composites identically to the
-    // sRGB LUT colors, and its alpha is scaled by the image's global alpha.
+    // NaN is the only value that fails self-equality. The nan_color is encoded
+    // on the CPU the same way the LUT texels sample (the target's encoding) so it
+    // composites identically, and its alpha is scaled by the image's global alpha.
     if (v != v) {
         return vec4<f32>(params.nan_color.rgb, params.nan_color.a * a);
     }

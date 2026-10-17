@@ -26,6 +26,13 @@ library), **rsdm** (a PyDM-style EPICS display layer built on rsplot), and
   linearised, which on the non-sRGB target drew every colour darker than its
   `Color32` and than egui's own legend swatches (`#4f9bff` showed as
   `(20, 84, 255)`); PNG export was affected the same way.
+- **rsplot**: the 2D image path uploads its colour texels in the render
+  target's encoding too: the colormap LUT and direct-RGBA tiles are
+  `Rgba8Unorm` for a non-sRGB target and `Rgba8UnormSrgb` for an sRGB one,
+  and the colormap's `nan_color` follows the same rule. They were always
+  sRGB-decoded to linear, which on egui-wgpu's non-sRGB swapchain drew every
+  colormapped image and RGBA image darker than its colormap (viridis' mid
+  teal `(33, 145, 140)` showed as `(4, 71, 66)`).
 
 ## [0.6.0] - 2026-10-16
 
