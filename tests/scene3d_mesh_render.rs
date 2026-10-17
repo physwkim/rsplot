@@ -9,11 +9,16 @@
 //! - the quad whose normal faces the headlight (camera-space `(0,0,1)`) is fully
 //!   lit → ambient + diffuse ≈ 1.0 → white;
 //! - the quad whose normal is perpendicular to the light gets ambient only ≈ 0.3
-//!   → dark grey.
+//!   in linear light → mid grey once encoded.
 //!
 //! Asserting the first is far brighter than the second proves the shader shades
 //! per-normal (not flat), with the right ambient/diffuse split. Using identical
 //! geometry isolates lighting from foreshortening/visibility.
+//!
+//! The harness target is a non-sRGB `Rgba8Unorm` read back verbatim, and the
+//! scene blit encodes its linear result for such a target (the same bytes a
+//! `Color32` carries), so the ambient 0.3 is expected as its sRGB byte ≈ 149,
+//! not the linear 76.
 
 use egui_kittest::Harness;
 use egui_kittest::wgpu::{WgpuTestRenderer, create_render_state, default_wgpu_setup};
@@ -117,15 +122,17 @@ fn scene3d_mesh_is_shaded_by_its_normal() {
         gray(lit) > 200,
         "normal-toward-light quad should be fully lit (~white); got rgb{lit:?}"
     );
-    // Perpendicular quad: ambient only ≈ 0.3 → ~76/255 grey, clearly not black
-    // (proves ambient is applied) and clearly not white (diffuse term is off).
+    // Perpendicular quad: ambient only ≈ 0.3 linear, sRGB-encoded by the blit
+    // for the non-sRGB target → ~149/255 grey, clearly not black (proves ambient
+    // is applied) and clearly not white (diffuse term is off).
     let a = gray(ambient);
     assert!(
-        (45..120).contains(&a),
-        "perpendicular quad should be ambient-only grey (~76); got rgb{ambient:?}"
+        (130..170).contains(&a),
+        "perpendicular quad should be ambient-only grey (~149 encoded); got rgb{ambient:?}"
     );
+    // Encoding compresses the 1.0 vs 0.3 gap to 255 vs ~149 in 8 bits.
     assert!(
-        gray(lit) > a + 100,
+        gray(lit) > a + 80,
         "lit quad must be much brighter than the ambient-only quad; \
          lit={} ambient={a}",
         gray(lit)

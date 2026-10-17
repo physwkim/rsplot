@@ -33,6 +33,14 @@ library), **rsdm** (a PyDM-style EPICS display layer built on rsplot), and
   sRGB-decoded to linear, which on egui-wgpu's non-sRGB swapchain drew every
   colormapped image and RGBA image darker than its colormap (viridis' mid
   teal `(33, 145, 140)` showed as `(4, 71, 66)`).
+- **rsplot**: the 3D scene (`paint_scene3d`, `SceneWidget`, `ScalarFieldView`,
+  the volume cut plane and iso-surfaces) is rendered into the sRGB variant of
+  the surface format and the blit encodes the linear result to sRGB when the
+  surface is non-sRGB, so geometry, mesh shading, fog, image layers and the
+  background now show at their `Color32` values on egui-wgpu's swapchain
+  instead of darker. `snapshot_scene3d` / `SceneWidget::snapshot` read back
+  the sRGB offscreen target, so their PNGs carry sRGB-encoded bytes whatever
+  the surface format (they were as dark as the screen).
 
 ## [0.6.0] - 2026-10-16
 
