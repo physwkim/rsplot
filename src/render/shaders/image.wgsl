@@ -37,7 +37,7 @@ fn apply_scale(p: vec2<f32>) -> vec2<f32> {
     );
 }
 
-@group(0) @binding(0) var<uniform> params: Params;
+@group(0) @binding(0) var<storage, read> params: Params;
 @group(0) @binding(1) var data_tex: texture_2d<f32>;   // R32Float, unfilterable
 @group(0) @binding(2) var data_samp: sampler;          // unused: data is fetched
                                                        // via textureLoad below,

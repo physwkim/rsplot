@@ -20,7 +20,7 @@ struct Uniforms {
     params: vec4<f32>,
 };
 
-@group(0) @binding(0) var<uniform> u: Uniforms;
+@group(0) @binding(0) var<storage, read> u: Uniforms;
 @group(0) @binding(1) var vol_tex: texture_3d<f32>;
 @group(0) @binding(2) var vol_samp: sampler;
 

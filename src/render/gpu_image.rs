@@ -168,10 +168,13 @@ fn srgb_u8_to_linear_rgba(c: [u8; 4]) -> [f32; 4] {
     ]
 }
 
-/// Uniform block for the image shader. Field order keeps `repr(C)` offsets
-/// std140-aligned: mat4 @0, vec4 @64, vec2 @80, then scalars f32 @88/92/96/100,
-/// u32 @104/108/112, explicit pad @116, then vec4 @128 (16-aligned); total 144.
-/// Matches `Params` in `image.wgsl` (where WGSL auto-pads the vec4 to 128).
+/// Params block for the image shader, bound as a read-only storage buffer like
+/// every rsplot params block (see `CurveParams` in `gpu_curve.rs` for why).
+/// Field order keeps `repr(C)` offsets std140-aligned: mat4 @0, vec4 @64, vec2
+/// @80, then scalars f32 @88/92/96/100, u32 @104/108/112, explicit pad @116,
+/// then vec4 @128 (16-aligned); total 144 — the same under the storage rules,
+/// since there are no arrays or nested structs. Matches `Params` in
+/// `image.wgsl` (where WGSL auto-pads the vec4 to 128).
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct ImageParams {
@@ -202,10 +205,11 @@ struct ImageParams {
     nan_color: [f32; 4],
 }
 
-/// Uniform block for the RGBA (direct) image shader: just the transform, rect,
-/// axis-scale flags, and global alpha — no colormap fields. `repr(C)` offsets
-/// stay std140-aligned: mat4 @0, vec4 @64, vec2 @80, f32 @88; padded to 96.
-/// Matches `Params` in `image_rgba.wgsl`.
+/// Params block for the RGBA (direct) image shader (read-only storage, as
+/// [`ImageParams`]): just the transform, rect, axis-scale flags, and global
+/// alpha — no colormap fields. `repr(C)` offsets stay std140-aligned: mat4 @0,
+/// vec4 @64, vec2 @80, f32 @88; padded to 96. Matches `Params` in
+/// `image_rgba.wgsl`.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct ImageRgbaParams {
@@ -374,12 +378,12 @@ impl ImagePipeline {
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("rsplot image bgl"),
                 entries: &[
-                    // 0: params uniform (used by both stages)
+                    // 0: params block, read-only storage (used by both stages)
                     wgpu::BindGroupLayoutEntry {
                         binding: 0,
                         visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                         ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Uniform,
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
                             has_dynamic_offset: false,
                             min_binding_size: NonZeroU64::new(
                                 std::mem::size_of::<ImageParams>() as u64
@@ -470,7 +474,7 @@ impl ImagePipeline {
             cache: None,
         });
 
-        // RGBA pipeline: its own minimal layout (uniform + RGBA texture +
+        // RGBA pipeline: its own minimal layout (params + RGBA texture +
         // sampler, no LUT). The texture is declared filterable and the sampler
         // slot is filtering so the bind group can choose the nearest or linear
         // sampler per image (silx `interpolation`). `Rgba8UnormSrgb` is a
@@ -483,7 +487,7 @@ impl ImagePipeline {
                         binding: 0,
                         visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                         ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Uniform,
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
                             has_dynamic_offset: false,
                             min_binding_size: NonZeroU64::new(
                                 std::mem::size_of::<ImageRgbaParams>() as u64,
@@ -655,7 +659,7 @@ struct ImageTile {
 }
 
 /// What a [`GpuImage`] renders: a colormapped scalar field (carrying the
-/// resolved normalization for the per-frame uniform) or a direct RGBA image
+/// resolved normalization for the per-frame params) or a direct RGBA image
 /// (no colormap fields — they would have no meaning).
 #[derive(Clone, Copy)]
 enum GpuImageKind {
@@ -830,7 +834,7 @@ impl GpuImage {
                         let params = device.create_buffer(&wgpu::BufferDescriptor {
                             label: Some("rsplot image tile params"),
                             size: std::mem::size_of::<ImageParams>() as u64,
-                            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
                             mapped_at_creation: false,
                         });
                         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -941,7 +945,7 @@ impl GpuImage {
                         let params = device.create_buffer(&wgpu::BufferDescriptor {
                             label: Some("rsplot image rgba tile params"),
                             size: std::mem::size_of::<ImageRgbaParams>() as u64,
-                            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
                             mapped_at_creation: false,
                         });
                         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -985,7 +989,7 @@ impl GpuImage {
             kind,
             alpha: image.alpha,
         };
-        // Seed each tile's uniform; the per-frame transform overwrites `ortho`.
+        // Seed each tile's params; the per-frame transform overwrites `ortho`.
         gpu.write_uniforms(queue, IDENTITY, [0.0, 0.0]);
         gpu
     }

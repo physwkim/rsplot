@@ -264,9 +264,12 @@ pub struct Scene3dTexturedMesh {
     pub interpolation: ImageInterpolation,
 }
 
-/// Uniform block for `scene3d.wgsl` **and** `scene3d_image.wgsl` (the image
+/// Params block for `scene3d.wgsl` **and** `scene3d_image.wgsl` (the image
 /// pipeline binds the same buffer at group 0): the column-major, clip-corrected
-/// MVP plus the linear-fog datum.
+/// MVP plus the linear-fog datum. Bound as a read-only storage buffer like every
+/// rsplot params block (see `CurveParams` in `gpu_curve.rs` for why); the three
+/// scene blocks hold only mat4/vec4/vec2, so their layout is the same under the
+/// uniform and storage rules.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct Scene3dParams {
@@ -281,9 +284,10 @@ struct Scene3dParams {
     view_row_z: [f32; 4],
 }
 
-/// Uniform block for `scene3d_mesh.wgsl`: the clip MVP, the camera-space
-/// normal transform (the view matrix, column-major, no depth correction), the
-/// fog datum, and the Phong shininess.
+/// Params block for `scene3d_mesh.wgsl` (read-only storage, as
+/// [`Scene3dParams`]): the clip MVP, the camera-space normal transform (the view
+/// matrix, column-major, no depth correction), the fog datum, and the Phong
+/// shininess.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct Scene3dMeshParams {
@@ -296,9 +300,10 @@ struct Scene3dMeshParams {
     light: [f32; 4],
 }
 
-/// Uniform block for `scene3d_points.wgsl`: the MVP, the fog datum, plus the
-/// offscreen viewport pixel size (the sprite-corner offset is computed in
-/// pixels then converted to NDC, so the shader needs the viewport extent).
+/// Params block for `scene3d_points.wgsl` (read-only storage, as
+/// [`Scene3dParams`]): the MVP, the fog datum, plus the offscreen viewport pixel
+/// size (the sprite-corner offset is computed in pixels then converted to NDC,
+/// so the shader needs the viewport extent).
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct Scene3dPointParams {
@@ -692,17 +697,17 @@ struct Scene3dPipeline {
     /// egui's surface format; the offscreen color target uses it too so colors
     /// round-trip through the blit without an extra color-space conversion.
     target_format: wgpu::TextureFormat,
-    /// `group(0)` layout for the MVP uniform (vertex stage).
+    /// `group(0)` layout for the scene params block (MVP + fog).
     scene_bgl: wgpu::BindGroupLayout,
     /// Depth-tested `LineList` pipeline.
     line_pipeline: wgpu::RenderPipeline,
     /// Depth-tested `TriangleList` pipeline (no face culling).
     tri_pipeline: wgpu::RenderPipeline,
-    /// `group(0)` layout for the point-sprite uniform (MVP + viewport, vertex stage).
+    /// `group(0)` layout for the point-sprite params block (MVP + fog + viewport).
     point_bgl: wgpu::BindGroupLayout,
     /// Depth-tested, alpha-blended billboarded point-sprite pipeline.
     point_pipeline: wgpu::RenderPipeline,
-    /// `group(0)` layout for the mesh uniform (MVP + normal matrix, vertex stage).
+    /// `group(0)` layout for the mesh params block (MVP + normal matrix + fog + light).
     mesh_bgl: wgpu::BindGroupLayout,
     /// Depth-tested, headlight-shaded `TriangleList` mesh pipeline (no culling).
     mesh_pipeline: wgpu::RenderPipeline,
@@ -749,11 +754,11 @@ impl Scene3dPipeline {
             label: Some("rsplot scene3d scene bgl"),
             entries: &[wgpu::BindGroupLayoutEntry {
                 binding: 0,
-                // The fragment stage reads the fog uniform (silx applies fog
+                // The fragment stage reads the fog params (silx applies fog
                 // per-fragment, viewport.py RenderContext scene_post).
                 visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                 ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
                     has_dynamic_offset: false,
                     min_binding_size: NonZeroU64::new(std::mem::size_of::<Scene3dParams>() as u64),
                 },
@@ -831,17 +836,17 @@ impl Scene3dPipeline {
             "rsplot scene3d triangles",
         );
 
-        // Point sprites: their own uniform (MVP + fog + viewport) and an
+        // Point sprites: their own params block (MVP + fog + viewport) and an
         // instanced billboard pipeline with premultiplied-alpha blending so the
         // antialiased marker edges composite over the opaque scene behind them.
         let point_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("rsplot scene3d point bgl"),
             entries: &[wgpu::BindGroupLayoutEntry {
                 binding: 0,
-                // Fragment stage reads the fog uniform.
+                // Fragment stage reads the fog params.
                 visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                 ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
                     has_dynamic_offset: false,
                     min_binding_size: NonZeroU64::new(
                         std::mem::size_of::<Scene3dPointParams>() as u64
@@ -900,17 +905,17 @@ impl Scene3dPipeline {
             cache: None,
         });
 
-        // Shaded meshes: their own uniform (MVP + normal matrix + fog +
+        // Shaded meshes: their own params block (MVP + normal matrix + fog +
         // shininess) and a depth-tested, premultiplied-alpha-blended, double-sided
         // triangle pipeline with headlight lighting in the fragment shader.
         let mesh_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("rsplot scene3d mesh bgl"),
             entries: &[wgpu::BindGroupLayoutEntry {
                 binding: 0,
-                // Fragment stage reads the fog + shininess uniforms.
+                // Fragment stage reads the fog + shininess params.
                 visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                 ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
                     has_dynamic_offset: false,
                     min_binding_size: NonZeroU64::new(
                         std::mem::size_of::<Scene3dMeshParams>() as u64
@@ -976,7 +981,7 @@ impl Scene3dPipeline {
             cache: None,
         });
 
-        // Textured image quads: group 0 reuses the scene MVP uniform; group 1 is
+        // Textured image quads: group 0 reuses the scene params block; group 1 is
         // the per-image texture + sampler. Depth-tested, premultiplied-alpha
         // blended (opaque images write fully; RGBA images composite).
         let image_tex_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -1162,10 +1167,11 @@ struct Scene3dImageGpu {
     vertex_count: u32,
 }
 
-/// Per-scene GPU data: vertex buffers, the MVP uniform, and the offscreen
+/// Per-scene GPU data: vertex buffers, the params blocks, and the offscreen
 /// color+depth render target (recreated on size change).
 struct Scene3dGpu {
-    /// MVP uniform, written each frame in [`Scene3dResources::prepare_scene`].
+    /// Scene params (MVP + fog), written each frame in
+    /// [`Scene3dResources::prepare_scene`].
     params_buf: wgpu::Buffer,
     /// `group(0)` bind group over `params_buf` for the scene pipelines.
     scene_bind_group: wgpu::BindGroup,
@@ -1175,14 +1181,14 @@ struct Scene3dGpu {
     /// Triangle vertices; `None` while empty (skip the draw).
     tri_vbuf: Option<wgpu::Buffer>,
     tri_count: u32,
-    /// Point-sprite uniform (MVP + viewport), written each frame.
+    /// Point-sprite params (MVP + fog + viewport), written each frame.
     point_params_buf: wgpu::Buffer,
     /// `group(0)` bind group over `point_params_buf` for the point pipeline.
     point_bind_group: wgpu::BindGroup,
     /// Per-instance scatter points; `None` while empty (skip the draw).
     point_vbuf: Option<wgpu::Buffer>,
     point_count: u32,
-    /// Mesh uniform (MVP + normal matrix), written each frame.
+    /// Mesh params (MVP + normal matrix + fog + light), written each frame.
     mesh_params_buf: wgpu::Buffer,
     /// `group(0)` bind group over `mesh_params_buf` for the mesh pipeline.
     mesh_bind_group: wgpu::BindGroup,
@@ -1206,7 +1212,7 @@ impl Scene3dGpu {
         let params_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("rsplot scene3d params"),
             size: std::mem::size_of::<Scene3dParams>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         let scene_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1220,7 +1226,7 @@ impl Scene3dGpu {
         let point_params_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("rsplot scene3d point params"),
             size: std::mem::size_of::<Scene3dPointParams>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         let point_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1234,7 +1240,7 @@ impl Scene3dGpu {
         let mesh_params_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("rsplot scene3d mesh params"),
             size: std::mem::size_of::<Scene3dMeshParams>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         let mesh_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {

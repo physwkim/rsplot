@@ -2,15 +2,16 @@
 //
 // egui-wgpu already calls set_viewport with the paint callback's rect, so a
 // full-screen triangle covering all of NDC paints only the viewport (= the data
-// rect). The color comes from a group(0) binding(0) uniform (linear color space,
-// premultiplied).
+// rect). The color comes from the group(0) binding(0) params block (premultiplied
+// RGBA in the target's encoding), bound as a read-only storage buffer like every
+// rsplot params block (see `CurveParams` in gpu_curve.rs).
 
 struct Params {
     color: vec4<f32>,
 };
 
 @group(0) @binding(0)
-var<uniform> params: Params;
+var<storage, read> params: Params;
 
 @vertex
 fn vs_main(@builtin(vertex_index) vid: u32) -> @builtin(position) vec4<f32> {

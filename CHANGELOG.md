@@ -13,12 +13,13 @@ library), **rsdm** (a PyDM-style EPICS display layer built on rsplot), and
 
 ### Fixed
 
-- **rsplot**: the per-curve params blocks (line, markers, caps, fill, error
-  bars) are bound as read-only storage buffers instead of uniforms. On
-  Windows' DX12 backend with the WARP software adapter (a GPU-less VM) every
-  curve in a pass read the last curve's uniform, so all curves took the last
-  curve's colour; storage reads were per-curve correct. The block layouts are
-  unchanged.
+- **rsplot**: every per-draw params block — the curve pipelines (line,
+  markers, caps, fill, error bars), the data-area clear, the image tiles, the
+  3D scene pipelines and the volume ray-caster — is bound as a read-only
+  storage buffer instead of a uniform. On Windows' DX12 backend with the WARP
+  software adapter (a GPU-less VM) every curve in a pass read the last
+  curve's uniform, so all curves took the last curve's colour; storage reads
+  were per-curve correct. The block layouts are unchanged.
 - **rsplot**: curve, per-vertex, dashed-gap and data-background colours are
   uploaded in the render target's encoding: sRGB bytes for a non-sRGB target
   (egui-wgpu's swapchain), linear for an sRGB one. They were always

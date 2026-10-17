@@ -21,7 +21,10 @@ use half::f16;
 /// like `Scene3dId`).
 pub type VolumeId = u64;
 
-/// Per-frame camera + rendering uniforms. Column-major matrix for WGSL.
+/// Per-frame camera + rendering params, bound as a read-only storage buffer like
+/// every rsplot params block (see `CurveParams` in `gpu_curve.rs` for why; the
+/// block holds only a mat4 and vec4s, so the layout is the same as the uniform
+/// one). Column-major matrix for WGSL.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct VolumeUniforms {
@@ -110,7 +113,7 @@ impl VolumePipeline {
                     binding: 0,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
                         has_dynamic_offset: false,
                         min_binding_size: wgpu::BufferSize::new(
                             std::mem::size_of::<VolumeUniforms>() as u64,
@@ -262,10 +265,10 @@ impl VolumeGpu {
         (self.vol_min, self.vol_max) = volume_bounds(depth, height, width);
     }
 
-    /// Build a bind group for one frame: a fresh uniform buffer holding this
+    /// Build a bind group for one frame: a fresh params buffer holding this
     /// frame's camera and this view's box, plus the view's texture and the shared
     /// sampler. `None` until a volume has been uploaded. Called once per paint in
-    /// `prepare`, so each callback owns its uniforms rather than sharing one
+    /// `prepare`, so each callback owns its params rather than sharing one
     /// per-id buffer.
     fn frame_bind_group(
         &self,
@@ -284,7 +287,7 @@ impl VolumeGpu {
         let uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("rsplot volume raycaster uniforms"),
             size: std::mem::size_of::<VolumeUniforms>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         queue.write_buffer(&uniform_buf, 0, bytemuck::bytes_of(&u));
@@ -292,7 +295,7 @@ impl VolumeGpu {
             dimension: Some(wgpu::TextureViewDimension::D3),
             ..Default::default()
         });
-        // The bind group holds strong refs to the uniform buffer and view, so
+        // The bind group holds strong refs to the params buffer and view, so
         // both live as long as the callback keeps the bind group.
         Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("rsplot volume raycaster bind group"),
@@ -423,7 +426,7 @@ pub fn set_volume_raycaster(
 }
 
 /// egui paint callback. `prepare` builds this frame's own bind group (fresh
-/// uniform buffer for the camera + the view's texture) and stashes it in `ready`;
+/// params buffer for the camera + the view's texture) and stashes it in `ready`;
 /// `paint` ray-marches with it. Because the bind group is per-callback rather
 /// than a shared per-id buffer, two callbacks with the same [`VolumeId`] in one
 /// frame each render with their own camera.
@@ -475,7 +478,7 @@ impl egui_wgpu::CallbackTrait for VolumeCallback {
 /// Register the raycaster paint callback for `frame` over `rect`. A no-op on
 /// screen until [`set_volume_raycaster`] has uploaded a volume for `frame.id`.
 ///
-/// Each callback builds its own uniform buffer + bind group in `prepare` (keyed
+/// Each callback builds its own params buffer + bind group in `prepare` (keyed
 /// off `frame`, not shared per id), so painting the same [`VolumeId`] twice in
 /// one frame — two panels of the same volume from different cameras — renders
 /// each with its own viewpoint.

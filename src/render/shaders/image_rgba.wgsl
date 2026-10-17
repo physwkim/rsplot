@@ -25,7 +25,7 @@ fn apply_scale(p: vec2<f32>) -> vec2<f32> {
     );
 }
 
-@group(0) @binding(0) var<uniform> params: Params;
+@group(0) @binding(0) var<storage, read> params: Params;
 @group(0) @binding(1) var rgba_tex: texture_2d<f32>; // Rgba8UnormSrgb
 @group(0) @binding(2) var rgba_samp: sampler;         // non-filtering (nearest)
 
