@@ -11,6 +11,8 @@ library), **rsdm** (a PyDM-style EPICS display layer built on rsplot), and
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-10-18
+
 ### Fixed
 
 - **rsplot**: every per-draw params block — the curve pipelines (line,
@@ -620,7 +622,8 @@ instead of Qt `.ui` XML.
 - rsplot is now the root of a three-crate workspace; `rsdm` reaches egui/wgpu
   through `rsplot::egui` to keep a single egui/wgpu in the tree.
 
-[Unreleased]: https://github.com/physwkim/rsplot/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/physwkim/rsplot/compare/v0.6.1...HEAD
+[0.6.1]: https://github.com/physwkim/rsplot/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/physwkim/rsplot/compare/v0.5.6...v0.6.0
 [0.5.6]: https://github.com/physwkim/rsplot/compare/v0.5.5...v0.5.6
 [0.5.5]: https://github.com/physwkim/rsplot/compare/v0.5.4...v0.5.5
