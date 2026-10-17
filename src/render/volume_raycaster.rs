@@ -6,6 +6,12 @@
 //! per-view 3D RGBA texture and composites premultiplied colour straight into
 //! egui's render pass (`shaders/volume_raycaster.wgsl`).
 //!
+//! The voxel colours are uploaded in the render target's encoding
+//! (`gpu_image::rgba8_for_target`): the caller's sRGB bytes as is for
+//! egui-wgpu's non-sRGB swapchain, linearised for an sRGB target, so the
+//! composite the shader writes is already what the target stores — the rule
+//! every rsplot colour follows (`gpu_color`, the image LUT, the 3D blit).
+//!
 //! Lifecycle mirrors the scene path: [`install_volume_raycaster`] once at
 //! startup inserts the shared pipeline into `callback_resources`;
 //! [`set_volume_raycaster`] uploads a view's volume texture;
@@ -16,6 +22,8 @@ use std::sync::Mutex;
 
 use egui_wgpu::{RenderState, wgpu};
 use half::f16;
+
+use super::gpu_image::rgba8_for_target;
 
 /// Identifies one raycaster view within the shared resources (caller-assigned,
 /// like `Scene3dId`).
@@ -61,8 +69,11 @@ pub fn volume_bounds(depth: usize, height: usize, width: usize) -> ([f32; 3], [f
     ([-half[0], -half[1], -half[2]], half)
 }
 
-/// Premultiply a straight-alpha RGBA8 buffer into `Rgba16Float` texels (`rgb *=
-/// a`, both normalised to `[0, 1]`), so the linear sampler interpolates
+/// Convert a straight-alpha RGBA8 buffer (sRGB bytes, as a `Color32` carries
+/// them) into premultiplied `Rgba16Float` texels in the render target's
+/// encoding. Each voxel goes through [`rgba8_for_target`] — the bytes as is for
+/// a non-sRGB target, linearised RGB for an sRGB one, which encodes on store —
+/// and is then premultiplied (`rgb *= a`), so the linear sampler interpolates
 /// premultiplied colour: a transparent voxel becomes `(0,0,0,0)` and
 /// interpolating it against an opaque colour keeps the hue instead of dragging
 /// it toward black. A trailing partial pixel (len not a multiple of 4) is
@@ -75,17 +86,19 @@ pub fn volume_bounds(depth: usize, height: usize, width: usize) -> ([f32; 3], [f
 /// to steps of `1/a`, which for the low coverages a ray-march is built on
 /// (`a = 3/255`) is three colour levels total. `f16` holds every `c·a/255²` to
 /// ~0.05% relative, so the recovered RGB is exact to well under one 8-bit step
-/// at every coverage down to 1/255.
-fn premultiply_rgba(rgba: &[u8]) -> Vec<u8> {
+/// at every coverage down to 1/255. The linearised dark end (`1/255 → 3.0e-4`)
+/// times the lowest coverage lands in f16's subnormals, whose `6e-8` spacing
+/// still re-encodes the recovered channel to its own byte (unit test).
+fn premultiply_rgba(rgba: &[u8], srgb_target: bool) -> Vec<u8> {
     rgba.as_chunks::<4>()
         .0
         .iter()
         .flat_map(|px| {
-            let a = f32::from(px[3]) / 255.0;
+            let [r, g, b, a] = rgba8_for_target(*px, srgb_target);
             let texel = [
-                f16::from_f32(f32::from(px[0]) / 255.0 * a),
-                f16::from_f32(f32::from(px[1]) / 255.0 * a),
-                f16::from_f32(f32::from(px[2]) / 255.0 * a),
+                f16::from_f32(r * a),
+                f16::from_f32(g * a),
+                f16::from_f32(b * a),
                 f16::from_f32(a),
             ];
             texel.map(f16::to_le_bytes)
@@ -98,6 +111,9 @@ struct VolumePipeline {
     pipeline: wgpu::RenderPipeline,
     bgl: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
+    /// Whether the colour target is an `*Srgb` format: decides the encoding the
+    /// voxel texels are uploaded in (see [`premultiply_rgba`]).
+    srgb_target: bool,
 }
 
 impl VolumePipeline {
@@ -187,6 +203,7 @@ impl VolumePipeline {
             pipeline,
             bgl,
             sampler,
+            srgb_target: target_format.is_srgb(),
         }
     }
 }
@@ -216,21 +233,23 @@ impl VolumeGpu {
     }
 
     /// Upload a `(depth, height, width)` RGBA8 volume (row-major, straight
-    /// alpha), (re)building the 3D texture. The straight alpha is premultiplied
-    /// into `Rgba16Float` before upload so the linear sampler interpolates
-    /// premultiplied colour (no dark fringe at colour/transparent boundaries)
-    /// while the product still carries the straight RGB at low coverage — see
-    /// [`premultiply_rgba`]. Costs twice the VRAM of an 8-bit texture.
+    /// alpha, sRGB bytes), (re)building the 3D texture. The voxels are encoded
+    /// for the target (`srgb_target`) and premultiplied into `Rgba16Float`
+    /// before upload so the linear sampler interpolates premultiplied colour (no
+    /// dark fringe at colour/transparent boundaries) while the product still
+    /// carries the straight RGB at low coverage — see [`premultiply_rgba`].
+    /// Costs twice the VRAM of an 8-bit texture.
     fn upload(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         rgba: &[u8],
         dims: (usize, usize, usize),
+        srgb_target: bool,
     ) {
         let (depth, height, width) = dims;
         let (w, h, d) = (width as u32, height as u32, depth as u32);
-        let premul = premultiply_rgba(rgba);
+        let premul = premultiply_rgba(rgba, srgb_target);
         let extent = wgpu::Extent3d {
             width: w,
             height: h,
@@ -384,7 +403,8 @@ pub fn release_volume_raycaster(render_state: &RenderState, id: VolumeId) {
 }
 
 /// Upload view `id`'s volume as a `(depth, height, width)` RGBA8 texture
-/// (row-major, straight alpha). Requires a claim from
+/// (row-major, straight alpha; sRGB bytes, as `Color32` carries them — they are
+/// encoded for the render target on upload). Requires a claim from
 /// [`acquire_volume_raycaster`]; without one the call is a no-op, so an upload
 /// can never resurrect an entry whose last holder released it.
 pub fn set_volume_raycaster(
@@ -413,6 +433,7 @@ pub fn set_volume_raycaster(
         .callback_resources
         .get_mut()
         .expect("VolumeRaycasterResources not installed — call install_volume_raycaster() first");
+    let srgb_target = res.pipeline.srgb_target;
     let Some(scene) = res.scenes.get_mut(&id) else {
         debug_assert!(false, "set_volume_raycaster: id {id} holds no claim");
         return;
@@ -422,6 +443,7 @@ pub fn set_volume_raycaster(
         &render_state.queue,
         rgba,
         (depth, height, width),
+        srgb_target,
     );
 }
 
@@ -514,7 +536,7 @@ mod tests {
             200, 100, 50, 0, // transparent → all zero
             255, 255, 255, 128, // half coverage → ~half
         ];
-        let out = premultiply_rgba(&src);
+        let out = premultiply_rgba(&src, false);
         assert_eq!(texel(&out, 0), [1.0, 0.0, 0.0, 1.0]);
         assert_eq!(texel(&out, 1), [0.0; 4]);
         let half = texel(&out, 2);
@@ -530,7 +552,7 @@ mod tests {
     fn premultiply_recovers_the_straight_rgb_at_the_lowest_coverages() {
         for a in [1u8, 2, 3, 4, 8, 128, 255] {
             for c in [1u8, 37, 128, 200, 254, 255] {
-                let out = premultiply_rgba(&[c, 0, 0, a]);
+                let out = premultiply_rgba(&[c, 0, 0, a], false);
                 let t = texel(&out, 0);
                 let recovered = t[0] / t[3];
                 let want = f32::from(c) / 255.0;
@@ -545,6 +567,44 @@ mod tests {
     #[test]
     fn premultiply_drops_trailing_partial_pixel() {
         let src = [255, 0, 0, 255, 1, 2]; // 6 bytes: one pixel + 2 stragglers
-        assert_eq!(premultiply_rgba(&src).len(), 8); // one Rgba16Float texel
+        assert_eq!(premultiply_rgba(&src, false).len(), 8); // one Rgba16Float texel
+    }
+
+    /// The same opaque orange in both target encodings: the bytes as is for a
+    /// non-sRGB target, the sRGB transfer function applied for an sRGB one
+    /// (`128/255 → 0.2158`); alpha is linear in both.
+    #[test]
+    fn premultiply_encodes_the_rgb_for_the_target() {
+        let src = [255, 128, 0, 255];
+        let gamma = texel(&premultiply_rgba(&src, false), 0);
+        let linear = texel(&premultiply_rgba(&src, true), 0);
+        assert!((gamma[1] - 128.0 / 255.0).abs() < 1e-3, "got {}", gamma[1]);
+        assert!((linear[1] - 0.2158).abs() < 1e-3, "got {}", linear[1]);
+        assert_eq!(linear[0], 1.0);
+        assert_eq!(linear[2], 0.0);
+        assert_eq!(linear[3], gamma[3]);
+    }
+
+    /// The sRGB-target branch at the same coverage boundaries: the straight
+    /// channel the shader recovers (`s.rgb / s.a`), re-encoded, must be the
+    /// authored byte. Its dark end (`1/255 → 3.0e-4`) times the lowest coverage
+    /// is an f16 subnormal, so this is where the format's precision is thinnest.
+    #[test]
+    fn premultiply_recovers_the_authored_byte_through_the_linear_encoding() {
+        let encode = |l: f32| -> u8 {
+            let s = if l <= 0.003_130_8 {
+                l * 12.92
+            } else {
+                1.055 * l.powf(1.0 / 2.4) - 0.055
+            };
+            (s * 255.0).round() as u8
+        };
+        for a in [1u8, 2, 3, 4, 8, 128, 255] {
+            for c in [1u8, 37, 128, 200, 254, 255] {
+                let t = texel(&premultiply_rgba(&[c, 0, 0, a], true), 0);
+                let got = encode(t[0] / t[3]);
+                assert!(got.abs_diff(c) <= 1, "a={a} c={c}: re-encoded as {got}");
+            }
+        }
     }
 }

@@ -41,6 +41,11 @@ library), **rsdm** (a PyDM-style EPICS display layer built on rsplot), and
   instead of darker. `snapshot_scene3d` / `SceneWidget::snapshot` read back
   the sRGB offscreen target, so their PNGs carry sRGB-encoded bytes whatever
   the surface format (they were as dark as the screen).
+- **rsplot**: `VolumeRaycaster` uploads its voxel colours in the render
+  target's encoding — the sRGB bytes as is for egui-wgpu's non-sRGB swapchain
+  (unchanged there), linearised for an sRGB target, where the composite used
+  to be encoded a second time on store and showed washed out (an opaque
+  `(255, 128, 0)` voxel read back as `(255, 188, 0)`).
 
 ## [0.6.0] - 2026-10-16
 

@@ -162,12 +162,14 @@ fn color_texel_format(srgb_target: bool) -> wgpu::TextureFormat {
     }
 }
 
-/// Encode the colormap's straight-alpha sRGB `nan_color` bytes for the render
-/// target, in the same encoding the LUT texels sample as (see
-/// [`color_texel_format`]) so the shader composites the two identically:
-/// linearised RGB for an sRGB target, the bytes as-is for a non-sRGB one. Alpha
-/// is linear (not gamma-encoded) in both.
-fn nan_color_for_target(c: [u8; 4], srgb_target: bool) -> [f32; 4] {
+/// Encode straight-alpha sRGB RGBA8 bytes (a `Color32`'s, a colormap's) as the
+/// `[f32; 4]` a shader composites in the render target's encoding: linearised
+/// RGB for an sRGB target, the bytes as-is for a non-sRGB one — the same values
+/// an 8-bit colour texture of [`color_texel_format`] samples as, so a colour
+/// from either source composites identically. Alpha is linear (not
+/// gamma-encoded) in both. Used for the image `nan_color` and for the volume
+/// ray-caster's voxel texels (`volume_raycaster.rs`).
+pub(crate) fn rgba8_for_target(c: [u8; 4], srgb_target: bool) -> [f32; 4] {
     if srgb_target {
         srgb_u8_to_linear_rgba(c)
     } else {
@@ -177,7 +179,7 @@ fn nan_color_for_target(c: [u8; 4], srgb_target: bool) -> [f32; 4] {
 
 /// Convert an sRGB-encoded `[u8; 4]` color (the colormap's `nan_color`) to
 /// linear-space `[f32; 4]` — the sRGB-target branch of
-/// [`nan_color_for_target`]. The RGB channels use the standard sRGB transfer
+/// [`rgba8_for_target`]. The RGB channels use the standard sRGB transfer
 /// function; alpha is linear (not gamma-encoded).
 fn srgb_u8_to_linear_rgba(c: [u8; 4]) -> [f32; 4] {
     let to_linear = |b: u8| {
@@ -709,7 +711,7 @@ enum GpuImageKind {
         /// 1 if a per-pixel alpha map is bound at binding 5, else 0.
         has_alpha_map: u32,
         /// RGBA for non-finite samples (silx `Colormap.nan_color`) in the render
-        /// target's encoding, like the LUT texels (see [`nan_color_for_target`]).
+        /// target's encoding, like the LUT texels (see [`rgba8_for_target`]).
         nan_color: [f32; 4],
     },
     Rgba,
@@ -926,7 +928,7 @@ impl GpuImage {
                         norm: colormap.normalization.code(),
                         interp: image.interpolation.code(),
                         has_alpha_map: u32::from(image.alpha_map.is_some()),
-                        nan_color: nan_color_for_target(colormap.nan_color, pipeline.srgb_target),
+                        nan_color: rgba8_for_target(colormap.nan_color, pipeline.srgb_target),
                     },
                 )
             }
@@ -1213,17 +1215,17 @@ mod tests {
     }
 
     #[test]
-    fn nan_color_for_target_matches_the_lut_encoding() {
+    fn rgba8_for_target_matches_the_lut_encoding() {
         let c = [188, 64, 255, 128];
         // Non-sRGB target: the bytes pass through, like a texel of an
         // `Rgba8Unorm` LUT.
-        let gamma = nan_color_for_target(c, false);
+        let gamma = rgba8_for_target(c, false);
         let expected = c.map(|b| f32::from(b) / 255.0);
         assert_eq!(gamma, expected);
         // sRGB target: linearised RGB, like a texel of an `Rgba8UnormSrgb` LUT;
         // alpha linear in both.
-        assert_eq!(nan_color_for_target(c, true), srgb_u8_to_linear_rgba(c));
-        assert_eq!(gamma[3], nan_color_for_target(c, true)[3]);
+        assert_eq!(rgba8_for_target(c, true), srgb_u8_to_linear_rgba(c));
+        assert_eq!(gamma[3], rgba8_for_target(c, true)[3]);
     }
 
     #[test]
