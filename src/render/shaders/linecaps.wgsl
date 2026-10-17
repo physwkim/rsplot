@@ -30,7 +30,7 @@ struct Params {
 
 @group(0) @binding(0) var<storage, read> params: Params;
 @group(0) @binding(1) var<storage, read> points: array<vec2<f32>>;
-// Per-vertex linear premultiplied RGBA, one per point (silx per-point line
+// Per-vertex premultiplied RGBA (target encoding), one per point (silx per-point line
 // color). A 1-element placeholder when `use_vertex_color` is 0. Mirrors
 // curve.wgsl's vcolors so a join between two coloured vertices takes its own
 // vertex's color.

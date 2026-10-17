@@ -19,6 +19,12 @@ library), **rsdm** (a PyDM-style EPICS display layer built on rsplot), and
   curve in a pass read the last curve's uniform, so all curves took the last
   curve's colour; storage reads were per-curve correct. The block layouts are
   unchanged.
+- **rsplot**: curve, per-vertex, dashed-gap and data-background colours are
+  uploaded in the render target's encoding: sRGB bytes for a non-sRGB target
+  (egui-wgpu's swapchain), linear for an sRGB one. They were always
+  linearised, which on the non-sRGB target drew every colour darker than its
+  `Color32` and than egui's own legend swatches (`#4f9bff` showed as
+  `(20, 84, 255)`); PNG export was affected the same way.
 
 ## [0.6.0] - 2026-10-16
 

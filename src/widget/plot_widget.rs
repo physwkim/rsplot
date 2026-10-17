@@ -391,8 +391,6 @@ impl<'a> PlotView<'a> {
         let ppp = ui.ctx().pixels_per_point();
         let viewport_px = [area.width() * ppp, area.height() * ppp];
 
-        // Convert sRGB Color32 to linear, premultiplied RGBA expected by the shader.
-        let bg = egui::Rgba::from(plot.data_background).to_array();
         let style = chrome::Style::from_visuals(ui.visuals())
             .with_overrides(plot.foreground, plot.grid_color);
 
@@ -409,7 +407,7 @@ impl<'a> PlotView<'a> {
         painter.add(egui_wgpu::Callback::new_paint_callback(
             area,
             ClearCallback {
-                color: bg,
+                color: plot.data_background,
                 plot_id: plot.id,
             },
         ));

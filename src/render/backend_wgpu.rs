@@ -21,7 +21,7 @@ use crate::core::plot::{Plot, PlotId};
 use crate::core::shape::{Shape, ShapeKind};
 use crate::core::transform::{Margins, Scale, Transform, YAxis};
 use crate::core::triangles::Triangles;
-use crate::render::gpu_curve::{CurveData, CurvePipeline, GpuCurve};
+use crate::render::gpu_curve::{CurveData, CurvePipeline, GpuCurve, gpu_color};
 use crate::render::gpu_image::{
     AggregationMode, GpuImage, ImageData, ImagePipeline, ImagePixels, aggregate_blocks,
 };
@@ -49,6 +49,8 @@ pub struct WgpuResources {
     curve_pipeline: CurvePipeline,
     /// Per-plot GPU data, keyed by plot ID.
     plots: HashMap<PlotId, PlotGpuData>,
+    /// Whether the render target is an sRGB format; see [`Self::encode_color`].
+    srgb_target: bool,
 }
 
 impl WgpuResources {
@@ -112,7 +114,15 @@ impl WgpuResources {
             image_pipeline,
             curve_pipeline,
             plots: HashMap::new(),
+            srgb_target: target_format.is_srgb(),
         }
+    }
+
+    /// Encode a colour the way the clear pass must write it to the render
+    /// target (the same rule the curves use; see
+    /// [`gpu_color`](crate::render::gpu_curve::gpu_color)).
+    pub(crate) fn encode_color(&self, color: Color32) -> [f32; 4] {
+        gpu_color(color, self.srgb_target)
     }
 
     /// Return the [`PlotGpuData`] for `plot_id`, inserting a fresh entry if it
@@ -155,7 +165,8 @@ impl WgpuResources {
     /// back, and return tightly packed RGBA8 pixels (top row first). Used by
     /// [`crate::render::save::save_graph`] (`doc/design.md` §13 E1).
     ///
-    /// `bg` is the linear, premultiplied clear color; the orthos/axis_log pairs
+    /// `bg` is the clear color as [`Self::encode_color`] encodes it for
+    /// `target_format`; the orthos/axis_log pairs
     /// are the same matrices the on-screen [`CurveCallback`] uses for each Y
     /// axis. Curves are drawn at whatever resolution they were last decimated
     /// to, and dashed lines reuse the dash arc length last computed for the
@@ -1343,8 +1354,8 @@ pub fn update_curve_at(
 /// lightweight value re-registered by the egui side every frame; the actual GPU
 /// resources are looked up from [`WgpuResources`].
 pub(crate) struct ClearCallback {
-    /// Linear color space, premultiplied RGBA.
-    pub color: [f32; 4],
+    /// The data-area background; encoded for the target in `prepare`.
+    pub color: Color32,
     /// Which plot's GPU data to use.
     pub plot_id: PlotId,
 }
@@ -1361,8 +1372,9 @@ impl egui_wgpu::CallbackTrait for ClearCallback {
         let res: &mut WgpuResources = resources
             .get_mut()
             .expect("WgpuResources not installed — call rsplot::install() at startup");
+        let color = res.encode_color(self.color);
         let plot_data = res.get_or_insert_plot(device, self.plot_id);
-        queue.write_buffer(&plot_data.color_uniform, 0, bytemuck::bytes_of(&self.color));
+        queue.write_buffer(&plot_data.color_uniform, 0, bytemuck::bytes_of(&color));
         Vec::new()
     }
 

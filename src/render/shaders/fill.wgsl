@@ -9,7 +9,7 @@
 
 struct Params {
     ortho: mat4x4<f32>,
-    color: vec4<f32>,        // linear premultiplied RGBA
+    color: vec4<f32>,        // premultiplied RGBA (target encoding)
     axis_log: vec2<f32>,     // 1.0 if that axis is log10, else 0.0
 };
 

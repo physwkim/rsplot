@@ -59,8 +59,8 @@ const INV_LN10: f32 = std::f32::consts::LOG10_E;
 struct CurveParams {
     ortho: [[f32; 4]; 4],
     color: [f32; 4],
-    /// Fill color for dashed-line gaps (linear premultiplied); used only when
-    /// `use_gap_color` is set.
+    /// Fill color for dashed-line gaps (premultiplied, in the target's encoding
+    /// per [`gpu_color`]); used only when `use_gap_color` is set.
     gap_color: [f32; 4],
     /// Dash pattern as cumulative boundaries in physical pixels: a fragment at
     /// phase `p` is "on" when `p < .x` or `.y <= p < .z`; `.w` is the period.
@@ -340,6 +340,9 @@ pub struct CurvePipeline {
     marker_bind_group_layout: wgpu::BindGroupLayout,
     fill_bind_group_layout: wgpu::BindGroupLayout,
     errorbar_bind_group_layout: wgpu::BindGroupLayout,
+    /// Whether the render target is an sRGB format; selects the colour encoding
+    /// the curves are uploaded in (see [`gpu_color`]).
+    pub(crate) srgb_target: bool,
 }
 
 impl CurvePipeline {
@@ -394,7 +397,7 @@ impl CurvePipeline {
                         },
                         count: None,
                     },
-                    // Per-vertex line colors (linear premultiplied RGBA), read in
+                    // Per-vertex line colors (premultiplied RGBA, target encoding), read in
                     // the vertex shader; a 1-element placeholder when unused.
                     wgpu::BindGroupLayoutEntry {
                         binding: 2,
@@ -461,7 +464,7 @@ impl CurvePipeline {
                         },
                         count: None,
                     },
-                    // Per-vertex marker colors (linear premultiplied RGBA), read
+                    // Per-vertex marker colors (premultiplied RGBA, target encoding), read
                     // in the vertex shader; a 1-element placeholder when unused.
                     wgpu::BindGroupLayoutEntry {
                         binding: 2,
@@ -720,6 +723,7 @@ impl CurvePipeline {
             marker_bind_group_layout,
             fill_bind_group_layout,
             errorbar_bind_group_layout,
+            srgb_target: target_format.is_srgb(),
         }
     }
 }
@@ -789,13 +793,17 @@ pub struct GpuCurve {
     /// Error-bar params + bind group.
     errorbar_params: wgpu::Buffer,
     errorbar_bind_group: wgpu::BindGroup,
+    /// Line color as uploaded (premultiplied, encoded per [`gpu_color`]).
     color: [f32; 4],
     /// Line stroke style (selects the dash pattern; [`LineStyle::None`] skips
     /// the line entirely).
     line_style: LineStyle,
-    /// Dashed-gap fill color (linear premultiplied), or `None` to leave gaps
+    /// Dashed-gap fill color (encoded like `color`), or `None` to leave gaps
     /// transparent.
     gap_color: Option<[f32; 4]>,
+    /// The pipeline's target encoding, copied at creation so an in-place
+    /// [`Self::update`] encodes new colors the same way.
+    srgb_target: bool,
     /// Line width in physical pixels.
     width: f32,
     /// Marker symbol, or `None` for a line only.
@@ -837,13 +845,30 @@ fn pack(x: &[f64], y: &[f64]) -> Vec<[f32; 2]> {
         .collect()
 }
 
-/// Pack sRGB colors into the linear premultiplied RGBA the shader blends with
-/// (matches the single-color conversion `egui::Rgba::from`).
-fn pack_colors(colors: &[Color32]) -> Vec<[f32; 4]> {
-    colors
-        .iter()
-        .map(|&c| egui::Rgba::from(c).to_array())
-        .collect()
+/// Encode an sRGB `Color32` as the premultiplied RGBA the curve shaders write
+/// straight to the render target, in that target's own encoding.
+///
+/// The shaders do no colour conversion: the fragment value is stored as-is
+/// and alpha-blended by the target. An sRGB target (`*Srgb` formats) expects
+/// linear values and encodes them on store, so the colour is linearised like
+/// `egui::Rgba::from` does. A non-sRGB target stores the value verbatim and the
+/// display reads it as sRGB, so the colour's own gamma bytes are what must be
+/// written — egui-wgpu picks such a target for its swapchain and gamma-encodes
+/// in its own shader for the same reason. Writing linear values there made
+/// every curve darker than its `Color32` (and than the egui-drawn legend
+/// swatch for it): `#4f9bff` showed as `(20, 84, 255)`.
+pub(crate) fn gpu_color(c: Color32, srgb_target: bool) -> [f32; 4] {
+    if srgb_target {
+        egui::Rgba::from(c).to_array()
+    } else {
+        c.to_array().map(|v| f32::from(v) / 255.0)
+    }
+}
+
+/// Pack sRGB colors into the premultiplied RGBA the shader blends with,
+/// encoded for the target like the single-color path ([`gpu_color`]).
+fn pack_colors(colors: &[Color32], srgb_target: bool) -> Vec<[f32; 4]> {
+    colors.iter().map(|&c| gpu_color(c, srgb_target)).collect()
 }
 
 /// Project one data point to the shader's pixel space — NDC (`ortho * point`,
@@ -982,7 +1007,7 @@ impl GpuCurve {
             mapped_at_creation: false,
         });
         if let Some(colors) = &curve.colors {
-            let packed = pack_colors(colors);
+            let packed = pack_colors(colors, pipeline.srgb_target);
             if !packed.is_empty() {
                 queue.write_buffer(&vcolors, 0, bytemuck::cast_slice(&packed));
             }
@@ -1170,8 +1195,9 @@ impl GpuCurve {
             ],
         });
 
-        // sRGB Color32 -> linear, premultiplied RGBA (matches the alpha-blend target).
-        let color = egui::Rgba::from(curve.color).to_array();
+        // sRGB Color32 -> premultiplied RGBA in the target's encoding.
+        let srgb_target = pipeline.srgb_target;
+        let color = gpu_color(curve.color, srgb_target);
 
         let gpu = Self {
             points,
@@ -1201,7 +1227,8 @@ impl GpuCurve {
             errorbar_bind_group,
             color,
             line_style: curve.line_style.clone(),
-            gap_color: curve.gap_color.map(|c| egui::Rgba::from(c).to_array()),
+            gap_color: curve.gap_color.map(|c| gpu_color(c, srgb_target)),
+            srgb_target,
             width: curve.width,
             symbol: curve.symbol,
             marker_size: curve.marker_size,
@@ -1288,7 +1315,7 @@ impl GpuCurve {
         self.count = positions.len() as u32;
         self.vertex_color = curve.colors.is_some();
         if let Some(colors) = &curve.colors {
-            let packed = pack_colors(colors);
+            let packed = pack_colors(colors, self.srgb_target);
             if !packed.is_empty() {
                 queue.write_buffer(&self.vcolors, 0, bytemuck::cast_slice(&packed));
             }
@@ -1304,9 +1331,9 @@ impl GpuCurve {
         if !segs.is_empty() {
             queue.write_buffer(&self.errorbar_segs, 0, bytemuck::cast_slice(&segs));
         }
-        self.color = egui::Rgba::from(curve.color).to_array();
+        self.color = gpu_color(curve.color, self.srgb_target);
         self.line_style = curve.line_style.clone();
-        self.gap_color = curve.gap_color.map(|c| egui::Rgba::from(c).to_array());
+        self.gap_color = curve.gap_color.map(|c| gpu_color(c, self.srgb_target));
         self.width = curve.width;
         self.symbol = curve.symbol;
         self.marker_size = curve.marker_size;
@@ -1669,11 +1696,27 @@ mod tests {
     }
 
     #[test]
+    fn gpu_color_keeps_gamma_bytes_for_non_srgb_target() {
+        // A non-sRGB target stores the value verbatim, so the colour's own
+        // (premultiplied) sRGB bytes go in; an sRGB target linearises on store,
+        // so the linear value does.
+        let c = Color32::from_rgb(0x4f, 0x9b, 0xff);
+        assert_eq!(gpu_color(c, false), [79.0 / 255.0, 155.0 / 255.0, 1.0, 1.0]);
+        assert_eq!(gpu_color(c, true), egui::Rgba::from(c).to_array());
+        // Alpha is never gamma-encoded; the colour channels stay premultiplied.
+        let t = Color32::from_rgba_unmultiplied(255, 0, 0, 128);
+        assert_eq!(gpu_color(t, false)[3], 128.0 / 255.0);
+        assert_eq!(gpu_color(t, false)[0], f32::from(t.r()) / 255.0);
+    }
+
+    #[test]
     fn pack_colors_matches_single_color_conversion() {
         // Per-vertex packing must match the single-color path so a uniform
         // per-vertex list renders identically to a single `color`.
         let c = Color32::from_rgba_unmultiplied(200, 100, 50, 180);
-        assert_eq!(pack_colors(&[c])[0], egui::Rgba::from(c).to_array());
+        for srgb_target in [false, true] {
+            assert_eq!(pack_colors(&[c], srgb_target)[0], gpu_color(c, srgb_target));
+        }
     }
 
     #[test]

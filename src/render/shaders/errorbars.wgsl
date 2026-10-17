@@ -10,7 +10,7 @@
 
 struct Params {
     ortho: mat4x4<f32>,
-    color: vec4<f32>,        // linear premultiplied RGBA
+    color: vec4<f32>,        // premultiplied RGBA (target encoding)
     axis_log: vec2<f32>,     // 1.0 if that axis is log10, else 0.0
     viewport_px: vec2<f32>,  // data-area size in physical pixels
     half_width_px: f32,      // half the error-bar line width, in physical pixels

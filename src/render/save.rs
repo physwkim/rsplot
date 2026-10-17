@@ -1184,13 +1184,12 @@ pub fn render_plot_rgba(
             }
         }
     }
-    let bg = egui::Rgba::from(plot.data_background).to_array();
-
     let renderer = render_state.renderer.read();
     let res: &WgpuResources = renderer
         .callback_resources
         .get()
         .expect("WgpuResources not installed — call rsplot::install() first");
+    let bg = res.encode_color(plot.data_background);
     res.render_to_rgba(
         &render_state.device,
         &render_state.queue,
