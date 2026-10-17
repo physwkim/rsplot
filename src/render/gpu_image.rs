@@ -146,11 +146,41 @@ const IDENTITY: [[f32; 4]; 4] = [
     [0.0, 0.0, 0.0, 1.0],
 ];
 
+/// The texture format for 8-bit sRGB colour texels — the colormap LUT and the
+/// direct-RGBA tiles — given the render target's encoding: the texture analogue
+/// of [`gpu_color`](super::gpu_curve::gpu_color). `Rgba8UnormSrgb` decodes the
+/// bytes to linear for an sRGB target (the hardware re-encodes on write);
+/// `Rgba8Unorm` passes them through for a non-sRGB target such as egui-wgpu's
+/// swapchain, which holds gamma-encoded values. Either way the sampled texel is
+/// in the target's encoding and the shader needs no conversion. Both formats
+/// are hardware-filterable.
+fn color_texel_format(srgb_target: bool) -> wgpu::TextureFormat {
+    if srgb_target {
+        wgpu::TextureFormat::Rgba8UnormSrgb
+    } else {
+        wgpu::TextureFormat::Rgba8Unorm
+    }
+}
+
+/// Encode straight-alpha sRGB RGBA8 bytes (a `Color32`'s, a colormap's) as the
+/// `[f32; 4]` a shader composites in the render target's encoding: linearised
+/// RGB for an sRGB target, the bytes as-is for a non-sRGB one — the same values
+/// an 8-bit colour texture of [`color_texel_format`] samples as, so a colour
+/// from either source composites identically. Alpha is linear (not
+/// gamma-encoded) in both. Used for the image `nan_color` and for the volume
+/// ray-caster's voxel texels (`volume_raycaster.rs`).
+pub(crate) fn rgba8_for_target(c: [u8; 4], srgb_target: bool) -> [f32; 4] {
+    if srgb_target {
+        srgb_u8_to_linear_rgba(c)
+    } else {
+        c.map(|b| f32::from(b) / 255.0)
+    }
+}
+
 /// Convert an sRGB-encoded `[u8; 4]` color (the colormap's `nan_color`) to
-/// linear-space `[f32; 4]`. The scalar-image LUT is an `Rgba8UnormSrgb` texture,
-/// so sampling it returns linear RGB; converting the nan_color the same way lets
-/// the shader composite it identically to the colormapped path. The RGB channels
-/// use the standard sRGB transfer function; alpha is linear (not gamma-encoded).
+/// linear-space `[f32; 4]` — the sRGB-target branch of
+/// [`rgba8_for_target`]. The RGB channels use the standard sRGB transfer
+/// function; alpha is linear (not gamma-encoded).
 fn srgb_u8_to_linear_rgba(c: [u8; 4]) -> [f32; 4] {
     let to_linear = |b: u8| {
         let s = b as f32 / 255.0;
@@ -168,10 +198,13 @@ fn srgb_u8_to_linear_rgba(c: [u8; 4]) -> [f32; 4] {
     ]
 }
 
-/// Uniform block for the image shader. Field order keeps `repr(C)` offsets
-/// std140-aligned: mat4 @0, vec4 @64, vec2 @80, then scalars f32 @88/92/96/100,
-/// u32 @104/108/112, explicit pad @116, then vec4 @128 (16-aligned); total 144.
-/// Matches `Params` in `image.wgsl` (where WGSL auto-pads the vec4 to 128).
+/// Params block for the image shader, bound as a read-only storage buffer like
+/// every rsplot params block (see `CurveParams` in `gpu_curve.rs` for why).
+/// Field order keeps `repr(C)` offsets std140-aligned: mat4 @0, vec4 @64, vec2
+/// @80, then scalars f32 @88/92/96/100, u32 @104/108/112, explicit pad @116,
+/// then vec4 @128 (16-aligned); total 144 — the same under the storage rules,
+/// since there are no arrays or nested structs. Matches `Params` in
+/// `image.wgsl` (where WGSL auto-pads the vec4 to 128).
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct ImageParams {
@@ -202,10 +235,11 @@ struct ImageParams {
     nan_color: [f32; 4],
 }
 
-/// Uniform block for the RGBA (direct) image shader: just the transform, rect,
-/// axis-scale flags, and global alpha — no colormap fields. `repr(C)` offsets
-/// stay std140-aligned: mat4 @0, vec4 @64, vec2 @80, f32 @88; padded to 96.
-/// Matches `Params` in `image_rgba.wgsl`.
+/// Params block for the RGBA (direct) image shader (read-only storage, as
+/// [`ImageParams`]): just the transform, rect, axis-scale flags, and global
+/// alpha — no colormap fields. `repr(C)` offsets stay std140-aligned: mat4 @0,
+/// vec4 @64, vec2 @80, f32 @88; padded to 96. Matches `Params` in
+/// `image_rgba.wgsl`.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct ImageRgbaParams {
@@ -349,10 +383,13 @@ pub struct ImagePipeline {
     /// sampling must snap to the nearest texel, not interpolate between entries.
     lut_sampler: wgpu::Sampler,
     /// LINEAR sampler for the *direct RGBA* image path's bilinear interpolation
-    /// (`Rgba8UnormSrgb` is hardware-filterable). Kept separate from
+    /// (the 8-bit RGBA formats are hardware-filterable). Kept separate from
     /// [`Self::lut_sampler`] so making the LUT lookup NEAREST does not turn RGBA
     /// linear interpolation into nearest.
     linear_sampler: wgpu::Sampler,
+    /// Whether the render target is an sRGB format. Selects the colour texel
+    /// format and the nan-colour encoding (see [`color_texel_format`]).
+    srgb_target: bool,
     /// A 1×1 `R32Float` texture of value `1.0`, bound at scalar binding 5 for
     /// images without a per-pixel alpha map so the bind group stays valid; the
     /// shader never samples it (its `has_alpha_map` flag is 0).
@@ -374,12 +411,12 @@ impl ImagePipeline {
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("rsplot image bgl"),
                 entries: &[
-                    // 0: params uniform (used by both stages)
+                    // 0: params block, read-only storage (used by both stages)
                     wgpu::BindGroupLayoutEntry {
                         binding: 0,
                         visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                         ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Uniform,
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
                             has_dynamic_offset: false,
                             min_binding_size: NonZeroU64::new(
                                 std::mem::size_of::<ImageParams>() as u64
@@ -470,11 +507,11 @@ impl ImagePipeline {
             cache: None,
         });
 
-        // RGBA pipeline: its own minimal layout (uniform + RGBA texture +
+        // RGBA pipeline: its own minimal layout (params + RGBA texture +
         // sampler, no LUT). The texture is declared filterable and the sampler
         // slot is filtering so the bind group can choose the nearest or linear
-        // sampler per image (silx `interpolation`). `Rgba8UnormSrgb` is a
-        // filterable format, so this needs no extra wgpu feature.
+        // sampler per image (silx `interpolation`). Both 8-bit RGBA formats are
+        // filterable, so this needs no extra wgpu feature.
         let rgba_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("rsplot image rgba bgl"),
@@ -483,7 +520,7 @@ impl ImagePipeline {
                         binding: 0,
                         visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                         ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Uniform,
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
                             has_dynamic_offset: false,
                             min_binding_size: NonZeroU64::new(
                                 std::mem::size_of::<ImageRgbaParams>() as u64,
@@ -595,6 +632,7 @@ impl ImagePipeline {
             data_sampler,
             lut_sampler,
             linear_sampler,
+            srgb_target: target_format.is_srgb(),
             dummy_alpha_view,
         }
     }
@@ -640,7 +678,8 @@ fn extract_subgrid<T: Copy>(
 }
 
 /// One tile of a (possibly split) image: its own texture (`R32Float` for a
-/// scalar image, `Rgba8UnormSrgb` for an RGBA one), params, bind group,
+/// scalar image, 8-bit RGBA in the target's encoding — [`color_texel_format`]
+/// — for an RGBA one), params, bind group,
 /// data-space rect, and pixel bounds within the full image (the bounds route
 /// [`GpuImage::update_region`] writes to the tiles they overlap).
 struct ImageTile {
@@ -655,7 +694,7 @@ struct ImageTile {
 }
 
 /// What a [`GpuImage`] renders: a colormapped scalar field (carrying the
-/// resolved normalization for the per-frame uniform) or a direct RGBA image
+/// resolved normalization for the per-frame params) or a direct RGBA image
 /// (no colormap fields — they would have no meaning).
 #[derive(Clone, Copy)]
 enum GpuImageKind {
@@ -671,8 +710,8 @@ enum GpuImageKind {
         interp: u32,
         /// 1 if a per-pixel alpha map is bound at binding 5, else 0.
         has_alpha_map: u32,
-        /// Linear RGBA for non-finite samples (silx `Colormap.nan_color`),
-        /// pre-converted from the colormap's sRGB bytes.
+        /// RGBA for non-finite samples (silx `Colormap.nan_color`) in the render
+        /// target's encoding, like the LUT texels (see [`rgba8_for_target`]).
         nan_color: [f32; 4],
     },
     Rgba,
@@ -691,11 +730,12 @@ pub struct GpuImage {
 
 impl GpuImage {
     /// Upload `image` and build per-tile bind groups. A scalar image uploads
-    /// `R32Float` tiles plus a shared 256x1 sRGB LUT and uses the colormap
-    /// pipeline; an RGBA image uploads `Rgba8UnormSrgb` tiles and uses the
-    /// direct pipeline (no LUT). Either way the image is split into tiles no
-    /// larger than the device's `max_texture_dimension_2d`, so it can exceed the
-    /// single-texture limit.
+    /// `R32Float` tiles plus a shared 256x1 colormap LUT and uses the colormap
+    /// pipeline; an RGBA image uploads RGBA tiles and uses the direct pipeline
+    /// (no LUT). The LUT and the RGBA tiles take the 8-bit format
+    /// [`color_texel_format`] picks for the render target's encoding. Either way
+    /// the image is split into tiles no larger than the device's
+    /// `max_texture_dimension_2d`, so it can exceed the single-texture limit.
     pub fn new(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -730,7 +770,7 @@ impl GpuImage {
                     mip_level_count: 1,
                     sample_count: 1,
                     dimension: wgpu::TextureDimension::D2,
-                    format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                    format: color_texel_format(pipeline.srgb_target),
                     usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
                     view_formats: &[],
                 });
@@ -830,7 +870,7 @@ impl GpuImage {
                         let params = device.create_buffer(&wgpu::BufferDescriptor {
                             label: Some("rsplot image tile params"),
                             size: std::mem::size_of::<ImageParams>() as u64,
-                            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
                             mapped_at_creation: false,
                         });
                         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -888,14 +928,15 @@ impl GpuImage {
                         norm: colormap.normalization.code(),
                         interp: image.interpolation.code(),
                         has_alpha_map: u32::from(image.alpha_map.is_some()),
-                        nan_color: srgb_u8_to_linear_rgba(colormap.nan_color),
+                        nan_color: rgba8_for_target(colormap.nan_color, pipeline.srgb_target),
                     },
                 )
             }
             ImagePixels::Rgba { data } => {
-                // silx interpolation on a direct RGBA image: `Rgba8UnormSrgb` is
-                // filterable, so the hardware sampler does it (no manual bilinear
-                // and no extra wgpu feature). Nearest reuses the data sampler.
+                // silx interpolation on a direct RGBA image: the 8-bit RGBA formats
+                // are filterable, so the hardware sampler does it (no manual
+                // bilinear and no extra wgpu feature). Nearest reuses the data
+                // sampler.
                 let rgba_sampler = match image.interpolation {
                     InterpolationMode::Nearest => &pipeline.data_sampler,
                     InterpolationMode::Linear => &pipeline.linear_sampler,
@@ -914,7 +955,7 @@ impl GpuImage {
                             mip_level_count: 1,
                             sample_count: 1,
                             dimension: wgpu::TextureDimension::D2,
-                            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                            format: color_texel_format(pipeline.srgb_target),
                             usage: wgpu::TextureUsages::TEXTURE_BINDING
                                 | wgpu::TextureUsages::COPY_DST,
                             view_formats: &[],
@@ -941,7 +982,7 @@ impl GpuImage {
                         let params = device.create_buffer(&wgpu::BufferDescriptor {
                             label: Some("rsplot image rgba tile params"),
                             size: std::mem::size_of::<ImageRgbaParams>() as u64,
-                            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
                             mapped_at_creation: false,
                         });
                         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -985,7 +1026,7 @@ impl GpuImage {
             kind,
             alpha: image.alpha,
         };
-        // Seed each tile's uniform; the per-frame transform overwrites `ortho`.
+        // Seed each tile's params; the per-frame transform overwrites `ortho`.
         gpu.write_uniforms(queue, IDENTITY, [0.0, 0.0]);
         gpu
     }
@@ -1160,6 +1201,31 @@ mod tests {
         let expected = ((188.0_f32 / 255.0 + 0.055) / 1.055).powf(2.4);
         assert!((mid[0] - expected).abs() < 1e-6, "mid linearization");
         assert!((mid[3] - 128.0 / 255.0).abs() < 1e-6, "alpha is linear");
+    }
+
+    #[test]
+    fn color_texel_format_follows_the_target_encoding() {
+        // A non-sRGB target (egui-wgpu's swapchain) must sample the sRGB bytes
+        // as-is; an sRGB target must have them decoded to linear.
+        assert_eq!(color_texel_format(false), wgpu::TextureFormat::Rgba8Unorm);
+        assert_eq!(
+            color_texel_format(true),
+            wgpu::TextureFormat::Rgba8UnormSrgb
+        );
+    }
+
+    #[test]
+    fn rgba8_for_target_matches_the_lut_encoding() {
+        let c = [188, 64, 255, 128];
+        // Non-sRGB target: the bytes pass through, like a texel of an
+        // `Rgba8Unorm` LUT.
+        let gamma = rgba8_for_target(c, false);
+        let expected = c.map(|b| f32::from(b) / 255.0);
+        assert_eq!(gamma, expected);
+        // sRGB target: linearised RGB, like a texel of an `Rgba8UnormSrgb` LUT;
+        // alpha linear in both.
+        assert_eq!(rgba8_for_target(c, true), srgb_u8_to_linear_rgba(c));
+        assert_eq!(gamma[3], rgba8_for_target(c, true)[3]);
     }
 
     #[test]

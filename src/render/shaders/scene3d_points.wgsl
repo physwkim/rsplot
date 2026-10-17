@@ -23,7 +23,7 @@ struct PointParams {
     _pad: vec2<f32>,
 };
 
-@group(0) @binding(0) var<uniform> params: PointParams;
+@group(0) @binding(0) var<storage, read> params: PointParams;
 
 struct VsOut {
     @builtin(position) clip: vec4<f32>,

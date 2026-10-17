@@ -10,6 +10,10 @@
 // colour back out at low coverage. Samples accumulate front-to-back
 // into premultiplied colour that blends with `PREMULTIPLIED_ALPHA_BLENDING`
 // straight into egui's render pass (no offscreen target, no depth).
+//
+// The texels are already in the render target's encoding (the uploader keeps
+// the sRGB bytes for a non-sRGB target and linearises them for an sRGB one), so
+// nothing here converts colour: the composite is written out as is.
 
 struct Uniforms {
     // Inverse of the camera clip matrix P·V (OpenGL clip, z in [-1, 1]).
@@ -20,7 +24,7 @@ struct Uniforms {
     params: vec4<f32>,
 };
 
-@group(0) @binding(0) var<uniform> u: Uniforms;
+@group(0) @binding(0) var<storage, read> u: Uniforms;
 @group(0) @binding(1) var vol_tex: texture_3d<f32>;
 @group(0) @binding(2) var vol_samp: sampler;
 

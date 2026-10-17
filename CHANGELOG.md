@@ -11,6 +11,42 @@ library), **rsdm** (a PyDM-style EPICS display layer built on rsplot), and
 
 ## [Unreleased]
 
+### Fixed
+
+- **rsplot**: every per-draw params block — the curve pipelines (line,
+  markers, caps, fill, error bars), the data-area clear, the image tiles, the
+  3D scene pipelines and the volume ray-caster — is bound as a read-only
+  storage buffer instead of a uniform. On Windows' DX12 backend with the WARP
+  software adapter (a GPU-less VM) every curve in a pass read the last
+  curve's uniform, so all curves took the last curve's colour; storage reads
+  were per-curve correct. The block layouts are unchanged.
+- **rsplot**: curve, per-vertex, dashed-gap and data-background colours are
+  uploaded in the render target's encoding: sRGB bytes for a non-sRGB target
+  (egui-wgpu's swapchain), linear for an sRGB one. They were always
+  linearised, which on the non-sRGB target drew every colour darker than its
+  `Color32` and than egui's own legend swatches (`#4f9bff` showed as
+  `(20, 84, 255)`); PNG export was affected the same way.
+- **rsplot**: the 2D image path uploads its colour texels in the render
+  target's encoding too: the colormap LUT and direct-RGBA tiles are
+  `Rgba8Unorm` for a non-sRGB target and `Rgba8UnormSrgb` for an sRGB one,
+  and the colormap's `nan_color` follows the same rule. They were always
+  sRGB-decoded to linear, which on egui-wgpu's non-sRGB swapchain drew every
+  colormapped image and RGBA image darker than its colormap (viridis' mid
+  teal `(33, 145, 140)` showed as `(4, 71, 66)`).
+- **rsplot**: the 3D scene (`paint_scene3d`, `SceneWidget`, `ScalarFieldView`,
+  the volume cut plane and iso-surfaces) is rendered into the sRGB variant of
+  the surface format and the blit encodes the linear result to sRGB when the
+  surface is non-sRGB, so geometry, mesh shading, fog, image layers and the
+  background now show at their `Color32` values on egui-wgpu's swapchain
+  instead of darker. `snapshot_scene3d` / `SceneWidget::snapshot` read back
+  the sRGB offscreen target, so their PNGs carry sRGB-encoded bytes whatever
+  the surface format (they were as dark as the screen).
+- **rsplot**: `VolumeRaycaster` uploads its voxel colours in the render
+  target's encoding — the sRGB bytes as is for egui-wgpu's non-sRGB swapchain
+  (unchanged there), linearised for an sRGB target, where the composite used
+  to be encoded a second time on store and showed washed out (an opaque
+  `(255, 128, 0)` voxel read back as `(255, 188, 0)`).
+
 ## [0.6.0] - 2026-10-16
 
 ### Changed

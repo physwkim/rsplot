@@ -92,8 +92,9 @@ impl VolumeRaycaster {
     }
 
     /// Upload a `(depth, height, width)` RGBA8 volume (row-major, straight
-    /// alpha). The first upload frames the camera to the volume; later uploads
-    /// keep the viewpoint so a changing field animates in place.
+    /// alpha; sRGB bytes, as `Color32` carries them). The first upload frames
+    /// the camera to the volume; later uploads keep the viewpoint so a changing
+    /// field animates in place.
     pub fn set_volume(
         &mut self,
         render_state: &RenderState,

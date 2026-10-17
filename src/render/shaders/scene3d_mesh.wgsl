@@ -26,7 +26,7 @@ struct MeshParams {
     light: vec4<f32>,
 };
 
-@group(0) @binding(0) var<uniform> params: MeshParams;
+@group(0) @binding(0) var<storage, read> params: MeshParams;
 
 // silx viewport DirectionalLight defaults, camera frame (viewport.py:227-233
 // direction (0,0,-1), ambient 0.3, diffuse 0.7; specular defaults to (1,1,1)).

@@ -1,8 +1,10 @@
 // Direct RGBA image (silx addImage with an RGBA array): no colormap / LUT.
 //
 // Same quad as image.wgsl (the image's data-space rect mapped to NDC by the
-// ortho matrix), but the fragment samples a sRGB RGBA texture directly and
-// multiplies the global alpha. Used when the image is RGBA rather than a scalar
+// ortho matrix), but the fragment samples the RGBA texture directly and
+// multiplies the global alpha. The texture's format puts the sampled texel in
+// the render target's encoding (gpu_image.rs `color_texel_format`), so no
+// conversion happens here. Used when the image is RGBA rather than a scalar
 // field (doc/design.md §5·§6).
 
 struct Params {
@@ -25,8 +27,8 @@ fn apply_scale(p: vec2<f32>) -> vec2<f32> {
     );
 }
 
-@group(0) @binding(0) var<uniform> params: Params;
-@group(0) @binding(1) var rgba_tex: texture_2d<f32>; // Rgba8UnormSrgb
+@group(0) @binding(0) var<storage, read> params: Params;
+@group(0) @binding(1) var rgba_tex: texture_2d<f32>; // 8-bit RGBA, target encoding
 @group(0) @binding(2) var rgba_samp: sampler;         // non-filtering (nearest)
 
 struct VsOut {

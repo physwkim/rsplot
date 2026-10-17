@@ -3,7 +3,7 @@
 //! [`CurveData`] is the CPU spec (mirrors silx `addCurve`: x/y arrays + color +
 //! width + Y-axis binding). [`CurvePipeline`] holds the thick-line pipeline
 //! shared across curves. [`GpuCurve`] owns one curve's point storage buffer +
-//! uniform + bind group and persists across frames in `WgpuResources`.
+//! params + bind group and persists across frames in `WgpuResources`.
 //!
 //! Each segment of the polyline is expanded in the vertex shader into a
 //! screen-space quad (two triangles) of the curve's pixel width, so the line is
@@ -40,18 +40,27 @@ const IDENTITY: [[f32; 4]; 4] = [
 /// arc length) matches the shader's `apply_scale` exactly.
 const INV_LN10: f32 = std::f32::consts::LOG10_E;
 
-/// Uniform block for the curve shader. Field order is laid out so the natural
+/// Params block for the curve shader. Field order is laid out so the natural
 /// `repr(C)` offsets coincide with WGSL std140 alignment (all `vec4`s first at
 /// 16-aligned offsets, then `vec2`s at 8-aligned, then scalars): mat4 @0, vec4
 /// @64, vec4 @80, vec4 @96, vec2 @112, vec2 @120, f32 @128/132/136/140; total
 /// 144. Matches `Params` in `curve.wgsl`.
+///
+/// Every per-curve params block (this one and the marker/caps/fill/error-bar
+/// ones) is bound as a read-only *storage* buffer, not a uniform. On Windows'
+/// DX12 backend with the WARP software adapter (a GPU-less VM) every curve in
+/// a pass read the last curve's uniform block — all curves took the last
+/// curve's colour — while storage reads stayed per-curve correct; Vulkan on
+/// hardware and on lavapipe never showed it. The blocks hold only
+/// mat4/vec4/vec2/scalars (no arrays, no vec3), so the uniform and storage
+/// layouts coincide and the `repr(C)` structs are unchanged.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct CurveParams {
     ortho: [[f32; 4]; 4],
     color: [f32; 4],
-    /// Fill color for dashed-line gaps (linear premultiplied); used only when
-    /// `use_gap_color` is set.
+    /// Fill color for dashed-line gaps (premultiplied, in the target's encoding
+    /// per [`gpu_color`]); used only when `use_gap_color` is set.
     gap_color: [f32; 4],
     /// Dash pattern as cumulative boundaries in physical pixels: a fragment at
     /// phase `p` is "on" when `p < .x` or `.y <= p < .z`; `.w` is the period.
@@ -113,7 +122,7 @@ impl LineStyle {
     }
 }
 
-/// Uniform block for the fill shader. Field order keeps `repr(C)` offsets
+/// Params block for the fill shader. Field order keeps `repr(C)` offsets
 /// std140-aligned: mat4 @0, vec4 @64, vec2 @80, vec2 @88; total 96. Matches
 /// `Params` in `fill.wgsl`.
 #[repr(C)]
@@ -125,7 +134,7 @@ struct FillParams {
     _pad: [f32; 2],
 }
 
-/// Uniform block for the error-bar shader. Same layout as the marker uniform up
+/// Params block for the error-bar shader. Same layout as the marker block up
 /// to the line width: mat4 @0, vec4 @64, vec2 @80, vec2 @88, f32 @96; total 112.
 /// Matches `Params` in `errorbars.wgsl`.
 #[repr(C)]
@@ -140,7 +149,7 @@ struct ErrorBarParams {
     _pad: [f32; 3],
 }
 
-/// Uniform block for the marker shader. Layout matches `Params` in
+/// Params block for the marker shader. Layout matches `Params` in
 /// `markers.wgsl` (std140: mat4 @0, vec4 @64, vec2 @80, vec2 @88, f32 @96,
 /// u32 @100, f32 @104; padded to 112). `use_vertex_color` consumes one of the
 /// former `_pad` slots, so the 112-byte std140 size is unchanged (see the
@@ -312,18 +321,18 @@ impl CurveData {
 }
 
 /// The render pipelines shared by all curves: the thick-line, marker, fill, and
-/// error-bar pipelines. The line layout has the curve uniform at binding 0, the
+/// error-bar pipelines. The line layout has the curve params at binding 0, the
 /// points storage buffer at binding 1, a per-vertex color buffer at binding 2,
 /// and the dash arc length at binding 3. The marker, fill, and error-bar
 /// pipelines each have their own minimal layout (so the line layout can grow
-/// without affecting them): the marker layout is uniform + points; the fill
-/// layout is uniform + points + baseline; the error-bar layout is uniform +
+/// without affecting them): the marker layout is params + points; the fill
+/// layout is params + points + baseline; the error-bar layout is params +
 /// segments.
 pub struct CurvePipeline {
     pub(crate) pipeline: wgpu::RenderPipeline,
     pub(crate) marker_pipeline: wgpu::RenderPipeline,
     /// Round joins/caps: an AA disc of the line width at every vertex. Shares the
-    /// marker bind-group layout (uniform + points + per-vertex colors).
+    /// marker bind-group layout (params + points + per-vertex colors).
     pub(crate) caps_pipeline: wgpu::RenderPipeline,
     pub(crate) fill_pipeline: wgpu::RenderPipeline,
     pub(crate) errorbar_pipeline: wgpu::RenderPipeline,
@@ -331,6 +340,9 @@ pub struct CurvePipeline {
     marker_bind_group_layout: wgpu::BindGroupLayout,
     fill_bind_group_layout: wgpu::BindGroupLayout,
     errorbar_bind_group_layout: wgpu::BindGroupLayout,
+    /// Whether the render target is an sRGB format; selects the colour encoding
+    /// the curves are uploaded in (see [`gpu_color`]).
+    pub(crate) srgb_target: bool,
 }
 
 impl CurvePipeline {
@@ -364,7 +376,7 @@ impl CurvePipeline {
                         binding: 0,
                         visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                         ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Uniform,
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
                             has_dynamic_offset: false,
                             min_binding_size: NonZeroU64::new(
                                 std::mem::size_of::<CurveParams>() as u64
@@ -385,7 +397,7 @@ impl CurvePipeline {
                         },
                         count: None,
                     },
-                    // Per-vertex line colors (linear premultiplied RGBA), read in
+                    // Per-vertex line colors (premultiplied RGBA, target encoding), read in
                     // the vertex shader; a 1-element placeholder when unused.
                     wgpu::BindGroupLayoutEntry {
                         binding: 2,
@@ -420,9 +432,9 @@ impl CurvePipeline {
             immediate_size: 0,
         });
 
-        // Markers have their own minimal layout (uniform at 0 + points at 1 +
-        // per-vertex colors at 2) so the curve uniform/layout can grow dashes,
-        // etc. without forcing the marker uniform to match the curve uniform's
+        // Markers have their own minimal layout (params at 0 + points at 1 +
+        // per-vertex colors at 2) so the curve params/layout can grow dashes,
+        // etc. without forcing the marker params to match the curve params'
         // size or carry dead curve-only bindings.
         let marker_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -432,7 +444,7 @@ impl CurvePipeline {
                         binding: 0,
                         visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                         ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Uniform,
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
                             has_dynamic_offset: false,
                             min_binding_size: NonZeroU64::new(
                                 std::mem::size_of::<MarkerParams>() as u64
@@ -452,7 +464,7 @@ impl CurvePipeline {
                         },
                         count: None,
                     },
-                    // Per-vertex marker colors (linear premultiplied RGBA), read
+                    // Per-vertex marker colors (premultiplied RGBA, target encoding), read
                     // in the vertex shader; a 1-element placeholder when unused.
                     wgpu::BindGroupLayoutEntry {
                         binding: 2,
@@ -532,7 +544,7 @@ impl CurvePipeline {
         });
 
         // Round joins/caps pipeline: a disc per vertex. Reuses the marker layout
-        // (same bindings: uniform + points + per-vertex colors) and pipeline
+        // (same bindings: params + points + per-vertex colors) and pipeline
         // layout, but the AA disc shader instead of the symbol shader.
         let caps_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("rsplot line caps pipeline"),
@@ -560,7 +572,7 @@ impl CurvePipeline {
             cache: None,
         });
 
-        // Fill pipeline: its own layout (fill uniform at 0, the shared points at
+        // Fill pipeline: its own layout (fill params at 0, the shared points at
         // 1, the baseline at 2). Two data-space triangles per segment.
         let fill_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -570,7 +582,7 @@ impl CurvePipeline {
                         binding: 0,
                         visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                         ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Uniform,
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
                             has_dynamic_offset: false,
                             min_binding_size: NonZeroU64::new(
                                 std::mem::size_of::<FillParams>() as u64
@@ -634,7 +646,7 @@ impl CurvePipeline {
             cache: None,
         });
 
-        // Error-bar pipeline: its own layout (error-bar uniform at 0, the segment
+        // Error-bar pipeline: its own layout (error-bar params at 0, the segment
         // endpoints at 1). Two triangles (6 vertices) per segment, like the line.
         let errorbar_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -644,7 +656,7 @@ impl CurvePipeline {
                         binding: 0,
                         visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                         ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Uniform,
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
                             has_dynamic_offset: false,
                             min_binding_size: NonZeroU64::new(
                                 std::mem::size_of::<ErrorBarParams>() as u64,
@@ -711,6 +723,7 @@ impl CurvePipeline {
             marker_bind_group_layout,
             fill_bind_group_layout,
             errorbar_bind_group_layout,
+            srgb_target: target_format.is_srgb(),
         }
     }
 }
@@ -747,10 +760,10 @@ pub struct GpuCurve {
     /// for, or `None` when never computed; lets [`Self::ensure_arclen`] skip
     /// recomputation when the view is unchanged.
     arclen_key: Option<ArclenKey>,
-    /// Marker uniform + bind group (shares the points buffer at binding 1).
+    /// Marker params + bind group (shares the points buffer at binding 1).
     marker_params: wgpu::Buffer,
     marker_bind_group: wgpu::BindGroup,
-    /// Round joins/caps uniform + bind group (shares the points + per-vertex
+    /// Round joins/caps params + bind group (shares the points + per-vertex
     /// color buffers; an AA disc of the line width at every vertex).
     caps_params: wgpu::Buffer,
     caps_bind_group: wgpu::BindGroup,
@@ -762,7 +775,7 @@ pub struct GpuCurve {
     /// Baseline entries the `baseline_buf` can hold; `0` for the placeholder
     /// (unfilled at creation), forcing a realloc when the curve becomes filled.
     baseline_capacity: u32,
-    /// Fill uniform + bind group (shares the points buffer at binding 1).
+    /// Fill params + bind group (shares the points buffer at binding 1).
     fill_params: wgpu::Buffer,
     fill_bind_group: wgpu::BindGroup,
     /// Error-bar segment endpoints (binding 1 of the error-bar layout), two per
@@ -777,16 +790,20 @@ pub struct GpuCurve {
     /// capacity); `0` for the placeholder, forcing a realloc when the curve
     /// gains error bars.
     errorbar_capacity: u32,
-    /// Error-bar uniform + bind group.
+    /// Error-bar params + bind group.
     errorbar_params: wgpu::Buffer,
     errorbar_bind_group: wgpu::BindGroup,
+    /// Line color as uploaded (premultiplied, encoded per [`gpu_color`]).
     color: [f32; 4],
     /// Line stroke style (selects the dash pattern; [`LineStyle::None`] skips
     /// the line entirely).
     line_style: LineStyle,
-    /// Dashed-gap fill color (linear premultiplied), or `None` to leave gaps
+    /// Dashed-gap fill color (encoded like `color`), or `None` to leave gaps
     /// transparent.
     gap_color: Option<[f32; 4]>,
+    /// The pipeline's target encoding, copied at creation so an in-place
+    /// [`Self::update`] encodes new colors the same way.
+    srgb_target: bool,
     /// Line width in physical pixels.
     width: f32,
     /// Marker symbol, or `None` for a line only.
@@ -828,13 +845,30 @@ fn pack(x: &[f64], y: &[f64]) -> Vec<[f32; 2]> {
         .collect()
 }
 
-/// Pack sRGB colors into the linear premultiplied RGBA the shader blends with
-/// (matches the single-color conversion `egui::Rgba::from`).
-fn pack_colors(colors: &[Color32]) -> Vec<[f32; 4]> {
-    colors
-        .iter()
-        .map(|&c| egui::Rgba::from(c).to_array())
-        .collect()
+/// Encode an sRGB `Color32` as the premultiplied RGBA the curve shaders write
+/// straight to the render target, in that target's own encoding.
+///
+/// The shaders do no colour conversion: the fragment value is stored as-is
+/// and alpha-blended by the target. An sRGB target (`*Srgb` formats) expects
+/// linear values and encodes them on store, so the colour is linearised like
+/// `egui::Rgba::from` does. A non-sRGB target stores the value verbatim and the
+/// display reads it as sRGB, so the colour's own gamma bytes are what must be
+/// written — egui-wgpu picks such a target for its swapchain and gamma-encodes
+/// in its own shader for the same reason. Writing linear values there made
+/// every curve darker than its `Color32` (and than the egui-drawn legend
+/// swatch for it): `#4f9bff` showed as `(20, 84, 255)`.
+pub(crate) fn gpu_color(c: Color32, srgb_target: bool) -> [f32; 4] {
+    if srgb_target {
+        egui::Rgba::from(c).to_array()
+    } else {
+        c.to_array().map(|v| f32::from(v) / 255.0)
+    }
+}
+
+/// Pack sRGB colors into the premultiplied RGBA the shader blends with,
+/// encoded for the target like the single-color path ([`gpu_color`]).
+fn pack_colors(colors: &[Color32], srgb_target: bool) -> Vec<[f32; 4]> {
+    colors.iter().map(|&c| gpu_color(c, srgb_target)).collect()
 }
 
 /// Project one data point to the shader's pixel space — NDC (`ortho * point`,
@@ -938,7 +972,7 @@ fn build_errorbar_segments(
 }
 
 impl GpuCurve {
-    /// Upload `curve`'s vertices and build its uniform + bind group.
+    /// Upload `curve`'s vertices and build its params + bind group.
     pub fn new(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -973,7 +1007,7 @@ impl GpuCurve {
             mapped_at_creation: false,
         });
         if let Some(colors) = &curve.colors {
-            let packed = pack_colors(colors);
+            let packed = pack_colors(colors, pipeline.srgb_target);
             if !packed.is_empty() {
                 queue.write_buffer(&vcolors, 0, bytemuck::cast_slice(&packed));
             }
@@ -995,7 +1029,7 @@ impl GpuCurve {
         let params = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("rsplot curve params"),
             size: std::mem::size_of::<CurveParams>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
 
@@ -1022,11 +1056,11 @@ impl GpuCurve {
             ],
         });
 
-        // Marker uniform + bind group: same layout, sharing the points buffer.
+        // Marker params + bind group: same layout, sharing the points buffer.
         let marker_params = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("rsplot marker params"),
             size: std::mem::size_of::<MarkerParams>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         let marker_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1051,13 +1085,13 @@ impl GpuCurve {
             ],
         });
 
-        // Round joins/caps uniform + bind group: reuses the marker layout,
+        // Round joins/caps params + bind group: reuses the marker layout,
         // sharing the points buffer (binding 1) and the per-vertex color buffer
         // (binding 2, so a join takes its own vertex's color).
         let caps_params = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("rsplot line caps params"),
             size: std::mem::size_of::<MarkerParams>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         let caps_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1098,7 +1132,7 @@ impl GpuCurve {
         let fill_params = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("rsplot fill params"),
             size: std::mem::size_of::<FillParams>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         let fill_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1143,7 +1177,7 @@ impl GpuCurve {
         let errorbar_params = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("rsplot errorbar params"),
             size: std::mem::size_of::<ErrorBarParams>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         let errorbar_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1161,8 +1195,9 @@ impl GpuCurve {
             ],
         });
 
-        // sRGB Color32 -> linear, premultiplied RGBA (matches the alpha-blend target).
-        let color = egui::Rgba::from(curve.color).to_array();
+        // sRGB Color32 -> premultiplied RGBA in the target's encoding.
+        let srgb_target = pipeline.srgb_target;
+        let color = gpu_color(curve.color, srgb_target);
 
         let gpu = Self {
             points,
@@ -1192,7 +1227,8 @@ impl GpuCurve {
             errorbar_bind_group,
             color,
             line_style: curve.line_style.clone(),
-            gap_color: curve.gap_color.map(|c| egui::Rgba::from(c).to_array()),
+            gap_color: curve.gap_color.map(|c| gpu_color(c, srgb_target)),
+            srgb_target,
             width: curve.width,
             symbol: curve.symbol,
             marker_size: curve.marker_size,
@@ -1203,7 +1239,7 @@ impl GpuCurve {
             src_y: curve.y.clone(),
             decimate_key: None,
         };
-        // Seed the uniforms; the per-frame transform/viewport overwrite them.
+        // Seed the params blocks; the per-frame transform/viewport overwrite them.
         gpu.write_uniforms(queue, IDENTITY, [0.0, 0.0], [1.0, 1.0]);
         gpu
     }
@@ -1279,7 +1315,7 @@ impl GpuCurve {
         self.count = positions.len() as u32;
         self.vertex_color = curve.colors.is_some();
         if let Some(colors) = &curve.colors {
-            let packed = pack_colors(colors);
+            let packed = pack_colors(colors, self.srgb_target);
             if !packed.is_empty() {
                 queue.write_buffer(&self.vcolors, 0, bytemuck::cast_slice(&packed));
             }
@@ -1295,9 +1331,9 @@ impl GpuCurve {
         if !segs.is_empty() {
             queue.write_buffer(&self.errorbar_segs, 0, bytemuck::cast_slice(&segs));
         }
-        self.color = egui::Rgba::from(curve.color).to_array();
+        self.color = gpu_color(curve.color, self.srgb_target);
         self.line_style = curve.line_style.clone();
-        self.gap_color = curve.gap_color.map(|c| egui::Rgba::from(c).to_array());
+        self.gap_color = curve.gap_color.map(|c| gpu_color(c, self.srgb_target));
         self.width = curve.width;
         self.symbol = curve.symbol;
         self.marker_size = curve.marker_size;
@@ -1428,7 +1464,7 @@ impl GpuCurve {
         };
         queue.write_buffer(&self.params, 0, bytemuck::bytes_of(&params));
 
-        // Marker uniform shares the same transform/viewport; symbol code is the
+        // Marker params share the same transform/viewport; symbol code is the
         // sentinel `0` (unused) when no marker is set. The drawn size honors the
         // silx per-symbol overrides (pixel = 1px, point shrinks, strokes round to
         // odd) via `render_size_px`.
@@ -1449,7 +1485,7 @@ impl GpuCurve {
         };
         queue.write_buffer(&self.marker_params, 0, bytemuck::bytes_of(&marker));
 
-        // Round joins/caps uniform: an AA disc of the line *width* at every
+        // Round joins/caps params: an AA disc of the line *width* at every
         // vertex (radius = half the width), the curve color, and the same
         // per-vertex-color flag so a coloured join takes its vertex's color.
         // `symbol` is unused by the caps shader.
@@ -1465,7 +1501,7 @@ impl GpuCurve {
         };
         queue.write_buffer(&self.caps_params, 0, bytemuck::bytes_of(&caps));
 
-        // Fill uniform shares the transform; the fill takes the curve color.
+        // Fill params share the transform; the fill takes the curve color.
         let fill = FillParams {
             ortho,
             color: self.color,
@@ -1474,7 +1510,7 @@ impl GpuCurve {
         };
         queue.write_buffer(&self.fill_params, 0, bytemuck::bytes_of(&fill));
 
-        // Error-bar uniform shares the transform; bars take the curve color and
+        // Error-bar params share the transform; bars take the curve color and
         // a fixed pixel width.
         let errorbar = ErrorBarParams {
             ortho,
@@ -1646,15 +1682,31 @@ mod tests {
     }
 
     #[test]
-    fn marker_params_std140_size_unchanged() {
-        // `use_vertex_color` consumed a former `_pad` slot, so the std140 size
+    fn marker_params_size_unchanged() {
+        // `use_vertex_color` consumed a former `_pad` slot, so the block size
         // must stay 112 bytes (the value the WGSL `Params` struct is laid out
         // for: mat4 @0, vec4 @64, vec2 @80, vec2 @88, f32 @96, u32 @100,
-        // f32 @104, padded to 112). A size change here silently desyncs the
-        // CPU uniform from the shader's binding offsets — fail loudly instead.
+        // f32 @104, padded to 112 — the same under the uniform and storage
+        // layout rules, as the block has no arrays or vec3). A size change here
+        // silently desyncs the CPU block from the shader's offsets — fail
+        // loudly instead.
         assert_eq!(std::mem::size_of::<MarkerParams>(), 112);
-        // The block must be 16-byte aligned for std140 (the mat4 governs it).
+        // The block must be 16-byte aligned (the mat4 governs it).
         assert_eq!(std::mem::size_of::<MarkerParams>() % 16, 0);
+    }
+
+    #[test]
+    fn gpu_color_keeps_gamma_bytes_for_non_srgb_target() {
+        // A non-sRGB target stores the value verbatim, so the colour's own
+        // (premultiplied) sRGB bytes go in; an sRGB target linearises on store,
+        // so the linear value does.
+        let c = Color32::from_rgb(0x4f, 0x9b, 0xff);
+        assert_eq!(gpu_color(c, false), [79.0 / 255.0, 155.0 / 255.0, 1.0, 1.0]);
+        assert_eq!(gpu_color(c, true), egui::Rgba::from(c).to_array());
+        // Alpha is never gamma-encoded; the colour channels stay premultiplied.
+        let t = Color32::from_rgba_unmultiplied(255, 0, 0, 128);
+        assert_eq!(gpu_color(t, false)[3], 128.0 / 255.0);
+        assert_eq!(gpu_color(t, false)[0], f32::from(t.r()) / 255.0);
     }
 
     #[test]
@@ -1662,7 +1714,9 @@ mod tests {
         // Per-vertex packing must match the single-color path so a uniform
         // per-vertex list renders identically to a single `color`.
         let c = Color32::from_rgba_unmultiplied(200, 100, 50, 180);
-        assert_eq!(pack_colors(&[c])[0], egui::Rgba::from(c).to_array());
+        for srgb_target in [false, true] {
+            assert_eq!(pack_colors(&[c], srgb_target)[0], gpu_color(c, srgb_target));
+        }
     }
 
     #[test]

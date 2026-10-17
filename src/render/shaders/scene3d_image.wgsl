@@ -22,7 +22,7 @@ struct Params {
     view_row_z: vec4<f32>,
 };
 
-@group(0) @binding(0) var<uniform> params: Params;
+@group(0) @binding(0) var<storage, read> params: Params;
 @group(1) @binding(0) var tex: texture_2d<f32>;
 @group(1) @binding(1) var samp: sampler;
 

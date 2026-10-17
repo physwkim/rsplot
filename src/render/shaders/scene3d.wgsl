@@ -4,12 +4,14 @@
 //
 // The MVP is `camera.matrix() × model`, already transposed to column-major and
 // clip-corrected for wgpu's z∈[0,1] depth range (see `Mat4::to_gpu_clip_cols`);
-// it arrives in the group(0) binding(0) uniform. Per-vertex position and color
-// (linear, premultiplied) come from the vertex buffer.
+// it arrives in the group(0) binding(0) params block (a read-only storage
+// buffer, like every rsplot params block — see `CurveParams` in gpu_curve.rs).
+// Per-vertex position and color (linear, premultiplied) come from the vertex
+// buffer.
 //
-// NOTE: `Params` is the shared group(0) uniform of the line/triangle pipelines
-// AND the textured-image pipeline (`scene3d_image.wgsl`) — both bind the same
-// buffer, so the two WGSL structs must stay layout-identical.
+// NOTE: `Params` is the shared group(0) params block of the line/triangle
+// pipelines AND the textured-image pipeline (`scene3d_image.wgsl`) — both bind
+// the same buffer, so the two WGSL structs must stay layout-identical.
 
 struct Params {
     mvp: mat4x4<f32>,
@@ -24,7 +26,7 @@ struct Params {
 };
 
 @group(0) @binding(0)
-var<uniform> params: Params;
+var<storage, read> params: Params;
 
 struct VsOut {
     @builtin(position) clip: vec4<f32>,
