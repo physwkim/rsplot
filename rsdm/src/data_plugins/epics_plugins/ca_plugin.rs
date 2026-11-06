@@ -52,6 +52,10 @@ use crate::channel::{AlarmSeverity, ChannelState, PvValue, StateWriter};
 use crate::data_plugins::{ConnectionCtx, DataPlugin};
 use crate::engine::EngineError;
 
+/// Bound on a `DBR_CTRL` metadata read: the 30 s that epics-ca-rs 0.24 applied
+/// inside `get_with_metadata` before the bound became the caller's argument.
+const CTRL_READ_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// The `ca://` data plugin. Holds the lazily-initialized, engine-shared
 /// [`CaClient`] (PyDM's process-wide pyepics context).
 pub struct CaPlugin {
@@ -361,7 +365,10 @@ async fn on_connect(
         let write = info.access_rights.write && !read_only;
         writer.update(move |s| s.write_access = write);
     }
-    match ch.get_with_metadata(DbrClass::Ctrl).await {
+    match ch
+        .get_with_metadata(DbrClass::Ctrl, CTRL_READ_TIMEOUT)
+        .await
+    {
         Ok(snap) => {
             let strings: Option<Arc<[String]>> = snap
                 .enums
@@ -415,7 +422,10 @@ async fn on_property_change(
     enum_cache: &mut Option<Arc<[String]>>,
 ) {
     // On a transient read failure the current metadata is simply kept.
-    if let Ok(snap) = ch.get_with_metadata(DbrClass::Ctrl).await {
+    if let Ok(snap) = ch
+        .get_with_metadata(DbrClass::Ctrl, CTRL_READ_TIMEOUT)
+        .await
+    {
         let strings: Option<Arc<[String]>> = snap
             .enums
             .as_ref()
@@ -592,12 +602,12 @@ fn pv_to_epics(
 ) -> Option<EpicsValue> {
     match value {
         // Waveforms keep their element type; the IOC coerces to the native FTVL.
-        PvValue::FloatArray(a) => Some(EpicsValue::DoubleArray(a.to_vec())),
-        PvValue::IntArray(a) => Some(EpicsValue::Int64Array(a.to_vec())),
+        PvValue::FloatArray(a) => Some(EpicsValue::DoubleArray(Arc::clone(a).into())),
+        PvValue::IntArray(a) => Some(EpicsValue::Int64Array(Arc::clone(a).into())),
         PvValue::StrArray(a) => Some(EpicsValue::StringArray(
             a.iter().map(PvString::from).collect(),
         )),
-        PvValue::Bytes(a) => Some(EpicsValue::CharArray(a.to_vec())),
+        PvValue::Bytes(a) => Some(EpicsValue::CharArray(Arc::clone(a).into())),
         scalar => scalar_to_native(scalar, native, enum_strings),
     }
 }
@@ -752,24 +762,27 @@ mod tests {
     #[test]
     fn arrays_map_to_typed_waveforms() {
         assert_eq!(
-            epics_to_pv(&EpicsValue::DoubleArray(vec![1.0, 2.0]), None),
+            epics_to_pv(&EpicsValue::DoubleArray(vec![1.0, 2.0].into()), None),
             PvValue::FloatArray(Arc::from([1.0_f64, 2.0].as_slice()))
         );
         assert_eq!(
-            epics_to_pv(&EpicsValue::LongArray(vec![3, 4]), None),
+            epics_to_pv(&EpicsValue::LongArray(vec![3, 4].into()), None),
             PvValue::IntArray(Arc::from([3_i64, 4].as_slice()))
         );
         assert_eq!(
-            epics_to_pv(&EpicsValue::FloatArray(vec![1.5_f32]), None),
+            epics_to_pv(&EpicsValue::FloatArray(vec![1.5_f32].into()), None),
             PvValue::FloatArray(Arc::from([1.5_f64].as_slice()))
         );
         // CHAR waveform stays raw bytes (the formatter decides string vs array).
         assert_eq!(
-            epics_to_pv(&EpicsValue::CharArray(vec![104, 105, 0]), None),
+            epics_to_pv(&EpicsValue::CharArray(vec![104, 105, 0].into()), None),
             PvValue::Bytes(Arc::from([104_u8, 105, 0].as_slice()))
         );
         assert_eq!(
-            epics_to_pv(&EpicsValue::StringArray(vec!["a".into(), "b".into()]), None),
+            epics_to_pv(
+                &EpicsValue::StringArray(vec!["a".into(), "b".into()].into()),
+                None
+            ),
             PvValue::StrArray(Arc::from(["a".to_owned(), "b".to_owned()].as_slice()))
         );
     }
@@ -1050,7 +1063,7 @@ mod tests {
                 Some(DbFieldType::Double),
                 None
             ),
-            Some(EpicsValue::DoubleArray(vec![1.0, 2.0]))
+            Some(EpicsValue::DoubleArray(vec![1.0, 2.0].into()))
         );
         assert_eq!(
             pv_to_epics(
@@ -1058,11 +1071,11 @@ mod tests {
                 Some(DbFieldType::Long),
                 None
             ),
-            Some(EpicsValue::Int64Array(vec![3, 4]))
+            Some(EpicsValue::Int64Array(vec![3, 4].into()))
         );
         assert_eq!(
             pv_to_epics(&PvValue::Bytes(Arc::from([1_u8, 2].as_slice())), None, None),
-            Some(EpicsValue::CharArray(vec![1, 2]))
+            Some(EpicsValue::CharArray(vec![1, 2].into()))
         );
     }
 }

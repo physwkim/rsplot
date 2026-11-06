@@ -1321,7 +1321,7 @@ mod tests {
     #[test]
     fn typed_arrays_map_to_waveforms() {
         let root = ntscalar(
-            PvField::ScalarArrayTyped(TypedScalarArray::Double(Arc::from([1.0, 2.0, 3.0]))),
+            PvField::ScalarArrayTyped(TypedScalarArray::Double([1.0, 2.0, 3.0].into())),
             0,
             1,
             0,
@@ -1334,7 +1334,7 @@ mod tests {
         );
 
         let root = ntscalar(
-            PvField::ScalarArrayTyped(TypedScalarArray::Long(Arc::from([3_i64, 4]))),
+            PvField::ScalarArrayTyped(TypedScalarArray::Long([3_i64, 4].into())),
             0,
             1,
             0,
@@ -1348,7 +1348,7 @@ mod tests {
 
         // A UByte array is a CHAR waveform → raw bytes (matching CA).
         let root = ntscalar(
-            PvField::ScalarArrayTyped(TypedScalarArray::UByte(Arc::from([104_u8, 105, 0]))),
+            PvField::ScalarArrayTyped(TypedScalarArray::UByte([104_u8, 105, 0].into())),
             0,
             1,
             0,
@@ -1610,7 +1610,7 @@ mod tests {
         let mut table = PvStructure::new("");
         table.set(
             "col",
-            PvField::ScalarArrayTyped(TypedScalarArray::Double(Arc::from([1.5, 2.5].as_slice()))),
+            PvField::ScalarArrayTyped(TypedScalarArray::Double([1.5, 2.5].into())),
         );
         let mut root = PvStructure::new("epics:nt/NTTable:1.0");
         root.set("value", PvField::Structure(table));
@@ -1644,7 +1644,7 @@ mod tests {
             selector: 5,
             variant_name: "ubyteValue".to_owned(),
             value: Box::new(PvField::ScalarArrayTyped(TypedScalarArray::UByte(
-                Arc::from([1u8, 2, 3, 4].as_slice()),
+                [1u8, 2, 3, 4].into(),
             ))),
         };
         assert_eq!(
@@ -1657,7 +1657,7 @@ mod tests {
             selector: 10,
             variant_name: "doubleValue".to_owned(),
             value: Box::new(PvField::ScalarArrayTyped(TypedScalarArray::Double(
-                Arc::from([0.5, 1.5].as_slice()),
+                [0.5, 1.5].into(),
             ))),
         };
         assert_eq!(
@@ -1697,7 +1697,7 @@ mod tests {
                 selector: 5,
                 variant_name: "ubyteValue".to_owned(),
                 value: Box::new(PvField::ScalarArrayTyped(TypedScalarArray::UByte(
-                    Arc::from(payload),
+                    payload.into(),
                 ))),
             },
         );

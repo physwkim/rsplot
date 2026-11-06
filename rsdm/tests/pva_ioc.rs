@@ -311,7 +311,7 @@ fn pva_ntndarray_ubyte_image_lands_as_bytes() {
             source,
             "rsdm:test:pva:img",
             nt_nd_array_desc(),
-            nt_nd_array_value(&nd_array(NdArrayBuffer::UByte(vec![1, 2, 3, 4]), "")),
+            nt_nd_array_value(&nd_array(NdArrayBuffer::UByte(vec![1, 2, 3, 4].into()), "")),
         );
     });
 
@@ -340,7 +340,7 @@ fn pva_compressed_ntndarray_decodes_lz4_end_to_end() {
     // (pva_codec.py:36-38) and the image lands as `Bytes`.
     let img: Vec<u8> = (0..4096u32).map(|i| (i % 251) as u8).collect();
     let compressed = lz4_flex::block::compress(&img);
-    let mut array = nd_array(NdArrayBuffer::UByte(compressed), "lz4");
+    let mut array = nd_array(NdArrayBuffer::UByte(compressed.into()), "lz4");
     array.uncompressed_size = img.len() as i64;
     let (engine, _server, _server_rt) = pva_engine(|source| {
         add_pv(
@@ -376,7 +376,7 @@ fn pva_undecodable_compressed_ntndarray_connects_without_a_value() {
             source,
             "rsdm:test:pva:imgbad",
             nt_nd_array_desc(),
-            nt_nd_array_value(&nd_array(NdArrayBuffer::UByte(vec![9, 9]), "blosc")),
+            nt_nd_array_value(&nd_array(NdArrayBuffer::UByte(vec![9, 9].into()), "blosc")),
         );
     });
 

@@ -11,6 +11,20 @@ library), **rsdm** (a PyDM-style EPICS display layer built on rsplot), and
 
 ## [Unreleased]
 
+### Changed
+
+- **Bumped the EPICS backends `epics-ca-rs` / `epics-base-rs` / `epics-pva-rs`
+  to 0.34.0** (from 0.24.x), affecting `rsdm`'s `ca`/`pva`/`calc` features
+  only. Two API changes were adapted:
+  - The CA `DBR_CTRL` metadata read takes its bound as an argument; `rsdm`
+    passes the 30 s that 0.24 applied internally.
+  - Array payloads are shared buffers (`SharedArray` in `EpicsValue`, `PvArray`
+    in the pvAccess types) instead of `Vec`; `rsdm`'s CA writes hand its
+    `Arc<[T]>` buffers over with `into()` instead of copying them.
+- **`rsdm` MSRV 1.95 → 1.98.** `epics-base-rs` 0.34.0 calls
+  `isolate_lowest_one` (stable in 1.97), so 1.96 cannot build it; 1.98.0 is
+  the oldest toolchain checked. `rsplot` and `adl2rsdm` stay at 1.95.
+
 ## [0.6.1] - 2026-10-18
 
 ### Fixed
